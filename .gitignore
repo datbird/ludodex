@@ -1,0 +1,27 @@
+# --- private data / credentials / state — NEVER commit ---
+# databases
+*.sqlite
+*.sqlite3
+roms-index.sqlite
+game-library.sqlite
+# per-store ownership dumps
+*_games.tsv
+*.tsv
+epic_raw.json
+# cached auth tokens
+.gog/
+.steam/
+tokens.json
+# diff/run state
+.prev_keys
+.cur_keys
+.new_keys
+.gogchk
+# error logs
+*.err
+
+# --- python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
