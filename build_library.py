@@ -102,7 +102,7 @@ def load_tsv(path, source):
             add(title, source, source, sid)
 
 
-for _src in ("steam", "epic", "gog", "itch"):
+for _src in ("steam", "epic", "gog", "itch", "ea"):
     if config.source_enabled(_src):
         load_tsv(OWN + "/%s_games.tsv" % _src, _src)
 

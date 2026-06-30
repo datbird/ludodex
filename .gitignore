@@ -13,6 +13,7 @@ ludodex_to_playnite.json
 *_to_playnite.json
 # cached auth tokens / service-account keys
 .gog/
+.ea/
 .steam/
 tokens.json
 *service-account*.json

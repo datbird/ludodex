@@ -87,6 +87,11 @@ SCHEMA = [
     ("source_epic_enabled", "1", "[source] Pull Epic ownership."),
     ("source_gog_enabled", "1", "[source] Pull GOG ownership."),
     ("source_itch_enabled", "1", "[source] Pull itch.io ownership."),
+    ("source_ea_enabled", "1", "[source] Pull EA app/Origin ownership."),
+    ("ea_op_item", "",
+     "1Password item holding the EA 'remid' cookie (durable login) in its "
+     "'credential'/'password' field. Used if .ea/cookies.json is absent. Set up "
+     "the login once with: python3 ea_owned.py --login."),
     ("source_emulation_enabled", "1", "[source] Include the emulation ROM index."),
     ("source_playnite_enabled", "1", "[source] Include an imported Playnite library."),
     ("playnite_import_json", "", "Path to the Playnite export JSON produced by "
@@ -300,7 +305,7 @@ def igdb_creds():
 # --------------------------------------------------------------------------- #
 #  sources: built-in store/emulation toggles + a registry of crawl archives
 # --------------------------------------------------------------------------- #
-BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "emulation", "playnite")
+BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "ea", "emulation", "playnite")
 
 # Metadata providers are CONSULTED to enrich attributes — they are NOT sources
 # (they add no ownership). Toggled like sources but tracked separately.

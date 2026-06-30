@@ -49,6 +49,13 @@ if ! enabled itch; then echo "  itch: disabled"; else
   else echo "  itch: no API key (run ./setup.sh, or set itch_api_key)"; fi
 fi
 
+echo "== EA =="
+if ! enabled ea; then echo "  ea: disabled"; else
+  if python3 ea_owned.py > ea_games.tsv 2>ea.err; then
+    echo "  ea: $(wc -l < ea_games.tsv) games"
+  else echo "  ea: $(tail -1 ea.err 2>/dev/null) (set up once: python3 ea_owned.py --login)"; fi
+fi
+
 if [ "$1" = "--roms" ]; then
   echo "== ROM rescan =="
   HOST=$(cfg unraid_host); RPATH=$(cfg roms_path)

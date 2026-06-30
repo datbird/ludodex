@@ -36,3 +36,13 @@ else
   echo "itch: BROKEN  $(tail -1 .itchchk)"
 fi
 rm -f .itchchk
+
+# --- EA app/Origin (durable remid cookie -> silent token refresh) ---
+if [ ! -f .ea/cookies.json ] && [ -z "$(python3 config.py get ea_op_item)" ] && [ -z "$EA_REMID" ]; then
+  echo "ea: BROKEN  not logged in — run: python3 ea_owned.py --login"
+elif WHO=$(python3 ea_owned.py --whoami 2>.eachk); then
+  echo "ea: OK  ($WHO)"
+else
+  echo "ea: BROKEN  $(tail -1 .eachk 2>/dev/null) — re-login: python3 ea_owned.py --login"
+fi
+rm -f .eachk
