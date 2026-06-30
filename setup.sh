@@ -166,8 +166,28 @@ prefask dedupe_preserve_years "Keep release years so remakes stay separate from 
 prefask dedupe_strip_editions "Merge remasters/editions into their base game?"
 echo
 
+# --- metadata enrichment (optional) -----------------------------------------
+rule; b "7) Metadata enrichment — IGDB (optional)"
+cat <<'TXT'
+IGDB (igdb.com) is a metadata PROVIDER, not a source: it fills in MISSING
+attributes (genres, themes, developers, release dates, ratings) on games you
+already have — owned-source data is never overwritten. It needs free Twitch app
+credentials:
+  1. Sign in at https://dev.twitch.tv/console/apps and "Register Your Application"
+     (any name; OAuth Redirect URL: http://localhost; Category: Application
+     Integration).
+  2. Open the app -> copy the Client ID, then "New Secret" -> copy the Client
+     Secret. Leave both blank below to skip IGDB (you can add them later).
+TXT
+ask igdb_client_id "  IGDB/Twitch Client ID (blank to skip)"
+if [ -n "$(cfg igdb_client_id)" ]; then
+  read -rp "  IGDB/Twitch Client Secret (blank to use 1Password/env): " igs
+  [ -n "$igs" ] && setcfg igdb_client_secret "$igs"
+fi
+echo
+
 # --- remote sync (optional) --------------------------------------------------
-rule; b "7) Remote sync (optional)"
+rule; b "8) Remote sync (optional)"
 cat <<'TXT'
 Push the catalog to a remote DB after each update (so other devices/apps can
 read it). Targets: pocketbase, firebase, both — or blank to disable.
@@ -208,7 +228,7 @@ esac
 echo
 
 # --- local mounts / archives (optional) -------------------------------------
-rule; b "8) Local mounts / archives (optional)"
+rule; b "9) Local mounts / archives (optional)"
 cat <<'TXT'
 Add local folders or drives (SD card, USB, NAS mount) for the crawler to scan.
 kind 'rom' recurses (first subfolder = system, ROM files only, tags cleaned);

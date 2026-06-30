@@ -8,6 +8,7 @@ export PATH="$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
 
 cfg() { python3 config.py get "$1"; }
 enabled() { [ "$(cfg "source_$1_enabled")" != 0 ]; }   # default on
+meta_enabled() { [ "$(cfg "metadata_$1_enabled")" != 0 ]; }   # default on
 LIB=$(cfg library_db)
 ROM_DB=$(cfg roms_index_db)
 
@@ -67,6 +68,13 @@ python3 process.py        # stage 2: extract system/title/attributes from new fi
 
 echo "== rebuilding unified library =="
 python3 build_library.py
+
+# metadata providers enrich attributes AFTER the catalog exists, then we re-merge
+if meta_enabled igdb && \
+   [ -n "$(python3 -c 'import config; print("1" if all(config.igdb_creds()) else "")')" ]; then
+  echo "== IGDB metadata enrichment =="
+  python3 igdb_enrich.py && python3 build_library.py
+fi
 
 echo "== new since last run =="
 sqlite3 "$LIB" "SELECT norm_key FROM games" | sort > .cur_keys

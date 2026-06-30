@@ -16,9 +16,10 @@ locally (they go into config.sqlite, never into git):
   python3 config.py steam-key      # resolve the Steam key (env > config > 1Password)
   python3 config.py init           # just create/seed config.sqlite
 
-  python3 config.py sources                       # list sources + on/off state
-  python3 config.py enable|disable <source>       # toggle steam/epic/gog/itch/
-                                                  #   emulation or an archive name
+  python3 config.py sources                       # list sources + metadata + state
+  python3 config.py enable|disable <name>         # toggle steam/epic/gog/itch/
+                                                  #   emulation/playnite, an archive,
+                                                  #   or a metadata provider (igdb)
   python3 config.py mount add <path> [rom|flat] [name]     # add a crawl mount/path
   python3 config.py mounts                         # list crawl paths + mount status
   python3 config.py mount rm <name>
@@ -92,6 +93,29 @@ SCHEMA = [
      "playnite_bridge.ps1 (-Export); ingested by build_library."),
     ("playnite_export_json", "", "Where playnite_export.py writes the ludodex->"
      "Playnite JSON (blank = ludodex_to_playnite.json next to the scripts)."),
+    # --- metadata providers: CONSULTED to enrich attributes, NOT sources.
+    #     They never add ownership; they only fill in missing attributes. ---
+    ("metadata_igdb_enabled", "1",
+     "[metadata] Consult IGDB (igdb.com) to fill in MISSING game attributes "
+     "(genres, themes, game modes, developers, publishers, release dates, "
+     "ratings). Fill-gaps only — never overwrites store/Playnite data. No-ops "
+     "without Twitch credentials below."),
+    ("igdb_client_id", "",
+     "Twitch application Client ID for the IGDB API. Create a free app at "
+     "https://dev.twitch.tv/console/apps (any name; OAuth Redirect URL "
+     "http://localhost; Category 'Application Integration'). The IGDB_CLIENT_ID "
+     "env var overrides this."),
+    ("igdb_client_secret", "",
+     "Twitch application Client Secret, stored locally (gitignored). Optional — "
+     "leave blank to fetch from 1Password via igdb_op_item. IGDB_CLIENT_SECRET "
+     "env overrides both."),
+    ("igdb_op_item", "",
+     "1Password item holding the Twitch/IGDB creds: its 'username' field = Client "
+     "ID, its 'credential' (or 'password') field = Client Secret. Used only if "
+     "the local values above are blank."),
+    ("igdb_meta_ttl_days", "30",
+     "[metadata] Days before a cached IGDB record is considered stale and "
+     "re-fetched by igdb_enrich.py."),
     # --- remote sync (push the catalog to a remote DB mirror) ---
     ("sync_target", "",
      "Where `update.sh` pushes the catalog after a rebuild: blank (off), "
@@ -179,6 +203,22 @@ def set_(key, value):
     con.close()
 
 
+def _op_field(item, vault, field):
+    """Read one field of a 1Password item via the opx CLI ("" on any failure)."""
+    if not (item and vault):
+        return ""
+    try:
+        r = subprocess.run(
+            ["opx", "item", "get", item, "--vault", vault,
+             "--fields", field, "--reveal"],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            return r.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
 def _resolve_key(env_var, local_key, op_item_key, field="apikey"):
     """Resolve a secret: env var > local config value > 1Password (opx)."""
     k = os.environ.get(env_var, "").strip()
@@ -187,18 +227,7 @@ def _resolve_key(env_var, local_key, op_item_key, field="apikey"):
     k = get(local_key)
     if k:
         return k
-    vault, item = get("op_vault"), get(op_item_key)
-    if vault and item:
-        try:
-            r = subprocess.run(
-                ["opx", "item", "get", item, "--vault", vault,
-                 "--fields", field, "--reveal"],
-                capture_output=True, text=True, timeout=30)
-            if r.returncode == 0:
-                return r.stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    return ""
+    return _op_field(get(op_item_key), get("op_vault"), field)
 
 
 def steam_key():
@@ -214,10 +243,38 @@ def pocketbase_password():
                         "pocketbase_op_item", field="password")
 
 
+def igdb_creds():
+    """Resolve the Twitch (IGDB) Client ID + Secret -> (client_id, client_secret).
+
+    env (IGDB_CLIENT_ID / IGDB_CLIENT_SECRET) > local config > 1Password
+    (igdb_op_item: 'username' = id, 'credential'/'password' = secret)."""
+    cid = os.environ.get("IGDB_CLIENT_ID", "").strip() or get("igdb_client_id")
+    csec = os.environ.get("IGDB_CLIENT_SECRET", "").strip() or get("igdb_client_secret")
+    if cid and csec:
+        return cid, csec
+    vault, item = get("op_vault"), get("igdb_op_item")
+    if vault and item:
+        if not cid:
+            cid = _op_field(item, vault, "username")
+        if not csec:
+            csec = _op_field(item, vault, "credential") or \
+                _op_field(item, vault, "password")
+    return cid, csec
+
+
 # --------------------------------------------------------------------------- #
 #  sources: built-in store/emulation toggles + a registry of crawl archives
 # --------------------------------------------------------------------------- #
 BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "emulation", "playnite")
+
+# Metadata providers are CONSULTED to enrich attributes — they are NOT sources
+# (they add no ownership). Toggled like sources but tracked separately.
+METADATA_PROVIDERS = ("igdb",)
+
+
+def metadata_enabled(name):
+    """True if a metadata provider (e.g. igdb) is enabled."""
+    return get_bool("metadata_%s_enabled" % name, True)
 
 
 def _arch_con():
@@ -315,16 +372,27 @@ def main(argv):
         if name in BUILTIN_SOURCES:
             set_("source_%s_enabled" % name, "1" if on else "0")
             print("%sd source %s" % (cmd, name))
+        elif name in METADATA_PROVIDERS:
+            set_("metadata_%s_enabled" % name, "1" if on else "0")
+            print("%sd metadata provider %s" % (cmd, name))
         elif archive_set_enabled(name, on):
             print("%sd archive %s" % (cmd, name))
         else:
-            sys.exit("unknown source %r (built-ins: %s; or an archive name)"
-                     % (name, ", ".join(BUILTIN_SOURCES)))
+            sys.exit("unknown source %r (built-ins: %s; metadata: %s; or an "
+                     "archive name)" % (name, ", ".join(BUILTIN_SOURCES),
+                                        ", ".join(METADATA_PROVIDERS)))
     elif cmd == "sources":
         print("built-in sources:")
         for s in BUILTIN_SOURCES:
             mark = "x" if get_bool("source_%s_enabled" % s, True) else " "
             print("  [%s] %s" % (mark, s))
+        print("metadata providers (enrich attributes, not sources):")
+        for m in METADATA_PROVIDERS:
+            mark = "x" if metadata_enabled(m) else " "
+            extra = "" if m != "igdb" else (
+                "" if all(igdb_creds()) else "  (no Twitch creds — set igdb_client_id"
+                "/igdb_client_secret or igdb_op_item)")
+            print("  [%s] %s%s" % (mark, m, extra))
         archs = archives_list()
         print("crawl mounts/paths:" if archs else
               "crawl mounts/paths: (none — add: config.py mount add <path> [rom|flat])")

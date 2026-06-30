@@ -79,6 +79,7 @@ games(   id, canonical_title, norm_key, n_sources, n_kinds, sources_summary,
 sources( game_id, source, platform, source_id, title_raw, detail )
 source_attrs(    game_id, source, source_id, attrs_json )   -- lossless per-provider
 game_attributes( game_id, kind, value )                     -- queryable, aggregated
+metadata_links(  game_id, provider, provider_id, slug, url )-- canonical ids (igdb, …)
 -- source ∈ emulation|steam|gog|epic|itch|archive|manual|ea|ubisoft|battlenet|xbox|amazon|…
 --   (any provider; the has_* columns cover the common ones, sources_summary lists all)
 -- emulation platform = system (psx, snes…); archive platform = archive name
@@ -141,6 +142,28 @@ This is a **two-stage pipeline** over a persistent `crawl-index.sqlite` (gitigno
 `build_library.py` ingests `extracted`; `update.sh` runs both stages before each rebuild,
 so archives refresh with every **games-update**. (`process.py --all` re-extracts
 everything.)
+
+## Metadata providers (enrich attributes — IGDB)
+
+A **metadata provider** is *consulted* to fill in attributes; it is **not a source** (it
+adds no ownership). **[IGDB](https://www.igdb.com/)** resolves each catalog game to a
+canonical IGDB id — by Steam appid via its `external_games` map, else by name search —
+and attaches genres, themes, game modes, developers/publishers, series, release dates and
+ratings. The merge is **fill-gaps only**: if a game already has values for a kind (from a
+store or Playnite), IGDB leaves that kind untouched, so owned-source data always wins.
+(Artwork/media is intentionally out of scope for now.)
+
+```bash
+# one-time: Twitch app creds (free) at https://dev.twitch.tv/console/apps
+python3 config.py set igdb_client_id     <client-id>
+python3 config.py set igdb_client_secret <client-secret>   # or use igdb_op_item (1Password)
+python3 config.py enable igdb            # on by default; no-ops without creds
+```
+
+IGDB data is cached in `metadata-cache.sqlite` (gitignored) by **`igdb_enrich.py`** —
+re-runs only fetch new/stale records (`igdb_meta_ttl_days`); `--all` re-does everything.
+`update.sh` runs enrichment after each rebuild, then re-merges. Each link is recorded in
+`metadata_links` (provider `igdb`, the id, slug and `igdb.com` URL).
 
 ## Playnite interoperability (import/export)
 

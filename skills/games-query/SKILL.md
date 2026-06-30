@@ -17,10 +17,14 @@ Schema:
   amazon|… (any provider; has_* covers the common ones, `sources_summary` lists all).
   emulation `platform` = system, archive `platform` = archive name; `detail` for
   emulation = regions.
-- `game_attributes(game_id, kind, value)` — Playnite-parity attributes (genres, tags,
-  developers, publishers, series, features, regions, release_year, playtime, scores,
-  completion_status, favorite, …). `source_attrs(game_id, source, source_id, attrs_json)`
-  = lossless per-provider record.
+- `game_attributes(game_id, kind, value)` — attributes (genres, themes, game_modes,
+  developers, publishers, series, features, regions, release_year/date, playtime, scores,
+  completion_status, favorite, …). Sourced from stores/Playnite AND filled-in from IGDB
+  (metadata provider, gaps only — owned-source values win). `source_attrs(game_id, source,
+  source_id, attrs_json)` = lossless per-provider record.
+- `metadata_links(game_id, provider, provider_id, slug, url)` — canonical id from a
+  metadata provider (e.g. provider `igdb` → IGDB id + `igdb.com` URL). Metadata providers
+  enrich attributes; they are NOT sources/ownership.
 - **`in_playnite`** = provenance (game is in the Playnite library), NOT a source. Playnite
   imports map to their underlying provider (ea/steam/…), not to "playnite".
 

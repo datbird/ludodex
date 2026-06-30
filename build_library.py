@@ -19,6 +19,7 @@ sys.path.insert(0, DIR)
 import config
 from titlenorm import norm      # shared dedupe normalizer (honors config prefs)
 from playnite import LIST_KINDS, SCALAR_KINDS
+from igdb import map_record as igdb_map   # IGDB metadata-provider record mapping
 
 OWN = DIR                                   # store TSVs live next to the scripts
 ROM_DB = config.get("roms_index_db")
@@ -170,6 +171,8 @@ CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
 CREATE TABLE source_attrs (game_id INTEGER, source TEXT, source_id TEXT,
   attrs_json TEXT);                       -- lossless per-provider record (export)
 CREATE TABLE game_attributes (game_id INTEGER, kind TEXT, value TEXT);  -- queryable
+CREATE TABLE metadata_links (game_id INTEGER, provider TEXT, provider_id TEXT,
+  slug TEXT, url TEXT);                    -- canonical ids from metadata providers
 """)
 
 key_to_gid = {}
@@ -225,6 +228,52 @@ for key, data in games_attrs.items():
     cur.executemany("INSERT INTO game_attributes(game_id,kind,value) VALUES(?,?,?)",
                     rows)
 
+# ---- IGDB enrichment (metadata provider, fill-gaps only) ----
+# IGDB is NOT a source: it only fills attribute KINDS a game still lacks. If a
+# game already has any value for a kind (from a store / Playnite), IGDB leaves
+# that kind untouched, so owned-source data is always authoritative.
+CACHE_DB = os.path.join(DIR, "metadata-cache.sqlite")
+n_link = n_attr = 0
+if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
+    have = {}                       # game_id -> set(kinds already populated)
+    for gid, kind in cur.execute("SELECT game_id, kind FROM game_attributes"):
+        have.setdefault(gid, set()).add(kind)
+    mc = sqlite3.connect(CACHE_DB)
+    try:
+        rows = mc.execute(
+            "SELECT r.norm_key, r.igdb_id, r.slug, m.payload_json "
+            "FROM igdb_resolution r JOIN igdb_meta m ON m.igdb_id=r.igdb_id "
+            "WHERE r.igdb_id>0").fetchall()
+    except sqlite3.OperationalError:
+        rows = []                   # cache exists but enrich hasn't populated it
+    mc.close()
+    for nk, iid, slug, payload in rows:
+        gid = key_to_gid.get(nk)
+        if gid is None:
+            continue
+        url = "https://www.igdb.com/games/%s" % slug if slug else None
+        cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
+                    "slug,url) VALUES(?,?,?,?,?)",
+                    (gid, "igdb", str(iid), slug, url))
+        n_link += 1
+        try:
+            rec = json.loads(payload)
+        except ValueError:
+            continue
+        existing = have.setdefault(gid, set())
+        new_rows = []
+        for kind, val in igdb_map(rec).items():
+            if kind in existing:                 # fill-gaps: don't touch it
+                continue
+            for v in (val if isinstance(val, list) else [val]):
+                if v not in (None, ""):
+                    new_rows.append((gid, kind, str(v)))
+            existing.add(kind)
+        if new_rows:
+            cur.executemany("INSERT INTO game_attributes(game_id,kind,value) "
+                            "VALUES(?,?,?)", new_rows)
+            n_attr += len(new_rows)
+
 cur.executescript("""
 CREATE INDEX ix_norm ON games(norm_key);
 CREATE INDEX ix_title ON games(canonical_title);
@@ -233,6 +282,7 @@ CREATE INDEX ix_src_plat ON sources(platform);
 CREATE INDEX ix_sattr_game ON source_attrs(game_id);
 CREATE INDEX ix_gattr_game ON game_attributes(game_id);
 CREATE INDEX ix_gattr_kv ON game_attributes(kind, value);
+CREATE INDEX ix_mlink_game ON metadata_links(game_id);
 """)
 con.commit()
 
@@ -247,6 +297,9 @@ for label, col in (("emulation", "has_emulation"), ("steam", "has_steam"),
 _pn = cur.execute("SELECT COUNT(*) FROM games WHERE in_playnite=1").fetchone()[0]
 if _pn:
     print("# games also in Playnite (provenance): %d" % _pn, file=sys.stderr)
+if n_link:
+    print("# IGDB: linked %d games, +%d attribute rows (fill-gaps)"
+          % (n_link, n_attr), file=sys.stderr)
 print("# total unique games: %d (%d available from >1 source KIND)" % (tot, multi),
       file=sys.stderr)
 con.close()
