@@ -10,21 +10,17 @@ Output: game-library.sqlite
   sources(game_id, source, platform, source_id, title_raw, detail)
 """
 import os
-import re
 import sys
 import sqlite3
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config
+from titlenorm import norm      # shared dedupe normalizer (honors config prefs)
 
 OWN = DIR                                   # store TSVs live next to the scripts
 ROM_DB = config.get("roms_index_db")
 OUT = config.get("library_db")
-
-# dedupe behavior preferences (see config.py)
-PRESERVE_YEARS = config.get_bool("dedupe_preserve_years", True)
-STRIP_EDITIONS = config.get_bool("dedupe_strip_editions", True)
 
 # Extensions that indicate an actual ROM/disc image (to skip box-art/manuals/etc).
 ROM_EXTS = {
@@ -39,39 +35,6 @@ ROM_EXTS = {
 }
 MEDIA_GAMES = {"images", "manuals", "videos", "media", "screenshots", "snaps",
                "box", "wheel", "marquee", "covers", "", "downloaded_media"}
-
-ROMAN = {"ii": "2", "iii": "3", "iv": "4", "vi": "6", "vii": "7", "viii": "8",
-         "ix": "9", "xi": "11", "xii": "12", "xiii": "13", "xiv": "14"}
-EDITION = re.compile(
-    r"\b(game of the year edition|goty|definitive edition|remaster(ed)?|"
-    r"complete edition|deluxe edition|gold edition|enhanced edition|"
-    r"ultimate edition|collector'?s edition|digital deluxe|standard edition|"
-    r"legacy edition|premium edition|special edition)\b")
-
-
-def norm(t):
-    s = (t or "").lower()
-    # strip a trailing ROM/disc/playlist extension left on faux-.m3u dir names
-    s = re.sub(r"\.(m3u|iso|chd|cue|bin|img|mdf|nrg|ccd|rvz|wbfs|nkit|gcm|gcz|"
-               r"cso|pbp|gdi|cdi|rom|nds|3ds|zip|7z|rar)$", "", s)
-    s = re.sub(r"[™®©]", "", s)        # ™ ® ©
-    if PRESERVE_YEARS:
-        # drop (...) tags, but KEEP a bare 4-digit year so e.g. "RE4 (2005)" stays
-        # distinct from the "RE4" remake (which carries no year tag).
-        s = re.sub(r"\(([^)]*)\)",
-                   lambda m: " %s " % m.group(1)
-                   if re.fullmatch(r"\s*\d{4}\s*", m.group(1)) else " ", s)
-    else:
-        s = re.sub(r"\([^)]*\)", " ", s)               # (...) tags
-    s = re.sub(r"\[[^\]]*\]", " ", s)                   # [...] tags
-    s = s.replace("&", " and ").replace("+", " plus ")
-    if STRIP_EDITIONS:
-        s = EDITION.sub(" ", s)
-    s = re.sub(r"[^a-z0-9 ]+", " ", s)
-    toks = [ROMAN.get(w, w) for w in s.split()]
-    while toks and toks[0] in ("the", "a", "an"):
-        toks = toks[1:]
-    return " ".join(toks).strip()
 
 
 games = {}   # norm_key -> dict(title, store_title, sources=[])
@@ -121,18 +84,22 @@ for _src in ("steam", "epic", "gog", "itch"):
         load_tsv(OWN + "/%s_games.tsv" % _src, _src)
 
 
-# ---- crawled local archives (crawl.py -> crawl-index.sqlite) ----
+# ---- crawled local archives (crawl.py -> process.py -> extracted) ----
 CRAWL_DB = os.path.join(DIR, "crawl-index.sqlite")
 if os.path.exists(CRAWL_DB):
     enabled = {a["name"] for a in config.archives_list(only_enabled=True)}
     cc = sqlite3.connect(CRAWL_DB)
     try:
-        rows = cc.execute("SELECT archive, system, title, detail FROM items")
-        for archive, system, title, detail in rows:
+        rows = cc.execute(
+            "SELECT archive, system, title, region, version, revision, disc, "
+            "flags FROM extracted")
+        for archive, system, title, region, version, revision, disc, flags in rows:
             if archive in enabled and title:
-                add(title, "archive", archive, archive, detail or system or "")
+                detail = " | ".join(x for x in (system, region, version, revision,
+                                                disc, flags) if x)
+                add(title, "archive", archive, archive, detail)
     except sqlite3.OperationalError:
-        pass            # no items table yet (never crawled)
+        pass            # nothing processed yet (run crawl.py + process.py)
     cc.close()
 
 

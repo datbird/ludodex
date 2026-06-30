@@ -51,8 +51,9 @@ optionally indexes a ROM archive, and builds the first catalog. Re-runnable any 
 - **`build_romdb.py`** — recursively indexes a ROM archive into `roms-index.sqlite`,
   parsing No-Intro / GoodTools tags for system, region, and version. (Runs where the ROMs
   live.) Shares its tag parser with `crawl.py` via **`romtags.py`**.
-- **`crawl.py`** — crawls registered **local archive** directories into
-  `crawl-index.sqlite` (see *Sources* below); ingested as the `archive` source.
+- **`crawl.py`** / **`process.py`** — the local-archive pipeline (see *Sources*):
+  crawl appends new files to a raw inventory; process extracts system/title/attributes
+  and flags variants of known games. Ingested as the `archive` source.
 - **`build_library.py`** — normalizes titles and dedupes all sources into
   `game-library.sqlite`.
 - **`update.sh`** — refresh all stores (cached auth) → rebuild → report games new since
@@ -105,7 +106,7 @@ python3 config.py disable gog             # skip a built-in (steam|epic|gog|itch
 python3 config.py enable gog
 ```
 
-**Local archives** — point ludodex at any local folder of games/ROMs and it's crawled
+**Local archives** — point ludodex at any local folder of games/ROMs and it's indexed
 into the catalog as the `archive` source (deduped against everything else by title):
 
 ```bash
@@ -114,13 +115,23 @@ python3 config.py archive add ssd-roms /run/media/SD/roms rom
 # kind 'flat': each immediate child (file or folder) is one title
 python3 config.py archive add installers ~/Games flat
 
-python3 crawl.py            # scan enabled archives -> crawl-index.sqlite
 python3 config.py disable ssd-roms        # archives toggle the same way
 python3 config.py archive list|rm <name>
 ```
 
-`update.sh` runs `crawl.py` automatically before each rebuild, so registered archives
-refresh with every **games-update**.
+This is a **two-stage pipeline** over a persistent `crawl-index.sqlite` (gitignored):
+
+1. **`crawl.py`** — append-only inventory. Walks each enabled archive and records raw
+   file facts (full path, name, ext, size, mtime) into a `files` table, adding **only new
+   files** (existing ones just touch `last_seen`; a changed file is re-flagged).
+2. **`process.py`** — reads unprocessed `files` and extracts into an `extracted` table:
+   system (from the path), cleaned game title + dedupe key, region/languages/version/
+   revision/disc/dump-flags, and whether the file is a **variant of a game already in the
+   catalog** (`is_variant` + `base_norm_key`). Marks each file processed → incremental.
+
+`build_library.py` ingests `extracted`; `update.sh` runs both stages before each rebuild,
+so archives refresh with every **games-update**. (`process.py --all` re-extracts
+everything.)
 
 ## Sync to a remote DB (optional)
 

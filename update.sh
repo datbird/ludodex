@@ -62,7 +62,8 @@ if [ "$1" = "--roms" ]; then
 fi
 
 echo "== local archives =="
-python3 crawl.py
+python3 crawl.py          # stage 1: append new files to the inventory
+python3 process.py        # stage 2: extract system/title/attributes from new files
 
 echo "== rebuilding unified library =="
 python3 build_library.py
