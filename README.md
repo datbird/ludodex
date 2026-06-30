@@ -12,6 +12,11 @@ cached, so refreshing is one command with no prompts.
 It's driven through three Claude skills (`skills/`), so the day-to-day interface is just
 asking Claude to *update*, *query*, or *re-auth* — but every script runs standalone too.
 
+> **Where it's headed:** see [`DESIGN.md`](DESIGN.md) for the canonical spec and roadmap
+> — the **Device layer** (push curated games + metadata/media to named devices, with a
+> detect/pin install ledger, provenance, changelog, and conflict awareness) and the
+> Build-now / Next / Someday docket.
+
 ## Why
 
 > "A local db of all games + their sources, universal between emulation and PC stores,
