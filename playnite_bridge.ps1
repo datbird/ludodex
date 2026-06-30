@@ -48,6 +48,9 @@ if ($Export) {
       roms=$(if($g.Roms){@($g.Roms|ForEach-Object{@{name=$_.Name;path=$_.Path}})}else{@()})
       added=$(if($g.Added){$g.Added.ToString('o')}else{$null})
       last_activity=$(if($g.LastActivity){$g.LastActivity.ToString('o')}else{$null})
+      cover=$(if($g.CoverImage){$PlayniteApi.Database.GetFullFilePath($g.CoverImage)}else{$null})
+      background=$(if($g.BackgroundImage){$PlayniteApi.Database.GetFullFilePath($g.BackgroundImage)}else{$null})
+      icon=$(if($g.Icon){$PlayniteApi.Database.GetFullFilePath($g.Icon)}else{$null})
     }
   }
   $out | ConvertTo-Json -Depth 6 | Out-File -Encoding utf8 $Path
@@ -66,8 +69,22 @@ if ($Import) {
   function RefList($coll, $names) { @($names | ForEach-Object { Ref $coll $_ }) }
 
   $recs = Get-Content -Raw -Encoding utf8 $Path | ConvertFrom-Json
+  $base = Split-Path -Parent (Resolve-Path $Path)   # art bundle ships beside the JSON
   $byName = @{}; foreach ($g in $PlayniteApi.Database.Games) { $byName[$g.Name.ToLower()] = $g }
-  $created = 0; $updated = 0
+  $created = 0; $updated = 0; $art = 0
+
+  # Set one art slot from a JSON-relative file, honoring the Deck-computed flag.
+  # $prop is CoverImage/BackgroundImage/Icon. Replaces the file Playnite stores.
+  function SetArt($g, $prop, $rel, $do) {
+    if (-not $do -or -not $rel) { return $false }
+    $src = Join-Path $base $rel
+    if (-not (Test-Path $src)) { return $false }
+    $old = $g.$prop
+    $dbp = $PlayniteApi.Database.AddFile($src, $g.Id)
+    $g.$prop = $dbp
+    if ($old) { $PlayniteApi.Database.RemoveFile($old) }
+    return $true
+  }
   foreach ($r in $recs) {
     $g = $byName[("" + $r.name).ToLower()]
     $new = $false
@@ -93,9 +110,16 @@ if ($Import) {
     if ($r.community_score) { $g.CommunityScore = [int]$r.community_score }
     if ($null -ne $r.favorite) { $g.Favorite = [bool]$r.favorite }
     if ($r.links) { $g.Links = New-Object "System.Collections.ObjectModel.ObservableCollection[Playnite.SDK.Models.Link]"; foreach($l in $r.links){ $g.Links.Add((New-Object "Playnite.SDK.Models.Link" $l.name,$l.url)) } }
-    if ($new) { $PlayniteApi.Database.Games.Add($g); $created++ } else { $PlayniteApi.Database.Games.Update($g); $updated++ }
+    # the game must exist in the DB before AddFile associates art with its Id
+    if ($new) { $PlayniteApi.Database.Games.Add($g); $created++ } else { $updated++ }
+    $set = $false
+    $set = (SetArt $g 'CoverImage'      $r.cover_file      $r.set_cover)      -or $set
+    $set = (SetArt $g 'BackgroundImage' $r.background_file $r.set_background) -or $set
+    $set = (SetArt $g 'Icon'            $r.icon_file       $r.set_icon)       -or $set
+    if ($set) { $art++ }
+    $PlayniteApi.Database.Games.Update($g)
   }
-  $PlayniteApi.Dialogs.ShowMessage("Import done: $created created, $updated enriched")
+  $PlayniteApi.Dialogs.ShowMessage("Import done: $created created, $updated enriched, $art with art")
   return
 }
 

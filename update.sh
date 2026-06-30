@@ -103,6 +103,11 @@ fi
 
 echo "== media index =="
 python3 media_index.py 2>&1 | sed 's/^/  /'      # local: ES-DE + Steam grid
+# Playnite's own cover/background/icon art, indexed as the 'playnite' provider.
+if [ "$(python3 -c 'import config; print(int(config.source_enabled("playnite")))')" = "1" ] && \
+   [ -n "$(cfg playnite_import_json)" ] && [ -f "$(cfg playnite_import_json)" ]; then
+  python3 playnite_import.py 2>&1 | sed 's/^/  /'
+fi
 python3 media_fetch.py 2>&1 | sed 's/^/  /'      # remote refs: Steam CDN + IGDB + ScreenScraper
 python3 media_choose.py 2>&1 | tail -1 | sed 's/^/  /'   # pick the best per game
 # (materialize is on-demand: python3 media_choose.py --materialize; ~17GB if all)

@@ -99,7 +99,17 @@ SCHEMA = [
     ("playnite_import_json", "", "Path to the Playnite export JSON produced by "
      "playnite_bridge.ps1 (-Export); ingested by build_library."),
     ("playnite_export_json", "", "Where playnite_export.py writes the ludodex->"
-     "Playnite JSON (blank = ludodex_to_playnite.json next to the scripts)."),
+     "Playnite JSON (blank = ludodex_to_playnite.json next to the scripts). A "
+     "portable art bundle is written beside it as <name>_media/ — copy BOTH to the "
+     "Playnite machine before running the bridge -Import."),
+    ("playnite_media_overwrite", "gaps", "How playnite_export.py treats art already "
+     "set in Playnite: 'gaps' (only fill empty cover/background/icon slots), 'all' "
+     "(always replace with ludodex's chosen art), or 'playnite-wins' (never clobber "
+     "AND make your Playnite art the chosen pick everywhere — it propagates to the "
+     "other frontends and the server)."),
+    ("playnite_icon_source", "logo", "What playnite_export.py uses for the Playnite "
+     "icon (Playnite has no separate logo slot): 'logo' (clear-logo art), 'cover' "
+     "(reuse the boxart), or 'none' (leave icons alone)."),
     ("source_launchbox_enabled", "1", "[source] Include an imported LaunchBox "
      "library (a frontend meta-layer, like Playnite — provenance only)."),
     ("launchbox_path", "", "Root of a LaunchBox install (the folder holding Data/, "
@@ -630,6 +640,27 @@ INTEGRATIONS = [
                      "launchbox_import_json"],
      "env": [], "op_item": None,
      "verify": "python3 launchbox_import.py --no-media | head"},
+
+    {"id": "playnite", "name": "Playnite (frontend)", "kind": "source",
+     "purpose": "Two-way sync with Playnite (metadata + cover/background/icon art). "
+                "Playnite stores its library in LiteDB, so a small PowerShell bridge "
+                "runs inside Playnite; ludodex speaks one canonical JSON both ways. "
+                "Like LaunchBox it's a meta-layer (provenance only, in_playnite).",
+     "url": "(no signup — runs inside your Playnite install)",
+     "steps": [
+         "In Playnite (Extensions > Execute script) run the bridge to EXPORT its "
+         "library + art paths to JSON:  .\\playnite_bridge.ps1 -Export -Path "
+         "playnite_games.json   — copy it to this machine and set: config.py set "
+         "playnite_import_json <path>  (then update.sh imports it).",
+         "To push BACK: python3 playnite_export.py  (writes ludodex_to_playnite.json "
+         "+ a <name>_media/ art bundle). Copy BOTH to the Playnite machine and run: "
+         ".\\playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json",
+         "Tune behavior: playnite_media_overwrite (gaps|all|playnite-wins) and "
+         "playnite_icon_source (logo|cover|none)."],
+     "config_keys": ["playnite_import_json", "playnite_export_json",
+                     "playnite_media_overwrite", "playnite_icon_source"],
+     "env": [], "op_item": None,
+     "verify": "python3 playnite_export.py --no-media /tmp/pn_check.json"},
 
     {"id": "igdb", "name": "IGDB (metadata)", "kind": "metadata",
      "purpose": "Enrich attributes (genres/themes/devs/ratings) + cover/artwork "

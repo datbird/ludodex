@@ -51,6 +51,7 @@ source. The `games-auth` skill wraps this with re-auth walkthroughs.
 | **EA** | source | browser access token | URL below (returns JSON) | `ea_op_item` | `ea_op_item` (field `credential`) | ~4h (re-grab) |
 | **emulation / archive** | source | none (local files / SSH) | — | mounts (see below) | — | — |
 | **LaunchBox** | source (frontend) | none (local/networked files) | a LaunchBox install folder | `launchbox_path`, `launchbox_media_mode` | — | — |
+| **Playnite** | source (frontend) | none (PowerShell bridge in-app) | your Playnite install | `playnite_import_json`, `playnite_media_overwrite`, `playnite_icon_source` | — | — |
 | **IGDB** | metadata | Twitch app Client ID+Secret | dev.twitch.tv/console/apps | `igdb_client_id/secret` | `igdb_op_item` (`username`=ID, `credential`=secret) | token auto-mints |
 | **ScreenScraper** | metadata + media | software `devid`/`devpassword` + account `ssid`/`sspassword` | forum (devid) + screenscraper.fr (account) | `screenscraper_devid/devpassword/ssid/sspassword` | `screenscraper_op_item` (`username`=ssid, `password`=sspassword) | no (devid is approval-gated) |
 | **SteamGridDB** | media | API key | steamgriddb.com/profile/preferences/api | `steamgriddb_api_key` | `steamgriddb_op_item` (field `credential`) | no |
@@ -161,6 +162,28 @@ copy of each asset (e.g. on Unraid) and points every frontend at it — use it w
 the LaunchBox `Images/` folder is on the same filesystem as `media_repo`. Close
 LaunchBox before exporting (it rewrites Platform XMLs on edit); ludodex upserts by a
 stable per-game GUID and never touches games you added by hand.
+
+### Playnite (desktop frontend)
+No cloud auth — a small PowerShell bridge (`playnite_bridge.ps1`) runs **inside**
+Playnite (Playnite stores its library in LiteDB, which needs .NET, so unlike
+LaunchBox ludodex can't touch it directly). Both sides speak one canonical JSON.
+Like LaunchBox it's a **meta-layer**, not a source (`in_playnite` provenance only).
+
+```powershell
+# in Playnite (Extensions > Execute script): export its library + art paths
+.\playnite_bridge.ps1 -Export -Path playnite_games.json
+```
+```
+python3 config.py set playnite_import_json <path to playnite_games.json>  # update.sh ingests it
+python3 playnite_export.py        # catalog + chosen art -> ludodex_to_playnite.json + _media/ bundle
+# copy the JSON AND its <name>_media/ folder to the Playnite machine, then:
+#   .\playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json
+```
+Media flows both ways (cover/background/icon). Two knobs:
+- `playnite_media_overwrite` = `gaps` (fill empty slots) · `all` (replace) ·
+  `playnite-wins` (never clobber + your Playnite art becomes the canonical pick
+  everywhere, propagating to LaunchBox and the server).
+- `playnite_icon_source` = `logo` · `cover` · `none`.
 
 ---
 

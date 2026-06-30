@@ -44,9 +44,16 @@ def con_index():
 def select(con):
     """Set chosen=1 on the best asset per (norm_key, scalar kind); 0 elsewhere."""
     con.execute("UPDATE media SET chosen=0")
+    # playnite_media_overwrite=playnite-wins: your hand-curated Playnite art beats
+    # every other provider for the slots Playnite owns, so it becomes the canonical
+    # pick that propagates to the other frontends and the server.
+    pn_wins = (config.get("playnite_media_overwrite") or "").lower() == "playnite-wins"
     rank = {}                       # (kind) -> {provider: order}
     for kind in media.SCALAR_KINDS:
-        rank[kind] = {p: i for i, p in enumerate(media.priority(kind))}
+        order = list(media.priority(kind))
+        if pn_wins and kind in ("cover", "background", "icon"):
+            order = ["playnite"] + [p for p in order if p != "playnite"]
+        rank[kind] = {p: i for i, p in enumerate(order)}
     rows = con.execute(
         "SELECT id, norm_key, kind, provider, matched, ref_type FROM media "
         "WHERE kind IN (%s)" % ",".join("'%s'" % k for k in media.SCALAR_KINDS)

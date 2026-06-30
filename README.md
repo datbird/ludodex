@@ -216,6 +216,22 @@ developers, publishers, series, age ratings, regions, release date, playtime, co
 scores, favorite, version, links, …), stored in `game_attributes` (queryable) and
 `source_attrs` (lossless, for round-trip export).
 
+**Media both ways.** The bridge also carries cover/background/icon. On `-Export`,
+Playnite's own art is indexed as the `playnite` media provider (`playnite_import.py`),
+so your hand-curated art can win/seed the chosen set. On the way back,
+`playnite_export.py` materializes ludodex's **chosen** art (including ES-DE scrapes,
+Steam, IGDB, ScreenScraper) into a portable bundle beside the JSON — copy the JSON
+**and** its `<name>_media/` folder to the Playnite machine, then `-Import` writes them
+in. Two knobs control the write:
+
+- `playnite_media_overwrite` = `gaps` (fill empty slots only) · `all` (always replace)
+  · `playnite-wins` (never clobber **and** make your Playnite art the canonical pick
+  everywhere — it then propagates to LaunchBox and the server too).
+- `playnite_icon_source` = `logo` · `cover` · `none` (Playnite has no separate logo slot).
+
+This same canonical art set is what `launchbox_export.py` pushes, so metadata **and
+media** stay in sync **across Playnite and LaunchBox**.
+
 ## LaunchBox interoperability (import/export)
 
 [LaunchBox](https://www.launchbox-app.com/) is treated exactly like Playnite — a

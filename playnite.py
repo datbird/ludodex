@@ -25,7 +25,19 @@ Canonical record (all keys optional except name):
   "install_dir": "", "is_installed": true, "install_size": 1234567,
   "links": [{"name":"Steam","url":"https://…"}],
   "roms":  [{"name":"…","path":"…"}],
-  "added": "2020-01-01T00:00:00Z", "last_activity": "2024-05-01T00:00:00Z"
+  "added": "2020-01-01T00:00:00Z", "last_activity": "2024-05-01T00:00:00Z",
+
+  # --- media (both ways) ---
+  # EXPORT direction (bridge -Export): absolute paths to Playnite's own art, so
+  # ludodex can index it as the 'playnite' media provider.
+  "cover": "C:/Users/…/library/files/<id>/x.png",
+  "background": "…", "icon": "…",
+  # IMPORT direction (playnite_export.py -> bridge -Import): art ludodex chose,
+  # given as paths RELATIVE to the JSON (a portable bundle ships beside it), plus
+  # per-slot booleans the Deck computed from the overwrite policy.
+  "cover_file": "ludodex_to_playnite_media/<sha1>.png", "set_cover": true,
+  "background_file": "…", "set_background": true,
+  "icon_file": "…", "set_icon": false
 }
 """
 
@@ -55,6 +67,12 @@ SCALAR_KINDS = ["release_date", "release_year", "playtime", "play_count",
                 "community_score", "favorite", "hidden", "version",
                 "description", "notes", "install_dir", "is_installed",
                 "install_size", "added", "last_activity"]
+
+
+# Playnite's three art slots <-> canonical media kind. (Playnite has no separate
+# logo/screenshot slots; 'icon' is sourced per the playnite_icon_source config.)
+MEDIA_SLOTS = {"cover": "CoverImage", "background": "BackgroundImage",
+               "icon": "Icon"}
 
 
 def source_for_guid(guid):
