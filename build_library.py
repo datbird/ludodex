@@ -116,7 +116,7 @@ con = sqlite3.connect(OUT)
 cur = con.cursor()
 cur.executescript("""
 CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
-  n_sources INTEGER, sources_summary TEXT,
+  n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
   has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT);
 CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
   source_id TEXT, title_raw TEXT, detail TEXT);
@@ -138,10 +138,10 @@ for key, g in games.items():
             parts.append(st)
     summary = "; ".join(parts)
     cur.execute(
-        "INSERT INTO games(canonical_title,norm_key,n_sources,sources_summary,"
+        "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,sources_summary,"
         "has_emulation,has_steam,has_gog,has_epic,has_itch) "
-        "VALUES(?,?,?,?,?,?,?,?,?)",
-        (canonical, key, len(srcs), summary,
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (canonical, key, len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds)))
     gid = cur.lastrowid
@@ -158,13 +158,12 @@ CREATE INDEX ix_src_plat ON sources(platform);
 con.commit()
 
 # summary to stderr
-import sys
 tot = cur.execute("SELECT COUNT(*) FROM games").fetchone()[0]
-multi = cur.execute("SELECT COUNT(*) FROM games WHERE n_sources>1").fetchone()[0]
+multi = cur.execute("SELECT COUNT(*) FROM games WHERE n_kinds>1").fetchone()[0]
 for label, col in (("emulation", "has_emulation"), ("steam", "has_steam"),
                    ("gog", "has_gog"), ("epic", "has_epic"), ("itch", "has_itch")):
     n = cur.execute("SELECT COUNT(*) FROM games WHERE %s=1" % col).fetchone()[0]
     print("# games with %-9s source: %d" % (label, n), file=sys.stderr)
-print("# total unique games: %d (%d available from >1 source)" % (tot, multi),
+print("# total unique games: %d (%d available from >1 source KIND)" % (tot, multi),
       file=sys.stderr)
 con.close()

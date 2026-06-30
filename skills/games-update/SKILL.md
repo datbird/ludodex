@@ -36,11 +36,14 @@ bash ~/game-ownership/update.sh --roms
 
 ## Schema (for answering questions)
 
-`games(id, canonical_title, norm_key, n_sources, sources_summary,
+`games(id, canonical_title, norm_key, n_sources, n_kinds, sources_summary,
        has_emulation, has_steam, has_gog, has_epic, has_itch)`
 `sources(game_id, source, platform, source_id, title_raw, detail)`
 — `source` ∈ emulation|steam|gog|epic|itch; for emulation, `platform` is the system
 (psx, snes…). `sources_summary` e.g. `emulation:psx,sega saturn; steam; itch`.
+**`n_kinds`** = number of distinct source *kinds* (emu/steam/gog/epic/itch) — use this
+for "available from multiple sources". **`n_sources`** = raw source-row count (a game on
+3 emulation systems has n_sources=3 but n_kinds=1), so don't use n_sources for that.
 
 ## Common queries
 
@@ -48,9 +51,9 @@ bash ~/game-ownership/update.sh --roms
 # does the user own a game, and where?
 sqlite3 ~/game-ownership/game-library.sqlite \
   "SELECT canonical_title, sources_summary FROM games WHERE norm_key LIKE '%<term>%';"
-# games owned on multiple sources
+# games owned on multiple source KINDS (cross-source) — use n_kinds, not n_sources
 sqlite3 ~/game-ownership/game-library.sqlite \
-  "SELECT canonical_title, sources_summary FROM games WHERE n_sources>1 ORDER BY canonical_title;"
+  "SELECT canonical_title, sources_summary FROM games WHERE n_kinds>1 ORDER BY canonical_title;"
 # counts per source
 sqlite3 ~/game-ownership/game-library.sqlite \
   "SELECT SUM(has_emulation), SUM(has_steam), SUM(has_gog), SUM(has_epic), SUM(has_itch) FROM games;"

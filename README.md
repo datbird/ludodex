@@ -68,12 +68,14 @@ Drop `skills/*` into `~/.claude/skills/` (or symlink). Then:
 ## Schema
 
 ```sql
-games(   id, canonical_title, norm_key, n_sources, sources_summary,
+games(   id, canonical_title, norm_key, n_sources, n_kinds, sources_summary,
          has_emulation, has_steam, has_gog, has_epic, has_itch )
 sources( game_id, source, platform, source_id, title_raw, detail )
 -- source ∈ emulation|steam|gog|epic|itch
 -- emulation platform = system (psx, snes…); detail = regions
 -- sources_summary e.g. "emulation:psx,sega saturn; steam; itch"
+-- n_kinds  = # of distinct source kinds  -> use for "owned from multiple sources"
+-- n_sources = raw source-row count (a game on 3 emu systems = 3 rows, 1 kind)
 ```
 
 ```bash
@@ -81,9 +83,9 @@ DB=game-library.sqlite
 # Do I own <game>, and where?
 sqlite3 -column -header "$DB" \
   "SELECT canonical_title, sources_summary FROM games WHERE norm_key LIKE '%halo%';"
-# Games available from more than one source
+# Games available from more than one source kind (cross-source)
 sqlite3 -column -header "$DB" \
-  "SELECT canonical_title, sources_summary FROM games WHERE n_sources>1;"
+  "SELECT canonical_title, sources_summary FROM games WHERE n_kinds>1;"
 # Counts per source
 sqlite3 "$DB" \
   "SELECT SUM(has_emulation) emu, SUM(has_steam) steam, SUM(has_gog) gog, SUM(has_epic) epic, COUNT(*) total FROM games;"
