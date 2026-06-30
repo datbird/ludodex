@@ -151,7 +151,6 @@ canonical IGDB id — by Steam appid via its `external_games` map, else by name 
 and attaches genres, themes, game modes, developers/publishers, series, release dates and
 ratings. The merge is **fill-gaps only**: if a game already has values for a kind (from a
 store or Playnite), IGDB leaves that kind untouched, so owned-source data always wins.
-(Artwork/media is intentionally out of scope for now.)
 
 ```bash
 # one-time: Twitch app creds (free) at https://dev.twitch.tv/console/apps
@@ -164,6 +163,29 @@ IGDB data is cached in `metadata-cache.sqlite` (gitignored) by **`igdb_enrich.py
 re-runs only fetch new/stale records (`igdb_meta_ttl_days`); `--all` re-does everything.
 `update.sh` runs enrichment after each rebuild, then re-merges. Each link is recorded in
 `metadata_links` (provider `igdb`, the id, slug and `igdb.com` URL).
+
+## Media (covers, backgrounds, logos, screenshots…)
+
+Game art is indexed **by reference** into `media-index.sqlite`, keyed by the catalog's
+stable `norm_key`, from several **media providers**:
+
+- **ES-DE** (local) — RetroDECK/EmuDeck `downloaded_media` sets, matched to emulation
+  games by ROM filename. Register the folder: `config.py media-mount add "<path>" esde`.
+- **Steam grid** (local) — your custom Steam artwork (`userdata/<id>/config/grid`).
+- **Steam CDN / IGDB images** (remote) — capsule/hero/logo by appid; IGDB
+  cover/artwork/screenshots by id. **SteamGridDB** (remote, needs a key) gap-fills.
+
+```bash
+python3 media_index.py          # scan local providers (ES-DE, Steam grid)
+python3 media_fetch.py          # add remote refs (Steam CDN, IGDB images)
+python3 media_choose.py         # pick the ONE best asset per game+kind (by priority)
+python3 media_choose.py --materialize --kind cover   # pull chosen bytes into media/ repo
+```
+
+Hybrid storage: everything is indexed as a reference; only the **chosen** asset per kind
+is materialized into a content-addressed local repo (`media/`, gitignored) on demand —
+so the index is cheap and complete while the repo stays small. `update.sh` runs
+index → fetch → choose automatically.
 
 ## Playnite interoperability (import/export)
 

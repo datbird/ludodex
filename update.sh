@@ -83,6 +83,12 @@ if meta_enabled igdb && \
   python3 igdb_enrich.py && python3 build_library.py
 fi
 
+echo "== media index =="
+python3 media_index.py 2>&1 | sed 's/^/  /'      # local: ES-DE + Steam grid
+python3 media_fetch.py 2>&1 | sed 's/^/  /'      # remote refs: Steam CDN + IGDB
+python3 media_choose.py 2>&1 | tail -1 | sed 's/^/  /'   # pick the best per game
+# (materialize is on-demand: python3 media_choose.py --materialize; ~17GB if all)
+
 echo "== new since last run =="
 sqlite3 "$LIB" "SELECT norm_key FROM games" | sort > .cur_keys
 comm -13 .prev_keys .cur_keys > .new_keys
