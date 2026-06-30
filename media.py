@@ -127,3 +127,23 @@ def steamgrid_kind(filename):
 LOCAL_PROVIDERS = ("esde", "steamgrid", "playnite")
 REMOTE_PROVIDERS = ("steam", "igdb", "steamgriddb")
 MEDIA_PROVIDERS = LOCAL_PROVIDERS + REMOTE_PROVIDERS
+
+# Per-kind provider priority for choosing the ONE best asset (first available
+# wins). Curated/owned local art (your Steam custom grid, your ES-DE scrapes)
+# beats official store art, which beats IGDB, which beats SteamGridDB community
+# art. ES-DE has no real backgrounds, so it sinks for that kind.
+PRIORITY = {
+    "cover":        ["steamgrid", "esde", "steam", "igdb", "steamgriddb", "playnite"],
+    "background":   ["steamgrid", "steam", "igdb", "steamgriddb", "esde", "playnite"],
+    "logo":         ["steamgrid", "esde", "steam", "igdb", "steamgriddb"],
+    "icon":         ["steamgrid", "steamgriddb", "igdb", "playnite"],
+    "title_screen": ["esde"],
+    "box_3d":       ["esde", "steamgriddb"],
+    "box_back":     ["esde"],
+    "mix":          ["esde"],
+}
+DEFAULT_PRIORITY = ["steamgrid", "esde", "steam", "igdb", "steamgriddb", "playnite"]
+
+
+def priority(kind):
+    return PRIORITY.get(kind, DEFAULT_PRIORITY)
