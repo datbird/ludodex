@@ -207,6 +207,23 @@ TXT
 esac
 echo
 
+# --- local archives (optional) ----------------------------------------------
+rule; b "8) Local archives (optional)"
+cat <<'TXT'
+Add local folders of games/ROMs as sources. kind 'rom' recurses (first subfolder
+= system, ROM files only, tags cleaned); kind 'flat' = each immediate child is a
+title. Add as many as you like; blank name to finish. Toggle later with
+`config.py enable|disable <name>`; disable a built-in store the same way.
+TXT
+while true; do
+  read -rp "  archive name (blank to finish): " an
+  [ -z "$an" ] && break
+  read -rp "    path: " ap
+  read -rp "    kind [rom/flat]: " ak; ak=${ak:-rom}
+  python3 config.py archive add "$an" "$ap" "$ak"
+done
+echo
+
 # --- build -------------------------------------------------------------------
 rule; b "Verifying auth"
 bash auth_status.sh

@@ -50,7 +50,9 @@ optionally indexes a ROM archive, and builds the first catalog. Re-runnable any 
   with a personal API key. → `itch_games.tsv`
 - **`build_romdb.py`** — recursively indexes a ROM archive into `roms-index.sqlite`,
   parsing No-Intro / GoodTools tags for system, region, and version. (Runs where the ROMs
-  live.)
+  live.) Shares its tag parser with `crawl.py` via **`romtags.py`**.
+- **`crawl.py`** — crawls registered **local archive** directories into
+  `crawl-index.sqlite` (see *Sources* below); ingested as the `archive` source.
 - **`build_library.py`** — normalizes titles and dedupes all sources into
   `game-library.sqlite`.
 - **`update.sh`** — refresh all stores (cached auth) → rebuild → report games new since
@@ -71,11 +73,11 @@ Drop `skills/*` into `~/.claude/skills/` (or symlink). Then:
 
 ```sql
 games(   id, canonical_title, norm_key, n_sources, n_kinds, sources_summary,
-         has_emulation, has_steam, has_gog, has_epic, has_itch )
+         has_emulation, has_steam, has_gog, has_epic, has_itch, has_archive )
 sources( game_id, source, platform, source_id, title_raw, detail )
--- source ∈ emulation|steam|gog|epic|itch
--- emulation platform = system (psx, snes…); detail = regions
--- sources_summary e.g. "emulation:psx,sega saturn; steam; itch"
+-- source ∈ emulation|steam|gog|epic|itch|archive
+-- emulation platform = system (psx, snes…); archive platform = archive name
+-- sources_summary e.g. "emulation:psx,snes; archive:ssd-roms; steam; itch"
 -- n_kinds  = # of distinct source kinds  -> use for "owned from multiple sources"
 -- n_sources = raw source-row count (a game on 3 emu systems = 3 rows, 1 kind)
 ```
@@ -92,6 +94,33 @@ sqlite3 -column -header "$DB" \
 sqlite3 "$DB" \
   "SELECT SUM(has_emulation) emu, SUM(has_steam) steam, SUM(has_gog) gog, SUM(has_epic) epic, COUNT(*) total FROM games;"
 ```
+
+## Sources (enable/disable + local archives)
+
+Every source can be toggled, and you can add your own local directories as sources.
+
+```bash
+python3 config.py sources                 # list all sources + on/off state
+python3 config.py disable gog             # skip a built-in (steam|epic|gog|itch|emulation)
+python3 config.py enable gog
+```
+
+**Local archives** — point ludodex at any local folder of games/ROMs and it's crawled
+into the catalog as the `archive` source (deduped against everything else by title):
+
+```bash
+# kind 'rom':  recurse, first folder = system, ROM/disc files only, tags cleaned
+python3 config.py archive add ssd-roms /run/media/SD/roms rom
+# kind 'flat': each immediate child (file or folder) is one title
+python3 config.py archive add installers ~/Games flat
+
+python3 crawl.py            # scan enabled archives -> crawl-index.sqlite
+python3 config.py disable ssd-roms        # archives toggle the same way
+python3 config.py archive list|rm <name>
+```
+
+`update.sh` runs `crawl.py` automatically before each rebuild, so registered archives
+refresh with every **games-update**.
 
 ## Sync to a remote DB (optional)
 

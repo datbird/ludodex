@@ -92,14 +92,15 @@ def add(title, source, platform, sid, detail=""):
 
 
 # ---- emulation (distinct game per system, ROM files only) ----
-rc = sqlite3.connect(ROM_DB)
-ph = ",".join("?" * len(ROM_EXTS))
-q = ("SELECT system, game, GROUP_CONCAT(DISTINCT region) FROM roms "
-     "WHERE ext IN (%s) AND lower(game) NOT IN (%s) AND game<>'' "
-     "GROUP BY system, game" % (ph, ",".join("?" * len(MEDIA_GAMES))))
-for system, game, regions in rc.execute(q, list(ROM_EXTS) + list(MEDIA_GAMES)):
-    add(game, "emulation", system, system, (regions or ""))
-rc.close()
+if config.source_enabled("emulation") and ROM_DB and os.path.exists(ROM_DB):
+    rc = sqlite3.connect(ROM_DB)
+    ph = ",".join("?" * len(ROM_EXTS))
+    q = ("SELECT system, game, GROUP_CONCAT(DISTINCT region) FROM roms "
+         "WHERE ext IN (%s) AND lower(game) NOT IN (%s) AND game<>'' "
+         "GROUP BY system, game" % (ph, ",".join("?" * len(MEDIA_GAMES))))
+    for system, game, regions in rc.execute(q, list(ROM_EXTS) + list(MEDIA_GAMES)):
+        add(game, "emulation", system, system, (regions or ""))
+    rc.close()
 
 
 # ---- store TSVs ----
@@ -115,10 +116,24 @@ def load_tsv(path, source):
             add(title, source, source, sid)
 
 
-load_tsv(OWN + "/steam_games.tsv", "steam")
-load_tsv(OWN + "/epic_games.tsv", "epic")
-load_tsv(OWN + "/gog_games.tsv", "gog")
-load_tsv(OWN + "/itch_games.tsv", "itch")
+for _src in ("steam", "epic", "gog", "itch"):
+    if config.source_enabled(_src):
+        load_tsv(OWN + "/%s_games.tsv" % _src, _src)
+
+
+# ---- crawled local archives (crawl.py -> crawl-index.sqlite) ----
+CRAWL_DB = os.path.join(DIR, "crawl-index.sqlite")
+if os.path.exists(CRAWL_DB):
+    enabled = {a["name"] for a in config.archives_list(only_enabled=True)}
+    cc = sqlite3.connect(CRAWL_DB)
+    try:
+        rows = cc.execute("SELECT archive, system, title, detail FROM items")
+        for archive, system, title, detail in rows:
+            if archive in enabled and title:
+                add(title, "archive", archive, archive, detail or system or "")
+    except sqlite3.OperationalError:
+        pass            # no items table yet (never crawled)
+    cc.close()
 
 
 # ---- write ----
@@ -129,7 +144,8 @@ cur = con.cursor()
 cur.executescript("""
 CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
   n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
-  has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT);
+  has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
+  has_archive INT);
 CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
   source_id TEXT, title_raw TEXT, detail TEXT);
 """)
@@ -140,22 +156,24 @@ for key, g in games.items():
     kinds = {}
     for s in srcs:
         kinds.setdefault(s[0], set())
-        if s[0] == "emulation":
+        if s[0] in ("emulation", "archive"):    # grouped sources keep their platforms
             kinds[s[0]].add(s[1])
     parts = []
-    if "emulation" in kinds:
-        parts.append("emulation:" + ",".join(sorted(kinds["emulation"])))
+    for grp in ("emulation", "archive"):
+        if grp in kinds:
+            parts.append(grp + ":" + ",".join(sorted(kinds[grp])))
     for st in ("steam", "gog", "epic", "itch"):
         if st in kinds:
             parts.append(st)
     summary = "; ".join(parts)
     cur.execute(
         "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,sources_summary,"
-        "has_emulation,has_steam,has_gog,has_epic,has_itch) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (canonical, key, len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
-         int("gog" in kinds), int("epic" in kinds), int("itch" in kinds)))
+         int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
+         int("archive" in kinds)))
     gid = cur.lastrowid
     cur.executemany(
         "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail)"
@@ -173,7 +191,8 @@ con.commit()
 tot = cur.execute("SELECT COUNT(*) FROM games").fetchone()[0]
 multi = cur.execute("SELECT COUNT(*) FROM games WHERE n_kinds>1").fetchone()[0]
 for label, col in (("emulation", "has_emulation"), ("steam", "has_steam"),
-                   ("gog", "has_gog"), ("epic", "has_epic"), ("itch", "has_itch")):
+                   ("gog", "has_gog"), ("epic", "has_epic"), ("itch", "has_itch"),
+                   ("archive", "has_archive")):
     n = cur.execute("SELECT COUNT(*) FROM games WHERE %s=1" % col).fetchone()[0]
     print("# games with %-9s source: %d" % (label, n), file=sys.stderr)
 print("# total unique games: %d (%d available from >1 source KIND)" % (tot, multi),

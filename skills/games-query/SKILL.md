@@ -10,10 +10,11 @@ per deduped game; each lists every source it's available from.
 
 Schema:
 - `games(id, canonical_title, norm_key, n_sources, n_kinds, sources_summary,
-         has_emulation, has_steam, has_gog, has_epic, has_itch)`
+         has_emulation, has_steam, has_gog, has_epic, has_itch, has_archive)`
 - `sources(game_id, source, platform, source_id, title_raw, detail)` —
-  `source` ∈ emulation|steam|gog|epic|itch; emulation `platform` = system (psx, snes…);
-  `detail` for emulation = regions.
+  `source` ∈ emulation|steam|gog|epic|itch|archive; emulation `platform` = system
+  (psx, snes…) and archive `platform` = the archive name; `detail` for emulation =
+  regions.
 
 `norm_key` is the normalized title (lowercase, tags/punct/edition-suffix stripped,
 roman→arabic) — **match against `norm_key` with LIKE and a normalized term** for best

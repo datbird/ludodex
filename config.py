@@ -16,6 +16,12 @@ locally (they go into config.sqlite, never into git):
   python3 config.py steam-key      # resolve the Steam key (env > config > 1Password)
   python3 config.py init           # just create/seed config.sqlite
 
+  python3 config.py sources                       # list sources + on/off state
+  python3 config.py enable|disable <source>       # toggle steam/epic/gog/itch/
+                                                  #   emulation or an archive name
+  python3 config.py archive add <name> <path> [rom|flat]   # register a crawl archive
+  python3 config.py archive list|rm <name>
+
 For first-time onboarding with credential how-to guidance, run ./setup.sh instead.
 """
 import os
@@ -73,6 +79,12 @@ SCHEMA = [
     ("dedupe_strip_editions", "1",
      "[pref] Strip edition/remaster words (Remastered, Definitive Edition, GOTY, …) "
      "when deduping, so a remaster merges with its base game."),
+    # --- source toggles (1 = include, 0 = skip) — see `config.py sources` ---
+    ("source_steam_enabled", "1", "[source] Pull Steam ownership."),
+    ("source_epic_enabled", "1", "[source] Pull Epic ownership."),
+    ("source_gog_enabled", "1", "[source] Pull GOG ownership."),
+    ("source_itch_enabled", "1", "[source] Pull itch.io ownership."),
+    ("source_emulation_enabled", "1", "[source] Include the emulation ROM index."),
     # --- remote sync (push the catalog to a remote DB mirror) ---
     ("sync_target", "",
      "Where `update.sh` pushes the catalog after a rebuild: blank (off), "
@@ -195,6 +207,67 @@ def pocketbase_password():
                         "pocketbase_op_item", field="password")
 
 
+# --------------------------------------------------------------------------- #
+#  sources: built-in store/emulation toggles + a registry of crawl archives
+# --------------------------------------------------------------------------- #
+BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "emulation")
+
+
+def _arch_con():
+    con = sqlite3.connect(DB)
+    con.execute("CREATE TABLE IF NOT EXISTS archives("
+                "name TEXT PRIMARY KEY, path TEXT, kind TEXT, "
+                "enabled INTEGER DEFAULT 1)")
+    return con
+
+
+def archives_list(only_enabled=False):
+    con = _arch_con()
+    q = ("SELECT name,path,kind,enabled FROM archives" +
+         (" WHERE enabled=1" if only_enabled else "") + " ORDER BY name")
+    rows = [{"name": n, "path": p, "kind": k, "enabled": e}
+            for n, p, k, e in con.execute(q)]
+    con.close()
+    return rows
+
+
+def archive_set(name, path, kind="rom", enabled=1):
+    con = _arch_con()
+    con.execute("INSERT INTO archives(name,path,kind,enabled) VALUES(?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET path=excluded.path, "
+                "kind=excluded.kind, enabled=excluded.enabled",
+                (name, path, kind, int(enabled)))
+    con.commit()
+    con.close()
+
+
+def archive_rm(name):
+    con = _arch_con()
+    con.execute("DELETE FROM archives WHERE name=?", (name,))
+    con.commit()
+    con.close()
+
+
+def archive_set_enabled(name, enabled):
+    con = _arch_con()
+    cur = con.execute("UPDATE archives SET enabled=? WHERE name=?",
+                      (1 if enabled else 0, name))
+    con.commit()
+    n = cur.rowcount
+    con.close()
+    return n
+
+
+def source_enabled(name):
+    """True if a source (built-in store/emulation, or an archive) is enabled."""
+    if name in BUILTIN_SOURCES:
+        return get_bool("source_%s_enabled" % name, True)
+    for a in archives_list():
+        if a["name"] == name:
+            return bool(a["enabled"])
+    return True
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -219,6 +292,47 @@ def main(argv):
         sys.stdout.write(steam_key())
     elif cmd == "itch-key":
         sys.stdout.write(itch_key())
+    elif cmd in ("enable", "disable"):
+        if len(argv) < 2:
+            sys.exit("usage: config.py %s <source>" % cmd)
+        name, on = argv[1], cmd == "enable"
+        if name in BUILTIN_SOURCES:
+            set_("source_%s_enabled" % name, "1" if on else "0")
+            print("%sd source %s" % (cmd, name))
+        elif archive_set_enabled(name, on):
+            print("%sd archive %s" % (cmd, name))
+        else:
+            sys.exit("unknown source %r (built-ins: %s; or an archive name)"
+                     % (name, ", ".join(BUILTIN_SOURCES)))
+    elif cmd == "sources":
+        print("built-in sources:")
+        for s in BUILTIN_SOURCES:
+            mark = "x" if get_bool("source_%s_enabled" % s, True) else " "
+            print("  [%s] %s" % (mark, s))
+        archs = archives_list()
+        print("archives:" if archs else
+              "archives: (none — add: config.py archive add <name> <path> [rom|flat])")
+        for a in archs:
+            print("  [%s] %-16s %s  (%s)" %
+                  ("x" if a["enabled"] else " ", a["name"], a["path"], a["kind"]))
+    elif cmd == "archive":
+        sub = argv[1] if len(argv) > 1 else ""
+        if sub == "add" and len(argv) >= 4:
+            kind = argv[4] if len(argv) > 4 else "rom"
+            if kind not in ("rom", "flat"):
+                sys.exit("kind must be 'rom' or 'flat'")
+            archive_set(argv[2], os.path.abspath(os.path.expanduser(argv[3])), kind)
+            print("added archive %r (%s) -> %s" % (argv[2], kind, argv[3]))
+        elif sub == "rm" and len(argv) >= 3:
+            archive_rm(argv[2])
+            print("removed archive %r" % argv[2])
+        elif sub == "list":
+            for a in archives_list():
+                print("%-16s %s  (%s, %s)" % (a["name"], a["path"], a["kind"],
+                                              "on" if a["enabled"] else "off"))
+        else:
+            sys.exit("usage: config.py archive add <name> <path> [rom|flat]"
+                     " | rm <name> | list")
     elif cmd == "set":
         if len(argv) < 3:
             sys.exit("usage: config.py set <key> <value>")
@@ -235,7 +349,8 @@ def main(argv):
                 set_(k, new)
         print("\nSaved to config.sqlite. Verify with: bash auth_status.sh")
     else:
-        sys.exit("unknown command %r — use init|setup|list|get|set|steam-key|itch-key" % cmd)
+        sys.exit("unknown command %r — use init|setup|list|get|set|steam-key|"
+                 "itch-key|sources|enable|disable|archive" % cmd)
 
 
 if __name__ == "__main__":

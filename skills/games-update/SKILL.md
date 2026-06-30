@@ -15,6 +15,11 @@ itch.io** PC ownership. Each game lists all the sources it's available from.
 - Account/environment settings (SteamID, 1Password item, ROM host/paths) live in a
   `config` table — `python3 config.py list` to see them, `config.py set <key> <value>`
   to change. Nothing personal is hardcoded in the scripts.
+- Sources can be toggled and extended: `python3 config.py sources` (list + on/off),
+  `config.py enable|disable <steam|epic|gog|itch|emulation|archive-name>`. Add local
+  folders as sources with `config.py archive add <name> <path> [rom|flat]`; `update.sh`
+  crawls them (`crawl.py`) before each rebuild. Disabled sources are skipped on both
+  pull and rebuild.
 
 ## To run an update
 
@@ -37,10 +42,11 @@ bash ~/game-ownership/update.sh --roms
 ## Schema (for answering questions)
 
 `games(id, canonical_title, norm_key, n_sources, n_kinds, sources_summary,
-       has_emulation, has_steam, has_gog, has_epic, has_itch)`
+       has_emulation, has_steam, has_gog, has_epic, has_itch, has_archive)`
 `sources(game_id, source, platform, source_id, title_raw, detail)`
-— `source` ∈ emulation|steam|gog|epic|itch; for emulation, `platform` is the system
-(psx, snes…). `sources_summary` e.g. `emulation:psx,sega saturn; steam; itch`.
+— `source` ∈ emulation|steam|gog|epic|itch|archive; for emulation `platform` is the
+system (psx, snes…), for archive it's the archive name. `sources_summary` e.g.
+`emulation:psx,snes; archive:ssd-roms; steam; itch`.
 **`n_kinds`** = number of distinct source *kinds* (emu/steam/gog/epic/itch) — use this
 for "available from multiple sources". **`n_sources`** = raw source-row count (a game on
 3 emulation systems has n_sources=3 but n_kinds=1), so don't use n_sources for that.
@@ -56,7 +62,7 @@ sqlite3 ~/game-ownership/game-library.sqlite \
   "SELECT canonical_title, sources_summary FROM games WHERE n_kinds>1 ORDER BY canonical_title;"
 # counts per source
 sqlite3 ~/game-ownership/game-library.sqlite \
-  "SELECT SUM(has_emulation), SUM(has_steam), SUM(has_gog), SUM(has_epic), SUM(has_itch) FROM games;"
+  "SELECT SUM(has_emulation), SUM(has_steam), SUM(has_gog), SUM(has_epic), SUM(has_itch), SUM(has_archive) FROM games;"
 ```
 
 ## Auth notes (only relevant if a pull fails)

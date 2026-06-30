@@ -7,6 +7,7 @@ cd "$(dirname "$0")" || exit 1
 export PATH="$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
 
 cfg() { python3 config.py get "$1"; }
+enabled() { [ "$(cfg "source_$1_enabled")" != 0 ]; }   # default on
 LIB=$(cfg library_db)
 ROM_DB=$(cfg roms_index_db)
 
@@ -18,26 +19,34 @@ else
 fi
 
 echo "== Steam =="
-KEY=$(python3 config.py steam-key)
-if [ -n "$KEY" ]; then
-  STEAM_API_KEY="$KEY" python3 steam_owned.py > steam_games.tsv 2>steam.err \
-    && echo "  steam: $(wc -l < steam_games.tsv) games" \
-    || echo "  steam FAILED: $(tail -1 steam.err)"
-else echo "  steam: no API key (run ./setup.sh, or set steam_api_key / op_vault+steam_key_op_item)"; fi
+if ! enabled steam; then echo "  steam: disabled"; else
+  KEY=$(python3 config.py steam-key)
+  if [ -n "$KEY" ]; then
+    STEAM_API_KEY="$KEY" python3 steam_owned.py > steam_games.tsv 2>steam.err \
+      && echo "  steam: $(wc -l < steam_games.tsv) games" \
+      || echo "  steam FAILED: $(tail -1 steam.err)"
+  else echo "  steam: no API key (run ./setup.sh, or set steam_api_key / op_vault+steam_key_op_item)"; fi
+fi
 
 echo "== Epic =="
-python3 epic_owned.py 2>epic.err && echo "  epic: $(wc -l < epic_games.tsv) games" \
-  || echo "  epic FAILED: $(tail -1 epic.err)"
+if ! enabled epic; then echo "  epic: disabled"; else
+  python3 epic_owned.py 2>epic.err && echo "  epic: $(wc -l < epic_games.tsv) games" \
+    || echo "  epic FAILED: $(tail -1 epic.err)"
+fi
 
 echo "== GOG =="
-python3 gog_owned.py > gog_games.tsv 2>gog.err && echo "  gog: $(wc -l < gog_games.tsv) games" \
-  || echo "  gog FAILED: $(tail -1 gog.err)"
+if ! enabled gog; then echo "  gog: disabled"; else
+  python3 gog_owned.py > gog_games.tsv 2>gog.err && echo "  gog: $(wc -l < gog_games.tsv) games" \
+    || echo "  gog FAILED: $(tail -1 gog.err)"
+fi
 
 echo "== itch.io =="
-if [ -n "$(python3 config.py itch-key)" ]; then
-  python3 itch_owned.py > itch_games.tsv 2>itch.err && echo "  itch: $(wc -l < itch_games.tsv) games" \
-    || echo "  itch FAILED: $(tail -1 itch.err)"
-else echo "  itch: no API key (run ./setup.sh, or set itch_api_key)"; fi
+if ! enabled itch; then echo "  itch: disabled"; else
+  if [ -n "$(python3 config.py itch-key)" ]; then
+    python3 itch_owned.py > itch_games.tsv 2>itch.err && echo "  itch: $(wc -l < itch_games.tsv) games" \
+      || echo "  itch FAILED: $(tail -1 itch.err)"
+  else echo "  itch: no API key (run ./setup.sh, or set itch_api_key)"; fi
+fi
 
 if [ "$1" = "--roms" ]; then
   echo "== ROM rescan =="
@@ -45,12 +54,15 @@ if [ "$1" = "--roms" ]; then
   if [ -z "$HOST" ] || [ -z "$RPATH" ]; then
     echo "  skipped: set unraid_host + roms_path via config.py"
   else
-    scp -q build_romdb.py "$HOST":/tmp/build_romdb.py \
+    scp -q build_romdb.py romtags.py "$HOST":/tmp/ \
       && ssh "$HOST" "find \"$RPATH\" -type f -printf '%s\t%T@\t%P\n' > /tmp/romscan.tsv 2>/dev/null && python3 /tmp/build_romdb.py /tmp/romscan.tsv /tmp/roms-index.sqlite \"$RPATH\"" \
       && scp -q "$HOST":/tmp/roms-index.sqlite "$ROM_DB" \
       && echo "  roms reindexed" || echo "  rom rescan FAILED"
   fi
 fi
+
+echo "== local archives =="
+python3 crawl.py
 
 echo "== rebuilding unified library =="
 python3 build_library.py
