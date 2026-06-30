@@ -122,6 +122,14 @@ python3 config.py get steam_id                 # read one (used by the shell scr
 | `unraid_host` / `roms_path` | ssh target + ROM archive path (only for `update.sh --roms`) |
 | `gog_client_id` / `gog_client_secret` | GOG Galaxy's public OAuth client (defaults work) |
 
+Behavior **preferences** live in the same table (`1`/`0`):
+
+| pref | effect |
+|------|--------|
+| `steam_include_free` | count played free-to-play games (TF2, Dota) as owned (`1`) vs strict ownership (`0`) |
+| `dedupe_preserve_years` | keep `(YYYY)` in the dedupe key so a remake stays separate from the original (`1`) |
+| `dedupe_strip_editions` | merge remasters/editions (Remastered, GOTY…) into the base game (`1`) |
+
 The Steam key is resolved at runtime as **`STEAM_API_KEY` env → `steam_api_key` config →
 1Password** (`config.py steam-key`), so you can store it whichever way you prefer; config
 and 1Password both stay out of git.

@@ -63,6 +63,16 @@ SCHEMA = [
     ("gog_client_secret",
      "9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9",
      "GOG Galaxy public OAuth client secret (the shipped default works for everyone)."),
+    # --- preferences: behavior toggles (1 = on, 0 = off) ---
+    ("steam_include_free", "1",
+     "[pref] Count played free-to-play games (TF2, Dota, …) as owned in the Steam "
+     "pull. Set 0 for strict ownership only."),
+    ("dedupe_preserve_years", "1",
+     "[pref] Keep a bare 4-digit year in the dedupe key, so distinct releases that "
+     "share a base title (a remake vs the original (2005)) stay separate."),
+    ("dedupe_strip_editions", "1",
+     "[pref] Strip edition/remaster words (Remastered, Definitive Edition, GOTY, …) "
+     "when deduping, so a remaster merges with its base game."),
 ]
 DEFAULTS = {k: d for k, d, _ in SCHEMA}
 DESCS = {k: c for k, _, c in SCHEMA}
@@ -102,6 +112,20 @@ def get(key, default=None):
     if default is not None:
         return default
     return DEFAULTS.get(key, "")
+
+
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
+def get_bool(key, default=False):
+    """Interpret a config value as a boolean (1/true/yes/on vs 0/false/no/off)."""
+    v = (get(key) or "").strip().lower()
+    if v in _TRUE:
+        return True
+    if v in _FALSE:
+        return False
+    return default
 
 
 def set_(key, value):

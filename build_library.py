@@ -22,6 +22,10 @@ OWN = DIR                                   # store TSVs live next to the script
 ROM_DB = config.get("roms_index_db")
 OUT = config.get("library_db")
 
+# dedupe behavior preferences (see config.py)
+PRESERVE_YEARS = config.get_bool("dedupe_preserve_years", True)
+STRIP_EDITIONS = config.get_bool("dedupe_strip_editions", True)
+
 # Extensions that indicate an actual ROM/disc image (to skip box-art/manuals/etc).
 ROM_EXTS = {
     "sfc", "smc", "nes", "fds", "unf", "gba", "gb", "gbc", "n64", "z64", "v64",
@@ -51,14 +55,18 @@ def norm(t):
     s = re.sub(r"\.(m3u|iso|chd|cue|bin|img|mdf|nrg|ccd|rvz|wbfs|nkit|gcm|gcz|"
                r"cso|pbp|gdi|cdi|rom|nds|3ds|zip|7z|rar)$", "", s)
     s = re.sub(r"[™®©]", "", s)        # ™ ® ©
-    # drop (...) tags, but KEEP a bare 4-digit year so e.g. "RE4 (2005)" stays
-    # distinct from the "RE4" remake (which carries no year tag).
-    s = re.sub(r"\(([^)]*)\)",
-               lambda m: " %s " % m.group(1)
-               if re.fullmatch(r"\s*\d{4}\s*", m.group(1)) else " ", s)
+    if PRESERVE_YEARS:
+        # drop (...) tags, but KEEP a bare 4-digit year so e.g. "RE4 (2005)" stays
+        # distinct from the "RE4" remake (which carries no year tag).
+        s = re.sub(r"\(([^)]*)\)",
+                   lambda m: " %s " % m.group(1)
+                   if re.fullmatch(r"\s*\d{4}\s*", m.group(1)) else " ", s)
+    else:
+        s = re.sub(r"\([^)]*\)", " ", s)               # (...) tags
     s = re.sub(r"\[[^\]]*\]", " ", s)                   # [...] tags
     s = s.replace("&", " and ").replace("+", " plus ")
-    s = EDITION.sub(" ", s)
+    if STRIP_EDITIONS:
+        s = EDITION.sub(" ", s)
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     toks = [ROMAN.get(w, w) for w in s.split()]
     while toks and toks[0] in ("the", "a", "an"):

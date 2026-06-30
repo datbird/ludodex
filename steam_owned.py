@@ -44,8 +44,10 @@ else:
     steamid = res["steamid"]
 
 print("# steamid64:", steamid, file=sys.stderr)
+free = "1" if config.get_bool("steam_include_free", True) else "0"
 r = api("IPlayerService/GetOwnedGames/v1/?key=%s&steamid=%s"
-        "&include_appinfo=1&include_played_free_games=1&format=json" % (KEY, steamid))
+        "&include_appinfo=1&include_played_free_games=%s&format=json"
+        % (KEY, steamid, free))
 games = (r.get("response") or {}).get("games")
 if games is None:
     sys.exit("no games returned — is the profile's Game-details set to Public?")

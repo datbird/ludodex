@@ -21,6 +21,14 @@ ask() {
   [ -n "$new" ] && setcfg "$key" "$new"
 }
 yes() { local a; read -rp "$1 [y/N]: " a; [ "$a" = y ] || [ "$a" = Y ]; }
+# prefask KEY "question"  -> y/n toggle defaulting to the current value (Enter keeps it)
+prefask() {
+  local key="$1" q="$2" cur def a
+  cur=$(cfg "$key"); [ "$cur" = 1 ] && def="Y/n" || def="y/N"
+  read -rp "  $q [$def]: " a
+  [ -z "$a" ] && return
+  case "$a" in y|Y) setcfg "$key" 1;; *) setcfg "$key" 0;; esac
+}
 
 b "=== ludodex setup ==="
 echo "Builds one local catalog of every game you own — emulation ROMs + Steam/Epic/GOG."
@@ -147,6 +155,15 @@ if yes "  Configure a remote ROM host for 'update.sh --roms'?"; then
 fi
 ask roms_index_db "  ROM index DB path"
 ask library_db "  output catalog DB path"
+echo
+
+# --- preferences -------------------------------------------------------------
+rule; b "6) Preferences"
+echo "These tune what counts as owned and how titles are deduped (Enter keeps current)."
+echo
+prefask steam_include_free   "Count played free-to-play Steam games (TF2, Dota) as owned?"
+prefask dedupe_preserve_years "Keep release years so remakes stay separate from originals?"
+prefask dedupe_strip_editions "Merge remasters/editions into their base game?"
 echo
 
 # --- build -------------------------------------------------------------------
