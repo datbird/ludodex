@@ -4,10 +4,13 @@
 *.sqlite3
 roms-index.sqlite
 game-library.sqlite
-# per-store ownership dumps
+# per-store ownership dumps / interchange
 *_games.tsv
 *.tsv
 epic_raw.json
+playnite_games.json
+ludodex_to_playnite.json
+*_to_playnite.json
 # cached auth tokens / service-account keys
 .gog/
 .steam/

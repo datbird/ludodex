@@ -74,11 +74,16 @@ Drop `skills/*` into `~/.claude/skills/` (or symlink). Then:
 
 ```sql
 games(   id, canonical_title, norm_key, n_sources, n_kinds, sources_summary,
-         has_emulation, has_steam, has_gog, has_epic, has_itch, has_archive )
+         has_emulation, has_steam, has_gog, has_epic, has_itch, has_archive,
+         in_playnite )
 sources( game_id, source, platform, source_id, title_raw, detail )
--- source ∈ emulation|steam|gog|epic|itch|archive
+source_attrs(    game_id, source, source_id, attrs_json )   -- lossless per-provider
+game_attributes( game_id, kind, value )                     -- queryable, aggregated
+-- source ∈ emulation|steam|gog|epic|itch|archive|manual|ea|ubisoft|battlenet|xbox|amazon|…
+--   (any provider; the has_* columns cover the common ones, sources_summary lists all)
 -- emulation platform = system (psx, snes…); archive platform = archive name
--- sources_summary e.g. "emulation:psx,snes; archive:ssd-roms; steam; itch"
+-- sources_summary e.g. "emulation:psx,snes; archive:ssd-roms; ea; steam"
+-- in_playnite = provenance flag (game is in your Playnite library) — NOT a source
 -- n_kinds  = # of distinct source kinds  -> use for "owned from multiple sources"
 -- n_sources = raw source-row count (a game on 3 emu systems = 3 rows, 1 kind)
 ```
@@ -136,6 +141,35 @@ This is a **two-stage pipeline** over a persistent `crawl-index.sqlite` (gitigno
 `build_library.py` ingests `extracted`; `update.sh` runs both stages before each rebuild,
 so archives refresh with every **games-update**. (`process.py --all` re-extracts
 everything.)
+
+## Playnite interoperability (import/export)
+
+[Playnite](https://playnite.link/) is a unified library manager that — like ludodex —
+*consolidates* games across stores/emulators. So Playnite is **not** treated as a source:
+each imported game maps to its **underlying provider** (a Playnite EA game → source `ea`,
+a Steam game → enriches the existing `steam` entry). "In your Playnite library" is kept
+only as the `in_playnite` provenance flag. ludodex's title-dedup is the cross-store merge
+Playnite lacks natively.
+
+Both sides speak one canonical JSON (see `playnite.py`). A PowerShell bridge runs inside
+Playnite (it stores its library in LiteDB, which needs .NET):
+
+```powershell
+# in Playnite (Extensions > Execute script):
+.\playnite_bridge.ps1 -Export -Path playnite_games.json     # Playnite -> JSON
+.\playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json  # JSON -> Playnite (create+enrich)
+```
+
+```bash
+# ludodex side:
+python3 config.py set playnite_import_json /path/playnite_games.json   # then update.sh ingests it
+python3 playnite_export.py                                  # catalog -> ludodex_to_playnite.json
+```
+
+ludodex adopts Playnite's full attribute vocabulary (genres, tags, features, categories,
+developers, publishers, series, age ratings, regions, release date, playtime, completion,
+scores, favorite, version, links, …), stored in `game_attributes` (queryable) and
+`source_attrs` (lossless, for round-trip export).
 
 ## Sync to a remote DB (optional)
 

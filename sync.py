@@ -37,9 +37,10 @@ WORKERS = 12
 
 GAME_COLS = ["norm_key", "canonical_title", "sources_summary", "n_sources",
              "n_kinds", "has_emulation", "has_steam", "has_gog", "has_epic",
-             "has_itch"]
+             "has_itch", "has_archive", "in_playnite"]
 SRC_COLS = ["game_norm", "source", "platform", "source_id", "title_raw", "detail"]
-FB_BOOL_COLS = {"has_emulation", "has_steam", "has_gog", "has_epic", "has_itch"}
+FB_BOOL_COLS = {"has_emulation", "has_steam", "has_gog", "has_epic", "has_itch",
+                "has_archive", "in_playnite"}
 
 
 def log(msg):
@@ -193,8 +194,18 @@ def pb_auth(url, email, pw):
 
 
 def pb_ensure_collection(url, hdr, name, fields):
-    st, _ = http("GET", "%s/api/collections/%s" % (url, name), headers=hdr)
-    if st == 200:
+    st, resp = http("GET", "%s/api/collections/%s" % (url, name), headers=hdr)
+    if st == 200 and isinstance(resp, dict):
+        # migrate: append any fields the live collection is missing (preserve ids)
+        key = "fields" if "fields" in resp else "schema"
+        existing = resp.get(key) or []
+        have = {f.get("name") for f in existing}
+        missing = [f for f in fields if f["name"] not in have]
+        if missing:
+            mst, _ = http("PATCH", "%s/api/collections/%s" % (url, resp["id"]),
+                          headers=hdr, body={key: existing + missing})
+            log("  %s: added %d field(s) [%s]" %
+                (name, len(missing), "ok" if mst == 200 else "patch failed %s" % mst))
         return
     for key in ("fields", "schema"):
         st, resp = http("POST", url + "/api/collections", headers=hdr,

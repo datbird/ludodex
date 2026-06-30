@@ -10,11 +10,19 @@ per deduped game; each lists every source it's available from.
 
 Schema:
 - `games(id, canonical_title, norm_key, n_sources, n_kinds, sources_summary,
-         has_emulation, has_steam, has_gog, has_epic, has_itch, has_archive)`
+         has_emulation, has_steam, has_gog, has_epic, has_itch, has_archive,
+         in_playnite)`
 - `sources(game_id, source, platform, source_id, title_raw, detail)` —
-  `source` ∈ emulation|steam|gog|epic|itch|archive; emulation `platform` = system
-  (psx, snes…) and archive `platform` = the archive name; `detail` for emulation =
-  regions.
+  `source` ∈ emulation|steam|gog|epic|itch|archive|manual|ea|ubisoft|battlenet|xbox|
+  amazon|… (any provider; has_* covers the common ones, `sources_summary` lists all).
+  emulation `platform` = system, archive `platform` = archive name; `detail` for
+  emulation = regions.
+- `game_attributes(game_id, kind, value)` — Playnite-parity attributes (genres, tags,
+  developers, publishers, series, features, regions, release_year, playtime, scores,
+  completion_status, favorite, …). `source_attrs(game_id, source, source_id, attrs_json)`
+  = lossless per-provider record.
+- **`in_playnite`** = provenance (game is in the Playnite library), NOT a source. Playnite
+  imports map to their underlying provider (ea/steam/…), not to "playnite".
 
 `norm_key` is the normalized title (lowercase, tags/punct/edition-suffix stripped,
 roman→arabic) — **match against `norm_key` with LIKE and a normalized term** for best

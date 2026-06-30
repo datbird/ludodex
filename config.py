@@ -87,6 +87,11 @@ SCHEMA = [
     ("source_gog_enabled", "1", "[source] Pull GOG ownership."),
     ("source_itch_enabled", "1", "[source] Pull itch.io ownership."),
     ("source_emulation_enabled", "1", "[source] Include the emulation ROM index."),
+    ("source_playnite_enabled", "1", "[source] Include an imported Playnite library."),
+    ("playnite_import_json", "", "Path to the Playnite export JSON produced by "
+     "playnite_bridge.ps1 (-Export); ingested by build_library."),
+    ("playnite_export_json", "", "Where playnite_export.py writes the ludodex->"
+     "Playnite JSON (blank = ludodex_to_playnite.json next to the scripts)."),
     # --- remote sync (push the catalog to a remote DB mirror) ---
     ("sync_target", "",
      "Where `update.sh` pushes the catalog after a rebuild: blank (off), "
@@ -212,7 +217,7 @@ def pocketbase_password():
 # --------------------------------------------------------------------------- #
 #  sources: built-in store/emulation toggles + a registry of crawl archives
 # --------------------------------------------------------------------------- #
-BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "emulation")
+BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "emulation", "playnite")
 
 
 def _arch_con():
