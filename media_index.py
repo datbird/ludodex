@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Index game media by REFERENCE into media-index.sqlite (keyed by norm_key).
+
+Local providers (scanned here):
+  * esde      — ES-DE downloaded_media sets (RetroDECK / EmuDeck), one or more
+                registered media mounts. Files live at
+                <root>/<system>/<mediatype>/[<rom-subdirs>/]<rom-basename>.<ext>
+                (ES-DE mirrors the ROM's own subfolder structure, so we recurse).
+                Matched to emulation games by ROM filename -> norm_key, within
+                the system (mapped to our platform label).
+  * steamgrid — local Steam custom artwork (userdata/<id>/config/grid), keyed by
+                appid -> our steam games.
+
+Remote providers (steam CDN / IGDB / SteamGridDB) are resolved by media_fetch.py.
+
+The index is keyed by the catalog's stable norm_key (game_id is reassigned every
+build_library rebuild). The server / exporters join media-index.sqlite to
+game-library.sqlite on norm_key. Each provider is FULLY refreshed per run (local
+scans are cheap), so removed assets drop out and the index never drifts.
+
+  python3 media_index.py                 # scan all enabled local providers
+  python3 media_index.py --provider esde # just one provider
+"""
+import os
+import sqlite3
+import sys
+import time
+
+DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, DIR)
+import config
+import media
+from titlenorm import norm
+
+INDEX = os.path.join(DIR, "media-index.sqlite")
+IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+VID_EXTS = (".mp4", ".webm", ".mkv", ".flv")
+DOC_EXTS = (".pdf",)
+
+
+def index_con():
+    con = sqlite3.connect(INDEX)
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS media(
+      id INTEGER PRIMARY KEY,
+      norm_key TEXT NOT NULL,
+      system TEXT,
+      kind TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      mount TEXT,
+      ref_type TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      ext TEXT,
+      sha1 TEXT,
+      width INTEGER,
+      height INTEGER,
+      chosen INTEGER DEFAULT 0,
+      matched INTEGER DEFAULT 0,
+      meta TEXT,
+      indexed_at INTEGER,
+      UNIQUE(provider, kind, ref));
+    CREATE INDEX IF NOT EXISTS ix_media_nk ON media(norm_key);
+    CREATE INDEX IF NOT EXISTS ix_media_nk_kind ON media(norm_key, kind);
+    """)
+    return con
+
+
+def catalog():
+    """Return (owned norm_keys set, {steam appid -> norm_key})."""
+    lib = config.get("library_db")
+    owned, steam = set(), {}
+    if not (lib and os.path.exists(lib)):
+        print("media_index: no catalog (%s) — matched flags will be 0" % lib,
+              file=sys.stderr)
+        return owned, steam
+    con = sqlite3.connect(lib)
+    owned = {k for (k,) in con.execute("SELECT norm_key FROM games")}
+    for nk, sid in con.execute(
+            "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
+            "ON s.game_id=g.id WHERE s.source='steam'"):
+        if sid and str(sid).isdigit():
+            steam[str(sid)] = nk
+    con.close()
+    return owned, steam
+
+
+def ext_kind_ok(ext, kind):
+    """Sanity: the file extension must suit the canonical kind."""
+    e = ext.lower()
+    if kind == "video":
+        return e in VID_EXTS
+    if kind == "manual":
+        return e in DOC_EXTS
+    return e in IMG_EXTS
+
+
+def scan_esde(con, owned, now):
+    """Walk every enabled ES-DE media mount; return (#rows, #matched)."""
+    rows = matched = 0
+    for mount in config.media_mounts_list(only_enabled=True, provider="esde"):
+        root = mount["path"]
+        if not os.path.isdir(root):
+            print("media_index: esde mount %r missing (%s) — skipped"
+                  % (mount["name"], root), file=sys.stderr)
+            continue
+        for system in sorted(os.listdir(root)):
+            sysdir = os.path.join(root, system)
+            if not os.path.isdir(sysdir):
+                continue
+            platform = media.norm_system(system)
+            for mtype, kind in media.ESDE_TYPE_KIND.items():
+                tdir = os.path.join(sysdir, mtype)
+                if not os.path.isdir(tdir):
+                    continue
+                for dirpath, _d, files in os.walk(tdir):
+                    for fn in files:
+                        base, ext = os.path.splitext(fn)
+                        if not ext_kind_ok(ext, kind):
+                            continue
+                        nk = norm(base)
+                        if not nk:
+                            continue
+                        is_match = nk in owned
+                        con.execute(
+                            "INSERT OR REPLACE INTO media(norm_key,system,kind,"
+                            "provider,mount,ref_type,ref,ext,matched,indexed_at)"
+                            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                            (nk, platform, kind, "esde", mount["name"], "file",
+                             os.path.join(dirpath, fn), ext.lower().lstrip("."),
+                             int(is_match), now))
+                        rows += 1
+                        matched += int(is_match)
+        con.commit()
+    return rows, matched
+
+
+def steam_grid_dirs():
+    """Configured grid path, else autodetect Steam userdata grid folders."""
+    p = config.get("steam_grid_path")
+    if p and os.path.isdir(p):
+        return [p]
+    import glob
+    found = []
+    for pat in ("~/.steam/steam/userdata/*/config/grid",
+                "~/.local/share/Steam/userdata/*/config/grid"):
+        found += glob.glob(os.path.expanduser(pat))
+    return sorted(set(os.path.realpath(d) for d in found if os.path.isdir(d)))
+
+
+def scan_steamgrid(con, steam, now):
+    """Index local Steam custom artwork keyed by appid -> steam games."""
+    rows = matched = 0
+    for gdir in steam_grid_dirs():
+        for fn in os.listdir(gdir):
+            appid, kind = media.steamgrid_kind(fn)
+            if not (appid and kind):
+                continue
+            nk = steam.get(appid)
+            if not nk:                      # art for a non-owned/shortcut appid
+                continue
+            ext = os.path.splitext(fn)[1].lower().lstrip(".")
+            con.execute(
+                "INSERT OR REPLACE INTO media(norm_key,system,kind,provider,"
+                "mount,ref_type,ref,ext,matched,indexed_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (nk, None, kind, "steamgrid", "steam", "file",
+                 os.path.join(gdir, fn), ext, 1, now))
+            rows += 1
+            matched += 1
+    con.commit()
+    return rows, matched
+
+
+def main(argv):
+    only = argv[argv.index("--provider") + 1] if "--provider" in argv else None
+    owned, steam = catalog()
+    con = index_con()
+    now = int(time.time())
+
+    if only in (None, "esde") and config.media_enabled("esde"):
+        con.execute("DELETE FROM media WHERE provider='esde'")
+        r, m = scan_esde(con, owned, now)
+        print("media_index: esde — %d assets (%d matched to a catalog game)"
+              % (r, m), file=sys.stderr)
+    if only in (None, "steamgrid") and config.media_enabled("steamgrid"):
+        con.execute("DELETE FROM media WHERE provider='steamgrid'")
+        r, m = scan_steamgrid(con, steam, now)
+        print("media_index: steamgrid — %d assets" % r, file=sys.stderr)
+
+    tot = con.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+    bykind = con.execute("SELECT provider,kind,COUNT(*) FROM media "
+                         "GROUP BY provider,kind ORDER BY 1,3 DESC").fetchall()
+    con.commit()
+    con.close()
+    print("media_index: %d total assets in %s" % (tot, INDEX), file=sys.stderr)
+    for p, k, c in bykind:
+        print("    %-10s %-14s %d" % (p, k, c), file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

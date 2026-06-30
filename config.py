@@ -116,6 +116,41 @@ SCHEMA = [
     ("igdb_meta_ttl_days", "30",
      "[metadata] Days before a cached IGDB record is considered stale and "
      "re-fetched by igdb_enrich.py."),
+    # --- media providers: image/video assets indexed by REFERENCE, keyed by
+    #     norm_key. Local providers read registered media mounts; remote ones
+    #     fetch by id. Indexed by media_index.py into media-index.sqlite. ---
+    ("media_esde_enabled", "1",
+     "[media] Index ES-DE downloaded_media sets (shared by RetroDECK AND "
+     "EmuDeck) registered via 'config.py media-mount add <path> esde'. Covers "
+     "covers/marquees/screenshots/titlescreens/physicalmedia/miximages/videos/"
+     "manuals, matched to emulation games by system + ROM filename."),
+    ("media_steamgrid_enabled", "1",
+     "[media] Index local Steam custom artwork (userdata/<id>/config/grid), "
+     "keyed by appid -> cover/background/logo/icon. Autodetected, or set "
+     "steam_grid_path."),
+    ("media_playnite_enabled", "1",
+     "[media] Index cover/background/icon from an imported Playnite library."),
+    ("media_steam_enabled", "1",
+     "[media] Resolve Steam store CDN art (capsule/hero/logo) by appid. Remote, "
+     "no auth."),
+    ("media_igdb_enabled", "1",
+     "[media] Resolve IGDB cover/artwork/screenshots by IGDB id. Remote; reuses "
+     "the Twitch creds already configured for metadata."),
+    ("media_steamgriddb_enabled", "0",
+     "[media] Resolve SteamGridDB community art (grids/heroes/logos/icons). "
+     "Remote; needs an API key (steamgriddb_api_key or steamgriddb_op_item)."),
+    ("steam_grid_path", "",
+     "Steam userdata grid folder for the steamgrid media provider. Blank = "
+     "autodetect ~/.steam/steam/userdata/<id>/config/grid."),
+    ("steamgriddb_api_key", "",
+     "SteamGridDB API key (https://www.steamgriddb.com/profile/preferences/api). "
+     "Blank = fetch from 1Password via steamgriddb_op_item."),
+    ("steamgriddb_op_item", "",
+     "1Password item holding the SteamGridDB API key in its 'credential' (or "
+     "'password') field. Used only if steamgriddb_api_key is blank."),
+    ("media_repo", "",
+     "Local content-addressed repo where CHOSEN media is materialized for "
+     "export/sync/serving. Blank = <scripts-dir>/media."),
     # --- remote sync (push the catalog to a remote DB mirror) ---
     ("sync_target", "",
      "Where `update.sh` pushes the catalog after a rebuild: blank (off), "
@@ -277,6 +312,80 @@ def metadata_enabled(name):
     return get_bool("metadata_%s_enabled" % name, True)
 
 
+# Media providers: local mount-based (esde, steamgrid, playnite) + remote
+# (steam, igdb, steamgriddb). Kept in sync with media.MEDIA_PROVIDERS.
+MEDIA_PROVIDERS = ("esde", "steamgrid", "playnite", "steam", "igdb",
+                   "steamgriddb")
+
+
+def media_enabled(name):
+    """True if a media provider is enabled (steamgriddb defaults off)."""
+    return get_bool("media_%s_enabled" % name, name != "steamgriddb")
+
+
+def steamgriddb_key():
+    """Resolve the SteamGridDB API key: env > local config > 1Password."""
+    k = os.environ.get("STEAMGRIDDB_API_KEY", "").strip() or get("steamgriddb_api_key")
+    if k:
+        return k
+    vault, item = get("op_vault"), get("steamgriddb_op_item")
+    if vault and item:
+        return _op_field(item, vault, "credential") or \
+            _op_field(item, vault, "password") or ""
+    return ""
+
+
+def _media_con():
+    con = sqlite3.connect(DB)
+    con.execute("CREATE TABLE IF NOT EXISTS media_mounts("
+                "name TEXT PRIMARY KEY, path TEXT, provider TEXT, "
+                "enabled INTEGER DEFAULT 1)")
+    return con
+
+
+def media_mounts_list(only_enabled=False, provider=None):
+    con = _media_con()
+    q = "SELECT name,path,provider,enabled FROM media_mounts"
+    cond = []
+    if only_enabled:
+        cond.append("enabled=1")
+    if provider:
+        cond.append("provider=%r" % provider)
+    if cond:
+        q += " WHERE " + " AND ".join(cond)
+    rows = [{"name": n, "path": p, "provider": pr, "enabled": e}
+            for n, p, pr, e in con.execute(q + " ORDER BY name")]
+    con.close()
+    return rows
+
+
+def media_mount_set(name, path, provider="esde", enabled=1):
+    con = _media_con()
+    con.execute("INSERT INTO media_mounts(name,path,provider,enabled) "
+                "VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                "path=excluded.path, provider=excluded.provider, "
+                "enabled=excluded.enabled", (name, path, provider, int(enabled)))
+    con.commit()
+    con.close()
+
+
+def media_mount_rm(name):
+    con = _media_con()
+    con.execute("DELETE FROM media_mounts WHERE name=?", (name,))
+    con.commit()
+    con.close()
+
+
+def media_mount_set_enabled(name, enabled):
+    con = _media_con()
+    cur = con.execute("UPDATE media_mounts SET enabled=? WHERE name=?",
+                      (1 if enabled else 0, name))
+    con.commit()
+    n = cur.rowcount
+    con.close()
+    return n > 0
+
+
 def _arch_con():
     con = sqlite3.connect(DB)
     con.execute("CREATE TABLE IF NOT EXISTS archives("
@@ -375,12 +484,16 @@ def main(argv):
         elif name in METADATA_PROVIDERS:
             set_("metadata_%s_enabled" % name, "1" if on else "0")
             print("%sd metadata provider %s" % (cmd, name))
-        elif archive_set_enabled(name, on):
-            print("%sd archive %s" % (cmd, name))
+        elif name in MEDIA_PROVIDERS:
+            set_("media_%s_enabled" % name, "1" if on else "0")
+            print("%sd media provider %s" % (cmd, name))
+        elif archive_set_enabled(name, on) or media_mount_set_enabled(name, on):
+            print("%sd mount %s" % (cmd, name))
         else:
-            sys.exit("unknown source %r (built-ins: %s; metadata: %s; or an "
-                     "archive name)" % (name, ", ".join(BUILTIN_SOURCES),
-                                        ", ".join(METADATA_PROVIDERS)))
+            sys.exit("unknown source %r (built-ins: %s; metadata: %s; media: %s;"
+                     " or a mount name)" % (name, ", ".join(BUILTIN_SOURCES),
+                                            ", ".join(METADATA_PROVIDERS),
+                                            ", ".join(MEDIA_PROVIDERS)))
     elif cmd == "sources":
         print("built-in sources:")
         for s in BUILTIN_SOURCES:
@@ -400,6 +513,20 @@ def main(argv):
             print("  [%s] %-16s %-7s %-8s %s" %
                   ("x" if a["enabled"] else " ", a["name"], a["kind"],
                    path_status(a["path"]), a["path"]))
+        print("media providers (image/video assets, indexed by reference):")
+        for m in MEDIA_PROVIDERS:
+            mark = "x" if media_enabled(m) else " "
+            extra = ""
+            if m == "steamgriddb" and media_enabled(m) and not steamgriddb_key():
+                extra = "  (no API key — set steamgriddb_api_key/op_item)"
+            print("  [%s] %s%s" % (mark, m, extra))
+        mms = media_mounts_list()
+        if mms:
+            print("media mounts:")
+            for a in mms:
+                print("  [%s] %-16s %-9s %-8s %s" %
+                      ("x" if a["enabled"] else " ", a["name"], a["provider"],
+                       path_status(a["path"]), a["path"]))
     elif cmd in ("mount", "mounts"):
         sub = argv[1] if cmd == "mount" and len(argv) > 1 else "list"
         if sub == "add" and len(argv) >= 3:
@@ -423,6 +550,30 @@ def main(argv):
                 print("[%s] %-16s %-7s %-8s %s" %
                       ("on" if a["enabled"] else "off", a["name"], a["kind"],
                        path_status(a["path"]), a["path"]))
+    elif cmd in ("media-mount", "media-mounts"):
+        sub = argv[1] if cmd == "media-mount" and len(argv) > 1 else "list"
+        if sub == "add" and len(argv) >= 3:
+            path = os.path.abspath(os.path.expanduser(argv[2]))
+            opts = argv[3:]
+            provider = next((o for o in opts if o in MEDIA_PROVIDERS), "esde")
+            named = [o for o in opts if o not in MEDIA_PROVIDERS]
+            name = (named[0] if named else os.path.basename(path.rstrip("/"))
+                    or "root").replace(" ", "_")
+            media_mount_set(name, path, provider)
+            print("media mount %r -> %s  (%s) [%s]" %
+                  (name, path, provider, path_status(path)))
+        elif sub == "rm" and len(argv) >= 3:
+            media_mount_rm(argv[2])
+            print("removed media mount %r" % argv[2])
+        else:
+            mms = media_mounts_list()
+            if not mms:
+                print("no media mounts — add: config.py media-mount add <path> "
+                      "[esde|steamgrid]")
+            for a in mms:
+                print("[%s] %-16s %-9s %-8s %s" %
+                      ("on" if a["enabled"] else "off", a["name"],
+                       a["provider"], path_status(a["path"]), a["path"]))
     elif cmd == "archive":
         sub = argv[1] if len(argv) > 1 else ""
         if sub == "add" and len(argv) >= 4:
@@ -458,7 +609,8 @@ def main(argv):
         print("\nSaved to config.sqlite. Verify with: bash auth_status.sh")
     else:
         sys.exit("unknown command %r — use init|setup|list|get|set|steam-key|"
-                 "itch-key|sources|enable|disable|mount|mounts|archive" % cmd)
+                 "itch-key|sources|enable|disable|mount|mounts|archive|"
+                 "media-mount|media-mounts" % cmd)
 
 
 if __name__ == "__main__":
