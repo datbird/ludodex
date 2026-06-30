@@ -19,6 +19,17 @@ asking Claude to *update*, *query*, or *re-auth* — but every script runs stand
 
 No public-profile toggling, no logins on every run. One DB, deduped, queryable.
 
+## Quick start
+
+```bash
+./setup.sh
+```
+
+A guided wizard: it initializes the config DB and walks you through obtaining and
+entering each credential (with the exact URLs/steps), authenticates Steam/Epic/GOG,
+optionally indexes a ROM archive, and builds the first catalog. Re-runnable any time
+(existing values are offered as defaults). After that, refresh with `bash update.sh`.
+
 ## How it works
 
 ```
@@ -86,12 +97,12 @@ Fuzzy near-misses may stay separate — acceptable.
 
 ## Configuration
 
-Account- and environment-specific values are **not hardcoded** — they live in a `config`
-table inside `config.sqlite` (gitignored), managed by `config.py`. Only safe/public
-defaults ship in the code; you fill the rest locally:
+`./setup.sh` (above) handles this interactively. Under the hood, account- and
+environment-specific values are **not hardcoded** — they live in a `config` table inside
+`config.sqlite` (gitignored), managed by `config.py`. Only safe/public defaults ship in
+the code. To tweak values directly:
 
 ```bash
-python3 config.py setup     # interactively fill every key (Enter keeps current)
 python3 config.py list      # show all keys, values, and descriptions
 python3 config.py set steam_id 7656119...      # set one value
 python3 config.py get steam_id                 # read one (used by the shell scripts)
@@ -100,12 +111,15 @@ python3 config.py get steam_id                 # read one (used by the shell scr
 | key | what it is |
 |-----|------------|
 | `steam_id` | SteamID64 of the account that **owns** your Steam Web API key |
-| `op_vault` / `steam_key_op_item` | 1Password vault + item holding the Steam key (`apikey` field) |
+| `steam_api_key` | the Steam key, stored locally (gitignored) — *or* leave blank and use 1Password |
+| `op_vault` / `steam_key_op_item` | 1Password vault + item holding the key (`apikey` field) |
 | `library_db` / `roms_index_db` | output catalog + ROM-index DB paths |
 | `unraid_host` / `roms_path` | ssh target + ROM archive path (only for `update.sh --roms`) |
 | `gog_client_id` / `gog_client_secret` | GOG Galaxy's public OAuth client (defaults work) |
 
-The Steam key itself stays in 1Password, not in config; only the *item name* is stored.
+The Steam key is resolved at runtime as **`STEAM_API_KEY` env → `steam_api_key` config →
+1Password** (`config.py steam-key`), so you can store it whichever way you prefer; config
+and 1Password both stay out of git.
 
 ## Auth
 

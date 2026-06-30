@@ -18,13 +18,12 @@ else
 fi
 
 echo "== Steam =="
-OPV=$(cfg op_vault); OPITEM=$(cfg steam_key_op_item)
-KEY=$(opx item get "$OPITEM" --vault "$OPV" --fields apikey --reveal 2>/dev/null)
+KEY=$(python3 config.py steam-key)
 if [ -n "$KEY" ]; then
   STEAM_API_KEY="$KEY" python3 steam_owned.py > steam_games.tsv 2>steam.err \
     && echo "  steam: $(wc -l < steam_games.tsv) games" \
     || echo "  steam FAILED: $(tail -1 steam.err)"
-else echo "  steam: no API key (check config op_vault/steam_key_op_item + 1Password)"; fi
+else echo "  steam: no API key (run ./setup.sh, or set steam_api_key / op_vault+steam_key_op_item)"; fi
 
 echo "== Epic =="
 python3 epic_owned.py 2>epic.err && echo "  epic: $(wc -l < epic_games.tsv) games" \

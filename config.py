@@ -13,10 +13,14 @@ locally (they go into config.sqlite, never into git):
   python3 config.py list           # show all keys, values, descriptions
   python3 config.py get <key>      # print one value (used by the shell scripts)
   python3 config.py set <key> <value>
+  python3 config.py steam-key      # resolve the Steam key (env > config > 1Password)
   python3 config.py init           # just create/seed config.sqlite
+
+For first-time onboarding with credential how-to guidance, run ./setup.sh instead.
 """
 import os
 import sqlite3
+import subprocess
 import sys
 
 DIR = os.path.dirname(os.path.abspath(__file__))
@@ -32,7 +36,12 @@ SCHEMA = [
     ("op_vault", "",
      "1Password vault holding the Steam Web API key item (read via the `opx` CLI)."),
     ("steam_key_op_item", "",
-     "1Password item name whose 'apikey' field is your Steam Web API key."),
+     "1Password item name whose 'apikey' field is your Steam Web API key "
+     "(used only if steam_api_key below is blank)."),
+    ("steam_api_key", "",
+     "Steam Web API key stored locally (config.sqlite is gitignored). Optional — "
+     "leave blank to fetch it from 1Password via op_vault/steam_key_op_item. The "
+     "STEAM_API_KEY env var overrides both."),
     ("library_db", os.path.join(DIR, "game-library.sqlite"),
      "Output path for the unified deduped catalog."),
     ("roms_index_db", os.path.join(DIR, "roms-index.sqlite"),
@@ -97,6 +106,28 @@ def set_(key, value):
     con.close()
 
 
+def steam_key():
+    """Resolve the Steam Web API key: env > local config > 1Password (opx)."""
+    k = os.environ.get("STEAM_API_KEY", "").strip()
+    if k:
+        return k
+    k = get("steam_api_key")
+    if k:
+        return k
+    vault, item = get("op_vault"), get("steam_key_op_item")
+    if vault and item:
+        try:
+            r = subprocess.run(
+                ["opx", "item", "get", item, "--vault", vault,
+                 "--fields", "apikey", "--reveal"],
+                capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                return r.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return ""
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -117,6 +148,8 @@ def main(argv):
         if len(argv) < 2:
             sys.exit("usage: config.py get <key>")
         sys.stdout.write(get(argv[1]) or "")
+    elif cmd == "steam-key":
+        sys.stdout.write(steam_key())
     elif cmd == "set":
         if len(argv) < 3:
             sys.exit("usage: config.py set <key> <value>")
@@ -133,7 +166,7 @@ def main(argv):
                 set_(k, new)
         print("\nSaved to config.sqlite. Verify with: bash auth_status.sh")
     else:
-        sys.exit("unknown command %r — use init|setup|list|get|set" % cmd)
+        sys.exit("unknown command %r — use init|setup|list|get|set|steam-key" % cmd)
 
 
 if __name__ == "__main__":

@@ -11,12 +11,16 @@ need no interaction — this skill is only for the rare re-auth (token expired, 
 changed, fresh machine).
 
 Account/environment values (SteamID, 1Password vault & item, ROM host/paths) are NOT
-hardcoded — they live in a `config` table. Inspect/edit them with:
+hardcoded — they live in a `config` table. For a fresh machine / full onboarding, run
+the guided wizard which also explains where to obtain each credential:
 ```bash
-cd ~/game-ownership
+cd ~/game-ownership && ./setup.sh
+```
+For individual tweaks:
+```bash
 python3 config.py list                 # all keys + descriptions
-python3 config.py setup                # interactively fill them (fresh machine)
 python3 config.py get steam_id         # read one value
+python3 config.py set steam_id <id>    # change one
 ```
 
 ## Step 1 — check what's broken
