@@ -15,7 +15,8 @@ asking Claude to *update*, *query*, or *re-auth* — but every script runs stand
 > **Where it's headed:** see [`DESIGN.md`](DESIGN.md) for the canonical spec and roadmap
 > — the **Device layer** (push curated games + metadata/media to named devices, with a
 > detect/pin install ledger, provenance, changelog, and conflict awareness) and the
-> Build-now / Next / Someday docket.
+> Build-now / Next / Someday docket. For a single-page orientation + the full plan for
+> the **AI-forward server**, see [`HANDOFF.md`](HANDOFF.md).
 
 ## Why
 
