@@ -16,8 +16,10 @@ locally (they go into config.sqlite, never into git):
   python3 config.py steam-key      # resolve the Steam key (env > config > 1Password)
   python3 config.py init           # just create/seed config.sqlite
 
+  python3 config.py integrations                  # how to get every credential
+  python3 config.py integrations <id>             # step-by-step for one (e.g. ea, igdb)
   python3 config.py sources                       # list sources + metadata + state
-  python3 config.py enable|disable <name>         # toggle steam/epic/gog/itch/
+  python3 config.py enable|disable <name>         # toggle steam/epic/gog/itch/ea/
                                                   #   emulation/playnite, an archive,
                                                   #   or a metadata provider (igdb)
   python3 config.py mount add <path> [rom|flat] [name]     # add a crawl mount/path
@@ -455,6 +457,197 @@ def path_status(path):
     return "MISSING"
 
 
+# --------------------------------------------------------------------------- #
+#  integrations registry — the single structured source of "how do I get the
+#  credential" for every integration. Consumed by `config.py integrations`, the
+#  setup wizard, and (later) the web UI. Keep in sync with AUTH.md.
+# --------------------------------------------------------------------------- #
+INTEGRATIONS = [
+    {"id": "steam", "name": "Steam", "kind": "source",
+     "purpose": "Owned Steam games via the Web API (no login/2FA needed).",
+     "url": "https://steamcommunity.com/dev/apikey",
+     "steps": [
+         "Sign in at https://steamcommunity.com/dev/apikey and register a key "
+         "(any domain name works).",
+         "Find the SteamID64 of the account that OWNS the key — it's the "
+         "'steamid' in ~/.steam/steam/config/loginusers.vdf. Do NOT use a vanity "
+         "URL (/id/<name>) — that can be a different account.",
+         "Store: config.py set steam_id <id>  and  config.py set steam_api_key "
+         "<key>  (or put the key in 1Password and set steam_key_op_item)."],
+     "config_keys": ["steam_id", "steam_api_key", "steam_key_op_item"],
+     "env": ["STEAM_API_KEY"], "op_item": "steam_key_op_item", "op_field": "apikey",
+     "verify": "python3 steam_owned.py | head"},
+
+    {"id": "epic", "name": "Epic Games", "kind": "source",
+     "purpose": "Owned Epic games via the legendary CLI (token auto-refreshes).",
+     "url": "https://legendary.gl/epiclogin",
+     "steps": [
+         "Run: legendary auth",
+         "Open https://legendary.gl/epiclogin, log in, and copy the "
+         "'authorizationCode' value.",
+         "Paste it when legendary prompts. Token is cached in ~/.config/legendary."],
+     "config_keys": [], "env": [], "op_item": None,
+     "verify": "legendary status"},
+
+    {"id": "gog", "name": "GOG", "kind": "source",
+     "purpose": "Owned GOG games via Galaxy OAuth (refresh token auto-renews).",
+     "url": "(login URL is printed by gog_owned.py)",
+     "steps": [
+         "Run: python3 gog_owned.py   (prints a GOG login URL on first run).",
+         "Log in, then copy the 'code=...' value from the redirected URL.",
+         "Run: python3 gog_owned.py --code <code>   (caches .gog/tokens.json)."],
+     "config_keys": ["gog_client_id", "gog_client_secret"], "env": [],
+     "op_item": None, "verify": "python3 gog_owned.py | head"},
+
+    {"id": "itch", "name": "itch.io", "kind": "source",
+     "purpose": "Owned itch.io games via a personal API key.",
+     "url": "https://itch.io/user/settings/api-keys",
+     "steps": [
+         "Generate a key at https://itch.io/user/settings/api-keys.",
+         "Store: config.py set itch_api_key <key>  (or put it in 1Password and "
+         "set itch_key_op_item). The itch *login* is separate — you only need "
+         "the API key."],
+     "config_keys": ["itch_api_key", "itch_key_op_item"], "env": ["ITCH_API_KEY"],
+     "op_item": "itch_key_op_item", "op_field": "apikey",
+     "verify": "python3 itch_owned.py | head"},
+
+    {"id": "ea", "name": "EA app / Origin", "kind": "source",
+     "purpose": "Owned EA games (EA-exclusive titles). EA's Akamai shield blocks "
+                "headless refresh, so use a browser-minted token (lasts ~4h).",
+     "url": "https://accounts.ea.com/connect/auth?client_id=ORIGIN_JS_SDK"
+            "&response_type=token&redirect_uri=nucleus:rest&prompt=none",
+     "steps": [
+         "Log in to your EA account in a normal browser.",
+         "Visit this URL in that browser (it returns raw JSON): "
+         "https://accounts.ea.com/connect/auth?client_id=ORIGIN_JS_SDK"
+         "&response_type=token&redirect_uri=nucleus:rest&prompt=none",
+         "Inject the token: python3 ea_owned.py --token '<the JSON>'  (cached in "
+         ".ea/token.json). Re-grab when it expires — EA libraries rarely change."],
+     "config_keys": ["ea_op_item"], "env": [], "op_item": "ea_op_item",
+     "op_field": "credential", "verify": "python3 ea_owned.py --whoami"},
+
+    {"id": "igdb", "name": "IGDB (metadata)", "kind": "metadata",
+     "purpose": "Enrich attributes (genres/themes/devs/ratings) + cover/artwork "
+                "images. Auth = a free Twitch application.",
+     "url": "https://dev.twitch.tv/console/apps",
+     "steps": [
+         "Go to https://dev.twitch.tv/console/apps and Register Your Application: "
+         "any name; OAuth Redirect URL http://localhost; Category 'Application "
+         "Integration'.",
+         "Copy the Client ID and generate a Client Secret.",
+         "Store: config.py set igdb_client_id <id>  and  config.py set "
+         "igdb_client_secret <secret>  (or set igdb_op_item: username=Client ID, "
+         "credential=Secret), then: config.py enable igdb."],
+     "config_keys": ["igdb_client_id", "igdb_client_secret", "igdb_op_item"],
+     "env": ["IGDB_CLIENT_ID", "IGDB_CLIENT_SECRET"], "op_item": "igdb_op_item",
+     "op_field": "username=Client ID, credential=Secret",
+     "verify": "python3 igdb_enrich.py --limit 1"},
+
+    {"id": "steamgriddb", "name": "SteamGridDB (media)", "kind": "media",
+     "purpose": "Community grids/heroes/logos/icons — a media gap-filler.",
+     "url": "https://www.steamgriddb.com/profile/preferences/api",
+     "steps": [
+         "Get a free API key at "
+         "https://www.steamgriddb.com/profile/preferences/api.",
+         "Store: config.py set steamgriddb_api_key <key>  (or set "
+         "steamgriddb_op_item), then: config.py enable steamgriddb."],
+     "config_keys": ["steamgriddb_api_key", "steamgriddb_op_item"],
+     "env": ["STEAMGRIDDB_API_KEY"], "op_item": "steamgriddb_op_item",
+     "op_field": "credential", "verify": "python3 media_fetch.py --steamgriddb --limit 1"},
+
+    {"id": "esde", "name": "ES-DE media (RetroDECK / EmuDeck)", "kind": "media",
+     "purpose": "Local emulation art (covers/marquees/screenshots/…). No auth — "
+                "register the downloaded_media folder as a media mount.",
+     "url": "(local filesystem)",
+     "steps": [
+         "RetroDECK: <retrodeck>/ES-DE/downloaded_media. EmuDeck: "
+         "<Emulation>/tools/downloaded_media.",
+         "Register it: config.py media-mount add \"<path>\" esde [name].",
+         "Index: python3 media_index.py."],
+     "config_keys": [], "env": [], "op_item": None,
+     "verify": "python3 config.py media-mounts"},
+
+    {"id": "pocketbase", "name": "PocketBase (sync)", "kind": "sync",
+     "purpose": "Mirror the catalog to a PocketBase instance for other apps/devices.",
+     "url": "(your PocketBase admin UI)",
+     "steps": [
+         "Create a superuser on the server: docker exec <container> "
+         "/pb/pocketbase superuser upsert <email> <password>.",
+         "Store: config.py set pocketbase_url <url>; config.py set "
+         "pocketbase_admin_email <email>; config.py set pocketbase_admin_password "
+         "<pw>  (or set pocketbase_op_item).",
+         "Enable auto-sync: config.py set sync_target pocketbase."],
+     "config_keys": ["pocketbase_url", "pocketbase_admin_email",
+                     "pocketbase_admin_password", "pocketbase_op_item"],
+     "env": ["POCKETBASE_PASSWORD"], "op_item": "pocketbase_op_item",
+     "op_field": "username / password", "verify": "python3 sync.py --dry-run"},
+
+    {"id": "firebase", "name": "Firebase Firestore (sync)", "kind": "sync",
+     "purpose": "Mirror the catalog to Firestore (alternative/addition to PocketBase).",
+     "url": "https://console.firebase.google.com/",
+     "steps": [
+         "Firebase console -> Project settings -> Service accounts -> Generate "
+         "new private key (downloads a JSON).",
+         "Store: config.py set firebase_project_id <project>; config.py set "
+         "firebase_sa_json /path/to/service-account.json.",
+         "pip install -r requirements-firebase.txt; config.py set sync_target "
+         "firebase (or 'both')."],
+     "config_keys": ["firebase_project_id", "firebase_sa_json"], "env": [],
+     "op_item": None, "verify": "python3 sync.py firebase --dry-run"},
+]
+
+NO_AUTH_NOTE = ("emulation/archive (local ROM index + crawl mounts), Steam-grid "
+                "local art, Steam CDN art, and IGDB images (reuses IGDB creds) "
+                "need no separate credential.")
+
+
+def _has_cred(it):
+    """Best-effort 'is this integration configured?' for the status column."""
+    if it["id"] == "steam":
+        return bool(steam_key() and get("steam_id"))
+    if it["id"] == "itch":
+        return bool(itch_key())
+    if it["id"] == "igdb":
+        return all(igdb_creds())
+    if it["id"] == "steamgriddb":
+        return bool(steamgriddb_key())
+    if it["id"] == "ea":
+        return os.path.exists(os.path.join(DIR, ".ea", "token.json")) or \
+            bool(get("ea_op_item"))
+    if it["id"] == "epic":
+        return os.path.exists(os.path.expanduser("~/.config/legendary/user.json"))
+    if it["id"] == "gog":
+        return os.path.exists(os.path.join(DIR, ".gog", "tokens.json"))
+    if it["id"] == "esde":
+        return bool(media_mounts_list(only_enabled=True, provider="esde"))
+    for k in it.get("config_keys", []):
+        if get(k):
+            return True
+    return False
+
+
+def print_integration(it, detail=True):
+    mark = "[ok]" if _has_cred(it) else "[  ]"
+    print("%s %-14s %-9s %s" % (mark, it["id"], it["kind"], it["name"]))
+    if not detail:
+        return
+    print("    %s" % it["purpose"])
+    if it.get("url") and it["url"].startswith("http"):
+        print("    obtain: %s" % it["url"])
+    for i, s in enumerate(it["steps"], 1):
+        print("      %d. %s" % (i, s))
+    if it.get("config_keys"):
+        print("    config keys: %s" % ", ".join(it["config_keys"]))
+    if it.get("env"):
+        print("    env override: %s" % ", ".join(it["env"]))
+    if it.get("op_item"):
+        print("    1Password: set %s (field: %s)"
+              % (it["op_item"], it.get("op_field", "credential")))
+    if it.get("verify"):
+        print("    verify: %s" % it["verify"])
+    print()
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -597,6 +790,25 @@ def main(argv):
         else:
             sys.exit("usage: config.py archive add <name> <path> [rom|flat]"
                      " | rm <name> | list")
+    elif cmd in ("integrations", "integration", "guide", "creds"):
+        if len(argv) > 1:                       # detail for one integration
+            want = argv[1].lower()
+            hit = next((i for i in INTEGRATIONS if i["id"] == want), None)
+            if not hit:
+                sys.exit("unknown integration %r — one of: %s"
+                         % (want, ", ".join(i["id"] for i in INTEGRATIONS)))
+            print_integration(hit, detail=True)
+        else:                                   # overview of all
+            print("Integrations — credential setup ([ok] = looks configured).\n"
+                  "Details for one: config.py integrations <id>\n")
+            for kind in ("source", "metadata", "media", "sync"):
+                print("%s:" % kind.upper())
+                for it in INTEGRATIONS:
+                    if it["kind"] == kind:
+                        print_integration(it, detail=False)
+                print()
+            print("No credential needed: %s" % NO_AUTH_NOTE)
+            print("\nFull guide: AUTH.md   |   verify all: bash auth_status.sh")
     elif cmd == "set":
         if len(argv) < 3:
             sys.exit("usage: config.py set <key> <value>")
@@ -615,7 +827,7 @@ def main(argv):
     else:
         sys.exit("unknown command %r — use init|setup|list|get|set|steam-key|"
                  "itch-key|sources|enable|disable|mount|mounts|archive|"
-                 "media-mount|media-mounts" % cmd)
+                 "media-mount|media-mounts|integrations" % cmd)
 
 
 if __name__ == "__main__":

@@ -279,21 +279,30 @@ and 1Password both stay out of git.
 
 ## Auth
 
-Once cached, auth needs no further interaction:
+**See [AUTH.md](AUTH.md) for the complete, authoritative guide** to obtaining and
+wiring up the credentials for *every* integration (ownership sources, metadata and
+media providers, and remote sync), plus the env → config → 1Password precedence.
 
-- **Steam** — Web API key (does not expire). Generate at
-  https://steamcommunity.com/dev/apikey while logged into the owning account; use that
-  account's SteamID64. `steam_owned.py` reads `STEAM_API_KEY` from the environment.
-- **Epic** — `legendary auth`, then paste the `authorizationCode` from
-  https://legendary.gl/epiclogin. Token auto-refreshes (`~/.config/legendary`).
-- **GOG** — `python3 gog_owned.py --code <code>` once (login URL is in the script). A
-  refresh token is cached in `.gog/tokens.json` and auto-refreshes.
-- **itch.io** — generate a key at https://itch.io/user/settings/api-keys and store it
-  (`config.py set itch_api_key <key>`, or 1Password). The key doesn't expire.
+Quick version — once cached, auth needs no further interaction:
+
+- **Steam** — Web API key (no expiry). https://steamcommunity.com/dev/apikey + the
+  owning account's SteamID64.
+- **Epic** — `legendary auth` → paste the code from https://legendary.gl/epiclogin.
+- **GOG** — `python3 gog_owned.py --code <code>` once; refresh token auto-renews.
+- **itch.io** — key from https://itch.io/user/settings/api-keys.
+- **EA** — browser-minted token (`ea_owned.py --token …`); see AUTH.md (EA's Akamai
+  shield blocks headless refresh, so it's a re-grab-on-demand source).
+- **IGDB** (metadata) — free Twitch app at https://dev.twitch.tv/console/apps.
+- **SteamGridDB** (media) — key from https://www.steamgriddb.com/profile/preferences/api.
+
+Get the exact steps for any integration right from the CLI:
+`python3 config.py integrations` (overview + which are configured) or
+`python3 config.py integrations <id>` (e.g. `ea`, `igdb`). Verify all sources at
+once: `bash auth_status.sh`.
 
 > **Privacy note:** the SQLite catalogs, per-store ownership dumps (`*_games.tsv`), and
-> cached auth tokens (`.gog/`) are `.gitignore`d — only code, skills, and docs are
-> tracked. No personal ownership data or credentials are committed.
+> cached auth tokens (`.gog/`, `.ea/`) are `.gitignore`d — only code, skills, and docs
+> are tracked. No personal ownership data or credentials are committed.
 
 ## License
 
