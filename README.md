@@ -54,8 +54,10 @@ optionally indexes a ROM archive, and builds the first catalog. Re-runnable any 
 - **`build_library.py`** — normalizes titles and dedupes all sources into
   `game-library.sqlite`.
 - **`update.sh`** — refresh all stores (cached auth) → rebuild → report games new since
-  the last run. `--roms` also re-scans the ROM archive (slow).
+  the last run. `--roms` also re-scans the ROM archive (slow). Pushes to a remote DB if
+  `sync_target` is set.
 - **`auth_status.sh`** — prints `OK`/`BROKEN` per source.
+- **`sync.py`** — mirror the catalog to a remote PocketBase / Firebase DB (see below).
 
 ## Skills
 
@@ -90,6 +92,28 @@ sqlite3 -column -header "$DB" \
 sqlite3 "$DB" \
   "SELECT SUM(has_emulation) emu, SUM(has_steam) steam, SUM(has_gog) gog, SUM(has_epic) epic, COUNT(*) total FROM games;"
 ```
+
+## Sync to a remote DB (optional)
+
+`sync.py` mirrors the catalog (`games` + `sources`) one-way to a remote backend so
+other devices/apps can read it. Targets: **PocketBase** (self-hosted) and/or **Firebase
+Firestore**. Set `sync_target` (`pocketbase` | `firebase` | `both`) and `update.sh` pushes
+after every rebuild; or run it directly:
+
+```bash
+python3 sync.py both --dry-run     # show what would be pushed, write nothing
+python3 sync.py pocketbase         # force a target
+python3 sync.py                    # use the configured sync_target
+```
+
+- **PocketBase** — set `pocketbase_url`, `pocketbase_admin_email`, and a password
+  (`pocketbase_admin_password` locally, or `pocketbase_op_item` in 1Password, or the
+  `POCKETBASE_PASSWORD` env). Collections `games`/`sources` are auto-created; each sync
+  is a full replace (remote == local). Uses the batch API when available, else parallel
+  per-record writes.
+- **Firebase** — set `firebase_project_id` and `firebase_sa_json` (path to a
+  service-account key, gitignored). Needs `google-auth` (`uv pip install google-auth`).
+  Upserts by deterministic doc id and prunes stale docs.
 
 ## Dedup notes
 

@@ -166,6 +166,28 @@ prefask dedupe_preserve_years "Keep release years so remakes stay separate from 
 prefask dedupe_strip_editions "Merge remasters/editions into their base game?"
 echo
 
+# --- remote sync (optional) --------------------------------------------------
+rule; b "7) Remote sync (optional)"
+cat <<'TXT'
+Push the catalog to a remote DB after each update (so other devices/apps can
+read it). Targets: pocketbase, firebase, both — or blank to disable.
+TXT
+ask sync_target "  sync target (blank/pocketbase/firebase/both)"
+T=$(cfg sync_target)
+case "$T" in
+  *pocketbase*|*both*)
+    ask pocketbase_url "  PocketBase URL (https://...)"
+    ask pocketbase_admin_email "  PocketBase admin email"
+    read -rp "  PocketBase admin password (blank to use 1Password/env): " pbp
+    [ -n "$pbp" ] && setcfg pocketbase_admin_password "$pbp" ;;
+esac
+case "$T" in
+  *firebase*|*both*)
+    ask firebase_project_id "  Firebase project id"
+    ask firebase_sa_json "  path to service-account JSON" ;;
+esac
+echo
+
 # --- build -------------------------------------------------------------------
 rule; b "Verifying auth"
 bash auth_status.sh

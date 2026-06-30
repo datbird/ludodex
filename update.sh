@@ -70,3 +70,9 @@ if keys:
     for t, s in con.execute(q, keys):
         print("  + %s  [%s]" % (t, s))
 PY
+
+TARGET=$(cfg sync_target)
+if [ -n "$TARGET" ]; then
+  echo "== syncing to remote ($TARGET) =="
+  python3 sync.py || echo "  sync FAILED (see above)"
+fi

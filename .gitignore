@@ -8,10 +8,14 @@ game-library.sqlite
 *_games.tsv
 *.tsv
 epic_raw.json
-# cached auth tokens
+# cached auth tokens / service-account keys
 .gog/
 .steam/
 tokens.json
+*service-account*.json
+*serviceaccount*.json
+firebase*.json
+*-sa.json
 # diff/run state
 .prev_keys
 .cur_keys

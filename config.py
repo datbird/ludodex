@@ -73,6 +73,26 @@ SCHEMA = [
     ("dedupe_strip_editions", "1",
      "[pref] Strip edition/remaster words (Remastered, Definitive Edition, GOTY, …) "
      "when deduping, so a remaster merges with its base game."),
+    # --- remote sync (push the catalog to a remote DB mirror) ---
+    ("sync_target", "",
+     "Where `update.sh` pushes the catalog after a rebuild: blank (off), "
+     "'pocketbase', 'firebase', or 'both'."),
+    ("pocketbase_url", "",
+     "PocketBase base URL, e.g. https://pb.example.com (no trailing slash)."),
+    ("pocketbase_admin_email", "",
+     "PocketBase admin/superuser email used for the sync."),
+    ("pocketbase_admin_password", "",
+     "PocketBase admin password, stored locally (gitignored). Optional — leave "
+     "blank to use 1Password via pocketbase_op_item. POCKETBASE_PASSWORD env wins."),
+    ("pocketbase_op_item", "",
+     "1Password item (its 'password' field) for the PocketBase admin, if not local."),
+    ("firebase_project_id", "",
+     "Firebase/GCP project id for the Firestore sync."),
+    ("firebase_sa_json", "",
+     "Path to a Firebase service-account JSON key (gitignored). Needs the "
+     "google-auth package; used to mint a Firestore access token."),
+    ("firebase_collection_prefix", "",
+     "Optional prefix for the Firestore collection names (e.g. 'ludodex_')."),
 ]
 DEFAULTS = {k: d for k, d, _ in SCHEMA}
 DESCS = {k: c for k, _, c in SCHEMA}
@@ -137,8 +157,8 @@ def set_(key, value):
     con.close()
 
 
-def _resolve_key(env_var, local_key, op_item_key):
-    """Resolve an API key: env var > local config value > 1Password (opx)."""
+def _resolve_key(env_var, local_key, op_item_key, field="apikey"):
+    """Resolve a secret: env var > local config value > 1Password (opx)."""
     k = os.environ.get(env_var, "").strip()
     if k:
         return k
@@ -150,7 +170,7 @@ def _resolve_key(env_var, local_key, op_item_key):
         try:
             r = subprocess.run(
                 ["opx", "item", "get", item, "--vault", vault,
-                 "--fields", "apikey", "--reveal"],
+                 "--fields", field, "--reveal"],
                 capture_output=True, text=True, timeout=30)
             if r.returncode == 0:
                 return r.stdout.strip()
@@ -165,6 +185,11 @@ def steam_key():
 
 def itch_key():
     return _resolve_key("ITCH_API_KEY", "itch_api_key", "itch_key_op_item")
+
+
+def pocketbase_password():
+    return _resolve_key("POCKETBASE_PASSWORD", "pocketbase_admin_password",
+                        "pocketbase_op_item", field="password")
 
 
 def main(argv):
