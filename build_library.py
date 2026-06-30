@@ -232,12 +232,15 @@ for key, data in games_attrs.items():
 # IGDB is NOT a source: it only fills attribute KINDS a game still lacks. If a
 # game already has any value for a kind (from a store / Playnite), IGDB leaves
 # that kind untouched, so owned-source data is always authoritative.
+# kinds each game already has (owned-source/Playnite) — shared by every metadata
+# provider so they only fill gaps, in registry order (IGDB then ScreenScraper).
+have = {}                           # game_id -> set(kinds already populated)
+for gid, kind in cur.execute("SELECT game_id, kind FROM game_attributes"):
+    have.setdefault(gid, set()).add(kind)
+
 CACHE_DB = os.path.join(DIR, "metadata-cache.sqlite")
 n_link = n_attr = 0
 if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
-    have = {}                       # game_id -> set(kinds already populated)
-    for gid, kind in cur.execute("SELECT game_id, kind FROM game_attributes"):
-        have.setdefault(gid, set()).add(kind)
     mc = sqlite3.connect(CACHE_DB)
     try:
         rows = mc.execute(
@@ -274,6 +277,52 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
                             "VALUES(?,?,?)", new_rows)
             n_attr += len(new_rows)
 
+# ---- ScreenScraper enrichment (metadata provider, fill-gaps; emulation) ----
+# One scrape per game yields metadata + media; here we merge the metadata (media
+# is ingested into the media index separately). Fill-gaps after IGDB, so owned
+# and IGDB data still win.
+SS_CACHE = os.path.join(DIR, "screenscraper-cache.sqlite")
+ss_link = ss_attr = 0
+if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
+    from screenscraper import extract_metadata as ss_map
+    sc = sqlite3.connect(SS_CACHE)
+    try:
+        ss_rows = sc.execute("SELECT norm_key, ss_id, payload_json FROM ss_game "
+                             "WHERE status='ok'").fetchall()
+    except sqlite3.OperationalError:
+        ss_rows = []
+    sc.close()
+    linked = set()
+    for nk, ss_id, payload in ss_rows:
+        gid = key_to_gid.get(nk)
+        if gid is None or not payload:
+            continue
+        if ss_id and (gid, ss_id) not in linked:
+            cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
+                        "slug,url) VALUES(?,?,?,?,?)",
+                        (gid, "screenscraper", str(ss_id), None,
+                         "https://www.screenscraper.fr/gameinfos.php?gameid=%s"
+                         % ss_id))
+            linked.add((gid, ss_id))
+            ss_link += 1
+        try:
+            jeu = json.loads(payload)
+        except ValueError:
+            continue
+        existing = have.setdefault(gid, set())
+        new_rows = []
+        for kind, val in ss_map(jeu).items():
+            if kind == "name" or kind in existing:      # fill-gaps; name isn't an attr
+                continue
+            for v in (val if isinstance(val, list) else [val]):
+                if v not in (None, ""):
+                    new_rows.append((gid, kind, str(v)))
+            existing.add(kind)
+        if new_rows:
+            cur.executemany("INSERT INTO game_attributes(game_id,kind,value) "
+                            "VALUES(?,?,?)", new_rows)
+            ss_attr += len(new_rows)
+
 cur.executescript("""
 CREATE INDEX ix_norm ON games(norm_key);
 CREATE INDEX ix_title ON games(canonical_title);
@@ -300,6 +349,9 @@ if _pn:
 if n_link:
     print("# IGDB: linked %d games, +%d attribute rows (fill-gaps)"
           % (n_link, n_attr), file=sys.stderr)
+if ss_link:
+    print("# ScreenScraper: linked %d games, +%d attribute rows (fill-gaps)"
+          % (ss_link, ss_attr), file=sys.stderr)
 print("# total unique games: %d (%d available from >1 source KIND)" % (tot, multi),
       file=sys.stderr)
 con.close()

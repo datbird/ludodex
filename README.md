@@ -315,6 +315,8 @@ Quick version — once cached, auth needs no further interaction:
 - **EA** — browser-minted token (`ea_owned.py --token …`); see AUTH.md (EA's Akamai
   shield blocks headless refresh, so it's a re-grab-on-demand source).
 - **IGDB** (metadata) — free Twitch app at https://dev.twitch.tv/console/apps.
+- **ScreenScraper** (emulation metadata + media) — your account + a software
+  `devid` (request on their forum); tier-aware, resumable scraper. See AUTH.md.
 - **SteamGridDB** (media) — key from https://www.steamgriddb.com/profile/preferences/api.
 
 Get the exact steps for any integration right from the CLI:

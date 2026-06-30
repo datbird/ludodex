@@ -83,9 +83,18 @@ if meta_enabled igdb && \
   python3 igdb_enrich.py && python3 build_library.py
 fi
 
+# ScreenScraper: emulation metadata + media in one scrape (tier-aware, resumable,
+# stops at the daily quota). No-ops without a devid.
+if meta_enabled screenscraper && \
+   [ -n "$(python3 -c 'import config; print("1" if config.screenscraper_creds() else "")')" ]; then
+  echo "== ScreenScraper (emulation metadata + media) =="
+  python3 ss_scrape.py 2>&1 | sed 's/^/  /'
+  python3 build_library.py >/dev/null      # re-merge ScreenScraper metadata
+fi
+
 echo "== media index =="
 python3 media_index.py 2>&1 | sed 's/^/  /'      # local: ES-DE + Steam grid
-python3 media_fetch.py 2>&1 | sed 's/^/  /'      # remote refs: Steam CDN + IGDB
+python3 media_fetch.py 2>&1 | sed 's/^/  /'      # remote refs: Steam CDN + IGDB + ScreenScraper
 python3 media_choose.py 2>&1 | tail -1 | sed 's/^/  /'   # pick the best per game
 # (materialize is on-demand: python3 media_choose.py --materialize; ~17GB if all)
 

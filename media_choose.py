@@ -76,7 +76,13 @@ def _materialize_row(repo, r):
             with open(r["ref"], "rb") as f:
                 data = f.read()
         else:
-            req = urllib.request.Request(r["ref"], headers={"User-Agent": "ludodex"})
+            url = r["ref"]
+            if r["provider"] == "screenscraper":   # ScreenScraper media needs auth
+                creds = config.screenscraper_creds()
+                if creds:
+                    import screenscraper as ss
+                    url = ss.media_url_with_auth(url, creds)
+            req = urllib.request.Request(url, headers={"User-Agent": "ludodex"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = resp.read()
         if not data:

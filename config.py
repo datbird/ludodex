@@ -123,6 +123,43 @@ SCHEMA = [
     ("igdb_meta_ttl_days", "30",
      "[metadata] Days before a cached IGDB record is considered stale and "
      "re-fetched by igdb_enrich.py."),
+    # --- ScreenScraper (screenscraper.fr) — emulation metadata AND media, in one
+    #     scrape per game. Needs a software devid/devpassword (request at
+    #     screenscraper.fr/forumsujets.php?frub=12) PLUS the end-user's account. ---
+    ("metadata_screenscraper_enabled", "1",
+     "[metadata] Consult ScreenScraper for emulation game metadata + media "
+     "(genres/dev/publisher/players/rating + box/wheel/fanart/screenshots). "
+     "No-ops without a devid. Drives both the metadata merge and SS media refs."),
+    ("screenscraper_softname", "ludodex",
+     "Your software name sent to the ScreenScraper API (they log by softname)."),
+    ("screenscraper_devid", "",
+     "ScreenScraper developer id (software credential). Request one at "
+     "https://www.screenscraper.fr/forumsujets.php?frub=12 — free/non-commercial "
+     "software qualifies. Blank = fetch from screenscraper_dev_op_item. Env: "
+     "SS_DEVID."),
+    ("screenscraper_devpassword", "",
+     "ScreenScraper developer password (pairs with the devid). Blank = 1Password "
+     "via screenscraper_dev_op_item. Env: SS_DEVPASSWORD."),
+    ("screenscraper_dev_op_item", "",
+     "1Password item holding the dev credential: 'username'=devid, "
+     "'credential'/'password'=devpassword."),
+    ("screenscraper_ssid", "",
+     "Your ScreenScraper account login (sets your tier/quota). Blank = 1Password "
+     "via screenscraper_op_item. Env: SS_SSID."),
+    ("screenscraper_sspassword", "",
+     "Your ScreenScraper account password. Blank = 1Password. Env: SS_SSPASSWORD."),
+    ("screenscraper_op_item", "",
+     "1Password item with your ScreenScraper account: 'username'=ssid (login), "
+     "'password'=sspassword."),
+    ("screenscraper_op_vault", "",
+     "Vault for screenscraper_op_item / screenscraper_dev_op_item if different "
+     "from op_vault (e.g. the account item may live in another vault)."),
+    ("screenscraper_media", "1",
+     "[media] Ingest the media URLs returned by each ScreenScraper scrape into "
+     "the media index (no extra API calls — they come free with the metadata)."),
+    ("screenscraper_daily_margin", "200",
+     "Stop scraping when within this many requests of the daily cap "
+     "(maxrequestsperday), leaving headroom. Free tier cap is ~20,000/day."),
     # --- media providers: image/video assets indexed by REFERENCE, keyed by
     #     norm_key. Local providers read registered media mounts; remote ones
     #     fetch by id. Indexed by media_index.py into media-index.sqlite. ---
@@ -311,12 +348,43 @@ BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "ea", "emulation", "playnite"
 
 # Metadata providers are CONSULTED to enrich attributes — they are NOT sources
 # (they add no ownership). Toggled like sources but tracked separately.
-METADATA_PROVIDERS = ("igdb",)
+METADATA_PROVIDERS = ("igdb", "screenscraper")
 
 
 def metadata_enabled(name):
     """True if a metadata provider (e.g. igdb) is enabled."""
     return get_bool("metadata_%s_enabled" % name, True)
+
+
+def screenscraper_creds():
+    """Resolve ScreenScraper API params -> dict, or {} if the devid is missing.
+
+    devid/devpassword (software) and ssid/sspassword (your account) each resolve
+    env > local config > 1Password. The account item may live in a different
+    vault (screenscraper_op_vault). softname always set; ssid/sspassword optional
+    (they raise your tier) but devid/devpassword are mandatory for the API."""
+    vault = get("screenscraper_op_vault") or get("op_vault")
+    devid = os.environ.get("SS_DEVID", "").strip() or get("screenscraper_devid")
+    devpw = os.environ.get("SS_DEVPASSWORD", "").strip() or get("screenscraper_devpassword")
+    dev_item = get("screenscraper_dev_op_item")
+    if (not devid or not devpw) and dev_item and vault:
+        devid = devid or _op_field(dev_item, vault, "username")
+        devpw = devpw or _op_field(dev_item, vault, "credential") or \
+            _op_field(dev_item, vault, "password")
+    ssid = os.environ.get("SS_SSID", "").strip() or get("screenscraper_ssid")
+    sspw = os.environ.get("SS_SSPASSWORD", "").strip() or get("screenscraper_sspassword")
+    user_item = get("screenscraper_op_item")
+    if (not ssid or not sspw) and user_item and vault:
+        ssid = ssid or _op_field(user_item, vault, "username")
+        sspw = sspw or _op_field(user_item, vault, "password") or \
+            _op_field(user_item, vault, "credential")
+    if not (devid and devpw):
+        return {}                       # API unusable without the software devid
+    creds = {"devid": devid, "devpassword": devpw,
+             "softname": get("screenscraper_softname") or "ludodex"}
+    if ssid and sspw:
+        creds["ssid"], creds["sspassword"] = ssid, sspw
+    return creds
 
 
 # Media providers: local mount-based (esde, steamgrid, playnite) + remote
@@ -543,6 +611,36 @@ INTEGRATIONS = [
      "op_field": "username=Client ID, credential=Secret",
      "verify": "python3 igdb_enrich.py --limit 1"},
 
+    {"id": "screenscraper", "name": "ScreenScraper (metadata + media)",
+     "kind": "metadata",
+     "purpose": "The emulation community's database — genres/dev/publisher/players/"
+                "rating PLUS box/wheel/fanart/screenshots/video for your ROMs, in "
+                "one scrape per game. Fills emulation metadata + backgrounds.",
+     "url": "https://www.screenscraper.fr/forumsujets.php?frub=12",
+     "steps": [
+         "Make a free account at screenscraper.fr (your login = ssid). Past "
+         "contribution / Patreon raises your tier (threads + daily quota).",
+         "Request a software devid/devpassword on the dev forum "
+         "https://www.screenscraper.fr/forumsujets.php?frub=12 (free, "
+         "non-commercial use qualifies; can take days/weeks — request early). "
+         "This is MANDATORY and separate from your account.",
+         "Store dev creds: config.py set screenscraper_devid <id>; config.py set "
+         "screenscraper_devpassword <pw> (or screenscraper_dev_op_item). Store "
+         "your account: screenscraper_op_item/_op_vault (username=ssid, "
+         "password=sspassword).",
+         "Check tier/quota: python3 ss_scrape.py --status. Scrape: python3 "
+         "ss_scrape.py (resumable; stops at the daily cap). Tiers: free ≈1 "
+         "thread / ~20k req-day; ~5€/mo +1 thread; ~10€/mo +5 threads / ~50k "
+         "req-day. The engine reads your live quota and adapts."],
+     "config_keys": ["screenscraper_devid", "screenscraper_devpassword",
+                     "screenscraper_dev_op_item", "screenscraper_ssid",
+                     "screenscraper_sspassword", "screenscraper_op_item",
+                     "screenscraper_op_vault", "screenscraper_softname"],
+     "env": ["SS_DEVID", "SS_DEVPASSWORD", "SS_SSID", "SS_SSPASSWORD"],
+     "op_item": "screenscraper_op_item",
+     "op_field": "username=ssid, password=sspassword",
+     "verify": "python3 ss_scrape.py --status"},
+
     {"id": "steamgriddb", "name": "SteamGridDB (media)", "kind": "media",
      "purpose": "Community grids/heroes/logos/icons — a media gap-filler.",
      "url": "https://www.steamgriddb.com/profile/preferences/api",
@@ -611,6 +709,8 @@ def _has_cred(it):
         return all(igdb_creds())
     if it["id"] == "steamgriddb":
         return bool(steamgriddb_key())
+    if it["id"] == "screenscraper":
+        return bool(screenscraper_creds())
     if it["id"] == "ea":
         return os.path.exists(os.path.join(DIR, ".ea", "token.json")) or \
             bool(get("ea_op_item"))

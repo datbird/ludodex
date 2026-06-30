@@ -199,6 +199,39 @@ def fetch_steamgriddb(con, now, limit=None):
           % (n, len(todo)), file=sys.stderr)
 
 
+def fetch_screenscraper(con, now):
+    """Ingest media URLs from the local ScreenScraper cache (no API calls — they
+    came free with each metadata scrape). Stored as URL refs; downloading them
+    later appends auth via screenscraper.media_url_with_auth."""
+    cache = os.path.join(DIR, "screenscraper-cache.sqlite")
+    if not os.path.exists(cache):
+        print("media_fetch: screenscraper — no cache yet (run ss_scrape.py)",
+              file=sys.stderr)
+        return
+    import json
+    import screenscraper as ss
+    sc = sqlite3.connect(cache)
+    try:
+        rows = sc.execute("SELECT norm_key, system, payload_json FROM ss_game "
+                          "WHERE status='ok' AND payload_json IS NOT NULL").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    sc.close()
+    n = 0
+    for nk, system, payload in rows:
+        try:
+            jeu = json.loads(payload)
+        except (ValueError, TypeError):
+            continue
+        for m in ss.extract_media(jeu):
+            put(con, nk, m["kind"], "screenscraper", m["url"], now,
+                ext=(m.get("format") or "jpg"), system=system, meta=m.get("type"))
+            n += 1
+    con.commit()
+    print("media_fetch: screenscraper — %d media refs from %d scraped games"
+          % (n, len(rows)), file=sys.stderr)
+
+
 def main(argv):
     only = argv[argv.index("--provider") + 1] if "--provider" in argv else None
     limit = int(argv[argv.index("--limit") + 1]) if "--limit" in argv else None
@@ -210,6 +243,11 @@ def main(argv):
     if only in (None, "igdb") and config.media_enabled("igdb"):
         con.execute("DELETE FROM media WHERE provider='igdb'")
         fetch_igdb(con, now)
+    if only in (None, "screenscraper") and \
+            config.metadata_enabled("screenscraper") and \
+            config.get_bool("screenscraper_media", True):
+        con.execute("DELETE FROM media WHERE provider='screenscraper'")
+        fetch_screenscraper(con, now)
     if (only == "steamgriddb" or "--steamgriddb" in argv) and \
             config.media_enabled("steamgriddb"):
         con.execute("DELETE FROM media WHERE provider='steamgriddb'")

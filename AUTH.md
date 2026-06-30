@@ -51,6 +51,7 @@ source. The `games-auth` skill wraps this with re-auth walkthroughs.
 | **EA** | source | browser access token | URL below (returns JSON) | `ea_op_item` | `ea_op_item` (field `credential`) | ~4h (re-grab) |
 | **emulation / archive** | source | none (local files / SSH) | — | mounts (see below) | — | — |
 | **IGDB** | metadata | Twitch app Client ID+Secret | dev.twitch.tv/console/apps | `igdb_client_id/secret` | `igdb_op_item` (`username`=ID, `credential`=secret) | token auto-mints |
+| **ScreenScraper** | metadata + media | software `devid`/`devpassword` + account `ssid`/`sspassword` | forum (devid) + screenscraper.fr (account) | `screenscraper_devid/devpassword/ssid/sspassword` | `screenscraper_op_item` (`username`=ssid, `password`=sspassword) | no (devid is approval-gated) |
 | **SteamGridDB** | media | API key | steamgriddb.com/profile/preferences/api | `steamgriddb_api_key` | `steamgriddb_op_item` (field `credential`) | no |
 | **ES-DE / Steam-grid / Steam CDN / IGDB images** | media | none / reuses IGDB | — | media mounts | — | — |
 | **PocketBase** | sync | superuser email+password | your PocketBase admin | `pocketbase_admin_email/password`, `pocketbase_url` | `pocketbase_op_item` (`username`/`password`) | no |
@@ -161,6 +162,46 @@ client-credentials, the access token auto-mints/refreshes).
    (Env overrides: `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET`.)
 - Enrich: `python3 igdb_enrich.py` (incremental; `--all` re-does). Caches in
   `metadata-cache.sqlite`; `build_library.py` merges **fill-gaps only**.
+
+### ScreenScraper (screenscraper.fr) — emulation metadata **and** media
+The emulation community's canonical database (what ES-DE/Skraper/RetroArch scrape).
+**One scrape per game returns both metadata** (genres, developer, publisher,
+players, rating, description) **and every media URL** (box, wheel/logo, fanart
+background, screenshots, title, marquee, video, manual). It fills the retro gaps
+IGDB misses and the backgrounds ES-DE lacks.
+
+**Auth = a software credential + your account** (both required):
+1. **Account** — make a free account at screenscraper.fr; your login is `ssid`.
+   Past contribution / a Patreon pledge raises your **tier** (more threads + a
+   higher daily request cap). Store it (often in its own vault):
+   ```
+   python3 config.py set screenscraper_op_item "<1Password item>"   # username=ssid, password=sspassword
+   python3 config.py set screenscraper_op_vault "<vault>"           # if not op_vault
+   # …or locally: config.py set screenscraper_ssid / screenscraper_sspassword
+   ```
+2. **`devid`/`devpassword`** — a *software* credential the API **requires** (you
+   cannot call it with only an account). Request one on the **dev forum**
+   **https://www.screenscraper.fr/forumsujets.php?frub=12** describing your free,
+   non-commercial use. ⚠️ Manual approval, **can take days–weeks — request early.**
+   ```
+   python3 config.py set screenscraper_devid <id>
+   python3 config.py set screenscraper_devpassword <pw>     # or screenscraper_dev_op_item
+   ```
+
+**Tiers & quota (the engine adapts to whatever you have):**
+
+| Tier | Threads | Daily requests |
+|---|---|---|
+| Free / registered | ~1 | ~20,000 |
+| ~5 €/mo (Patreon) | +1 | higher |
+| ~10 €/mo (Patreon) | +5 | ~50,000 |
+
+The engine reads your **live `ssuser` quota** from every response, paces under the
+per-minute limit, runs at your thread count, and **stops before the daily cap**,
+resuming the next day. Check it any time: `python3 ss_scrape.py --status`. Scrape:
+`python3 ss_scrape.py` (resumable; `--limit N` to cap a run). Metadata merges
+fill-gaps (after IGDB); media URLs are indexed as the `screenscraper` provider and
+downloaded (with auth) only when a chosen asset is materialized.
 
 ---
 
