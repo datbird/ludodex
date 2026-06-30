@@ -110,8 +110,8 @@ def main(argv):
     for i in range(0, len(appids), 200):
         batch = appids[i:i + 200]
         uids = ",".join('"%s"' % a for a in batch)
-        body = ("fields game,uid; where category = %d & uid = (%s); limit 500;"
-                % (igdb.STEAM_CATEGORY, uids))
+        body = ("fields game,uid; where external_game_source = %d "
+                "& uid = (%s); limit 500;" % (igdb.STEAM_SOURCE, uids))
         for row in igdb.query("external_games", body, cid, tok):
             nk, gid = appid_map.get(str(row.get("uid"))), row.get("game")
             if nk and gid:

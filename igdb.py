@@ -23,10 +23,12 @@ import urllib.request
 API = "https://api.igdb.com/v4"
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 
-# IGDB external_games.category -> store. Used to resolve a game by its store id.
-EXTERNAL_CATEGORY = {"steam": 1, "gog": 5, "microsoft": 11, "epic": 26,
-                     "itch": 30}
-STEAM_CATEGORY = 1
+# IGDB external_games.external_game_source -> store. Used to resolve a game by
+# its store id. NOTE: IGDB deprecated the old `category` field on external_games
+# in favour of `external_game_source` (Steam stayed 1; others were renumbered).
+EXTERNAL_SOURCE = {"steam": 1, "gog": 5, "microsoft": 11, "epic": 26,
+                   "itch": 30}
+STEAM_SOURCE = 1
 
 # Fields requested for a full game record (with nested expansions).
 GAME_FIELDS = (
