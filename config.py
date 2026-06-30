@@ -91,6 +91,9 @@ SCHEMA = [
     ("firebase_sa_json", "",
      "Path to a Firebase service-account JSON key (gitignored). Needs the "
      "google-auth package; used to mint a Firestore access token."),
+    ("firebase_database", "(default)",
+     "Firestore database id. Most projects use the default; set this only if you "
+     "created a named (non-default) Firestore database."),
     ("firebase_collection_prefix", "",
      "Optional prefix for the Firestore collection names (e.g. 'ludodex_')."),
 ]

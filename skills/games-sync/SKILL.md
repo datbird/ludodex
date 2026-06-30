@@ -16,10 +16,17 @@ cd ~/game-ownership
 python3 sync.py both --dry-run    # preview counts, write nothing
 python3 sync.py                   # use the configured sync_target
 python3 sync.py pocketbase        # force one target (pocketbase|firebase|both)
+python3 sync.py --reconcile       # self-heal: repair remote drift / lost cache
 ```
 
 `update.sh` also runs the sync automatically after a rebuild whenever `sync_target`
 is set, so a normal **games-update** already pushes to the remote.
+
+**It's incremental + idempotent:** deterministic record ids + a local content-hash
+cache (`sync_cache.sqlite`) mean each run pushes only new/changed/removed records (a
+no-op re-sync is ~1s); transient errors retry with backoff. If the remote looks wrong
+(drifted, edited by hand, or a prior run died mid-way), run `python3 sync.py --reconcile`
+to re-assert every record and prune anything stale — it converges with no duplicates.
 
 ## Configure (all in the config/profile table — see `config.py list`)
 
@@ -28,8 +35,11 @@ is set, so a normal **games-update** already pushes to the remote.
   `pocketbase_admin_password` (local, gitignored), `pocketbase_op_item` (1Password),
   or the `POCKETBASE_PASSWORD` env. Collections `games`/`sources` are auto-created;
   each run is a full replace.
-- **Firebase**: `firebase_project_id` + `firebase_sa_json` (path to a service-account
-  key). Requires `google-auth` (`uv pip install google-auth`). Upserts by doc id and
+- **Firebase**: `firebase_project_id` + `firebase_sa_json` (service-account key path),
+  optional `firebase_database` (named DB) and `firebase_collection_prefix`. Requires
+  `google-auth` (`python3 -m pip install --user -r requirements-firebase.txt`). Create a
+  Firestore DB (Native mode) + a service account (role Cloud Datastore User) in the
+  Firebase/GCP console — `./setup.sh` step 7 walks through it. Upserts by doc id and
   prunes removed docs.
 
 Set values with `python3 config.py set <key> <value>`, or run `./setup.sh` (step 7).

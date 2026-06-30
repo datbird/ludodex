@@ -183,8 +183,27 @@ case "$T" in
 esac
 case "$T" in
   *firebase*|*both*)
+    cat <<'TXT'
+  Firebase (Firestore) — how to get the credentials:
+    1. Create/pick a project at https://console.firebase.google.com
+    2. Build > Firestore Database > Create database  (choose Native mode).
+    3. Project settings (gear) > Service accounts > "Generate new private key"
+       -> downloads a JSON key. (Equivalent in Google Cloud: IAM > Service
+        Accounts, grant the role "Cloud Datastore User".)
+    4. Copy that JSON onto this machine and give its path below.
+TXT
     ask firebase_project_id "  Firebase project id"
-    ask firebase_sa_json "  path to service-account JSON" ;;
+    ask firebase_sa_json "  path to the service-account JSON"
+    ask firebase_database "  Firestore database id (blank = (default))"
+    ask firebase_collection_prefix "  collection name prefix (optional, e.g. ludodex_)"
+    if ! python3 -c "import google.oauth2.service_account" 2>/dev/null; then
+      echo "  google-auth (required for Firebase) is not installed."
+      if yes "  Install it now?"; then
+        python3 -m pip install --user --quiet google-auth \
+          && echo "  google-auth installed" \
+          || echo "  install failed — run: python3 -m pip install --user google-auth"
+      fi
+    fi ;;
 esac
 echo
 

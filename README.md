@@ -103,17 +103,35 @@ after every rebuild; or run it directly:
 ```bash
 python3 sync.py both --dry-run     # show what would be pushed, write nothing
 python3 sync.py pocketbase         # force a target
+python3 sync.py --reconcile        # self-heal: ignore cache, repair remote drift
 python3 sync.py                    # use the configured sync_target
 ```
 
+It's **incremental and idempotent**: record ids are deterministic (hash of the natural
+key), and a local content-hash cache (`sync_cache.sqlite`, gitignored) means each run
+pushes only new/changed/removed records — a no-op re-sync is ~1s. Transient HTTP errors
+(429/5xx/network) retry with exponential backoff. `--reconcile` ignores the cache,
+re-asserts every record, and prunes any remote doc missing locally — use it after a lost
+cache, manual remote edits, or a failed partial run.
+
 - **PocketBase** — set `pocketbase_url`, `pocketbase_admin_email`, and a password
   (`pocketbase_admin_password` locally, or `pocketbase_op_item` in 1Password, or the
-  `POCKETBASE_PASSWORD` env). Collections `games`/`sources` are auto-created; each sync
-  is a full replace (remote == local). Uses the batch API when available, else parallel
-  per-record writes.
-- **Firebase** — set `firebase_project_id` and `firebase_sa_json` (path to a
-  service-account key, gitignored). Needs `google-auth` (`uv pip install google-auth`).
-  Upserts by deterministic doc id and prunes stale docs.
+  `POCKETBASE_PASSWORD` env). Collections `games`/`sources` are auto-created. Upserts are
+  idempotent (create↔patch self-heal per record); uses the batch API when enabled, else
+  parallel per-record writes.
+- **Firebase (Firestore)** — one-time setup:
+  1. Create/pick a project at <https://console.firebase.google.com>.
+  2. **Build → Firestore Database → Create database** (Native mode).
+  3. **Project settings → Service accounts → Generate new private key** → downloads a
+     JSON (or in Google Cloud: a service account with role *Cloud Datastore User*).
+  4. Put the JSON on the machine and `python3 config.py set firebase_sa_json <path>`
+     (it's gitignored), plus `firebase_project_id`. Optional: `firebase_database` (for a
+     named, non-default DB) and `firebase_collection_prefix`.
+  5. Install the one dependency: `python3 -m pip install --user -r requirements-firebase.txt`.
+
+  Collections `<prefix>games`/`<prefix>sources` are upserted by deterministic doc id
+  (`norm_key` for games), and docs no longer present locally are pruned — so the remote
+  mirrors local. `has_*` are stored as booleans, counts as integers.
 
 ## Dedup notes
 

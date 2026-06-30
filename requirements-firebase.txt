@@ -1,0 +1,4 @@
+# Only needed for the Firebase/Firestore sync target (sync_target=firebase|both).
+# PocketBase sync needs none of this — it uses the Python standard library.
+#   python3 -m pip install --user -r requirements-firebase.txt
+google-auth>=2.0
