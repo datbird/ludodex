@@ -313,7 +313,15 @@ Two axes run through all of it: **`origin`** (detected vs manual) and **`actor`*
   repo), reference/symlink mode for shared storage.
 - Remote sync: PocketBase / Firestore.
 
-### 🔜 Build now (Device layer v1 — **push-only**, no install-triggering)
+### 🔜 Build now
+**Finish in flight:**
+- **ScreenScraper integration (metadata + media)** — code complete (`screenscraper.py`,
+  `ss_scrape.py`, wired into `build_library.py` + `update.sh`, tier/quota-aware,
+  resumable). **BLOCKED** on the developer `devid`/`devpassword` (forum request
+  pending). The moment it arrives: set the creds, `config.py enable screenscraper`,
+  run a scrape pass, validate metadata+media merge, done.
+
+**Device layer v1 (push-only, no install-triggering):**
 1. **This `DESIGN.md`** as the spec. ✅
 2. **Account registry** — multi-account per ecosystem (config table + CLI).
 3. **Device registry** — name/kind/transport/creds/channels (config table + CLI).
