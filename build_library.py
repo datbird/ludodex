@@ -51,7 +51,11 @@ def norm(t):
     s = re.sub(r"\.(m3u|iso|chd|cue|bin|img|mdf|nrg|ccd|rvz|wbfs|nkit|gcm|gcz|"
                r"cso|pbp|gdi|cdi|rom|nds|3ds|zip|7z|rar)$", "", s)
     s = re.sub(r"[™®©]", "", s)        # ™ ® ©
-    s = re.sub(r"\([^)]*\)", " ", s)                   # (...) tags
+    # drop (...) tags, but KEEP a bare 4-digit year so e.g. "RE4 (2005)" stays
+    # distinct from the "RE4" remake (which carries no year tag).
+    s = re.sub(r"\(([^)]*)\)",
+               lambda m: " %s " % m.group(1)
+               if re.fullmatch(r"\s*\d{4}\s*", m.group(1)) else " ", s)
     s = re.sub(r"\[[^\]]*\]", " ", s)                   # [...] tags
     s = s.replace("&", " and ").replace("+", " plus ")
     s = EDITION.sub(" ", s)
