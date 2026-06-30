@@ -222,18 +222,43 @@ def do_login():
           % (player.get("displayName"), player.get("pd"), COOKIES), file=sys.stderr)
 
 
+def save_token(access_token, ttl=14400):
+    """Cache a browser-minted access token (EA's Akamai shield blocks the
+    headless cookie->token refresh, so a token grabbed from the logged-in
+    browser is the reliable way in)."""
+    os.makedirs(EA_DIR, exist_ok=True)
+    with open(TOKEN, "w") as f:
+        json.dump({"access_token": access_token,
+                   "expires_at": int(time.time()) + int(ttl) - 60}, f)
+    os.chmod(TOKEN, 0o600)
+
+
 def main(argv):
     if "--login" in argv:
         do_login()
         return
+    if "--token" in argv:
+        i = argv.index("--token")
+        raw = argv[i + 1]
+        del argv[i:i + 2]
+        try:                                  # accept the whole JSON or just the value
+            raw = json.loads(raw).get("access_token", raw)
+        except (ValueError, AttributeError):
+            pass
+        save_token(raw.strip())
+        print("ea: saved access token. Pulling…", file=sys.stderr)
     if not config.source_enabled("ea"):
         print("ea: source disabled (config.py enable ea)", file=sys.stderr)
         return
     cookies = load_cookies()
-    if not cookies:
-        print("ea: not logged in — run: python3 ea_owned.py --login", file=sys.stderr)
+    # a valid cached (browser-minted) token works even without the cookie jar
+    have_token = os.path.exists(TOKEN) and json.load(open(TOKEN)).get(
+        "expires_at", 0) > int(time.time())
+    if not cookies and not have_token:
+        print("ea: not logged in — run: python3 ea_owned.py --login (or pass "
+              "--token <browser access_token>)", file=sys.stderr)
         return
-    tok = token(cookies)
+    tok = token(cookies) if cookies else json.load(open(TOKEN))["access_token"]
     if "--whoami" in argv:
         player, _ = whoami(cookies, tok)
         print("%s (pid %s)" % (player.get("displayName"), player.get("pd")))
