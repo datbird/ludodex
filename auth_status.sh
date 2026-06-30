@@ -4,14 +4,15 @@
 cd "$(dirname "$0")" || exit 1
 export PATH="$HOME/.local/bin:$PATH"
 
-# --- Steam (Web API key + fixed SteamID; key never expires) ---
-KEY=$(opx item get "Steam Web API (datbird main)" --vault <vault> --fields apikey --reveal 2>/dev/null)
+# --- Steam (Web API key + configured SteamID; key never expires) ---
+OPV=$(python3 config.py get op_vault); OPITEM=$(python3 config.py get steam_key_op_item)
+KEY=$(opx item get "$OPITEM" --vault "$OPV" --fields apikey --reveal 2>/dev/null)
 if [ -z "$KEY" ]; then
-  echo "steam: BROKEN  no API key in 1Password (<vault> > 'Steam Web API (datbird main)')"
+  echo "steam: BROKEN  no API key in 1Password (vault '$OPV' item '$OPITEM' — check config.py)"
 else
   N=$(STEAM_API_KEY="$KEY" python3 steam_owned.py 2>/dev/null | wc -l)
   if [ "$N" -gt 0 ]; then echo "steam: OK  ($N games)"
-  else echo "steam: BROKEN  key present but 0 games (key revoked, or wrong SteamID — must be <steam-id>)"; fi
+  else echo "steam: BROKEN  key present but 0 games (key revoked, or wrong config steam_id)"; fi
 fi
 
 # --- Epic (legendary cached token) ---

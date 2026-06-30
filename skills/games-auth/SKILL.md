@@ -10,6 +10,15 @@ ownership from **Steam, Epic, GOG**. All three cache credentials so normal updat
 need no interaction — this skill is only for the rare re-auth (token expired, password
 changed, fresh machine).
 
+Account/environment values (SteamID, 1Password vault & item, ROM host/paths) are NOT
+hardcoded — they live in a `config` table. Inspect/edit them with:
+```bash
+cd ~/game-ownership
+python3 config.py list                 # all keys + descriptions
+python3 config.py setup                # interactively fill them (fresh machine)
+python3 config.py get steam_id         # read one value
+```
+
 ## Step 1 — check what's broken
 
 ```bash
@@ -21,24 +30,25 @@ Prints `OK`/`BROKEN` per source. Only re-auth the BROKEN ones.
 
 ### Steam — Web API key (rarely needed; the key does not expire)
 Steam works via a Web API key, NOT a login. The key's privacy-bypass works **only for
-its owner's SteamID**, which is **`<steam-id>`** (account name `datbird`, the
-account the Deck is logged into per `~/.steam/steam/config/loginusers.vdf`).
-⚠️ The vanity `/id/datbird` is a DIFFERENT account (`<steam-id-2>`) — never use it.
-Do NOT pursue Steam *password* login — the stored password is stale and Steam rejects
-both the CM and WebAuth login flows; the API key is the only working path.
+its owner's SteamID** — the `steam_id` in config (`python3 config.py get steam_id`).
+⚠️ Use the SteamID of the account that *generated the key* (find it in
+`~/.steam/steam/config/loginusers.vdf`); a vanity URL can resolve to a different
+account and return 0 games. Do NOT pursue Steam *password* login — Steam rejects the
+CM and WebAuth flows here; the API key is the only working path.
 
 If `steam: BROKEN`:
 1. Ask the user to generate a key at **https://steamcommunity.com/dev/apikey** while
-   logged into the `datbird` (`<steam-id>`) account; domain field = `localhost`.
-2. Save it: update 1Password item `<vault> › Steam Web API (datbird main)` field
-   `apikey`, or `opx item edit "Steam Web API (datbird main)" --vault <vault> "apikey[password]=<KEY>"`.
+   logged into the account whose `steam_id` is in config; domain field = `localhost`.
+2. Save it to the configured 1Password item (`config.py get steam_key_op_item` in vault
+   `config.py get op_vault`), e.g.:
+   `opx item edit "$(python3 config.py get steam_key_op_item)" --vault "$(python3 config.py get op_vault)" "apikey[password]=<KEY>"`
 3. Verify: `bash ~/game-ownership/auth_status.sh`.
 
 ### Epic — legendary (browser authorization code)
 1. Ask the user to open **https://legendary.gl/epiclogin**, log in (their browser/2FA),
    and copy the **`authorizationCode`** value from the JSON shown.
 2. Run: `legendary auth --code <CODE>`  (PATH includes `~/.local/bin`).
-3. Verify: `legendary status` should show `Epic account: datbird`.
+3. Verify: `legendary status` should show their Epic account.
 Token then auto-refreshes; cached in `~/.config/legendary`.
 
 ### GOG — Galaxy OAuth (browser code)

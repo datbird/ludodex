@@ -84,11 +84,32 @@ suffixes and leading articles). Distinct subtitles stay distinct (*Tomb Raider* 
 Raider: Anniversary*). Store titles win as the display name over tag-laden ROM names.
 Fuzzy near-misses may stay separate — acceptable.
 
-## Setup / auth
+## Configuration
 
-ludodex is built for a personal setup; paths and source locations are configured inline
-in the scripts (Steam API key from 1Password, an Unraid ROM share, etc.). Adapt those to
-your environment. Auth, once cached, needs no further interaction:
+Account- and environment-specific values are **not hardcoded** — they live in a `config`
+table inside `config.sqlite` (gitignored), managed by `config.py`. Only safe/public
+defaults ship in the code; you fill the rest locally:
+
+```bash
+python3 config.py setup     # interactively fill every key (Enter keeps current)
+python3 config.py list      # show all keys, values, and descriptions
+python3 config.py set steam_id 7656119...      # set one value
+python3 config.py get steam_id                 # read one (used by the shell scripts)
+```
+
+| key | what it is |
+|-----|------------|
+| `steam_id` | SteamID64 of the account that **owns** your Steam Web API key |
+| `op_vault` / `steam_key_op_item` | 1Password vault + item holding the Steam key (`apikey` field) |
+| `library_db` / `roms_index_db` | output catalog + ROM-index DB paths |
+| `unraid_host` / `roms_path` | ssh target + ROM archive path (only for `update.sh --roms`) |
+| `gog_client_id` / `gog_client_secret` | GOG Galaxy's public OAuth client (defaults work) |
+
+The Steam key itself stays in 1Password, not in config; only the *item name* is stored.
+
+## Auth
+
+Once cached, auth needs no further interaction:
 
 - **Steam** — Web API key (does not expire). Generate at
   https://steamcommunity.com/dev/apikey while logged into the owning account; use that

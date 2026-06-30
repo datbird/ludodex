@@ -12,6 +12,9 @@ PC ownership. Each game lists all the sources it's available from.
 - Working dir / scripts: `~/game-ownership/`
 - Unified DB: `~/game-ownership/game-library.sqlite`
 - ROM index (input): `~/roms-index.sqlite`
+- Account/environment settings (SteamID, 1Password item, ROM host/paths) live in a
+  `config` table — `python3 config.py list` to see them, `config.py set <key> <value>`
+  to change. Nothing personal is hardcoded in the scripts.
 
 ## To run an update
 
@@ -19,13 +22,13 @@ PC ownership. Each game lists all the sources it's available from.
 bash ~/game-ownership/update.sh
 ```
 
-This pulls all three stores (auth is cached — Steam via API key in 1Password
-`<vault> › Steam Web API (datbird main)`, Epic via legendary, GOG via cached
-OAuth token), rebuilds `game-library.sqlite`, and prints the games added since the
-last run. Report that "new games" list to the user, plus the totals line.
+This pulls all three stores (auth is cached — Steam via the API key in the configured
+1Password item, Epic via legendary, GOG via cached OAuth token), rebuilds
+`game-library.sqlite`, and prints the games added since the last run. Report that
+"new games" list to the user, plus the totals line.
 
-Add `--roms` to also re-scan the Unraid ROM archive first (slow, ~5 min — only when
-the ROM collection changed):
+Add `--roms` to also re-scan the ROM archive first (slow, ~5 min — only when the ROM
+collection changed; needs `unraid_host` + `roms_path` set in config):
 
 ```bash
 bash ~/game-ownership/update.sh --roms
@@ -55,10 +58,10 @@ sqlite3 ~/game-ownership/game-library.sqlite \
 
 ## Auth notes (only relevant if a pull fails)
 
-- **Steam**: Web API key + the *correct* SteamID `<steam-id>` (account name
-  `datbird`). NOTE the vanity `/id/datbird` is a DIFFERENT account
-  (`<steam-id-2>`) — never resolve by vanity. The key bypasses profile privacy
-  only for its owner's SteamID, so no public profile / login / 2FA is needed.
+- **Steam**: Web API key (configured 1Password item) + the SteamID in config
+  (`python3 config.py get steam_id`) — must be the account that *owns the key*. NOTE a
+  vanity URL can resolve to a different account and return 0 games. The key bypasses
+  profile privacy only for its owner's SteamID, so no public profile / login / 2FA.
 - **Epic**: `legendary` token in `~/.config/legendary` (auto-refreshes). Re-auth:
   `legendary auth` (browser code).
 - **GOG**: cached OAuth token in `~/game-ownership/.gog/tokens.json` (auto-refreshes).

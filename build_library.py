@@ -11,11 +11,16 @@ Output: game-library.sqlite
 """
 import os
 import re
+import sys
 import sqlite3
 
-OWN = "/home/deck/game-ownership"
-ROM_DB = "/home/deck/roms-index.sqlite"
-OUT = OWN + "/game-library.sqlite"
+DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, DIR)
+import config
+
+OWN = DIR                                   # store TSVs live next to the scripts
+ROM_DB = config.get("roms_index_db")
+OUT = config.get("library_db")
 
 # Extensions that indicate an actual ROM/disc image (to skip box-art/manuals/etc).
 ROM_EXTS = {

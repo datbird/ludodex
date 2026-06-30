@@ -19,10 +19,16 @@ import time
 import urllib.parse
 import urllib.request
 
-CLIENT_ID = "46899977096215655"
-CLIENT_SECRET = "9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9"
+DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, DIR)
+import config
+
+# GOG Galaxy's public OAuth client (same values shipped in every GOG client/tool);
+# overridable via config, but the defaults work for everyone.
+CLIENT_ID = config.get("gog_client_id")
+CLIENT_SECRET = config.get("gog_client_secret")
 REDIRECT = "https://embed.gog.com/on_login_success?origin=client"
-TOKDIR = os.path.expanduser("~/game-ownership/.gog")
+TOKDIR = os.path.join(DIR, ".gog")
 TOKFILE = os.path.join(TOKDIR, "tokens.json")
 os.makedirs(TOKDIR, exist_ok=True)
 

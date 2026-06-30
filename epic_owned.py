@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-OWN = "/home/deck/game-ownership"
+OWN = os.path.dirname(os.path.abspath(__file__))
 leg = os.path.expanduser("~/.local/bin/legendary")
 try:
     out = subprocess.run([leg, "list", "--json"], capture_output=True, text=True,
