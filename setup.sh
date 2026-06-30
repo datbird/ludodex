@@ -109,8 +109,31 @@ elif yes "  Authenticate GOG now?"; then
 fi
 echo
 
+# --- itch.io -----------------------------------------------------------------
+rule; b "4) itch.io"
+cat <<'TXT'
+itch.io ownership is read with a personal API key.
+  Generate one at:  https://itch.io/user/settings/api-keys
+  Click "Generate new API key" and copy it (any scope can read your library).
+TXT
+echo
+echo "  Where should the itch.io API key live?"
+echo "    1) here, in the local config DB (gitignored)   [simplest]"
+echo "    2) in 1Password, read via the opx CLI"
+read -rp "  choice [1]: " ikc; ikc=${ikc:-1}
+if [ "$ikc" = 2 ]; then
+  ask op_vault "  1Password vault"
+  ask itch_key_op_item "  1Password item name (its 'apikey' field holds the key)"
+  setcfg itch_api_key ""
+else
+  read -rp "  paste your itch.io API key (leave blank to skip): " ik
+  [ -n "$ik" ] && setcfg itch_api_key "$ik"
+fi
+if [ -n "$(python3 config.py itch-key)" ]; then echo "  itch key: resolved ok"; else echo "  itch key: not set yet (you can add it later)"; fi
+echo
+
 # --- emulation ROMs (optional) ----------------------------------------------
-rule; b "4) Emulation ROMs (optional)"
+rule; b "5) Emulation ROMs (optional)"
 cat <<'TXT'
 ludodex can fold in a ROM archive. build_romdb.py scans a directory tree into
 roms-index.sqlite (parses No-Intro/GoodTools tags for system/region/version).

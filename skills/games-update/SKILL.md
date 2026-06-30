@@ -6,8 +6,8 @@ description: Refresh the user's unified game-ownership library — pull current 
 # Update the unified game library
 
 The user keeps a single local SQLite catalog of **every game they own/have**, deduped
-by title across sources: **emulation ROMs** (Unraid archive) + **Steam / Epic / GOG**
-PC ownership. Each game lists all the sources it's available from.
+by title across sources: **emulation ROMs** (Unraid archive) + **Steam / Epic / GOG /
+itch.io** PC ownership. Each game lists all the sources it's available from.
 
 - Working dir / scripts: `~/game-ownership/`
 - Unified DB: `~/game-ownership/game-library.sqlite`
@@ -37,10 +37,10 @@ bash ~/game-ownership/update.sh --roms
 ## Schema (for answering questions)
 
 `games(id, canonical_title, norm_key, n_sources, sources_summary,
-       has_emulation, has_steam, has_gog, has_epic)`
+       has_emulation, has_steam, has_gog, has_epic, has_itch)`
 `sources(game_id, source, platform, source_id, title_raw, detail)`
-— `source` ∈ emulation|steam|gog|epic; for emulation, `platform` is the system
-(psx, snes…). `sources_summary` e.g. `emulation:psx,sega saturn; steam; epic`.
+— `source` ∈ emulation|steam|gog|epic|itch; for emulation, `platform` is the system
+(psx, snes…). `sources_summary` e.g. `emulation:psx,sega saturn; steam; itch`.
 
 ## Common queries
 
@@ -53,7 +53,7 @@ sqlite3 ~/game-ownership/game-library.sqlite \
   "SELECT canonical_title, sources_summary FROM games WHERE n_sources>1 ORDER BY canonical_title;"
 # counts per source
 sqlite3 ~/game-ownership/game-library.sqlite \
-  "SELECT SUM(has_emulation), SUM(has_steam), SUM(has_gog), SUM(has_epic) FROM games;"
+  "SELECT SUM(has_emulation), SUM(has_steam), SUM(has_gog), SUM(has_epic), SUM(has_itch) FROM games;"
 ```
 
 ## Auth notes (only relevant if a pull fails)
@@ -67,3 +67,5 @@ sqlite3 ~/game-ownership/game-library.sqlite \
 - **GOG**: cached OAuth token in `~/game-ownership/.gog/tokens.json` (auto-refreshes).
   Re-auth: `python3 ~/game-ownership/gog_owned.py --code <code>` (see login URL in
   that file).
+- **itch.io**: personal API key (no expiry), resolved by `config.py itch-key`. Re-auth:
+  generate at https://itch.io/user/settings/api-keys → `config.py set itch_api_key <key>`.

@@ -6,7 +6,7 @@ description: Check and (re)authenticate the user's game-ownership sources — St
 # Game-source authentication
 
 The unified game library (`~/game-ownership/`, see the `games-update` skill) pulls
-ownership from **Steam, Epic, GOG**. All three cache credentials so normal updates
+ownership from **Steam, Epic, GOG, itch.io**. All cache credentials so normal updates
 need no interaction — this skill is only for the rare re-auth (token expired, password
 changed, fresh machine).
 
@@ -61,6 +61,13 @@ Token then auto-refreshes; cached in `~/.config/legendary`.
    `https://auth.gog.com/auth?client_id=46899977096215655&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient&response_type=code&layout=client2`
 2. Run: `python3 ~/game-ownership/gog_owned.py --code <CODE>`
 3. It caches a refresh token in `~/game-ownership/.gog/tokens.json` (auto-refreshes).
+
+### itch.io — personal API key (does not expire)
+1. Ask the user to open **https://itch.io/user/settings/api-keys**, click "Generate new
+   API key", and copy it (any scope can read the library).
+2. Store it: `python3 config.py set itch_api_key <KEY>` (local, gitignored) — or in
+   1Password, then set `itch_key_op_item` (+ `op_vault`) to that item's name.
+3. Verify: `bash ~/game-ownership/auth_status.sh` (the resolver is `config.py itch-key`).
 
 ## Step 3 — confirm + refresh data
 After fixing auth, run the **games-update** skill (`bash ~/game-ownership/update.sh`) to

@@ -33,11 +33,11 @@ optionally indexes a ROM archive, and builds the first catalog. Re-runnable any 
 ## How it works
 
 ```
- Steam  ──steam_owned.py─┐
- Epic   ──epic_owned.py──┤                            ┌─ games   (one row per deduped title)
- GOG    ──gog_owned.py───┼─→ build_library.py ──────→ │
- ROMs   ──build_romdb.py─┘     (normalize + dedupe)   └─ sources (every place a game lives)
-                                                          → game-library.sqlite
+ Steam   ──steam_owned.py─┐
+ Epic    ──epic_owned.py──┤                           ┌─ games   (one row per deduped title)
+ GOG     ──gog_owned.py───┼→ build_library.py ──────→ │
+ itch.io ──itch_owned.py──┤    (normalize + dedupe)   └─ sources (every place a game lives)
+ ROMs    ──build_romdb.py─┘                              → game-library.sqlite
 ```
 
 - **`steam_owned.py`** — Steam owned games via the Web API `GetOwnedGames`. The Web API
@@ -46,6 +46,8 @@ optionally indexes a ROM archive, and builds the first catalog. Re-runnable any 
 - **`epic_owned.py`** — Epic owned games via `legendary list --json`. → `epic_games.tsv`
 - **`gog_owned.py`** — GOG owned games via Galaxy OAuth (`--code` once, then a cached
   refresh token; uses GOG Galaxy's public client credentials). → `gog_games.tsv`
+- **`itch_owned.py`** — itch.io owned games via the server-side API (`/profile/owned-keys`)
+  with a personal API key. → `itch_games.tsv`
 - **`build_romdb.py`** — recursively indexes a ROM archive into `roms-index.sqlite`,
   parsing No-Intro / GoodTools tags for system, region, and version. (Runs where the ROMs
   live.)
@@ -60,18 +62,18 @@ optionally indexes a ROM archive, and builds the first catalog. Re-runnable any 
 Drop `skills/*` into `~/.claude/skills/` (or symlink). Then:
 
 - **games-update** — refresh ownership, rebuild the catalog, report new games.
-- **games-auth** — check/repair Steam/Epic/GOG logins (re-auth walkthroughs).
+- **games-auth** — check/repair Steam/Epic/GOG/itch.io logins (re-auth walkthroughs).
 - **games-query** — answer "do I own X / on what sources / what's cross-source / counts".
 
 ## Schema
 
 ```sql
 games(   id, canonical_title, norm_key, n_sources, sources_summary,
-         has_emulation, has_steam, has_gog, has_epic )
+         has_emulation, has_steam, has_gog, has_epic, has_itch )
 sources( game_id, source, platform, source_id, title_raw, detail )
--- source ∈ emulation|steam|gog|epic
+-- source ∈ emulation|steam|gog|epic|itch
 -- emulation platform = system (psx, snes…); detail = regions
--- sources_summary e.g. "emulation:psx,sega saturn; steam; epic"
+-- sources_summary e.g. "emulation:psx,sega saturn; steam; itch"
 ```
 
 ```bash
@@ -112,7 +114,8 @@ python3 config.py get steam_id                 # read one (used by the shell scr
 |-----|------------|
 | `steam_id` | SteamID64 of the account that **owns** your Steam Web API key |
 | `steam_api_key` | the Steam key, stored locally (gitignored) — *or* leave blank and use 1Password |
-| `op_vault` / `steam_key_op_item` | 1Password vault + item holding the key (`apikey` field) |
+| `itch_api_key` | itch.io API key, stored locally — *or* blank + use 1Password (`itch_key_op_item`) |
+| `op_vault` / `steam_key_op_item` | 1Password vault + item holding the Steam key (`apikey` field) |
 | `library_db` / `roms_index_db` | output catalog + ROM-index DB paths |
 | `unraid_host` / `roms_path` | ssh target + ROM archive path (only for `update.sh --roms`) |
 | `gog_client_id` / `gog_client_secret` | GOG Galaxy's public OAuth client (defaults work) |
@@ -132,6 +135,8 @@ Once cached, auth needs no further interaction:
   https://legendary.gl/epiclogin. Token auto-refreshes (`~/.config/legendary`).
 - **GOG** — `python3 gog_owned.py --code <code>` once (login URL is in the script). A
   refresh token is cached in `.gog/tokens.json` and auto-refreshes.
+- **itch.io** — generate a key at https://itch.io/user/settings/api-keys and store it
+  (`config.py set itch_api_key <key>`, or 1Password). The key doesn't expire.
 
 > **Privacy note:** the SQLite catalogs, per-store ownership dumps (`*_games.tsv`), and
 > cached auth tokens (`.gog/`) are `.gitignore`d — only code, skills, and docs are

@@ -26,3 +26,13 @@ else
   echo "gog: BROKEN  $( [ -f .gog/tokens.json ] && echo 'refresh failed (token expired)' || echo 'no cached token' ) — re-auth needed"
 fi
 rm -f .gogchk
+
+# --- itch.io (API key) ---
+if [ -z "$(python3 config.py itch-key)" ]; then
+  echo "itch: BROKEN  no API key (run ./setup.sh, or set itch_api_key)"
+elif OUT=$(python3 itch_owned.py 2>.itchchk); then
+  echo "itch: OK  ($(printf '%s\n' "$OUT" | grep -c .) games)"
+else
+  echo "itch: BROKEN  $(tail -1 .itchchk)"
+fi
+rm -f .itchchk

@@ -42,6 +42,13 @@ SCHEMA = [
      "Steam Web API key stored locally (config.sqlite is gitignored). Optional — "
      "leave blank to fetch it from 1Password via op_vault/steam_key_op_item. The "
      "STEAM_API_KEY env var overrides both."),
+    ("itch_api_key", "",
+     "itch.io API key stored locally (gitignored). Get one at "
+     "https://itch.io/user/settings/api-keys. Optional — leave blank to use "
+     "1Password via op_vault/itch_key_op_item. ITCH_API_KEY env overrides both."),
+    ("itch_key_op_item", "",
+     "1Password item name whose 'apikey' field is your itch.io API key "
+     "(used only if itch_api_key is blank)."),
     ("library_db", os.path.join(DIR, "game-library.sqlite"),
      "Output path for the unified deduped catalog."),
     ("roms_index_db", os.path.join(DIR, "roms-index.sqlite"),
@@ -106,15 +113,15 @@ def set_(key, value):
     con.close()
 
 
-def steam_key():
-    """Resolve the Steam Web API key: env > local config > 1Password (opx)."""
-    k = os.environ.get("STEAM_API_KEY", "").strip()
+def _resolve_key(env_var, local_key, op_item_key):
+    """Resolve an API key: env var > local config value > 1Password (opx)."""
+    k = os.environ.get(env_var, "").strip()
     if k:
         return k
-    k = get("steam_api_key")
+    k = get(local_key)
     if k:
         return k
-    vault, item = get("op_vault"), get("steam_key_op_item")
+    vault, item = get("op_vault"), get(op_item_key)
     if vault and item:
         try:
             r = subprocess.run(
@@ -126,6 +133,14 @@ def steam_key():
         except (OSError, subprocess.TimeoutExpired):
             pass
     return ""
+
+
+def steam_key():
+    return _resolve_key("STEAM_API_KEY", "steam_api_key", "steam_key_op_item")
+
+
+def itch_key():
+    return _resolve_key("ITCH_API_KEY", "itch_api_key", "itch_key_op_item")
 
 
 def main(argv):
@@ -150,6 +165,8 @@ def main(argv):
         sys.stdout.write(get(argv[1]) or "")
     elif cmd == "steam-key":
         sys.stdout.write(steam_key())
+    elif cmd == "itch-key":
+        sys.stdout.write(itch_key())
     elif cmd == "set":
         if len(argv) < 3:
             sys.exit("usage: config.py set <key> <value>")
@@ -166,7 +183,7 @@ def main(argv):
                 set_(k, new)
         print("\nSaved to config.sqlite. Verify with: bash auth_status.sh")
     else:
-        sys.exit("unknown command %r — use init|setup|list|get|set|steam-key" % cmd)
+        sys.exit("unknown command %r — use init|setup|list|get|set|steam-key|itch-key" % cmd)
 
 
 if __name__ == "__main__":

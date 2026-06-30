@@ -33,6 +33,12 @@ echo "== GOG =="
 python3 gog_owned.py > gog_games.tsv 2>gog.err && echo "  gog: $(wc -l < gog_games.tsv) games" \
   || echo "  gog FAILED: $(tail -1 gog.err)"
 
+echo "== itch.io =="
+if [ -n "$(python3 config.py itch-key)" ]; then
+  python3 itch_owned.py > itch_games.tsv 2>itch.err && echo "  itch: $(wc -l < itch_games.tsv) games" \
+    || echo "  itch FAILED: $(tail -1 itch.err)"
+else echo "  itch: no API key (run ./setup.sh, or set itch_api_key)"; fi
+
 if [ "$1" = "--roms" ]; then
   echo "== ROM rescan =="
   HOST=$(cfg unraid_host); RPATH=$(cfg roms_path)
