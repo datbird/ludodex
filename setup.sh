@@ -207,20 +207,21 @@ TXT
 esac
 echo
 
-# --- local archives (optional) ----------------------------------------------
-rule; b "8) Local archives (optional)"
+# --- local mounts / archives (optional) -------------------------------------
+rule; b "8) Local mounts / archives (optional)"
 cat <<'TXT'
-Add local folders of games/ROMs as sources. kind 'rom' recurses (first subfolder
-= system, ROM files only, tags cleaned); kind 'flat' = each immediate child is a
-title. Add as many as you like; blank name to finish. Toggle later with
-`config.py enable|disable <name>`; disable a built-in store the same way.
+Add local folders or drives (SD card, USB, NAS mount) for the crawler to scan.
+kind 'rom' recurses (first subfolder = system, ROM files only, tags cleaned);
+kind 'flat' = each immediate child is a title. Add as many as you like; blank
+path to finish. Toggle later with `config.py enable|disable <name>`; an unplugged
+drive is skipped automatically (its indexed games stay).
 TXT
 while true; do
-  read -rp "  archive name (blank to finish): " an
-  [ -z "$an" ] && break
-  read -rp "    path: " ap
+  read -rp "  mount path (blank to finish): " ap
+  [ -z "$ap" ] && break
   read -rp "    kind [rom/flat]: " ak; ak=${ak:-rom}
-  python3 config.py archive add "$an" "$ap" "$ak"
+  read -rp "    name [auto from path]: " an
+  python3 config.py mount add "$ap" "$ak" $an
 done
 echo
 

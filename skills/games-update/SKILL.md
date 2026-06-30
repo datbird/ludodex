@@ -17,8 +17,9 @@ itch.io** PC ownership. Each game lists all the sources it's available from.
   to change. Nothing personal is hardcoded in the scripts.
 - Sources can be toggled and extended: `python3 config.py sources` (list + on/off),
   `config.py enable|disable <steam|epic|gog|itch|emulation|archive-name>`. Add local
-  folders as sources with `config.py archive add <name> <path> [rom|flat]`. Local
-  archives use a two-stage pipeline (in `crawl-index.sqlite`): `crawl.py` appends new
+  folders/drives as sources with `config.py mount add <path> [rom|flat] [name]`
+  (`config.py mounts` lists them with live mounted/present/MISSING status; an unplugged
+  drive is skipped but its indexed games stay). Local archives use a two-stage pipeline (in `crawl-index.sqlite`): `crawl.py` appends new
   files to a raw `files` inventory, then `process.py` extracts system/title/region/
   version/etc. into `extracted` and flags variants of known games. `update.sh` runs both
   before each rebuild. Disabled sources are skipped on both pull and rebuild.

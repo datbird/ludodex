@@ -19,8 +19,10 @@ locally (they go into config.sqlite, never into git):
   python3 config.py sources                       # list sources + on/off state
   python3 config.py enable|disable <source>       # toggle steam/epic/gog/itch/
                                                   #   emulation or an archive name
-  python3 config.py archive add <name> <path> [rom|flat]   # register a crawl archive
-  python3 config.py archive list|rm <name>
+  python3 config.py mount add <path> [rom|flat] [name]     # add a crawl mount/path
+  python3 config.py mounts                         # list crawl paths + mount status
+  python3 config.py mount rm <name>
+  python3 config.py archive add <name> <path> [rom|flat]   # (same registry, name-first)
 
 For first-time onboarding with credential how-to guidance, run ./setup.sh instead.
 """
@@ -268,6 +270,15 @@ def source_enabled(name):
     return True
 
 
+def path_status(path):
+    """How a crawl path/mount currently looks on disk."""
+    if not path:
+        return "unset"
+    if os.path.isdir(path):
+        return "mounted" if os.path.ismount(path) else "present"
+    return "MISSING"
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -310,11 +321,35 @@ def main(argv):
             mark = "x" if get_bool("source_%s_enabled" % s, True) else " "
             print("  [%s] %s" % (mark, s))
         archs = archives_list()
-        print("archives:" if archs else
-              "archives: (none — add: config.py archive add <name> <path> [rom|flat])")
+        print("crawl mounts/paths:" if archs else
+              "crawl mounts/paths: (none — add: config.py mount add <path> [rom|flat])")
         for a in archs:
-            print("  [%s] %-16s %s  (%s)" %
-                  ("x" if a["enabled"] else " ", a["name"], a["path"], a["kind"]))
+            print("  [%s] %-16s %-7s %-8s %s" %
+                  ("x" if a["enabled"] else " ", a["name"], a["kind"],
+                   path_status(a["path"]), a["path"]))
+    elif cmd in ("mount", "mounts"):
+        sub = argv[1] if cmd == "mount" and len(argv) > 1 else "list"
+        if sub == "add" and len(argv) >= 3:
+            path = os.path.abspath(os.path.expanduser(argv[2]))
+            opts = argv[3:]
+            kind = next((o for o in opts if o in ("rom", "flat")), "rom")
+            named = [o for o in opts if o not in ("rom", "flat")]
+            name = (named[0] if named else os.path.basename(path.rstrip("/"))
+                    or "root").replace(" ", "_")
+            archive_set(name, path, kind)
+            print("mount %r -> %s  (%s) [%s]" %
+                  (name, path, kind, path_status(path)))
+        elif sub == "rm" and len(argv) >= 3:
+            archive_rm(argv[2])
+            print("removed mount %r" % argv[2])
+        else:                                   # list (default)
+            archs = archives_list()
+            if not archs:
+                print("no crawl mounts — add: config.py mount add <path> [rom|flat]")
+            for a in archs:
+                print("[%s] %-16s %-7s %-8s %s" %
+                      ("on" if a["enabled"] else "off", a["name"], a["kind"],
+                       path_status(a["path"]), a["path"]))
     elif cmd == "archive":
         sub = argv[1] if len(argv) > 1 else ""
         if sub == "add" and len(argv) >= 4:
@@ -350,7 +385,7 @@ def main(argv):
         print("\nSaved to config.sqlite. Verify with: bash auth_status.sh")
     else:
         sys.exit("unknown command %r — use init|setup|list|get|set|steam-key|"
-                 "itch-key|sources|enable|disable|archive" % cmd)
+                 "itch-key|sources|enable|disable|mount|mounts|archive" % cmd)
 
 
 if __name__ == "__main__":

@@ -72,7 +72,9 @@ def main(argv):
     for a in archives:
         name, path, kind = a["name"], a["path"], a["kind"]
         if not os.path.isdir(path):
-            log("  %s: SKIP — not a directory: %s" % (name, path))
+            # removable drive unplugged / not mounted yet — skip, keep inventory
+            log("  %s: SKIP — not mounted/missing: %s (existing entries kept)" %
+                (name, path))
             continue
         new = changed = seen = 0
         for full, fn, ext in _entries(path, kind):

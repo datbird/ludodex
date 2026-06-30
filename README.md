@@ -106,17 +106,21 @@ python3 config.py disable gog             # skip a built-in (steam|epic|gog|itch
 python3 config.py enable gog
 ```
 
-**Local archives** — point ludodex at any local folder of games/ROMs and it's indexed
-into the catalog as the `archive` source (deduped against everything else by title):
+**Local archives / mounts** — register any local folder or drive (SD card, USB, NAS
+mount) and the crawler scans it into the catalog as the `archive` source (deduped against
+everything by title). Mounts live in the profile DB (`config.sqlite`) and show live
+status, so a removable drive that isn't plugged in is just skipped — its already-indexed
+games stay in the catalog.
 
 ```bash
 # kind 'rom':  recurse, first folder = system, ROM/disc files only, tags cleaned
-python3 config.py archive add ssd-roms /run/media/SD/roms rom
+python3 config.py mount add /run/media/deck/SDCARD rom        # name defaults to "SDCARD"
 # kind 'flat': each immediate child (file or folder) is one title
-python3 config.py archive add installers ~/Games flat
+python3 config.py mount add ~/Games flat installers          # explicit name
 
-python3 config.py disable ssd-roms        # archives toggle the same way
-python3 config.py archive list|rm <name>
+python3 config.py mounts                  # list paths + mounted/present/MISSING status
+python3 config.py disable installers      # mounts toggle like any source
+python3 config.py mount rm <name>
 ```
 
 This is a **two-stage pipeline** over a persistent `crawl-index.sqlite` (gitignored):
