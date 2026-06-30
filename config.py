@@ -100,6 +100,18 @@ SCHEMA = [
      "playnite_bridge.ps1 (-Export); ingested by build_library."),
     ("playnite_export_json", "", "Where playnite_export.py writes the ludodex->"
      "Playnite JSON (blank = ludodex_to_playnite.json next to the scripts)."),
+    ("source_launchbox_enabled", "1", "[source] Include an imported LaunchBox "
+     "library (a frontend meta-layer, like Playnite — provenance only)."),
+    ("launchbox_path", "", "Root of a LaunchBox install (the folder holding Data/, "
+     "Images/, Videos/, Manuals/). Used by launchbox_import.py / launchbox_export.py. "
+     "On Windows e.g. C:/LaunchBox; via a network/Unraid share, the mounted path."),
+    ("launchbox_import_json", "", "Where launchbox_import.py writes the LaunchBox-> "
+     "ludodex JSON (blank = ludodex_from_launchbox.json next to the scripts); "
+     "ingested by build_library."),
+    ("launchbox_media_mode", "copy", "How launchbox_export.py places chosen art: "
+     "'copy' (independent copies) or 'link' (symlink Images/.. -> media_repo/<sha1>, "
+     "one stored copy backs every frontend — use when Images shares a filesystem "
+     "with media_repo, e.g. both on Unraid)."),
     # --- metadata providers: CONSULTED to enrich attributes, NOT sources.
     #     They never add ownership; they only fill in missing attributes. ---
     ("metadata_igdb_enabled", "1",
@@ -348,7 +360,8 @@ def igdb_creds():
 # --------------------------------------------------------------------------- #
 #  sources: built-in store/emulation toggles + a registry of crawl archives
 # --------------------------------------------------------------------------- #
-BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "ea", "emulation", "playnite")
+BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "ea", "emulation", "playnite",
+                   "launchbox")
 
 # Metadata providers are CONSULTED to enrich attributes — they are NOT sources
 # (they add no ownership). Toggled like sources but tracked separately.
@@ -391,9 +404,9 @@ def screenscraper_creds():
     return creds
 
 
-# Media providers: local mount-based (esde, steamgrid, playnite) + remote
-# (steam, igdb, steamgriddb). Kept in sync with media.MEDIA_PROVIDERS.
-MEDIA_PROVIDERS = ("esde", "steamgrid", "playnite", "steam", "igdb",
+# Media providers: local mount-based (esde, steamgrid, playnite, launchbox) +
+# remote (steam, igdb, steamgriddb). Kept in sync with media.MEDIA_PROVIDERS.
+MEDIA_PROVIDERS = ("esde", "steamgrid", "playnite", "launchbox", "steam", "igdb",
                    "steamgriddb")
 
 
@@ -597,6 +610,26 @@ INTEGRATIONS = [
          ".ea/token.json). Re-grab when it expires — EA libraries rarely change."],
      "config_keys": ["ea_op_item"], "env": [], "op_item": "ea_op_item",
      "op_field": "credential", "verify": "python3 ea_owned.py --whoami"},
+
+    {"id": "launchbox", "name": "LaunchBox (frontend)", "kind": "source",
+     "purpose": "Two-way sync with a LaunchBox install: import its library + art "
+                "as a meta-layer (provenance only), and export ludodex's "
+                "consolidated metadata + chosen art back into it. No credentials — "
+                "it's plain files on disk; just point ludodex at the folder.",
+     "url": "(no signup — a local/networked LaunchBox install)",
+     "steps": [
+         "Find the LaunchBox root (the folder containing Data/, Images/, Videos/, "
+         "Manuals/) — on Windows e.g. C:/LaunchBox, or its path via a network/Unraid "
+         "share mounted on this machine.",
+         "Set it: config.py set launchbox_path <root>   (then it imports on every "
+         "update, and `python3 launchbox_export.py` pushes back).",
+         "To share ONE media copy with Unraid instead of duplicating: store media on "
+         "the same filesystem and run launchbox_export.py --link (or set "
+         "launchbox_media_mode=link). Close LaunchBox before exporting."],
+     "config_keys": ["launchbox_path", "launchbox_media_mode",
+                     "launchbox_import_json"],
+     "env": [], "op_item": None,
+     "verify": "python3 launchbox_import.py --no-media | head"},
 
     {"id": "igdb", "name": "IGDB (metadata)", "kind": "metadata",
      "purpose": "Enrich attributes (genres/themes/devs/ratings) + cover/artwork "

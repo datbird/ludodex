@@ -124,7 +124,7 @@ def steamgrid_kind(filename):
 # --------------------------------------------------------------------------- #
 #  provider registry — local (mount-based) + remote (fetched by id)
 # --------------------------------------------------------------------------- #
-LOCAL_PROVIDERS = ("esde", "steamgrid", "playnite")
+LOCAL_PROVIDERS = ("esde", "steamgrid", "playnite", "launchbox")
 REMOTE_PROVIDERS = ("steam", "igdb", "steamgriddb")
 MEDIA_PROVIDERS = LOCAL_PROVIDERS + REMOTE_PROVIDERS
 
@@ -133,9 +133,9 @@ MEDIA_PROVIDERS = LOCAL_PROVIDERS + REMOTE_PROVIDERS
 # beats official store art, which beats IGDB, which beats SteamGridDB community
 # art. ES-DE has no real backgrounds, so it sinks for that kind.
 PRIORITY = {
-    "cover":        ["steamgrid", "esde", "screenscraper", "steam", "igdb", "steamgriddb", "playnite"],
-    "background":   ["steamgrid", "steam", "screenscraper", "igdb", "steamgriddb", "esde", "playnite"],
-    "logo":         ["steamgrid", "esde", "screenscraper", "steam", "igdb", "steamgriddb"],
+    "cover":        ["steamgrid", "esde", "screenscraper", "steam", "igdb", "steamgriddb", "playnite", "launchbox"],
+    "background":   ["steamgrid", "steam", "screenscraper", "igdb", "steamgriddb", "esde", "playnite", "launchbox"],
+    "logo":         ["steamgrid", "esde", "screenscraper", "steam", "igdb", "steamgriddb", "launchbox"],
     "icon":         ["steamgrid", "steamgriddb", "igdb", "screenscraper", "playnite"],
     "title_screen": ["esde", "screenscraper"],
     "box_3d":       ["esde", "screenscraper", "steamgriddb"],
@@ -143,7 +143,7 @@ PRIORITY = {
     "mix":          ["esde", "screenscraper"],
 }
 DEFAULT_PRIORITY = ["steamgrid", "esde", "screenscraper", "steam", "igdb",
-                    "steamgriddb", "playnite"]
+                    "steamgriddb", "playnite", "launchbox"]
 
 
 def priority(kind):

@@ -75,7 +75,7 @@ Drop `skills/*` into `~/.claude/skills/` (or symlink). Then:
 ```sql
 games(   id, canonical_title, norm_key, n_sources, n_kinds, sources_summary,
          has_emulation, has_steam, has_gog, has_epic, has_itch, has_archive,
-         in_playnite )
+         in_playnite, in_launchbox )
 sources( game_id, source, platform, source_id, title_raw, detail )
 source_attrs(    game_id, source, source_id, attrs_json )   -- lossless per-provider
 game_attributes( game_id, kind, value )                     -- queryable, aggregated
@@ -84,7 +84,7 @@ metadata_links(  game_id, provider, provider_id, slug, url )-- canonical ids (ig
 --   (any provider; the has_* columns cover the common ones, sources_summary lists all)
 -- emulation platform = system (psx, snes…); archive platform = archive name
 -- sources_summary e.g. "emulation:psx,snes; archive:ssd-roms; ea; steam"
--- in_playnite = provenance flag (game is in your Playnite library) — NOT a source
+-- in_playnite / in_launchbox = provenance flags (game is in that frontend) — NOT sources
 -- n_kinds  = # of distinct source kinds  -> use for "owned from multiple sources"
 -- n_sources = raw source-row count (a game on 3 emu systems = 3 rows, 1 kind)
 ```
@@ -215,6 +215,29 @@ ludodex adopts Playnite's full attribute vocabulary (genres, tags, features, cat
 developers, publishers, series, age ratings, regions, release date, playtime, completion,
 scores, favorite, version, links, …), stored in `game_attributes` (queryable) and
 `source_attrs` (lossless, for round-trip export).
+
+## LaunchBox interoperability (import/export)
+
+[LaunchBox](https://www.launchbox-app.com/) is treated exactly like Playnite — a
+frontend **meta-layer**, not a source (imported games map to their underlying
+provider; `in_launchbox` is provenance only). Unlike Playnite it stores everything
+as plain files (Platform XMLs + `Images/` folders), so **no bridge is needed** —
+ludodex reads and writes the install directly:
+
+```
+python3 config.py set launchbox_path <LaunchBox root>   # update.sh then imports it
+python3 launchbox_export.py            # catalog + chosen art -> LaunchBox
+python3 launchbox_export.py --link     # symlink art -> media_repo/<sha1> (1 stored copy)
+```
+
+Export upserts each game by a **stable per-game GUID** (idempotent — re-runs update
+in place and never duplicate or clobber hand-added games), splits multi-value fields
+on `;`, and drops chosen art into the right `Images/<Platform>/<MediaType>/` folder
+with LaunchBox's exact filename sanitization. **Reference mode** (`--link`, or
+`launchbox_media_mode=link`) keeps one stored copy per asset (e.g. on Unraid) shared
+by every frontend instead of duplicating. The same canonical pipeline can thus sync
+metadata + media **between LaunchBox and Playnite** (import both → consolidate →
+export to each).
 
 ## Sync to a remote DB (optional)
 

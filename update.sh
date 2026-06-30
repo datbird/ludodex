@@ -73,6 +73,15 @@ echo "== local archives =="
 python3 crawl.py          # stage 1: append new files to the inventory
 python3 process.py        # stage 2: extract system/title/attributes from new files
 
+# LaunchBox: a frontend meta-layer (like Playnite). Read its Platform XMLs into
+# the interchange JSON build_library merges, and index its Images/ as media.
+# No-ops unless source enabled and launchbox_path points at a real install.
+if [ "$(python3 -c 'import config; print(int(config.source_enabled("launchbox")))')" = "1" ] && \
+   [ -n "$(cfg launchbox_path)" ] && [ -d "$(cfg launchbox_path)" ]; then
+  echo "== LaunchBox import =="
+  python3 launchbox_import.py 2>&1 | sed 's/^/  /'
+fi
+
 echo "== rebuilding unified library =="
 python3 build_library.py
 
@@ -97,6 +106,11 @@ python3 media_index.py 2>&1 | sed 's/^/  /'      # local: ES-DE + Steam grid
 python3 media_fetch.py 2>&1 | sed 's/^/  /'      # remote refs: Steam CDN + IGDB + ScreenScraper
 python3 media_choose.py 2>&1 | tail -1 | sed 's/^/  /'   # pick the best per game
 # (materialize is on-demand: python3 media_choose.py --materialize; ~17GB if all)
+
+# Push the consolidated catalog + chosen art BACK to the desktop frontends. Opt-in
+# (writes into your LaunchBox/Playnite installs) — run manually when they're reachable:
+#   python3 launchbox_export.py            # -> launchbox_path (--link for shared/Unraid)
+#   python3 playnite_export.py             # -> Playnite interchange JSON (bridge -Import)
 
 echo "== new since last run =="
 sqlite3 "$LIB" "SELECT norm_key FROM games" | sort > .cur_keys

@@ -45,6 +45,7 @@ games = {}   # norm_key -> dict(title, store_title, sources=[])
 
 games_attrs = {}     # norm_key -> {"src": [(source, source_id, record)], }
 playnite_keys = set()  # norm_keys present in the Playnite library (provenance)
+launchbox_keys = set()  # norm_keys present in the LaunchBox library (provenance)
 
 
 def add(title, source, platform, sid, detail=""):
@@ -155,6 +156,30 @@ if config.source_enabled("playnite") and PN_JSON and os.path.exists(PN_JSON):
             add_attrs(key, provider, sid, rec)
 
 
+# ---- LaunchBox library (launchbox_import.py -> JSON) ----
+# Same meta-layer treatment as Playnite: each game maps to its underlying provider;
+# "in LaunchBox" is provenance only (the in_launchbox flag).
+LB_JSON = config.get("launchbox_import_json")
+if config.source_enabled("launchbox") and LB_JSON and os.path.exists(LB_JSON):
+    try:
+        lbgames = json.load(open(LB_JSON, encoding="utf-8"))
+    except (ValueError, OSError):
+        lbgames = []
+    for rec in (lbgames or []):
+        title = rec.get("name")
+        if not title:
+            continue
+        provider = rec.get("source") or "manual"
+        sid = rec.get("source_id") or ""
+        plats = rec.get("platforms") or []
+        platform = plats[0] if plats else provider
+        detail = str(rec.get("release_year") or "")
+        key = add(title, provider, platform, sid, detail)
+        if key:
+            launchbox_keys.add(key)
+            add_attrs(key, provider, sid, rec)
+
+
 # ---- write ----
 if os.path.exists(OUT):
     os.remove(OUT)
@@ -164,7 +189,7 @@ cur.executescript("""
 CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
   n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
   has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
-  has_archive INT, in_playnite INT);   -- in_playnite = provenance, NOT a source
+  has_archive INT, in_playnite INT, in_launchbox INT);  -- *_in flags = provenance, NOT sources
 CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
   source_id TEXT, title_raw TEXT, detail TEXT);
 -- Playnite-parity attributes:
@@ -194,12 +219,13 @@ for key, g in games.items():
     summary = "; ".join(parts)
     cur.execute(
         "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,sources_summary,"
-        "has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive,in_playnite) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive,in_playnite,"
+        "in_launchbox) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (canonical, key, len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
-         int("archive" in kinds), int(key in playnite_keys)))
+         int("archive" in kinds), int(key in playnite_keys),
+         int(key in launchbox_keys)))
     gid = cur.lastrowid
     key_to_gid[key] = gid
     cur.executemany(

@@ -50,6 +50,7 @@ source. The `games-auth` skill wraps this with re-auth walkthroughs.
 | **itch.io** | source | personal API key | itch.io/user/settings/api-keys | `itch_api_key` | `itch_key_op_item` (field `apikey`) | no |
 | **EA** | source | browser access token | URL below (returns JSON) | `ea_op_item` | `ea_op_item` (field `credential`) | ~4h (re-grab) |
 | **emulation / archive** | source | none (local files / SSH) | — | mounts (see below) | — | — |
+| **LaunchBox** | source (frontend) | none (local/networked files) | a LaunchBox install folder | `launchbox_path`, `launchbox_media_mode` | — | — |
 | **IGDB** | metadata | Twitch app Client ID+Secret | dev.twitch.tv/console/apps | `igdb_client_id/secret` | `igdb_op_item` (`username`=ID, `credential`=secret) | token auto-mints |
 | **ScreenScraper** | metadata + media | software `devid`/`devpassword` + account `ssid`/`sspassword` | forum (devid) + screenscraper.fr (account) | `screenscraper_devid/devpassword/ssid/sspassword` | `screenscraper_op_item` (`username`=ssid, `password`=sspassword) | no (devid is approval-gated) |
 | **SteamGridDB** | media | API key | steamgriddb.com/profile/preferences/api | `steamgriddb_api_key` | `steamgriddb_op_item` (field `credential`) | no |
@@ -138,6 +139,28 @@ Local archives are registered as **crawl mounts**:
 python3 config.py mount add <path> [rom|flat] [name]
 python3 config.py mounts
 ```
+
+### LaunchBox (desktop frontend)
+No credentials — LaunchBox is plain files on disk, so ludodex reads and writes it
+directly (no in-app bridge, unlike Playnite). It's a **meta-layer**, not a real
+source: imported games map to their underlying provider and only flag
+`in_launchbox` provenance. Point ludodex at the install root (the folder with
+`Data/`, `Images/`, `Videos/`, `Manuals/`) — locally or via a mounted network/Unraid
+share:
+```
+python3 config.py set launchbox_path <LaunchBox root>
+```
+Then every `update.sh` imports it, and you push the consolidated catalog + chosen
+art back with:
+```
+python3 launchbox_export.py            # copies art into <root>/Images/...
+python3 launchbox_export.py --link     # symlink art -> media_repo/<sha1> instead
+```
+**Reference mode (`--link` / `launchbox_media_mode=link`)** keeps a single stored
+copy of each asset (e.g. on Unraid) and points every frontend at it — use it when
+the LaunchBox `Images/` folder is on the same filesystem as `media_repo`. Close
+LaunchBox before exporting (it rewrites Platform XMLs on edit); ludodex upserts by a
+stable per-game GUID and never touches games you added by hand.
 
 ---
 
