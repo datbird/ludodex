@@ -195,6 +195,10 @@ SCHEMA = [
     ("media_repo", "",
      "Local content-addressed repo where CHOSEN media is materialized for "
      "export/sync/serving. Blank = <scripts-dir>/media."),
+    ("commercial_safe_only", "0",
+     "If 1, run only providers cleared for commercial use without a separate "
+     "license (see 'config.py integrations'). Excludes ScreenScraper and "
+     "community/publisher art until you have authorization. Default 0."),
     # --- remote sync (push the catalog to a remote DB mirror) ---
     ("sync_target", "",
      "Where `update.sh` pushes the catalog after a rebuild: blank (off), "
@@ -698,6 +702,37 @@ NO_AUTH_NOTE = ("emulation/archive (local ROM index + crawl mounts), Steam-grid 
                 "local art, Steam CDN art, and IGDB images (reuses IGDB creds) "
                 "need no separate credential.")
 
+# Commercial-use posture per integration WITHOUT separate licensing. Conservative
+# by design: this drives an opt-in "commercial mode" (commercial_safe_only) that
+# excludes data sources not cleared for a paid/hosted product, so the codebase is
+# ready for that pivot without rework. ScreenScraper is free/non-commercial unless
+# you obtain their prior authorization; community/publisher ART is IP-gated; your
+# own ownership data and your own infrastructure are fine. (id -> (ok, note))
+COMMERCIAL = {
+    "steam":        (True,  "reading your own owned-games list"),
+    "epic":         (True,  "your own ownership data"),
+    "gog":          (True,  "your own ownership data"),
+    "itch":         (True,  "your own ownership data"),
+    "ea":           (True,  "your own ownership data"),
+    "igdb":         (True,  "commercial terms exist (verify current terms + attribution)"),
+    "screenscraper": (False, "free/non-commercial by default — needs ScreenScraper's prior authorization"),
+    "steamgriddb":  (False, "community/publisher art — IP-gated"),
+    "esde":         (False, "your local files, but the art derives from ScreenScraper — same IP posture"),
+    "pocketbase":   (True,  "your own infrastructure"),
+    "firebase":     (True,  "your own infrastructure"),
+}
+
+
+def commercial_ok(provider):
+    """True if this provider's data is cleared for commercial use without a
+    separate license. Unknown providers default to True (treated as own-data)."""
+    return COMMERCIAL.get(provider, (True, ""))[0]
+
+
+def commercial_safe_only():
+    """When set, the engine should run only commercially-cleared providers."""
+    return get_bool("commercial_safe_only", False)
+
 
 def _has_cred(it):
     """Best-effort 'is this integration configured?' for the status column."""
@@ -728,10 +763,15 @@ def _has_cred(it):
 
 def print_integration(it, detail=True):
     mark = "[ok]" if _has_cred(it) else "[  ]"
-    print("%s %-14s %-9s %s" % (mark, it["id"], it["kind"], it["name"]))
+    cok, cnote = COMMERCIAL.get(it["id"], (True, ""))
+    tag = "commercial:yes" if cok else "commercial:NO"
+    print("%s %-14s %-9s %-34s %s" % (mark, it["id"], it["kind"], it["name"], tag))
     if not detail:
         return
     print("    %s" % it["purpose"])
+    print("    commercial use: %s%s" % ("OK without a separate license" if cok
+                                        else "NOT without authorization",
+                                        " — " + cnote if cnote else ""))
     if it.get("url") and it["url"].startswith("http"):
         print("    obtain: %s" % it["url"])
     for i, s in enumerate(it["steps"], 1):

@@ -274,6 +274,19 @@ or desktop-app integration).
 
 ---
 
+## Commercial use
+
+Each integration carries a **commercial posture** (shown by `config.py
+integrations`): whether its data is cleared for a paid/hosted product *without a
+separate license*. Your own ownership data and infrastructure are fine; **IGDB**
+has commercial terms (verify + attribute); **ScreenScraper** is free/non-commercial
+unless you obtain their prior authorization (a fresh request to their team), and
+**community/publisher art** (SteamGridDB, and ES-DE art which derives from
+ScreenScraper) is IP-gated. Setting `commercial_safe_only=1` is intended to run
+only the cleared providers — keep a commercial build standing on IGDB + members'
+own ownership/library data + user-owned media, with the rest as license-gated
+enrichers.
+
 ## Onboarding a fresh machine
 
 `./setup.sh` runs a guided wizard that initializes config and walks through obtaining
