@@ -27,6 +27,9 @@ firebase*.json
 .gogchk
 # error logs
 *.err
+# server runtime
+*.log
+*.pid
 
 # --- python ---
 __pycache__/

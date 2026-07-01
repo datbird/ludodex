@@ -69,6 +69,9 @@ the `media/` content-addressed repo (`<sha1>.<ext>`). The Deck-local ROM index i
   `origin` provenance, changelog, conflict awareness), and the Build-now / Next /
   Someday docket. **Selection policy** is the one open design decision.
 - **`HANDOFF.md`** — this file.
+- **`AI.md`** — how the AI features get model access (BYOAI): your own Claude
+  subscription vs. a developer API key, what each allows, and the (currently paused)
+  subscription Agent-SDK credit. Read before wiring AI auth.
 - **`skills/*/SKILL.md`** — the 5 Claude skills: `games-update`, `games-query`,
   `games-auth`, `games-sync`, `games-playnite`.
 
@@ -197,9 +200,13 @@ the chosen repo small and fills it lazily as assets are requested.
 
 ### 6.5 AI features (Claude — phased)
 
-Use the Anthropic API; tier the models by cost: **Haiku 4.5** for cheap
+Tier the models by cost: **Haiku 4.5** for cheap
 classification/extraction, **Sonnet 4.6** for most reasoning, **Opus 4.8** for the
-hardest calls. API key in `op://<vault>/...` (add an integration entry).
+hardest calls. **Model access is BYOAI — see `AI.md`** for the full rules: a self-hosting
+subscriber can run it on their own Claude **subscription** (Agent SDK / `claude -p`;
+currently draws from plan usage limits), while any multi-user/hosted deployment needs a
+**developer API key** (Anthropic / OpenRouter / etc.); a subscription includes no raw API
+credits. Store any API key per `AUTH.md`'s credential convention (add an integration entry).
 
 1. **NL search** — "co-op platformers I own playable on the Deck" → the model emits a
    structured catalog query (function-calling against the schema) + optional semantic
