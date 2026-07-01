@@ -84,6 +84,9 @@ def catalog():
     return owned, steam
 
 
+_SEEN_UNKNOWN_ESDE = set()
+
+
 def ext_kind_ok(ext, kind):
     """Sanity: the file extension must suit the canonical kind."""
     e = ext.lower()
@@ -108,10 +111,17 @@ def scan_esde(con, owned, now):
             if not os.path.isdir(sysdir):
                 continue
             platform = media.norm_system(system)
-            for mtype, kind in media.ESDE_TYPE_KIND.items():
+            for mtype in sorted(os.listdir(sysdir)):
                 tdir = os.path.join(sysdir, mtype)
                 if not os.path.isdir(tdir):
                     continue
+                kind = media.ESDE_TYPE_KIND.get(mtype)
+                if kind is None:            # unknown folder -> classify, never drop
+                    kind = "other"
+                    if mtype not in _SEEN_UNKNOWN_ESDE:
+                        _SEEN_UNKNOWN_ESDE.add(mtype)
+                        print("media_index: esde unmapped media folder %r -> "
+                              "'other'" % mtype, file=sys.stderr)
                 for dirpath, _d, files in os.walk(tdir):
                     for fn in files:
                         base, ext = os.path.splitext(fn)

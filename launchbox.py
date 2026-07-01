@@ -13,6 +13,7 @@ Like Playnite, LaunchBox is a frontend META-LAYER, not a source: games map to
 their underlying provider; "in LaunchBox" is provenance only.
 """
 import re
+import sys
 import uuid
 
 # Stable GUID namespace so a game's LaunchBox <ID> is deterministic across
@@ -48,34 +49,85 @@ def media_filename(title, ext, index=0):
 # canonical kind -> the LaunchBox Images/ media-type folder we WRITE chosen art to.
 KIND_TO_LB = {
     "cover": "Box - Front",
+    "box_back": "Box - Back",
+    "box_3d": "Box - 3D",
+    "box_spine": "Box - Spine",
+    "physical_media": "Cart - Front",
     "background": "Fanart - Background",
+    "hero": "Fanart - Background",   # LB has no hero slot; nearest is fanart bg
+    "header": "Steam Banner",
     "logo": "Clear Logo",
+    "marquee": "Arcade - Marquee",
+    "arcade_cabinet": "Arcade - Cabinet",
+    "arcade_controls": "Arcade - Control Panel",
+    "pcb": "Arcade - Circuit Board",
+    "flyer": "Advertisement Flyer - Front",
     "screenshot": "Screenshot - Gameplay",
     "title_screen": "Screenshot - Game Title",
-    "box_3d": "Box - 3D",
-    "box_back": "Box - Back",
-    "physical_media": "Cart - Front",
-    "marquee": "Arcade - Marquee",
+    # no LB Images/ target for: icon, bezel, map, mix -> exported elsewhere/skipped.
     # video/manual go to Videos/ and Manuals/, not Images/ (handled separately)
 }
 
-# LaunchBox Images/ folder -> canonical kind, for IMPORT (covers fan-art + arcade
-# variants). Folders not listed are skipped.
+# LaunchBox Images/ folder (the official ImageTypes set, 47 types) -> canonical
+# kind, for IMPORT. Anything not listed is classified 'other' + logged (see
+# lb_kind()).
 LB_TO_KIND = {
+    # box / cover
     "Box - Front": "cover", "Box - Front - Reconstructed": "cover",
-    "Fanart - Box - Front": "cover",
-    "Box - Back": "box_back", "Box - 3D": "box_3d",
+    "Box - Full": "cover", "Fanart - Box - Front": "cover",
+    "Box - Back": "box_back", "Box - Back - Reconstructed": "box_back",
+    "Fanart - Box - Back": "box_back",
+    "Box - Spine": "box_spine",
+    "Box - 3D": "box_3d", "Cart - 3D": "box_3d",
+    # physical media
     "Cart - Front": "physical_media", "Cart - Back": "physical_media",
-    "Cart - 3D": "box_3d", "Disc": "physical_media",
+    "Disc": "physical_media", "Fanart - Cart - Front": "physical_media",
+    "Fanart - Cart - Back": "physical_media", "Fanart - Disc": "physical_media",
+    # marks / wide art
     "Clear Logo": "logo",
     "Fanart - Background": "background",
+    "Banner": "header", "Steam Banner": "header",
+    # screenshots
     "Screenshot - Gameplay": "screenshot",
-    "Screenshot - Game Title": "title_screen",
     "Screenshot - Game Select": "screenshot",
     "Screenshot - Game Over": "screenshot",
-    "Banner": "banner", "Steam Banner": "banner",
+    "Screenshot - High Scores": "screenshot",
+    "Screenshot - Game Title": "title_screen",
+    # promo
+    "Advertisement Flyer - Front": "flyer",
+    "Advertisement Flyer - Back": "flyer",
+    # arcade
     "Arcade - Marquee": "marquee",
+    "Arcade - Control Panel": "arcade_controls",
+    "Arcade - Controls Information": "arcade_controls",
+    "Arcade - Cabinet": "arcade_cabinet",
+    "Arcade - Circuit Board": "pcb",
+    # store-service scraped art
+    "Steam - Poster": "cover", "GOG - Poster": "cover",
+    "Epic Games - Poster": "cover", "Origin - Poster": "cover",
+    "Amazon - Poster": "cover",
+    "Steam - Screenshot": "screenshot", "GOG - Screenshot": "screenshot",
+    "Epic Games - Screenshot": "screenshot", "Origin - Screenshot": "screenshot",
+    "Amazon - Screenshot": "screenshot",
+    "Epic Games - Background": "background", "Origin - Background": "background",
+    "Amazon - Background": "background", "Uplay - Background": "background",
+    "Uplay - Thumbnail": "icon",
 }
+
+_SEEN_UNKNOWN_LB = set()
+
+
+def lb_kind(folder):
+    """LaunchBox Images/ folder name -> canonical kind. Unknown folders map to
+    'other' (never dropped) and are logged once."""
+    k = LB_TO_KIND.get(folder)
+    if k is None:
+        k = "other"
+        if folder not in _SEEN_UNKNOWN_LB:
+            _SEEN_UNKNOWN_LB.add(folder)
+            print("launchbox: unmapped Images/ folder %r -> 'other'" % folder,
+                  file=sys.stderr)
+    return k
 
 # Video / manual roots (sibling of Images/), matched by sanitized Title too.
 VIDEO_DIR = "Videos"

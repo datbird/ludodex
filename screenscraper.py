@@ -49,17 +49,26 @@ SYSTEM_ID = {
 
 # ScreenScraper media `type` -> our canonical media kind (media.py KINDS).
 MEDIA_KIND = {
-    "box-2D": "cover", "flyer": "cover",
-    "box-3D": "box_3d", "box-2D-back": "box_back",
-    "support-2D": "physical_media", "support-texture": "physical_media",
+    "box-2D": "cover", "steamgrid": "cover",
+    "box-2D-back": "box_back",
+    "box-2D-side": "box_spine",
+    "box-3D": "box_3d", "box-3D-side": "box_3d", "box-texture": "box_3d",
+    "support-2D": "physical_media", "support-2D-back": "physical_media",
+    "support-texture": "physical_media",
     "wheel": "logo", "wheel-hd": "logo", "wheel-carbon": "logo",
     "wheel-steel": "logo",
     "ss": "screenshot", "sstitle": "title_screen", "fanart": "background",
-    "screenmarquee": "marquee", "screenmarquee-hd": "marquee", "marquee": "marquee",
+    "marquee": "marquee", "screenmarquee": "marquee",
+    "screenmarquee-hd": "marquee", "screenmarqueesmall": "marquee",
+    "bezel-16-9": "bezel", "bezel-4-3": "bezel",
+    "flyer": "flyer", "maps": "map",
     "mixrbv1": "mix", "mixrbv2": "mix",
     "video": "video", "video-normalized": "video", "manuel": "manual",
     "icon": "icon",
 }
+
+# raw types we've already warned about (avoid log spam)
+_SEEN_UNKNOWN = set()
 
 
 def systeme_id(platform):
@@ -234,14 +243,23 @@ def extract_metadata(jeu, region="us"):
 
 
 def extract_media(jeu):
-    """jeu -> [{kind, type, url, region, format}] for known media types."""
+    """jeu -> [{kind, type, url, region, format}]. Unknown types are classified
+    as 'other' (never dropped) and the raw type is logged once."""
     out = []
     for m in (jeu or {}).get("medias") or []:
-        kind = MEDIA_KIND.get(m.get("type"))
-        if kind and m.get("url"):
-            out.append({"kind": kind, "type": m["type"], "url": m["url"],
-                        "region": m.get("region"), "format": m.get("format"),
-                        "crc": m.get("crc")})
+        raw = m.get("type")
+        if not m.get("url"):
+            continue
+        kind = MEDIA_KIND.get(raw)
+        if kind is None:
+            kind = "other"
+            if raw not in _SEEN_UNKNOWN:
+                _SEEN_UNKNOWN.add(raw)
+                print("screenscraper: unmapped media type %r -> 'other'" % raw,
+                      file=sys.stderr)
+        out.append({"kind": kind, "type": raw, "url": m["url"],
+                    "region": m.get("region"), "format": m.get("format"),
+                    "crc": m.get("crc")})
     return out
 
 

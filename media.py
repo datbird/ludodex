@@ -22,23 +22,43 @@ media mount (config.py media-mount add <path> esde).
 #  canonical media kinds — the vocabulary every provider maps into
 # --------------------------------------------------------------------------- #
 KINDS = (
-    "cover",          # box front / portrait capsule / grid portrait
-    "background",     # fanart / hero / key art
-    "logo",           # clear logo / marquee / wheel art
+    # portrait box / cover family
+    "cover",          # box front / portrait capsule / library grid portrait
+    "box_back",       # rear box art
+    "box_3d",         # 3D box render
+    "box_spine",      # box spine / side
+    "physical_media",  # cartridge / disc / support label
+    # wide / landscape art (kept distinct)
+    "background",     # fanart / store page background
+    "hero",           # wide library hero banner (Steam library_hero, SGDB hero)
+    "header",         # capsule / banner (~460x215; Steam header, SGDB h-grids)
+    # marks
+    "logo",           # clear logo / wheel art (transparent)
     "icon",           # small square app icon
+    # arcade
+    "marquee",        # arcade marquee sign
+    "bezel",          # screen bezel / overlay / backdrop
+    "arcade_cabinet",  # full cabinet photo / render
+    "arcade_controls",  # control panel / CPO / controls info
+    "pcb",            # circuit board
+    # screens / composite
     "screenshot",     # in-game screenshot
     "title_screen",   # title / boot screen
-    "box_3d",         # 3D box render
-    "box_back",       # rear box art
-    "physical_media",  # cartridge / disc
-    "mix",            # ES-DE composite "miximage"
+    "mix",            # ES-DE / Recalbox composite "miximage"
+    # promo / misc
+    "flyer",          # advertisement flyer / promo poster
+    "map",            # game world / level map
     "video",          # preview / trailer
     "manual",         # scanned manual (pdf)
+    "other",          # catch-all — anything unrecognized (never dropped; logged)
 )
 
-# Single-asset kinds (one chosen per game); the rest can have many (screenshots).
-SCALAR_KINDS = ("cover", "background", "logo", "icon", "title_screen",
-                "box_3d", "box_back", "mix")
+# Single-asset kinds (one chosen per game); the rest can have many (screenshots,
+# physical_media, flyer, map, video, manual, other).
+SCALAR_KINDS = ("cover", "box_back", "box_3d", "box_spine",
+                "background", "hero", "header", "logo", "icon",
+                "marquee", "bezel", "arcade_cabinet", "arcade_controls", "pcb",
+                "title_screen", "mix")
 
 # --------------------------------------------------------------------------- #
 #  ES-DE (EmulationStation Desktop Edition) — used by RetroDECK *and* EmuDeck
@@ -48,7 +68,7 @@ SCALAR_KINDS = ("cover", "background", "logo", "icon", "title_screen",
 ESDE_TYPE_KIND = {
     "covers": "cover",
     "fanart": "background",
-    "marquees": "logo",
+    "marquees": "logo",          # ES-DE marquee = wheel/clear-logo art
     "screenshots": "screenshot",
     "titlescreens": "title_screen",
     "3dboxes": "box_3d",
@@ -57,6 +77,7 @@ ESDE_TYPE_KIND = {
     "miximages": "mix",
     "videos": "video",
     "manuals": "manual",
+    "custom": "other",           # user-supplied extra image
 }
 
 # ES-DE system short-name (folder) -> our catalog platform label (as stored in
@@ -98,8 +119,8 @@ def norm_system(esde_name):
 #  Steam custom-artwork grid (local) — ~/.steam/.../userdata/<id>/config/grid
 #  Files are keyed by Steam appid with a suffix that encodes the kind:
 #    <appid>p.png      -> cover     (600x900 portrait / library capsule)
-#    <appid>.png       -> background-ish landscape grid; treat as background
-#    <appid>_hero.png  -> background (hero banner)
+#    <appid>.png       -> header     (landscape grid / capsule)
+#    <appid>_hero.png  -> hero       (wide library hero banner)
 #    <appid>_logo.png  -> logo
 #    <appid>_icon.png  -> icon
 # --------------------------------------------------------------------------- #
@@ -109,7 +130,7 @@ def steamgrid_kind(filename):
     base, ext = os.path.splitext(filename)
     if ext.lower() not in (".png", ".jpg", ".jpeg", ".ico"):
         return None, None
-    for suffix, kind in (("_hero", "background"), ("_logo", "logo"),
+    for suffix, kind in (("_hero", "hero"), ("_logo", "logo"),
                          ("_icon", "icon")):
         if base.endswith(suffix):
             appid = base[: -len(suffix)]
@@ -117,7 +138,7 @@ def steamgrid_kind(filename):
     if base.endswith("p") and base[:-1].isdigit():     # <appid>p = portrait cover
         return base[:-1], "cover"
     if base.isdigit():                                  # <appid> = landscape grid
-        return base, "background"
+        return base, "header"
     return None, None
 
 
@@ -135,11 +156,22 @@ MEDIA_PROVIDERS = LOCAL_PROVIDERS + REMOTE_PROVIDERS
 PRIORITY = {
     "cover":        ["steamgrid", "esde", "screenscraper", "steam", "igdb", "steamgriddb", "playnite", "launchbox"],
     "background":   ["steamgrid", "steam", "screenscraper", "igdb", "steamgriddb", "esde", "playnite", "launchbox"],
+    "hero":         ["steamgrid", "steam", "steamgriddb", "igdb", "screenscraper", "launchbox"],
+    "header":       ["steamgrid", "steam", "steamgriddb", "launchbox", "screenscraper"],
     "logo":         ["steamgrid", "esde", "screenscraper", "steam", "igdb", "steamgriddb", "launchbox"],
     "icon":         ["steamgrid", "steamgriddb", "igdb", "screenscraper", "playnite"],
-    "title_screen": ["esde", "screenscraper"],
-    "box_3d":       ["esde", "screenscraper", "steamgriddb"],
-    "box_back":     ["esde", "screenscraper"],
+    "title_screen": ["esde", "screenscraper", "launchbox"],
+    "box_3d":       ["esde", "screenscraper", "steamgriddb", "launchbox"],
+    "box_back":     ["esde", "screenscraper", "launchbox"],
+    "box_spine":    ["screenscraper", "launchbox"],
+    "physical_media": ["esde", "screenscraper", "launchbox"],
+    "marquee":      ["esde", "screenscraper", "launchbox"],
+    "bezel":        ["screenscraper"],
+    "arcade_cabinet":  ["launchbox", "screenscraper"],
+    "arcade_controls": ["launchbox", "screenscraper"],
+    "pcb":          ["launchbox", "screenscraper"],
+    "flyer":        ["screenscraper", "launchbox"],
+    "map":          ["screenscraper"],
     "mix":          ["esde", "screenscraper"],
 }
 DEFAULT_PRIORITY = ["steamgrid", "esde", "screenscraper", "steam", "igdb",

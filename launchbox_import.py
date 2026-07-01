@@ -97,10 +97,10 @@ def scan_images(con, root, owned, now):
             continue
         system = lb.from_lb_platform(platform)
         for mtype in sorted(os.listdir(pdir)):
-            kind = lb.LB_TO_KIND.get(mtype)
-            if not kind:
-                continue
             mdir = os.path.join(pdir, mtype)
+            if not os.path.isdir(mdir):
+                continue
+            kind = lb.lb_kind(mtype)     # unknown folders -> 'other' (+ logged)
             for dirpath, _d, files in os.walk(mdir):   # recurse Region subfolders
                 for fn in files:
                     base, ext = os.path.splitext(fn)

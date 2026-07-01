@@ -31,11 +31,12 @@ import config
 INDEX = os.path.join(DIR, "media-index.sqlite")
 META_CACHE = os.path.join(DIR, "metadata-cache.sqlite")
 
-# Steam store CDN. library_600x900 (portrait cover), library_hero (background),
-# logo. Not every appid has every asset — verified lazily when materialized.
+# Steam store CDN. library_600x900 (portrait cover), library_hero (wide hero),
+# header.jpg (capsule/header banner), logo. Not every appid has every asset —
+# verified lazily when materialized.
 STEAM_CDN = "https://steamcdn-a.akamaihd.net/steam/apps/%s/%s"
-STEAM_ART = {"cover": "library_600x900.jpg", "background": "library_hero.jpg",
-             "logo": "logo.png"}
+STEAM_ART = {"cover": "library_600x900.jpg", "hero": "library_hero.jpg",
+             "header": "header.jpg", "logo": "logo.png"}
 
 # IGDB image sizes per canonical kind (https://api-docs.igdb.com/#images).
 IGDB_SIZE = {"cover": "t_cover_big", "background": "t_1080p",
@@ -163,13 +164,13 @@ def fetch_steamgriddb(con, now, limit=None):
     # gap targets: owned steam games missing a chosen-eligible kind locally/remote
     have = {(nk, k) for nk, k in con.execute(
         "SELECT norm_key, kind FROM media WHERE kind IN "
-        "('cover','background','logo','icon')")}
+        "('cover','hero','logo','icon')")}
     games = steam_games()
     todo = [(a, nk) for a, nk in games.items()
-            if any((nk, k) not in have for k in ("cover", "background", "logo"))]
+            if any((nk, k) not in have for k in ("cover", "hero", "logo"))]
     if limit:
         todo = todo[:limit]
-    KINDS = {"grids": ("cover", "600x900"), "heroes": ("background", None),
+    KINDS = {"grids": ("cover", "600x900"), "heroes": ("hero", None),
              "logos": ("logo", None), "icons": ("icon", None)}
     n = 0
     for appid, nk in todo:
