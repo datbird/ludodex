@@ -257,7 +257,8 @@ CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
 -- Playnite-parity attributes:
 CREATE TABLE source_attrs (game_id INTEGER, source TEXT, source_id TEXT,
   attrs_json TEXT);                       -- lossless per-provider record (export)
-CREATE TABLE game_attributes (game_id INTEGER, kind TEXT, value TEXT);  -- queryable
+CREATE TABLE game_attributes (game_id INTEGER, kind TEXT, value TEXT,
+  origin TEXT DEFAULT '');  -- origin = comma-joined source(s): steam/igdb/ai/…
 CREATE TABLE metadata_links (game_id INTEGER, provider TEXT, provider_id TEXT,
   slug TEXT, url TEXT);                    -- canonical ids from metadata providers
 CREATE TABLE game_tags (game_id INTEGER, tag TEXT, origin TEXT);  -- origin: playnite/ludodex/…
@@ -304,7 +305,7 @@ for key, data in games_attrs.items():
     gid = key_to_gid.get(key)
     if gid is None:
         continue
-    agg = {}                       # kind -> set of values (multi) / single (scalar)
+    agg = {}                       # kind -> {value: set(source origins)}
     for source, sid, rec, origin in data["src"]:
         cur.execute("INSERT INTO source_attrs(game_id,source,source_id,attrs_json)"
                     " VALUES(?,?,?,?)",
@@ -317,14 +318,15 @@ for key, data in games_attrs.items():
                     tag_map.setdefault(gid, {}).setdefault(str(v), set()).add(
                         origin or "import")
                 else:
-                    agg.setdefault(k, set()).add(str(v))
+                    agg.setdefault(k, {}).setdefault(str(v), set()).add(source)
         for k in SCALAR_KINDS:
             v = rec.get(k)
             if v not in (None, "", False):
-                agg.setdefault(k, set()).add(str(v))
-    rows = [(gid, k, v) for k, vs in agg.items() for v in sorted(vs)]
-    cur.executemany("INSERT INTO game_attributes(game_id,kind,value) VALUES(?,?,?)",
-                    rows)
+                agg.setdefault(k, {}).setdefault(str(v), set()).add(source)
+    rows = [(gid, k, v, ",".join(sorted(o))) for k, vmap in agg.items()
+            for v, o in sorted(vmap.items())]
+    cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                    "VALUES(?,?,?,?)", rows)
 
 # ---- user-defined tags (origin 'ludodex', durable in tags.sqlite) ----
 TAGS_DB = os.path.join(DIR, "tags.sqlite")
@@ -358,9 +360,10 @@ for gid, tags in tag_map.items():
     for tag, origins in tags.items():
         for o in sorted(origins):
             _gt_rows.append((gid, tag, o))
-        _ga_rows.append((gid, "tags", tag))
+        _ga_rows.append((gid, "tags", tag, ",".join(sorted(origins))))
 cur.executemany("INSERT INTO game_tags(game_id,tag,origin) VALUES(?,?,?)", _gt_rows)
-cur.executemany("INSERT INTO game_attributes(game_id,kind,value) VALUES(?,?,?)", _ga_rows)
+cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                "VALUES(?,?,?,?)", _ga_rows)
 
 # ---- IGDB enrichment (metadata provider, fill-gaps only) ----
 # IGDB is NOT a source: it only fills attribute KINDS a game still lacks. If a
@@ -404,11 +407,11 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
                 continue
             for v in (val if isinstance(val, list) else [val]):
                 if v not in (None, ""):
-                    new_rows.append((gid, kind, str(v)))
+                    new_rows.append((gid, kind, str(v), "igdb"))
             existing.add(kind)
         if new_rows:
-            cur.executemany("INSERT INTO game_attributes(game_id,kind,value) "
-                            "VALUES(?,?,?)", new_rows)
+            cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                            "VALUES(?,?,?,?)", new_rows)
             n_attr += len(new_rows)
 
 # ---- ScreenScraper enrichment (metadata provider, fill-gaps; emulation) ----
@@ -450,11 +453,11 @@ if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
                 continue
             for v in (val if isinstance(val, list) else [val]):
                 if v not in (None, ""):
-                    new_rows.append((gid, kind, str(v)))
+                    new_rows.append((gid, kind, str(v), "screenscraper"))
             existing.add(kind)
         if new_rows:
-            cur.executemany("INSERT INTO game_attributes(game_id,kind,value) "
-                            "VALUES(?,?,?)", new_rows)
+            cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                            "VALUES(?,?,?,?)", new_rows)
             ss_attr += len(new_rows)
 
 # ---- AI metadata supplement (accepted findings, fill-gaps, LOWEST precedence) ----
@@ -474,11 +477,11 @@ try:
                 continue
             for v in (val if isinstance(val, list) else [val]):
                 if v not in (None, ""):
-                    new_rows.append((gid, kind, str(v)))
+                    new_rows.append((gid, kind, str(v), "ai"))
             existing.add(kind)
         if new_rows:
-            cur.executemany("INSERT INTO game_attributes(game_id,kind,value) "
-                            "VALUES(?,?,?)", new_rows)
+            cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                            "VALUES(?,?,?,?)", new_rows)
             ai_attr += len(new_rows)
 except Exception as e:                             # never let AI supplements break a build
     print("# AI supplement merge skipped: %s" % e)

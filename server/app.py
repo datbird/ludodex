@@ -34,6 +34,7 @@ import titlenorm       # noqa: E402  shared title -> norm_key (matches build_lib
 import devices         # noqa: E402  device connections + library-manager pull
 import fileops         # noqa: E402  file-operations engine (profiles + runbooks)
 import aimeta          # noqa: E402  AI metadata audit/supplement store + context
+import overrides       # noqa: E402  per-attribute provenance overrides (re-pointing)
 from . import ai       # noqa: E402  AI features (server package)
 
 LIBRARY_DB = os.path.join(DIR, "game-library.sqlite")
@@ -72,6 +73,7 @@ DATABASES = [
     ("connections", "Device connections", "connections.sqlite", "durable"),
     ("fileops", "File operations", "file-profiles.sqlite", "durable"),
     ("aimeta", "AI metadata", "ai-metadata.sqlite", "durable"),
+    ("overrides", "Attribute overrides", "attr-overrides.sqlite", "durable"),
     ("ra", "RetroAchievements", "ra.sqlite", "durable"),
     ("library", "Game library", "game-library.sqlite", "output"),
     ("media", "Media index", "media-index.sqlite", "output"),
@@ -1399,10 +1401,15 @@ def game_detail(norm_key: str):
                 s["os"] = ["windows"]  # Epic Games Store is Windows-only (no Linux client)
             else:
                 s["os"] = None
-        attrs = {}
-        for r in con.execute("SELECT kind, value FROM game_attributes "
+        attrs = {}                       # kind -> [values] (compat)
+        prov = {}                        # kind -> [{value, origins, ai}] provenance
+        for r in con.execute("SELECT kind, value, origin FROM game_attributes "
                              "WHERE game_id=?", (gid,)):
             attrs.setdefault(r["kind"], []).append(r["value"])
+            origins = [o for o in (r["origin"] or "").split(",") if o]
+            prov.setdefault(r["kind"], []).append(
+                {"value": r["value"], "origins": origins, "ai": "ai" in origins})
+        ov = overrides.overrides_for(norm_key)   # user's chosen canonical per kind
         links = [dict(r) for r in con.execute(
             "SELECT provider, provider_id, slug, url FROM metadata_links "
             "WHERE game_id=?", (gid,))]
@@ -1414,6 +1421,8 @@ def game_detail(norm_key: str):
             "title": g["canonical_title"],
             "sources": sources,
             "attributes": attrs,
+            "attribute_provenance": prov,     # per-value origins (+ ai flag → ✨)
+            "attribute_overrides": ov,        # user re-pointed canonical values
             "tags": _game_tags(con, gid, norm_key),
             "scores": _score_breakdown(con, norm_key),
             "metadata_links": links,
@@ -1422,6 +1431,29 @@ def game_detail(norm_key: str):
         }
     finally:
         con.close()
+
+
+@app.post("/api/games/{norm_key}/attribute")
+def set_attribute_override(norm_key: str, body: dict = Body(...)):
+    """Re-point one attribute to a chosen value + source (another provider's value
+    or a hand-typed 'manual' one). Body: {kind, value, origin}."""
+    body = body or {}
+    kind = (body.get("kind") or "").strip()
+    value = body.get("value")
+    if not kind or value in (None, ""):
+        raise HTTPException(400, "kind and value are required")
+    try:
+        overrides.set_override(norm_key, kind, value, body.get("origin") or "manual")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"override": overrides.overrides_for(norm_key).get(kind)}
+
+
+@app.delete("/api/games/{norm_key}/attribute/{kind}")
+def clear_attribute_override(norm_key: str, kind: str):
+    """Remove an override — the attribute reverts to its provider-derived value(s)."""
+    overrides.clear_override(norm_key, kind)
+    return {"cleared": True}
 
 
 # Friendly names + type for each rating source (drives the per-source display).
