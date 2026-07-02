@@ -33,6 +33,7 @@ import media_choose    # noqa: E402  reuse _materialize_row (non-destructive)
 import titlenorm       # noqa: E402  shared title -> norm_key (matches build_library)
 import devices         # noqa: E402  device connections + library-manager pull
 import fileops         # noqa: E402  file-operations engine (profiles + runbooks)
+import aimeta          # noqa: E402  AI metadata audit/supplement store + context
 from . import ai       # noqa: E402  AI features (server package)
 
 LIBRARY_DB = os.path.join(DIR, "game-library.sqlite")
@@ -70,6 +71,7 @@ DATABASES = [
     ("ai_usage", "AI usage", "ai-usage.sqlite", "durable"),
     ("connections", "Device connections", "connections.sqlite", "durable"),
     ("fileops", "File operations", "file-profiles.sqlite", "durable"),
+    ("aimeta", "AI metadata", "ai-metadata.sqlite", "durable"),
     ("ra", "RetroAchievements", "ra.sqlite", "durable"),
     ("library", "Game library", "game-library.sqlite", "output"),
     ("media", "Media index", "media-index.sqlite", "output"),
@@ -1209,6 +1211,19 @@ def _jobs_list():
             "cancelable": live, "restartable": r["status"] in
             ("paused", "partial", "planned") or r["pending"] > 0,
             "deletable": not live})
+    for s in aimeta.scans_list(limit=20):
+        jid = "aimeta:%d" % s["id"]
+        rec = _JOBS.get(jid)
+        live = bool(rec and rec["thread"] and rec["thread"].is_alive())
+        out.append({
+            "id": jid, "kind": "aimeta", "run_id": s["id"],
+            "label": "Metadata scan — %s" % s["target"],
+            "status": "running" if live else s["status"],
+            "detail": "%d findings" % s["findings"], "error": (rec or {}).get("error"),
+            "progress": {"done": s["done"], "total": s["total"], "failed": 0},
+            "when": s["finished"] or s["created"],
+            "cancelable": live, "restartable": not live and s["done"] < s["total"],
+            "deletable": not live})
     return out
 
 
@@ -1235,6 +1250,20 @@ def jobs_restart(jid: str):
     if jid.startswith("run:"):
         _start_runbook_job(int(jid.split(":", 1)[1]))
         return {"restarted": True, "id": jid}
+    if jid.startswith("aimeta:"):
+        old = aimeta.scan_get(int(jid.split(":", 1)[1]))
+        if not old:
+            raise HTTPException(404, "no such scan")
+        # re-query the target (unmatched/missing naturally resume; others re-scan)
+        remaining = max(1, (old["total"] or 1) - (old["done"] or 0))
+        keys = aimeta.targets(old["target"], remaining)
+        if not keys:
+            raise HTTPException(400, "nothing left to scan for that target")
+        rid = aimeta.scan_new(old["target"], len(keys))
+        _start_job("aimeta:%d" % rid, "aimeta", "Metadata scan (%s)" % old["target"],
+                   lambda stop: _aimeta_scan(rid, keys, stop), run_id=rid,
+                   cancelable=True)
+        return {"restarted": True, "id": "aimeta:%d" % rid}
     raise HTTPException(400, "start a library sync from the Library page")
 
 
@@ -1251,7 +1280,94 @@ def jobs_delete(jid: str):
         fileops.run_delete(rid)
         _JOBS.pop(jid, None)
         return {"deleted": True}
+    if jid.startswith("aimeta:"):
+        rid = int(jid.split(":", 1)[1])
+        rec = _JOBS.get(jid)
+        if rec and rec["thread"] and rec["thread"].is_alive():
+            rec["cancel"].set()
+        aimeta.scan_delete(rid)                 # keeps the findings, drops the run
+        _JOBS.pop(jid, None)
+        return {"deleted": True}
     raise HTTPException(400, "unknown job")
+
+
+# --------------------------------------------------------------------------- #
+#  AI metadata audit & supplement: scan games → the `metadata` AI area audits
+#  the provider match, identifies unmatched games, and fills attribute gaps.
+#  Findings are proposals the user accepts/rejects; accepted supplements show
+#  in the detail view and bake into the catalog on the next rebuild.
+# --------------------------------------------------------------------------- #
+def _aimeta_scan(run_id, norm_keys, should_stop):
+    """Background scan body: analyze each game, store actionable findings."""
+    done = found = 0
+    lib = aimeta._lib()
+    try:
+        for nk in norm_keys:
+            if should_stop():
+                break
+            try:
+                ctx = aimeta.game_context(nk, lib=lib)
+                if ctx:
+                    res = ai.analyze_game(ctx)
+                    model = ai.model_for_area("metadata")
+                    if aimeta.store_finding(run_id, ctx, res, model):
+                        found += 1
+            except Exception:                    # one game's failure never aborts
+                pass
+            done += 1
+            aimeta.scan_progress(run_id, done, found)
+    finally:
+        lib.close()
+    aimeta.scan_progress(run_id, done, found)
+    aimeta.scan_finish(run_id, "paused" if done < len(norm_keys) else "done")
+
+
+@app.post("/api/aimeta/scan")
+def aimeta_scan(body: dict = Body(default={})):
+    """Start a background metadata scan. Body: {target, limit}. target =
+    'unmatched' | 'matched' | 'missing' | 'all'."""
+    body = body or {}
+    target = body.get("target", "unmatched")
+    if target not in ("unmatched", "matched", "missing", "all"):
+        raise HTTPException(400, "bad target")
+    try:
+        ai._resolve(ai.provider_for_area("metadata"), ai.model_for_area("metadata"))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    limit = max(1, min(int(body.get("limit") or 100), 2000))
+    keys = aimeta.targets(target, limit)
+    if not keys:
+        raise HTTPException(400, "no games match that target")
+    run_id = aimeta.scan_new(target, len(keys))
+    _start_job("aimeta:%d" % run_id, "aimeta", "Metadata scan (%s)" % target,
+               lambda stop: _aimeta_scan(run_id, keys, stop),
+               run_id=run_id, cancelable=True)
+    return {"run_id": run_id, "target": target, "count": len(keys)}
+
+
+@app.get("/api/aimeta/targets")
+def aimeta_targets():
+    """How many games each scan target would cover (for the scan UI)."""
+    return {t: aimeta.target_count(t) for t in ("unmatched", "matched", "missing", "all")}
+
+
+@app.get("/api/aimeta/findings")
+def aimeta_findings(status: str = Query(None), kind: str = Query(None)):
+    return {"findings": aimeta.findings_list(status, kind), "counts": aimeta.findings_counts()}
+
+
+@app.get("/api/aimeta/scans")
+def aimeta_scans():
+    return {"scans": aimeta.scans_list()}
+
+
+@app.post("/api/aimeta/finding/{fid}/{action}")
+def aimeta_finding_action(fid: int, action: str):
+    if action not in ("accept", "reject", "reset"):
+        raise HTTPException(400, "action must be accept|reject|reset")
+    aimeta.set_status(fid, {"accept": "accepted", "reject": "rejected",
+                            "reset": "proposed"}[action])
+    return {"findings": aimeta.findings_list(), "counts": aimeta.findings_counts()}
 
 
 @app.get("/api/games/{norm_key}")
@@ -1293,6 +1409,7 @@ def game_detail(norm_key: str):
             "scores": _score_breakdown(con, norm_key),
             "metadata_links": links,
             "media_kinds": media_kinds,
+            "ai_meta": aimeta.finding_for(norm_key),   # AI audit/supplement, if any
         }
     finally:
         con.close()

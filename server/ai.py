@@ -223,6 +223,10 @@ AREAS = [
     {"id": "filecmd", "name": "File-ops natural language", "status": "live",
      "description": "Turns a plain-English request ('put every game in its own "
                     "folder and build m3u playlists') into a file-operations plan."},
+    {"id": "metadata", "name": "Metadata search & supplement", "status": "live",
+     "description": "Audits provider matches (catches wrong ones like a remake "
+                    "matched to the original), identifies games no provider matched, "
+                    "and fills attribute gaps from the model's game knowledge."},
 ]
 AREA_IDS = {a["id"] for a in AREAS}
 VISION_AREAS = {a["id"] for a in AREAS if a.get("vision")}
@@ -300,6 +304,29 @@ DEFAULT_PROMPTS = {
         '  "explanation" : one short sentence on what will happen\n'
         "Choose a saved profile when one matches; otherwise craft a minimal target."
     ),
+    "metadata": (
+        "You are a video-game metadata expert auditing and enriching ONE game's "
+        "catalog entry. You get the game's title, the systems/stores it appears on, "
+        "its CURRENT provider match (if any), attributes already known, and a list of "
+        "MISSING attributes to fill. Do all that apply:\n"
+        "1) VERIFY the current match — is it truly the SAME game? Watch for remakes, "
+        "remasters, 'Anniversary'/'HD'/'Definitive' editions, and sequels that share a "
+        "name. Example: 'Tomb Raider: Anniversary' (2007) is NOT 'Tomb Raider' (1996) — "
+        "flag that as wrong.\n"
+        "2) If there is NO current match, IDENTIFY the game (canonical title + year).\n"
+        "3) SUPPLEMENT — give best-known values ONLY for the listed missing attributes.\n"
+        "Use only well-established facts. If unsure, LOWER the confidence and say so — "
+        "never invent a value.\n"
+        "Respond with ONLY a JSON object (no prose, no code fence):\n"
+        '{"match": {"status": "ok"|"wrong"|"unmatched"|"unsure", "confidence": 0..1, '
+        '"issue": "<short reason if wrong>", "suggested_title": "<canonical title>", '
+        '"suggested_year": <int or null>}, '
+        '"attributes": {"<missing_kind>": <string or array of strings>}, '
+        '"notes": "<one short sentence>"}\n'
+        "Attribute formats: release_year=\"YYYY\"; genres/themes/game_modes/"
+        "player_perspectives/developers/publishers=arrays of strings; "
+        "description=one paragraph string."
+    ),
 }
 # <<token>> placeholders each area's prompt fills in (surfaced in the editor).
 PROMPT_VARS = {
@@ -308,6 +335,7 @@ PROMPT_VARS = {
     "identify": [], "dedupe": [],
     "fileprofile": ["variables", "systems", "current"],
     "filecmd": ["profiles", "variables", "systems", "current"],
+    "metadata": [],
 }
 
 
@@ -756,6 +784,48 @@ def file_command(command, profiles_text, systems_text, variables_text, current,
     return obj
 
 
+# ------------------------------------------------------- metadata audit/supplement
+def _metadata_user(game):
+    """Format one game's state into the user message for the metadata area.
+    `game` = {title, systems:[...], sources:[...], match:{title,year,slug}|None,
+              have:{kind:[values]}, missing:[kinds]}."""
+    lines = ["Game title: %s" % game.get("title", "")]
+    if game.get("systems"):
+        lines.append("Systems/platforms: %s" % ", ".join(game["systems"]))
+    if game.get("sources"):
+        lines.append("Owned via: %s" % ", ".join(game["sources"]))
+    m = game.get("match")
+    if m:
+        yr = (" (%s)" % m.get("year")) if m.get("year") else ""
+        lines.append("Current provider match: \"%s\"%s [igdb:%s]"
+                     % (m.get("title", "?"), yr, m.get("slug", "")))
+    else:
+        lines.append("Current provider match: NONE (no provider matched this game)")
+    have = game.get("have") or {}
+    if have:
+        shown = "; ".join("%s=%s" % (k, ", ".join(map(str, v))[:80])
+                          for k, v in have.items())
+        lines.append("Known attributes: " + shown)
+    lines.append("MISSING attributes to fill: %s"
+                 % (", ".join(game.get("missing") or []) or "(none)"))
+    return "\n".join(lines)
+
+
+def analyze_game(game, provider=None, model=None):
+    """Audit + enrich one game. `game` is the context dict built by the caller.
+    Returns {match:{status,confidence,issue,suggested_title,suggested_year},
+             attributes:{kind:value}, notes}. Raises on error."""
+    provider, key, model = _resolve(provider or provider_for_area("metadata"),
+                                    model or model_for_area("metadata"))
+    system = area_prompt("metadata")
+    obj = _json(_complete_text(provider, key, model, system, _metadata_user(game)))
+    if not isinstance(obj, dict):
+        raise RuntimeError("model did not return a metadata object")
+    obj.setdefault("match", {})
+    obj.setdefault("attributes", {})
+    return obj
+
+
 # ------------------------------------------------------------------ provider calls
 def _call_anthropic(key, model, system, user):
     import anthropic
@@ -787,11 +857,16 @@ def _call_openai(key, model, system, user, base_url=None):
 def _call_gemini(key, model, system, user):
     from google import genai
     from google.genai import types
-    client = genai.Client(api_key=key)
+    # cap the HTTP wait so a hung request can never stall a long batch/scan
+    try:
+        client = genai.Client(api_key=key,
+                              http_options=types.HttpOptions(timeout=90_000))
+    except Exception:
+        client = genai.Client(api_key=key)
     cfg = dict(
         system_instruction=system,
         response_mime_type="application/json",
-        max_output_tokens=1024,
+        max_output_tokens=2048,
     )
     # Disable "thinking" — 2.5-flash spends output tokens on thinking and can
     # truncate the JSON to just "{". Not all models accept it, so degrade safely.

@@ -457,6 +457,34 @@ if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
                             "VALUES(?,?,?)", new_rows)
             ss_attr += len(new_rows)
 
+# ---- AI metadata supplement (accepted findings, fill-gaps, LOWEST precedence) ----
+# Only attributes the user accepted in the metadata review, and only for kinds no
+# owned/provider source supplied — AI never overrides real data.
+ai_attr = 0
+try:
+    import aimeta
+    for nk, attrs in aimeta.accepted_supplements().items():
+        gid = key_to_gid.get(nk)
+        if gid is None:
+            continue
+        existing = have.setdefault(gid, set())
+        new_rows = []
+        for kind, val in attrs.items():
+            if kind in existing:
+                continue
+            for v in (val if isinstance(val, list) else [val]):
+                if v not in (None, ""):
+                    new_rows.append((gid, kind, str(v)))
+            existing.add(kind)
+        if new_rows:
+            cur.executemany("INSERT INTO game_attributes(game_id,kind,value) "
+                            "VALUES(?,?,?)", new_rows)
+            ai_attr += len(new_rows)
+except Exception as e:                             # never let AI supplements break a build
+    print("# AI supplement merge skipped: %s" % e)
+if ai_attr:
+    print("# AI supplement       attrs: %d (accepted findings, fill-gaps)" % ai_attr)
+
 cur.executescript("""
 CREATE INDEX ix_norm ON games(norm_key);
 CREATE INDEX ix_title ON games(canonical_title);
