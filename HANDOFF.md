@@ -95,7 +95,7 @@ ScreenScraper) since those are just network calls. Decide the exact push mechani
 
 **Getting the repo onto the VM:**
 ```bash
-ssh <user>@<ai-server>
+ssh <ai-server-host>          # address in your operational notes, not the repo
 git clone https://github.com/datbird/ludodex.git
 cd ludodex
 python3 -m venv .venv && . .venv/bin/activate
@@ -129,7 +129,7 @@ memory); install the same on the VM, or build the SPA on the Deck and ship stati
 ### 6.1 Architecture
 
 ```
-   PRODUCER (Steam Deck)                 AI-SERVER VM (<user>@<ai-server>)
+   PRODUCER (Steam Deck)                 AI-SERVER VM (<user>@<ai-server-host>)
    ─────────────────────                 ──────────────────────────────────
    builds Deck-local data:               FastAPI app (uvicorn)
      ES-DE/RetroDECK media   ── push ──►   ├─ reads game-library.sqlite (catalog)
