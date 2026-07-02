@@ -665,7 +665,8 @@ export default function App() {
               )}
             </div>
           )}
-          <button className="filter-btn wand-btn" title="Let AI complete your library"
+          <button className="filter-btn wand-btn"
+            title="Let AI enrich and supplement metadata and media for your library"
             onClick={() => setShowWand(true)}>
             <span className="wand-spark">✨</span> Magic wand
           </button>
