@@ -1617,10 +1617,11 @@ function ApiKeys({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
 
 type LmKinds = Record<string, [string, boolean, boolean]>
 
-function AddManager({ deviceId, kinds, onAdded }: {
-  deviceId: number; kinds: [string, [string, boolean, boolean]][]
+function AddManager({ deviceId, deviceName, kinds, onAdded }: {
+  deviceId: number; deviceName: string; kinds: [string, [string, boolean, boolean]][]
   onAdded: (d: { devices: Device[] }) => void
 }) {
+  const [open, setOpen] = useState(false)
   const [kind, setKind] = useState(kinds[0]?.[0] || 'roms')
   const [name, setName] = useState('')
   const [rom, setRom] = useState('')
@@ -1628,12 +1629,15 @@ function AddManager({ deviceId, kinds, onAdded }: {
   const [mkinds, setMkinds] = useState<MediaKind[]>([])
   const [pick, setPick] = useState<Set<string>>(new Set())   // empty = all types
   const [busy, setBusy] = useState(false)
-  useEffect(() => { api.mediaKinds().then((d) => setMkinds(d.kinds)).catch(() => {}) }, [])
+  useEffect(() => { if (open) api.mediaKinds().then((d) => setMkinds(d.kinds)).catch(() => {}) }, [open])
   const caps = kinds.find(([k]) => k === kind)?.[1]
   const doesRoms = caps ? caps[1] : true
   const doesMedia = caps ? caps[2] : false
+  const kindLabel = caps ? caps[0] : kind
   const togglePick = (k: string) =>
     setPick((p) => { const n = new Set(p); n.has(k) ? n.delete(k) : n.add(k); return n })
+  const reset = () => { setName(''); setRom(''); setMedia(''); setPick(new Set()); setKind(kinds[0]?.[0] || 'roms') }
+  const close = () => { setOpen(false); reset() }
   const add = async () => {
     setBusy(true)
     try {
@@ -1642,40 +1646,69 @@ function AddManager({ deviceId, kinds, onAdded }: {
         rom_path: doesRoms ? rom : '', media_path: doesMedia ? media : '',
         media_kinds: doesMedia ? Array.from(pick) : [],
       }))
-      setName(''); setRom(''); setMedia(''); setPick(new Set())
+      close()
     } finally { setBusy(false) }
   }
+  if (!open) return (
+    <button className="dm-add-btn" onClick={() => setOpen(true)} title="Add a library manager to this device">
+      ＋ Add library manager
+    </button>
+  )
   return (
-    <div className="dm-add">
-      <div className="dm-add-row">
-        <select value={kind} onChange={(e) => setKind(e.target.value)}>
-          {kinds.map(([k, v]) => <option key={k} value={k}>{v[0]}</option>)}
-        </select>
-        <input placeholder="label (optional)" value={name} onChange={(e) => setName(e.target.value)} />
-        {doesRoms && <input placeholder="ROM path on device" value={rom} onChange={(e) => setRom(e.target.value)} />}
-        {doesMedia && <input placeholder={doesRoms ? 'media path (optional)' : 'media folder path on device'}
-          value={media} onChange={(e) => setMedia(e.target.value)} />}
-        <button className="ops-btn" disabled={busy} onClick={add}>＋ add</button>
-      </div>
-      {kind === 'media' && (
-        <div className="emu-kinds">
-          <div className="emu-kinds-head">
-            Media types in this folder
-            <span className="emu-kinds-note">
-              {pick.size === 0 ? 'all types (nothing selected = everything)' : `${pick.size} selected`}</span>
-            <button className="emu-kinds-clear" onClick={() => setPick(new Set(mkinds.map((k) => k.kind)))}>Select all</button>
-            {pick.size > 0 && <button className="emu-kinds-clear" onClick={() => setPick(new Set())}>Reset to all</button>}
-          </div>
-          <div className="emu-kinds-grid">
-            {mkinds.map((k) => (
-              <label key={k.kind} className={'emu-kchip' + (pick.has(k.kind) ? ' on' : '')} title={k.description}>
-                <input type="checkbox" checked={pick.has(k.kind)} onChange={() => togglePick(k.kind)} />
-                {k.kind.replace(/_/g, ' ')}
-              </label>
-            ))}
-          </div>
+    <div className="overlay overlay-2" onClick={close}>
+      <div className="panel dm-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={close}>×</button>
+        <h2>Add to {deviceName}</h2>
+        <p className="dim">A <b>library manager</b> is a folder on this device that holds ROMs
+          or downloaded media (RetroDECK/ES-DE, RetroBat, Playnite, LaunchBox, or a raw folder).</p>
+        <div className="dm-form">
+          <label className="dm-field">
+            <span>What is it?</span>
+            <select value={kind} onChange={(e) => setKind(e.target.value)}>
+              {kinds.map(([k, v]) => <option key={k} value={k}>{v[0]}</option>)}
+            </select>
+          </label>
+          <label className="dm-field">
+            <span>Label <em>(optional)</em></span>
+            <input placeholder={kindLabel} value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          {doesRoms && (
+            <label className="dm-field">
+              <span>ROM path {doesMedia && <em>on device</em>}</span>
+              <input placeholder="/path/to/roms" value={rom} onChange={(e) => setRom(e.target.value)} />
+            </label>
+          )}
+          {doesMedia && (
+            <label className="dm-field">
+              <span>Media path {doesRoms && <em>(optional)</em>}</span>
+              <input placeholder="/path/to/downloaded_media" value={media} onChange={(e) => setMedia(e.target.value)} />
+            </label>
+          )}
         </div>
-      )}
+        {kind === 'media' && (
+          <div className="emu-kinds">
+            <div className="emu-kinds-head">
+              Media types in this folder
+              <span className="emu-kinds-note">
+                {pick.size === 0 ? 'all types (nothing selected = everything)' : `${pick.size} selected`}</span>
+              <button className="emu-kinds-clear" onClick={() => setPick(new Set(mkinds.map((k) => k.kind)))}>Select all</button>
+              {pick.size > 0 && <button className="emu-kinds-clear" onClick={() => setPick(new Set())}>Reset to all</button>}
+            </div>
+            <div className="emu-kinds-grid">
+              {mkinds.map((k) => (
+                <label key={k.kind} className={'emu-kchip' + (pick.has(k.kind) ? ' on' : '')} title={k.description}>
+                  <input type="checkbox" checked={pick.has(k.kind)} onChange={() => togglePick(k.kind)} />
+                  {k.kind.replace(/_/g, ' ')}
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="dm-actions">
+          <button className="ops-btn" onClick={close}>Cancel</button>
+          <button className="go primary" disabled={busy} onClick={add}>{busy ? 'Adding…' : 'Add'}</button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1783,7 +1816,7 @@ function DevicesPanel() {
                 <button className="emu-rm" title="Remove" onClick={async () => apply(await api.removeManager(m.id))}>×</button>
               </div>
             ))}
-            <AddManager deviceId={d.id} kinds={kinds} onAdded={apply} />
+            <AddManager deviceId={d.id} deviceName={d.name} kinds={kinds} onAdded={apply} />
           </div>
         </div>
       ))}
