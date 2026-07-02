@@ -111,18 +111,24 @@ def _request(endpoint, creds, extra=None, timeout=40):
         raise SSError(kind, "HTTP %s %s" % (e.code, body[:120]))
     except urllib.error.URLError as e:
         raise SSError("closed", str(e))
+    # A valid api2 response is JSON with a "response" object — parse it FIRST, so the
+    # plaintext-error heuristics below can't false-positive on a good result (every
+    # response's ssuser block contains 'quotarefu' and the echoed commandRequested
+    # URL contains 'screenscraper' → both "quota" and "scrape" are always present).
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict) and "response" in obj:
+            return obj["response"]
+    except ValueError:
+        pass
     low = raw.lower()
     if "api closed" in low or "api ferm" in low or "maximum threads" in low:
         raise SSError("closed", raw[:120])
     if "quota" in low and "scrape" in low:
         raise SSError("quota", raw[:120])
-    if "erreur de login" in low or "invalid" in low and "dev" in low:
+    if "erreur de login" in low or ("invalid" in low and "dev" in low):
         raise SSError("badcreds", raw[:120])
-    try:
-        return json.loads(raw).get("response", {})
-    except ValueError:
-        # non-JSON body that wasn't caught above -> treat as not found / noise
-        return None
+    return None            # non-JSON body we couldn't classify → treat as not found
 
 
 def _classify(code, body):
@@ -168,11 +174,42 @@ def user_info(creds):
     return quota_view(ssuser(resp))
 
 
+def jeu_recherche(creds, recherche, systemeid=None, limit=8):
+    """Name search — jeuRecherche.php, the endpoint ES-DE's 'search by name' uses
+    (ludodex previously only did ROM-based jeu_infos). Returns a list of full
+    candidate jeu records (metadata + media included), best-match first."""
+    if not recherche:
+        return []
+    extra = {"recherche": recherche}
+    if systemeid:
+        extra["systemeid"] = systemeid
+    resp = _request("jeuRecherche.php", creds, extra)
+    if not resp:
+        return []
+    jeux = resp.get("jeux")
+    if isinstance(jeux, dict):                 # a single-game response
+        jeux = [jeux]
+    return (jeux or [])[:limit]
+
+
+def jeu_name(jeu, region="us"):
+    """Region-preferred display name of a jeu record."""
+    return _pick((jeu or {}).get("noms"), region=region) or ""
+
+
+def jeu_year(jeu, region="us"):
+    """Release year (YYYY string) of a jeu record, or None."""
+    d = _pick((jeu or {}).get("dates"), region=region)
+    return d[:4] if d and len(d) >= 4 and d[:4].isdigit() else None
+
+
 def jeu_infos(creds, systemeid=None, romnom=None, romtaille=None,
-              crc=None, md5=None, sha1=None):
+              crc=None, md5=None, sha1=None, gameid=None):
     """One game lookup. Returns (jeu dict | None, quota_view). Raises SSError on
     auth/quota/closed conditions so the caller can stop or back off."""
     extra = {}
+    if gameid:
+        extra["gameid"] = gameid
     if sha1:
         extra["sha1"] = sha1
     if md5:
