@@ -431,6 +431,14 @@ _PLAT_LABEL = {
 
 
 def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
+    # spotlight is a games showcase — never surface applications/tools/mods/etc.
+    clauses = [where] if where else []
+    args = list(args)
+    if config.get_bool("hide_non_games", True):
+        clauses.append("g.norm_key NOT IN (SELECT norm_key FROM sco.steam_type "
+                       "WHERE type IN (%s))" % ",".join("?" * len(NON_GAME_TYPES)))
+        args += list(NON_GAME_TYPES)
+    clause = ("WHERE " + " AND ".join("(%s)" % c for c in clauses) + " ") if clauses else ""
     sql = ("SELECT g.norm_key, g.canonical_title AS title, gs.universal AS score, "
            "g.sources_summary AS sources, "
            "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
@@ -438,7 +446,7 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
            "        AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media um "
            "        WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover "
            "FROM games g JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
-           + (("WHERE " + where + " ") if where else "")
+           + clause
            + "ORDER BY " + order + ", g.canonical_title LIMIT ?")
     return [{"norm_key": r["norm_key"], "title": r["title"], "score": r["score"],
              "sources": r["sources"], "matched": bool(r["matched"]),
