@@ -25,6 +25,20 @@ OWN = DIR                                   # store TSVs live next to the script
 ROM_DB = config.get("roms_index_db")
 OUT = config.get("library_db")
 
+
+def _rom_indexes():
+    """Every ROM index feeding the emulation source: the legacy single
+    roms_index_db plus one per Connections ROM-folder manager
+    (roms-index-mgr<id>.sqlite). Lets multiple ROM folders (local + devices) all
+    become emulation without overwriting each other."""
+    import glob
+    paths = []
+    if ROM_DB and os.path.exists(ROM_DB):
+        paths.append(ROM_DB)
+    for p in sorted(glob.glob(os.path.join(DIR, "roms-index-mgr*.sqlite"))):
+        paths.append(p)
+    return paths
+
 # Extensions that indicate an actual ROM/disc image (to skip box-art/manuals/etc).
 ROM_EXTS = {
     "sfc", "smc", "nes", "fds", "unf", "gba", "gb", "gbc", "n64", "z64", "v64",
@@ -92,7 +106,7 @@ _REGEN = set()
 for _s in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox"):
     if config.source_enabled(_s) and os.path.exists(OWN + "/%s_games.tsv" % _s):
         _REGEN.add(_s)
-if config.source_enabled("emulation") and ROM_DB and os.path.exists(ROM_DB):
+if config.source_enabled("emulation") and _rom_indexes():
     _REGEN.add("emulation")
 if os.path.exists(os.path.join(DIR, "crawl-index.sqlite")):
     _REGEN.add("archive")
@@ -121,15 +135,22 @@ if os.path.exists(OUT):
 
 
 # ---- emulation (distinct game per system, ROM files only) ----
-if config.source_enabled("emulation") and ROM_DB and os.path.exists(ROM_DB):
-    rc = sqlite3.connect(ROM_DB)
+# Read every ROM index (legacy single db + per-manager indexes); add() merges by
+# norm_key, so the same game across folders becomes one emulation entry.
+if config.source_enabled("emulation"):
     ph = ",".join("?" * len(ROM_EXTS))
     q = ("SELECT system, game, GROUP_CONCAT(DISTINCT region) FROM roms "
          "WHERE ext IN (%s) AND lower(game) NOT IN (%s) AND game<>'' "
          "GROUP BY system, game" % (ph, ",".join("?" * len(MEDIA_GAMES))))
-    for system, game, regions in rc.execute(q, list(ROM_EXTS) + list(MEDIA_GAMES)):
-        add(game, "emulation", system, system, (regions or ""))
-    rc.close()
+    for _rom_db in _rom_indexes():
+        rc = sqlite3.connect(_rom_db)
+        try:
+            for system, game, regions in rc.execute(q, list(ROM_EXTS)
+                                                     + list(MEDIA_GAMES)):
+                add(game, "emulation", system, system, (regions or ""))
+        except sqlite3.OperationalError:
+            pass
+        rc.close()
 
 
 # ---- store TSVs ----
