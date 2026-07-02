@@ -2102,3 +2102,26 @@ a.idchip:hover { background: var(--accent-bg); }
 .ar-opt:hover { border-color: var(--accent); }
 .ar-manual { display: flex; gap: 6px; }
 .ar-manual input { flex: 1; padding: 6px 9px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text-h); font-size: 13px; }
+
+/* --- auth: create-admin / login gate --- */
+.boot-screen { min-height: 100vh; display: flex; align-items: center;
+  justify-content: center; color: var(--text); }
+.auth-screen { min-height: 100vh; display: flex; align-items: center;
+  justify-content: center; padding: 24px; background: var(--bg); }
+.auth-card { width: 100%; max-width: 360px; display: flex; flex-direction: column;
+  gap: 14px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 16px; padding: 30px 28px; box-shadow: 0 12px 40px rgba(0,0,0,0.25); }
+.auth-logo { width: 44px; height: 44px; align-self: center; }
+.auth-title { margin: 0; text-align: center; font-size: 25px; font-weight: 800;
+  letter-spacing: -0.5px; color: var(--text-h); }
+.auth-title span { color: var(--accent); }
+.auth-sub { margin: -6px 0 6px; text-align: center; color: var(--text); font-size: 13px; }
+.auth-field { display: flex; flex-direction: column; gap: 5px; }
+.auth-field > span { font-size: 12px; font-weight: 600; color: var(--text-h); }
+.auth-field input { padding: 10px 12px; font-size: 14px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px; color: var(--text-h); }
+.auth-field input:focus { outline: none; border-color: var(--accent); }
+.auth-err { background: rgba(239,68,68,0.10); color: #ef4444;
+  border: 1px solid rgba(239,68,68,0.4); border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+.auth-submit { margin-top: 4px; padding: 11px; font-size: 14px; width: 100%; }
+.auth-hint { text-align: center; color: var(--text); opacity: 0.7; font-size: 11px; line-height: 1.5; }

@@ -23,7 +23,7 @@ import time
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("LUDODEX_DATA", DIR)
@@ -37,6 +37,7 @@ import devices         # noqa: E402  device connections + library-manager pull
 import fileops         # noqa: E402  file-operations engine (profiles + runbooks)
 import aimeta          # noqa: E402  AI metadata audit/supplement store + context
 import overrides       # noqa: E402  per-attribute provenance overrides (re-pointing)
+import auth            # noqa: E402  local username/password accounts + sessions
 from . import ai       # noqa: E402  AI features (server package)
 
 LIBRARY_DB = os.path.join(DATA, "game-library.sqlite")
@@ -95,6 +96,72 @@ app = FastAPI(title="ludodex", version="0.1.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
+
+# --------------------------------------------------------------------------- #
+#  Authentication: local accounts + session cookie. The whole /api surface is
+#  gated except the auth endpoints and /api/health; the static SPA stays public
+#  so it can render the create-admin / login screens.
+# --------------------------------------------------------------------------- #
+SESSION_COOKIE = "ludodex_session"
+_AUTH_OPEN = ("/api/auth/", "/api/health")
+
+
+def _current_user(request: Request):
+    return auth.session_user(request.cookies.get(SESSION_COOKIE))
+
+
+def _set_session_cookie(resp, token):
+    resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                    max_age=auth.SESSION_TTL, path="/")
+
+
+@app.middleware("http")
+async def _auth_gate(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and not path.startswith(_AUTH_OPEN):
+        if not _current_user(request):
+            return JSONResponse({"detail": "authentication required"}, status_code=401)
+    return await call_next(request)
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request):
+    """Drives the frontend gate: setup (no accounts) / login / authenticated."""
+    user = _current_user(request)
+    return {"needs_setup": auth.needs_setup(), "authenticated": bool(user), "user": user}
+
+
+@app.post("/api/auth/setup")
+def auth_setup(body: dict = Body(...)):
+    if not auth.needs_setup():
+        raise HTTPException(409, "already set up — an account already exists")
+    try:
+        uid = auth.create_user((body or {}).get("username", ""),
+                               (body or {}).get("password", ""), role="admin")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    user = {"id": uid, "username": (body or {}).get("username", "").strip(), "role": "admin"}
+    resp = JSONResponse({"ok": True, "user": user})
+    _set_session_cookie(resp, auth.create_session(uid))
+    return resp
+
+
+@app.post("/api/auth/login")
+def auth_login(body: dict = Body(...)):
+    user = auth.verify((body or {}).get("username", ""), (body or {}).get("password", ""))
+    if not user:
+        raise HTTPException(401, "invalid username or password")
+    resp = JSONResponse({"ok": True, "user": user})
+    _set_session_cookie(resp, auth.create_session(user["id"]))
+    return resp
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request):
+    auth.delete_session(request.cookies.get(SESSION_COOKIE))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(SESSION_COOKIE, path="/")
+    return resp
 
 
 # ----------------------------------------------------------------------------- db

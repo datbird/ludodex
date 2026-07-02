@@ -12,6 +12,7 @@ import type {
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, ProviderMatch, ScopeValue,
+  AuthUser, AuthStatus,
 } from './api'
 import './App.css'
 
@@ -282,7 +283,79 @@ function SortRow({ name, rank, onSet }: {
   )
 }
 
+// Auth gate: on load, decide between the create-admin screen (fresh install),
+// the login screen, or the app. The static SPA is always served; the API is
+// gated server-side, so this just picks what to render.
 export default function App() {
+  const [authState, setAuthState] = useState<AuthStatus | null | undefined>(undefined)
+  const refreshAuth = useCallback(
+    () => api.authStatus().then(setAuthState).catch(() => setAuthState(null)), [])
+  useEffect(() => { refreshAuth() }, [refreshAuth])
+
+  if (authState === undefined) return <div className="boot-screen">Loading…</div>
+  if (!authState || !authState.authenticated) {
+    return <AuthScreen needsSetup={!!authState?.needs_setup} onAuthed={refreshAuth} />
+  }
+  return <LudodexApp user={authState.user}
+    onLogout={async () => { try { await api.authLogout() } finally { refreshAuth() } }} />
+}
+
+function AuthScreen({ needsSetup, onAuthed }: { needsSetup: boolean; onAuthed: () => void }) {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setErr('')
+    if (needsSetup && password !== confirm) { setErr('Passwords do not match'); return }
+    setBusy(true)
+    try {
+      if (needsSetup) await api.authSetup(username.trim(), password)
+      else await api.authLogin(username.trim(), password)
+      onAuthed()
+    } catch (e) { setErr((e as Error).message); setBusy(false) }
+  }
+  return (
+    <div className="auth-screen">
+      <form className="auth-card" onSubmit={submit}>
+        <img className="auth-logo" src="/logo-mark.png" alt="" />
+        <h1 className="auth-title">ludo<span>dex</span></h1>
+        {needsSetup ? (
+          <p className="auth-sub">Welcome — create the <b>admin</b> account to get started.</p>
+        ) : (
+          <p className="auth-sub">Sign in to your library.</p>
+        )}
+        <label className="auth-field">
+          <span>Username</span>
+          <input autoFocus autoComplete="username" value={username}
+            onChange={(e) => setUsername(e.target.value)} />
+        </label>
+        <label className="auth-field">
+          <span>Password</span>
+          <input type="password" autoComplete={needsSetup ? 'new-password' : 'current-password'}
+            value={password} onChange={(e) => setPassword(e.target.value)} />
+        </label>
+        {needsSetup && (
+          <label className="auth-field">
+            <span>Confirm password</span>
+            <input type="password" autoComplete="new-password" value={confirm}
+              onChange={(e) => setConfirm(e.target.value)} />
+          </label>
+        )}
+        {err && <div className="auth-err">{err}</div>}
+        <button className="go primary auth-submit" type="submit"
+          disabled={busy || !username.trim() || !password}>
+          {busy ? 'Please wait…' : needsSetup ? 'Create admin & continue' : 'Sign in'}
+        </button>
+        {needsSetup && <div className="auth-hint">Password must be at least 8 characters. This account is stored only on this server.</div>}
+      </form>
+    </div>
+  )
+}
+
+function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () => void }) {
   const [stats, setStats] = useState<Stats | null>(null)
   const [facets, setFacets] = useState<Facets | null>(null)
   const [q, setQ] = useState('')
@@ -460,8 +533,10 @@ export default function App() {
             </button>
             {showProfile && (
               <div className="profile-menu">
-                <div className="pm-name">Guest</div>
-                <div className="pm-sub">Not signed in</div>
+                <div className="pm-name">{user?.username || 'Guest'}</div>
+                <div className="pm-sub">{user
+                  ? (user.role === 'admin' ? 'Administrator' : 'Signed in')
+                  : 'Not signed in'}</div>
                 <div className="pm-divider" />
                 <button className="pm-item pm-theme"
                   onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}>
@@ -482,7 +557,7 @@ export default function App() {
                   </span>
                 </button>
                 <div className="pm-divider" />
-                <button className="pm-item" disabled>Sign in (coming soon)</button>
+                <button className="pm-item" onClick={onLogout}>Sign out</button>
               </div>
             )}
           </div>

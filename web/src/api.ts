@@ -433,7 +433,28 @@ async function get<T>(path: string): Promise<T> {
   return r.json()
 }
 
+// POST JSON, surfacing the server's {detail} message on failure (for auth forms).
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(path, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error((data as { detail?: string }).detail || `${r.status} ${path}`)
+  return data as T
+}
+
+export type AuthUser = { id?: number; username: string; role: string }
+export type AuthStatus = { needs_setup: boolean; authenticated: boolean; user: AuthUser | null }
+
 export const api = {
+  authStatus: () => get<AuthStatus>('/api/auth/status'),
+  authSetup: (username: string, password: string) =>
+    postJson<{ ok: boolean; user: AuthUser }>('/api/auth/setup', { username, password }),
+  authLogin: (username: string, password: string) =>
+    postJson<{ ok: boolean; user: AuthUser }>('/api/auth/login', { username, password }),
+  authLogout: () => postJson<{ ok: boolean }>('/api/auth/logout', {}),
+
   stats: () => get<Stats>('/api/stats'),
   facets: () => get<Facets>('/api/facets'),
   games: (qy: GamesQuery) => {
