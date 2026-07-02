@@ -1758,12 +1758,13 @@ function AddManager({ deviceId, kinds, onAdded }: {
           value={media} onChange={(e) => setMedia(e.target.value)} />}
         <button className="ops-btn" disabled={busy} onClick={add}>＋ add</button>
       </div>
-      {doesMedia && (
+      {kind === 'media' && (
         <div className="emu-kinds">
           <div className="emu-kinds-head">
             Media types in this folder
             <span className="emu-kinds-note">
               {pick.size === 0 ? 'all types (nothing selected = everything)' : `${pick.size} selected`}</span>
+            <button className="emu-kinds-clear" onClick={() => setPick(new Set(mkinds.map((k) => k.kind)))}>Select all</button>
             {pick.size > 0 && <button className="emu-kinds-clear" onClick={() => setPick(new Set())}>Reset to all</button>}
           </div>
           <div className="emu-kinds-grid">
