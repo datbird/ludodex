@@ -1497,12 +1497,17 @@ def _aimeta_apply(should_stop):
 
 
 @app.post("/api/aimeta/apply")
-def aimeta_apply():
-    """Apply accepted findings to the catalog (background: link provider matches,
-    fetch their records, rebuild). Accepted supplements bake in via the rebuild."""
+def aimeta_apply(body: dict = Body(default={})):
+    """Apply the selected changes to the catalog (background: link provider
+    matches, fetch their records, rebuild). Body may carry
+    {selections:[{finding_id, attributes:[kinds]|null, match:bool}]} to apply an
+    exact per-change selection; without it, every already-accepted finding applies."""
+    sels = (body or {}).get("selections")
+    if sels:
+        aimeta.apply_selection(sels)
     _start_job("aimeta-apply", "aimeta-apply", "Apply AI metadata + rebuild",
                lambda stop: _aimeta_apply(stop))
-    return {"started": True}
+    return {"started": True, "selected": len(sels) if sels else None}
 
 
 @app.get("/api/games/{norm_key}")

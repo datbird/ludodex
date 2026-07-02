@@ -34,7 +34,10 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS findings(
         id INTEGER PRIMARY KEY, run_id INTEGER, norm_key TEXT, title TEXT,
         kind TEXT, status TEXT DEFAULT 'proposed', payload_json TEXT,
-        confidence REAL, model TEXT, created REAL)""")
+        confidence REAL, model TEXT, created REAL, selection_json TEXT)""")
+    if "selection_json" not in {r[1] for r in
+                                con.execute("PRAGMA table_info(findings)")}:
+        con.execute("ALTER TABLE findings ADD COLUMN selection_json TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS scan_runs(
         id INTEGER PRIMARY KEY, target TEXT, total INTEGER, done INTEGER DEFAULT 0,
         findings INTEGER DEFAULT 0, status TEXT, created REAL, finished REAL,
@@ -199,7 +202,25 @@ def store_finding(run_id, ctx, result, model=""):
 def _finding_row(r):
     d = dict(r)
     d["payload"] = json.loads(d.pop("payload_json") or "{}")
+    d["selection"] = json.loads(d.pop("selection_json", None) or "null")
     return d
+
+
+def apply_selection(selections):
+    """Mark the chosen changes for application. `selections` = [{finding_id,
+    attributes:[kinds]|null (null = all), match:bool}]. Each named finding becomes
+    'accepted' carrying its selection; unlisted findings are left as-is."""
+    con = _con()
+    for sel in selections or []:
+        fid = sel.get("finding_id")
+        if not fid:
+            continue
+        selj = json.dumps({"attributes": sel.get("attributes"),
+                           "match": bool(sel.get("match", True))})
+        con.execute("UPDATE findings SET status='accepted', selection_json=? "
+                    "WHERE id=?", (selj, int(fid)))
+    con.commit()
+    con.close()
 
 
 def findings_list(status=None, kind=None, limit=300):
@@ -255,9 +276,12 @@ def accepted_supplements():
     build_library fill-gaps merge."""
     con = _con()
     out = {}
-    for r in con.execute("SELECT norm_key, payload_json FROM findings "
-                         "WHERE status='accepted'"):
+    for r in con.execute("SELECT norm_key, payload_json, selection_json FROM "
+                         "findings WHERE status='accepted'"):
         attrs = (json.loads(r["payload_json"] or "{}").get("attributes") or {})
+        sel = json.loads(r["selection_json"] or "null")
+        if sel and sel.get("attributes") is not None:   # only the ticked kinds
+            attrs = {k: v for k, v in attrs.items() if k in sel["attributes"]}
         if attrs:
             out[r["norm_key"]] = attrs
     con.close()
@@ -269,10 +293,11 @@ def accepted_provider_matches():
     igdb_id}] — to write into igdb_resolution so a rebuild links them."""
     con = _con()
     out = []
-    for r in con.execute("SELECT norm_key, payload_json FROM findings "
-                         "WHERE status='accepted'"):
+    for r in con.execute("SELECT norm_key, payload_json, selection_json FROM "
+                         "findings WHERE status='accepted'"):
         pm = (json.loads(r["payload_json"] or "{}").get("provider_match") or {})
-        if pm.get("igdb_id"):
+        sel = json.loads(r["selection_json"] or "null")
+        if pm.get("igdb_id") and (not sel or sel.get("match", True)):
             out.append({"norm_key": r["norm_key"], "igdb_id": int(pm["igdb_id"])})
     con.close()
     return out
