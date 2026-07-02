@@ -92,6 +92,12 @@ export interface AiFinding {
   model: string
   created: number
   payload: AiFindingPayload
+  selection?: { attributes: string[] | null; match: boolean } | null
+}
+export interface AiApplySelection {
+  finding_id: number
+  attributes: string[] | null
+  match: boolean
 }
 export type AiFindingCounts = Record<string, Record<string, number>>
 export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number; web_capable: boolean }
@@ -824,10 +830,13 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ accepted: number; counts: AiFindingCounts }>
   },
-  aimetaApply: async () => {
-    const r = await fetch('/api/aimeta/apply', { method: 'POST' })
+  aimetaApply: async (selections?: AiApplySelection[]) => {
+    const r = await fetch('/api/aimeta/apply', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(selections ? { selections } : {}),
+    })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ started: boolean }>
+    return r.json() as Promise<{ started: boolean; selected: number | null }>
   },
   setAttributeOverride: async (nk: string, kind: string, value: string, origin: string) => {
     const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/attribute', {

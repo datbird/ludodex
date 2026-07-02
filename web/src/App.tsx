@@ -10,7 +10,7 @@ import type {
   Device,
   FileVariable, FileProfile, FileDetect, FilePlan, FileCommandResult,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
-  AiFinding, AiFindingCounts, AiScanTargets, AiScanRun,
+  AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
 } from './api'
 import './App.css'
 
@@ -3846,7 +3846,147 @@ function MetadataScan() {
   )
 }
 
+// One selectable change within a finding: the provider link, or one attribute fill.
+type Change =
+  | { id: string; type: 'match'; label: string; value: string; cover?: string | null }
+  | { id: string; type: 'attr'; attrKind: string; label: string; value: string }
+
+function findingChanges(f: AiFinding): Change[] {
+  const out: Change[] = []
+  const pm = f.payload.provider_match
+  if (pm) {
+    out.push({
+      id: `${f.id}:match`, type: 'match',
+      label: '🔗 Link to IGDB', cover: pm.cover,
+      value: pm.name + (pm.year ? ` (${pm.year})` : ''),
+    })
+  }
+  for (const k of Object.keys(f.payload.attributes || {})) {
+    out.push({
+      id: `${f.id}:attr:${k}`, type: 'attr', attrKind: k,
+      label: k.replace(/_/g, ' '), value: fmtAttrVal(f.payload.attributes[k]),
+    })
+  }
+  return out
+}
+
+function MetadataChangeset() {
+  const [findings, setFindings] = useState<AiFinding[] | null>(null)
+  const [sel, setSel] = useState<Set<string>>(new Set())
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(() => {
+    api.aimetaFindings('proposed').then((d) => {
+      setFindings(d.findings)
+      const all = new Set<string>()
+      d.findings.forEach((f) => findingChanges(f).forEach((c) => all.add(c.id)))
+      setSel(all)
+    }).catch(() => setFindings([]))
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const groups = (findings || []).map((f) => ({ f, changes: findingChanges(f) }))
+    .filter((g) => g.changes.length > 0)
+  const allIds = groups.flatMap((g) => g.changes.map((c) => c.id))
+  const selectedCount = allIds.filter((id) => sel.has(id)).length
+  const gamesTouched = groups.filter((g) => g.changes.some((c) => sel.has(c.id))).length
+
+  const toggle = (id: string) =>
+    setSel((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const toggleGroup = (ids: string[], on: boolean) =>
+    setSel((prev) => {
+      const n = new Set(prev)
+      ids.forEach((id) => (on ? n.add(id) : n.delete(id)))
+      return n
+    })
+  const setAll = (on: boolean) => setSel(on ? new Set(allIds) : new Set())
+
+  const apply = async () => {
+    const selections: AiApplySelection[] = []
+    for (const g of groups) {
+      const attrs = g.changes.filter((c) => c.type === 'attr' && sel.has(c.id))
+        .map((c) => (c as Extract<Change, { type: 'attr' }>).attrKind)
+      const match = g.changes.some((c) => c.type === 'match' && sel.has(c.id))
+      if (attrs.length === 0 && !match) continue
+      selections.push({ finding_id: g.f.id, attributes: attrs, match })
+    }
+    if (!selections.length) return
+    setBusy(true); setNote('')
+    try {
+      await api.aimetaApply(selections)
+      setNote(`✨ Applying ${selectedCount} change(s) across ${gamesTouched} game(s) — linking provider matches and rebuilding. Track it in the job monitor.`)
+      load()
+    } catch (e) { setNote((e as Error).message) } finally { setBusy(false) }
+  }
+
+  if (!findings) return <div className="loading">Loading…</div>
+  if (!groups.length) {
+    return <div className="sync-note dim">No proposed changes — run the ✨ Magic wand
+      or a scan first.</div>
+  }
+
+  return (
+    <div className="chg-wrap">
+      <p className="dim">Here's everything the AI wants to change. Tick the changes to keep,
+        then apply — like a runbook, nothing happens until you apply.</p>
+
+      {groups.map(({ f, changes }) => {
+        const ids = changes.map((c) => c.id)
+        const on = ids.filter((id) => sel.has(id))
+        const allOn = on.length === ids.length
+        const p = f.payload
+        return (
+          <div key={f.id} className="chg-group">
+            <div className="chg-ghead">
+              <label className="chg-check">
+                <input type="checkbox" checked={allOn}
+                  ref={(el) => { if (el) el.indeterminate = on.length > 0 && !allOn }}
+                  onChange={(e) => toggleGroup(ids, e.target.checked)} />
+              </label>
+              <span className="chg-gtitle">{f.title}</span>
+              <span className="chg-conf">{Math.round((f.confidence || 0) * 100)}%</span>
+            </div>
+            {p.match?.status === 'wrong' && (
+              <div className="chg-warn">⚠ current match may be wrong:{' '}
+                <b>{p.current_match?.title || '—'}</b> → <b>{p.match.suggested_title || '—'}</b></div>
+            )}
+            {changes.map((c) => (
+              <label key={c.id} className={'chg-row' + (c.type === 'match' ? ' chg-link' : '')}>
+                <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} />
+                {c.type === 'match' && c.cover && <img className="chg-cover" src={c.cover} alt="" />}
+                <span className="chg-label">{c.label}</span>
+                <span className="chg-arrow">→</span>
+                <span className="chg-value">{c.value}</span>
+              </label>
+            ))}
+            {p.web && (p.sources || []).length > 0 && (
+              <details className="chg-sources">
+                <summary>🔎 {p.sources!.length} web source{p.sources!.length === 1 ? '' : 's'}</summary>
+                <ul>{p.sources!.map((s, i) => (
+                  <li key={i}><a href={s.url} target="_blank" rel="noreferrer">{s.title || s.url}</a></li>
+                ))}</ul>
+              </details>
+            )}
+          </div>
+        )
+      })}
+
+      {note && <div className="sync-note">{note}</div>}
+      <div className="chg-bar">
+        <span className="chg-summary"><b>{selectedCount}</b> change{selectedCount === 1 ? '' : 's'}
+          {' '}across <b>{gamesTouched}</b> game{gamesTouched === 1 ? '' : 's'} selected</span>
+        <button className="ops-btn" onClick={() => setAll(true)}>Select all</button>
+        <button className="ops-btn" onClick={() => setAll(false)}>Deselect all</button>
+        <button className="ops-btn go" disabled={busy || selectedCount === 0} onClick={apply}>
+          {busy ? 'Applying…' : '✨ Apply selected'}</button>
+      </div>
+    </div>
+  )
+}
+
 function MetadataReview() {
+  const [view, setView] = useState<'cards' | 'changeset'>('changeset')
   const [data, setData] = useState<{ findings: AiFinding[]; counts: AiFindingCounts } | null>(null)
   const [kind, setKind] = useState('')          // '' = all
   const [status, setStatus] = useState('proposed')
@@ -3882,7 +4022,16 @@ function MetadataReview() {
 
   return (
     <>
-      <h2>Metadata review</h2>
+      <div className="aim-review-head">
+        <h2>Metadata review</h2>
+        <div className="aim-viewtoggle">
+          <button className={'tab' + (view === 'changeset' ? ' sel' : '')}
+            onClick={() => setView('changeset')}>Changeset</button>
+          <button className={'tab' + (view === 'cards' ? ' sel' : '')}
+            onClick={() => setView('cards')}>Cards</button>
+        </div>
+      </div>
+      {view === 'changeset' ? <MetadataChangeset /> : <>
       <p className="dim">AI proposals from your scans. Accept to keep (accepted supplements
         show on the game and bake into the catalog on the next rebuild); reject to dismiss.</p>
 
@@ -3924,6 +4073,7 @@ function MetadataReview() {
               <AimActions f={f} onAct={(a) => act(f.id, a)} />
             </div>
           ))}
+      </>}
     </>
   )
 }
@@ -4082,11 +4232,15 @@ function JobMonitor() {
   const pause = async (id: string) => { await api.pauseJob(id).catch(() => {}); load() }
   const del = async (id: string) => { await api.deleteJob(id).catch(() => {}); load() }
 
-  if (jobs.length === 0) return null
   return (
-    <div className="jobmon">
+    <div className={'jobmon' + (active.length ? ' busy' : ' idle')}>
       <div className="jobmon-rows">
-        {shown.map((j) => (
+        {shown.length === 0 ? (
+          <button className="jobmon-idle" title="Open job monitor" onClick={() => setOpen(true)}>
+            <span className="jm-idle-dot" />
+            {jobs.length ? `${jobs.length} recent job${jobs.length === 1 ? '' : 's'}` : 'No active jobs'}
+          </button>
+        ) : shown.map((j) => (
           <div key={j.id} className="jobmon-row">
             <span className="jm-label" title={j.label}>{j.label}</span>
             <ProgressBar done={j.progress.done} total={j.progress.total} failed={j.progress.failed} />
@@ -4095,6 +4249,7 @@ function JobMonitor() {
             {j.deletable && <button className="jm-btn" title="Remove" onClick={() => del(j.id)}>×</button>}
           </div>
         ))}
+        {active.length > 2 && <span className="jm-more">+{active.length - 2} more</span>}
       </div>
       <button className="jm-expand icon-btn" title="All jobs" onClick={() => setOpen(true)}>⤢</button>
       {open && <JobOverlay onClose={() => setOpen(false)} />}

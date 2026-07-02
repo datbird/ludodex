@@ -1914,6 +1914,12 @@ a.idchip:hover { background: var(--accent-bg); }
 
 /* job monitor widget (header) */
 .jobmon { display: flex; align-items: center; gap: 6px; max-width: 340px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 4px 6px; }
+.jobmon.busy { border-color: var(--accent); }
+.jobmon-idle { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text); opacity: 0.75; background: none; border: 0; cursor: pointer; padding: 2px; }
+.jobmon-idle:hover { opacity: 1; }
+.jm-idle-dot { width: 7px; height: 7px; border-radius: 50%; background: #4caf50; box-shadow: 0 0 0 2px rgba(76,175,80,.18); flex: none; }
+.jobmon.busy .jm-idle-dot { background: var(--accent); }
+.jm-more { font-size: 10px; color: var(--text); opacity: 0.6; }
 .jobmon-rows { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
 .jobmon-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
 .jm-label { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-h); }
@@ -2011,6 +2017,32 @@ a.idchip:hover { background: var(--accent-bg); }
 .aim-sources a { color: var(--accent); word-break: break-all; }
 .aim-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; }
 .aim-toolbar-hint { font-size: 12px; }
+
+/* --- metadata changeset (runbook-style checklist) --- */
+.aim-review-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.aim-viewtoggle { display: inline-flex; gap: 4px; }
+.aim-viewtoggle .tab { padding: 4px 12px; font-size: 12px; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 7px; cursor: pointer; }
+.aim-viewtoggle .tab.sel { background: var(--accent); color: #fff; border-color: var(--accent); }
+.chg-wrap { padding-bottom: 76px; }
+.chg-group { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; background: var(--panel); overflow: hidden; }
+.chg-ghead { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: color-mix(in srgb, var(--panel) 80%, var(--border)); border-bottom: 1px solid var(--border); }
+.chg-check { display: inline-flex; }
+.chg-gtitle { font-weight: 700; color: var(--text-h); flex: 1; }
+.chg-conf { font-size: 11px; font-weight: 700; color: var(--text); background: var(--border); border-radius: 10px; padding: 1px 8px; }
+.chg-warn { font-size: 12px; color: #d98a00; background: color-mix(in srgb, #d98a00 12%, transparent); padding: 6px 12px; }
+.chg-row { display: flex; align-items: center; gap: 10px; padding: 7px 12px; font-size: 13px; border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); cursor: pointer; }
+.chg-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.chg-row input { flex: none; }
+.chg-cover { width: 22px; height: 30px; object-fit: cover; border-radius: 3px; }
+.chg-label { color: var(--text); text-transform: capitalize; }
+.chg-link .chg-label { color: var(--accent); font-weight: 600; text-transform: none; }
+.chg-arrow { color: var(--text); opacity: 0.4; }
+.chg-value { color: var(--text-h); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; flex: 1; }
+.chg-link .chg-value { color: var(--accent); }
+.chg-sources { padding: 6px 12px; font-size: 12px; }
+.chg-sources ul { margin: 4px 0 0; padding-left: 18px; }
+.chg-bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; margin-top: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 -2px 10px rgba(0,0,0,0.15); }
+.chg-summary { flex: 1; font-size: 13px; color: var(--text); }
 
 /* ---- attribute provenance + re-pointing ---- */
 .attr-prov { margin-top: 8px; }
