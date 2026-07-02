@@ -1277,8 +1277,9 @@ def jobs_restart(jid: str):
             raise HTTPException(400, "nothing left to scan")
         opts = {"web": bool(old.get("web")),
                 "match_provider": bool(old.get("match_provider")),
-                "label": old.get("target")}
-        rid = aimeta.scan_new(old["target"], keys, opts["web"], opts["match_provider"])
+                "metadata_kinds": old.get("md_kinds"), "label": old.get("target")}
+        rid = aimeta.scan_new(old["target"], keys, opts["web"],
+                              opts["match_provider"], opts["metadata_kinds"])
         _start_aimeta_job(rid, keys, opts)
         return {"restarted": True, "id": "aimeta:%d" % rid}
     raise HTTPException(400, "start a library sync from the Library page")
@@ -1395,6 +1396,7 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
     to resolve AI identities to a real IGDB entry. Stores actionable findings."""
     web = bool(opts.get("web"))
     match_prov = bool(opts.get("match_provider"))
+    md_kinds = opts.get("metadata_kinds")     # None=all attrs, []=none (media-only)
     model = ai.model_for_area("metadata")
     done = found = 0
     lib = aimeta._lib()
@@ -1404,6 +1406,9 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                 break
             try:
                 ctx = aimeta.game_context(nk, lib=lib)
+                if ctx and md_kinds is not None:   # restrict which attrs AI fills
+                    ctx["missing"] = [k for k in ctx.get("missing", [])
+                                      if k in md_kinds]
                 if ctx:
                     res = ai.analyze_game(ctx, web=web)
                     m = res.get("match") or {}
@@ -1454,7 +1459,18 @@ def aimeta_scan(body: dict = Body(default={})):
         raise HTTPException(400, str(e))
     provider = ai.provider_for_area("metadata")
     web = bool(body.get("web")) and ai.supports_web(provider)
-    match_provider = bool(body.get("match_provider"))
+    # metadata: True=all attrs, False=none (media-only), or a list of attr kinds
+    md = body.get("metadata", True)
+    if md is False:
+        md_kinds = []
+    elif isinstance(md, list):
+        md_kinds = [k for k in md if k in aimeta.SUPPLEMENT_KINDS]
+    else:
+        md_kinds = None
+    # media: True=all, False=none, or a list of media kinds (applied at Apply time)
+    want_media = body.get("media", True) is not False
+    # media needs a provider match to source it, so force matching when media is on
+    match_provider = bool(body.get("match_provider")) or want_media
     explicit = body.get("norm_keys")
     if explicit:
         keys = [k for k in explicit if isinstance(k, str)][:5000]
@@ -1467,9 +1483,9 @@ def aimeta_scan(body: dict = Body(default={})):
         label = target
     if not keys:
         raise HTTPException(400, "no games to scan")
-    run_id = aimeta.scan_new(label, keys, web, match_provider)
+    run_id = aimeta.scan_new(label, keys, web, match_provider, md_kinds)
     _start_aimeta_job(run_id, keys, {"web": web, "match_provider": match_provider,
-                                     "label": label})
+                                     "metadata_kinds": md_kinds, "label": label})
     return {"run_id": run_id, "target": label, "count": len(keys), "web": web,
             "match_provider": match_provider}
 
@@ -1479,6 +1495,8 @@ def aimeta_targets():
     """Per-target game counts + whether the metadata provider can search the web."""
     out = {t: aimeta.target_count(t) for t in ("unmatched", "matched", "missing", "all")}
     out["web_capable"] = ai.supports_web(ai.provider_for_area("metadata"))
+    out["attributes"] = aimeta.SUPPLEMENT_KINDS       # metadata kinds the wand can fill
+    out["media_kinds"] = list(media.SCALAR_KINDS)      # media kinds it can (re)choose
     return out
 
 
@@ -1513,10 +1531,11 @@ def aimeta_accept_all(body: dict = Body(default={})):
     return {"accepted": n, "counts": aimeta.findings_counts()}
 
 
-def _aimeta_apply(should_stop):
+def _aimeta_apply(should_stop, media=True):
     """Make accepted findings real: write AI provider-matches into igdb_resolution
     (+ fetch their IGDB records), then rebuild the catalog so accepted supplements
-    and new provider links + their trusted attributes/media flow in."""
+    and new provider links + their trusted attributes/media flow in. `media` is
+    True (all art), False (skip art), or a list of media kinds to (re)choose."""
     import igdb
     cache = os.path.join(DIR, "metadata-cache.sqlite")
     now = int(time.time())
@@ -1552,11 +1571,12 @@ def _aimeta_apply(should_stop):
     mc.close()
     _apply_ss_matches(now)
     _run_script("build_library.py", timeout=1800)
-    # pull provider media for the newly-linked games (IGDB covers/art, Steam CDN,
-    # ScreenScraper box/marquee/video), then pick the best per kind — so a provider
-    # match fills ART, not just attrs
-    _run_script("media_fetch.py", timeout=1800)
-    _run_script("media_choose.py", timeout=900)
+    if media is not False:                 # media: False skips art entirely
+        # pull provider media for newly-linked games (IGDB/Steam/ScreenScraper),
+        # then pick the best per kind — restricted to `media` kinds if a list given
+        _run_script("media_fetch.py", timeout=1800)
+        args = ["--kinds", ",".join(media)] if isinstance(media, list) and media else []
+        _run_script("media_choose.py", args=args, timeout=900)
 
 
 def _apply_ss_matches(now):
@@ -1599,8 +1619,9 @@ def aimeta_apply(body: dict = Body(default={})):
     sels = (body or {}).get("selections")
     if sels:
         aimeta.apply_selection(sels)
+    media = (body or {}).get("media", True)   # True | False | [media kinds]
     _start_job("aimeta-apply", "aimeta-apply", "Apply AI metadata + rebuild",
-               lambda stop: _aimeta_apply(stop))
+               lambda stop: _aimeta_apply(stop, media=media))
     return {"started": True, "selected": len(sels) if sels else None}
 
 
@@ -2912,9 +2933,9 @@ def _lib_keys():
         return set()
 
 
-def _run_script(script, out=None, capture=False, timeout=300):
+def _run_script(script, out=None, capture=False, timeout=300, args=None):
     """Run a pipeline script with the server's interpreter; return (ok, error_tail)."""
-    argv = [sys.executable, script]
+    argv = [sys.executable, script] + list(args or [])
     try:
         if capture and out:
             with open(os.path.join(DIR, out), "w", encoding="utf-8") as f:

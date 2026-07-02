@@ -41,22 +41,31 @@ def con_index():
     return con
 
 
-def select(con):
-    """Set chosen=1 on the best asset per (norm_key, scalar kind); 0 elsewhere."""
-    con.execute("UPDATE media SET chosen=0")
+def select(con, kinds=None):
+    """Set chosen=1 on the best asset per (norm_key, scalar kind); 0 elsewhere.
+    `kinds` restricts the pass to a subset of scalar kinds (non-destructive — other
+    kinds keep their existing chosen flags), so a wand run can fill just covers."""
+    scalar = [k for k in media.SCALAR_KINDS if not kinds or k in kinds]
+    if not scalar:
+        return 0
+    if kinds:
+        con.execute("UPDATE media SET chosen=0 WHERE kind IN (%s)"
+                    % ",".join("'%s'" % k for k in scalar))
+    else:
+        con.execute("UPDATE media SET chosen=0")
     # playnite_media_overwrite=playnite-wins: your hand-curated Playnite art beats
     # every other provider for the slots Playnite owns, so it becomes the canonical
     # pick that propagates to the other frontends and the server.
     pn_wins = (config.get("playnite_media_overwrite") or "").lower() == "playnite-wins"
     rank = {}                       # (kind) -> {provider: order}
-    for kind in media.SCALAR_KINDS:
+    for kind in scalar:
         order = list(media.priority(kind))
         if pn_wins and kind in ("cover", "background", "icon"):
             order = ["playnite"] + [p for p in order if p != "playnite"]
         rank[kind] = {p: i for i, p in enumerate(order)}
     rows = con.execute(
         "SELECT id, norm_key, kind, provider, matched, ref_type FROM media "
-        "WHERE kind IN (%s)" % ",".join("'%s'" % k for k in media.SCALAR_KINDS)
+        "WHERE kind IN (%s)" % ",".join("'%s'" % k for k in scalar)
     ).fetchall()
     best = {}                       # (norm_key, kind) -> (sortkey, id)
     for r in rows:
@@ -152,8 +161,11 @@ def _repick(con, norm_key, kind):
 def main(argv):
     kind = argv[argv.index("--kind") + 1] if "--kind" in argv else None
     limit = int(argv[argv.index("--limit") + 1]) if "--limit" in argv else None
+    # --kinds a,b,c restricts the choose pass to those scalar kinds (non-destructive)
+    kinds = (argv[argv.index("--kinds") + 1].split(",")
+             if "--kinds" in argv else None)
     con = con_index()
-    n = select(con)
+    n = select(con, kinds=kinds)
     print("media_choose: selected %d chosen assets" % n, file=sys.stderr)
     if "--materialize" in argv:
         ok, dead = materialize(con, kind, limit)

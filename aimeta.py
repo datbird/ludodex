@@ -46,7 +46,7 @@ def _con():
     cols = {r[1] for r in con.execute("PRAGMA table_info(scan_runs)")}
     for col, decl in (("web", "INTEGER DEFAULT 0"),
                       ("match_provider", "INTEGER DEFAULT 0"),
-                      ("keys_json", "TEXT")):
+                      ("keys_json", "TEXT"), ("md_json", "TEXT")):
         if col not in cols:
             con.execute("ALTER TABLE scan_runs ADD COLUMN %s %s" % (col, decl))
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_nk ON findings(norm_key)")
@@ -363,12 +363,15 @@ def accepted_ss_matches():
 
 
 # --------------------------------------------------------------------- scan runs
-def scan_new(target, keys, web=0, match_provider=0):
+def scan_new(target, keys, web=0, match_provider=0, md_kinds=None):
     con = _con()
     cur = con.execute("INSERT INTO scan_runs(target,total,web,match_provider,"
-                      "keys_json,status,created) VALUES(?,?,?,?,?, 'running', ?)",
+                      "keys_json,md_json,status,created) "
+                      "VALUES(?,?,?,?,?,?, 'running', ?)",
                       (target, len(keys), 1 if web else 0, 1 if match_provider else 0,
-                       json.dumps(keys), time.time()))
+                       json.dumps(keys),
+                       json.dumps(md_kinds) if md_kinds is not None else None,
+                       time.time()))
     rid = cur.lastrowid
     con.commit()
     con.close()
@@ -399,6 +402,7 @@ def scan_get(run_id):
         return None
     d = dict(r)
     d["keys"] = json.loads(d.get("keys_json") or "[]")
+    d["md_kinds"] = json.loads(d["md_json"]) if d.get("md_json") else None
     return d
 
 
