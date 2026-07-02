@@ -11,6 +11,7 @@ import type {
   FileVariable, FileProfile, FileDetect, FilePlan, FileCommandResult,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
+  AiFindingPayload, ProviderMatch,
 } from './api'
 import './App.css'
 
@@ -3587,6 +3588,45 @@ function fmtAttrVal(v: string | string[]): string {
   return Array.isArray(v) ? v.join(', ') : String(v)
 }
 
+// Normalize a finding payload's provider link(s): prefer the multi-provider list,
+// fall back to the legacy single provider_match (IGDB).
+function providerMatches(p: AiFindingPayload): ProviderMatch[] {
+  if (p.provider_matches && p.provider_matches.length) return p.provider_matches
+  return p.provider_match ? [p.provider_match] : []
+}
+
+const PROVIDER_LABEL: Record<string, string> = {
+  igdb: 'IGDB', screenscraper: 'ScreenScraper',
+}
+
+function pmLabel(m: ProviderMatch): string {
+  return PROVIDER_LABEL[m.provider || (m.igdb_id ? 'igdb' : '')] || m.provider || 'provider'
+}
+
+function pmId(m: ProviderMatch): string | number | undefined {
+  return m.igdb_id ?? m.ss_id
+}
+
+// The green "✓ Matched to <provider>" row(s) shown on finding cards / callouts.
+function ProviderMatchRows({ p }: { p: AiFindingPayload }) {
+  const ms = providerMatches(p)
+  if (!ms.length) return null
+  return (
+    <>
+      {ms.map((m, i) => (
+        <div key={i} className={'aim-provmatch' + (m.provider === 'screenscraper' ? ' ss' : '')}>
+          {m.cover && <img className="aim-pm-cover" src={m.cover} alt="" />}
+          <div className="aim-pm-txt">
+            <span className="aim-pm-tag">✓ Matched to {pmLabel(m)}</span>
+            <b>{m.name}</b>{m.year ? ` (${m.year})` : ''}
+            {m.provider === 'screenscraper' && <span className="aim-pm-art">art</span>}
+          </div>
+        </div>
+      ))}
+    </>
+  )
+}
+
 function AimAttrList({ attrs }: { attrs: Record<string, string | string[]> }) {
   const keys = Object.keys(attrs || {})
   if (!keys.length) return null
@@ -3621,16 +3661,7 @@ function AimFindingBody({ f }: { f: AiFinding }) {
           {m.issue && <div className="aim-issue">{m.issue}</div>}
         </div>
       )}
-      {p.provider_match && (
-        <div className="aim-provmatch">
-          {p.provider_match.cover && <img className="aim-pm-cover" src={p.provider_match.cover} alt="" />}
-          <div className="aim-pm-txt">
-            <span className="aim-pm-tag">✓ Matched to IGDB</span>
-            <b>{p.provider_match.name}</b>
-            {p.provider_match.year ? ` (${p.provider_match.year})` : ''}
-          </div>
-        </div>
-      )}
+      <ProviderMatchRows p={p} />
       {f.kind === 'supplement' && Object.keys(p.attributes || {}).length > 0 &&
         <div className="aim-fills-label">Fills gaps:</div>}
       <AimAttrList attrs={p.attributes} />
@@ -3854,12 +3885,13 @@ type Change =
 
 function findingChanges(f: AiFinding): Change[] {
   const out: Change[] = []
-  const pm = f.payload.provider_match
-  if (pm) {
+  const pms = providerMatches(f.payload)
+  if (pms.length) {
     out.push({
       id: `${f.id}:match`, type: 'match',
-      label: '🔗 Link to IGDB', cover: pm.cover,
-      value: pm.name + (pm.year ? ` (${pm.year})` : ''),
+      label: '🔗 Link to ' + pms.map((m) => `${pmLabel(m)} #${pmId(m)}`).join(' + '),
+      cover: pms.find((m) => m.cover)?.cover ?? null,
+      value: pms.map((m) => `${m.name}${m.year ? ` (${m.year})` : ''}`).join(' · '),
     })
   }
   for (const k of Object.keys(f.payload.attributes || {})) {
@@ -4100,8 +4132,8 @@ function AiMetaCallout({ finding, onChanged }: { finding: AiFinding; onChanged: 
           {m.suggested_title}{m.suggested_year ? ` (${m.suggested_year})` : ''}</>}
         {finding.kind === 'supplement' && <><b>AI can fill:</b>{' '}
           {Object.keys(p.attributes || {}).map((k) => k.replace(/_/g, ' ')).join(', ')}</>}
-        {p.provider_match && <div className="aim-issue">✓ Real IGDB match found:{' '}
-          {p.provider_match.name}{p.provider_match.year ? ` (${p.provider_match.year})` : ''} — Apply in AI Metadata to link it.</div>}
+        {providerMatches(p).length > 0 && <div className="aim-issue">✓ Real provider match:{' '}
+          {providerMatches(p).map((m) => `${pmLabel(m)} — ${m.name}${m.year ? ` (${m.year})` : ''}`).join('; ')} — Apply in AI Metadata to link it.</div>}
       </div>
       {finding.status === 'proposed'
         ? <div className="aim-actions">

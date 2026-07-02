@@ -56,11 +56,13 @@ export interface GameDetail {
 }
 
 export interface ProviderMatch {
-  igdb_id: number
+  provider?: 'igdb' | 'screenscraper'
+  igdb_id?: number
+  ss_id?: string | number
   name: string
   year: number | null
-  cover: string | null
-  platforms: string[]
+  cover?: string | null
+  platforms?: string[]
 }
 export interface SourceCite { title: string; url: string }
 
@@ -78,6 +80,7 @@ export interface AiFindingPayload {
   current_match: { title: string | null; year: number | null; slug: string } | null
   missing: string[]
   provider_match?: ProviderMatch | null
+  provider_matches?: ProviderMatch[]
   sources?: SourceCite[]
   web?: boolean
 }
