@@ -1226,6 +1226,21 @@ def _jobs_list():
             "when": s["finished"] or s["created"],
             "cancelable": live, "restartable": not live and s["done"] < s["total"],
             "deletable": not live})
+    # generic one-shot jobs (apply, undo…) not represented above, while live/errored
+    shown = {j["id"] for j in out}
+    for jid, rec in list(_JOBS.items()):
+        if jid in shown:
+            continue
+        live = bool(rec["thread"] and rec["thread"].is_alive())
+        if not live and not rec.get("error"):
+            continue
+        out.append({
+            "id": jid, "kind": rec["kind"], "label": rec["label"],
+            "status": "running" if live else "error",
+            "detail": "", "error": rec.get("error"),
+            "progress": {"done": 0, "total": 0, "failed": 0},
+            "when": rec.get("started"), "cancelable": False,
+            "restartable": False, "deletable": not live})
     return out
 
 
@@ -1256,17 +1271,15 @@ def jobs_restart(jid: str):
         old = aimeta.scan_get(int(jid.split(":", 1)[1]))
         if not old:
             raise HTTPException(404, "no such scan")
-        # re-query the target (unmatched/missing naturally resume; others re-scan)
-        remaining = max(1, (old["total"] or 1) - (old["done"] or 0))
-        keys = aimeta.targets(old["target"], remaining)
+        # resume exactly where it stopped, using the stored key set + options
+        keys = (old.get("keys") or [])[old.get("done") or 0:]
         if not keys:
-            raise HTTPException(400, "nothing left to scan for that target")
-        web = bool(old.get("web"))
-        rid = aimeta.scan_new(old["target"], len(keys), web)
-        _start_job("aimeta:%d" % rid, "aimeta",
-                   "Metadata scan (%s%s)" % (old["target"], ", web" if web else ""),
-                   lambda stop: _aimeta_scan(rid, keys, web, stop), run_id=rid,
-                   cancelable=True)
+            raise HTTPException(400, "nothing left to scan")
+        opts = {"web": bool(old.get("web")),
+                "match_provider": bool(old.get("match_provider")),
+                "label": old.get("target")}
+        rid = aimeta.scan_new(old["target"], keys, opts["web"], opts["match_provider"])
+        _start_aimeta_job(rid, keys, opts)
         return {"restarted": True, "id": "aimeta:%d" % rid}
     raise HTTPException(400, "start a library sync from the Library page")
 
@@ -1301,10 +1314,37 @@ def jobs_delete(jid: str):
 #  Findings are proposals the user accepts/rejects; accepted supplements show
 #  in the detail view and bake into the catalog on the next rebuild.
 # --------------------------------------------------------------------------- #
-def _aimeta_scan(run_id, norm_keys, web, should_stop):
-    """Background scan body: analyze each game, store actionable findings."""
-    done = found = errs = 0
-    last_err = None
+def _provider_match(title, year=None):
+    """Search IGDB for an AI-proposed title → the best real provider hit (or None).
+    This is how an AI identification becomes a *trusted provider* match."""
+    if not title:
+        return None
+    try:
+        hits = _igdb_search(title, limit=6)
+    except Exception:
+        return None
+    if not hits:
+        return None
+    tn = titlenorm.norm(title)
+    best = None
+    for h in hits:
+        s = (2 if titlenorm.norm(h.get("name") or "") == tn else 0) + \
+            (1 if year and h.get("year") == year else 0)
+        if best is None or s > best[0]:
+            best = (s, h)
+    h = best[1]
+    return {"igdb_id": h.get("igdb_id"), "name": h.get("name"),
+            "year": h.get("year"), "cover": h.get("cover"),
+            "platforms": h.get("platforms")}
+
+
+def _aimeta_scan(run_id, norm_keys, opts, should_stop):
+    """Background scan body: analyze each game; when match_provider is on, also try
+    to resolve AI identities to a real IGDB entry. Stores actionable findings."""
+    web = bool(opts.get("web"))
+    match_prov = bool(opts.get("match_provider"))
+    model = ai.model_for_area("metadata")
+    done = found = 0
     lib = aimeta._lib()
     try:
         for nk in norm_keys:
@@ -1314,13 +1354,17 @@ def _aimeta_scan(run_id, norm_keys, web, should_stop):
                 ctx = aimeta.game_context(nk, lib=lib)
                 if ctx:
                     res = ai.analyze_game(ctx, web=web)
-                    model = ai.model_for_area("metadata")
+                    m = res.get("match") or {}
+                    if (match_prov and m.get("suggested_title")
+                            and m.get("status") in ("unmatched", "wrong", "unsure")):
+                        pm = _provider_match(m.get("suggested_title"),
+                                             m.get("suggested_year"))
+                        if pm:
+                            res["provider_match"] = pm
                     if aimeta.store_finding(run_id, ctx, res, model):
                         found += 1
             except Exception as e:               # one game's failure never aborts
-                errs += 1
-                last_err = str(e)[:200]
-                print("aimeta scan: %s -> %s" % (nk, last_err), file=sys.stderr)
+                print("aimeta scan: %s -> %s" % (nk, str(e)[:200]), file=sys.stderr)
             done += 1
             aimeta.scan_progress(run_id, done, found)
     finally:
@@ -1329,29 +1373,48 @@ def _aimeta_scan(run_id, norm_keys, web, should_stop):
     aimeta.scan_finish(run_id, "paused" if done < len(norm_keys) else "done")
 
 
+def _start_aimeta_job(run_id, keys, opts):
+    web = bool(opts.get("web"))
+    mp = bool(opts.get("match_provider"))
+    label = "Metadata scan (%s%s%s)" % (opts.get("label", "scan"),
+                                        ", web" if web else "",
+                                        ", match" if mp else "")
+    _start_job("aimeta:%d" % run_id, "aimeta", label,
+               lambda stop: _aimeta_scan(run_id, keys, opts, stop),
+               run_id=run_id, cancelable=True)
+
+
 @app.post("/api/aimeta/scan")
 def aimeta_scan(body: dict = Body(default={})):
-    """Start a background metadata scan. Body: {target, limit}. target =
-    'unmatched' | 'matched' | 'missing' | 'all'."""
+    """Start a background metadata scan / magic-wand pass. Body:
+    {target|norm_keys, limit, web, match_provider}. `norm_keys` (an explicit set,
+    e.g. the current library filter) takes precedence over `target`
+    ('unmatched'|'matched'|'missing'|'all')."""
     body = body or {}
-    target = body.get("target", "unmatched")
-    if target not in ("unmatched", "matched", "missing", "all"):
-        raise HTTPException(400, "bad target")
     try:
         ai._resolve(ai.provider_for_area("metadata"), ai.model_for_area("metadata"))
     except RuntimeError as e:
         raise HTTPException(400, str(e))
-    limit = max(1, min(int(body.get("limit") or 100), 2000))
-    web = bool(body.get("web")) and ai.supports_web(ai.provider_for_area("metadata"))
-    keys = aimeta.targets(target, limit)
+    provider = ai.provider_for_area("metadata")
+    web = bool(body.get("web")) and ai.supports_web(provider)
+    match_provider = bool(body.get("match_provider"))
+    explicit = body.get("norm_keys")
+    if explicit:
+        keys = [k for k in explicit if isinstance(k, str)][:5000]
+        label = body.get("label") or "selection"
+    else:
+        target = body.get("target", "unmatched")
+        if target not in ("unmatched", "matched", "missing", "all"):
+            raise HTTPException(400, "bad target")
+        keys = aimeta.targets(target, max(1, min(int(body.get("limit") or 100), 2000)))
+        label = target
     if not keys:
-        raise HTTPException(400, "no games match that target")
-    run_id = aimeta.scan_new(target, len(keys), web)
-    _start_job("aimeta:%d" % run_id, "aimeta",
-               "Metadata scan (%s%s)" % (target, ", web" if web else ""),
-               lambda stop: _aimeta_scan(run_id, keys, web, stop),
-               run_id=run_id, cancelable=True)
-    return {"run_id": run_id, "target": target, "count": len(keys), "web": web}
+        raise HTTPException(400, "no games to scan")
+    run_id = aimeta.scan_new(label, keys, web, match_provider)
+    _start_aimeta_job(run_id, keys, {"web": web, "match_provider": match_provider,
+                                     "label": label})
+    return {"run_id": run_id, "target": label, "count": len(keys), "web": web,
+            "match_provider": match_provider}
 
 
 @app.get("/api/aimeta/targets")
@@ -1379,6 +1442,67 @@ def aimeta_finding_action(fid: int, action: str):
     aimeta.set_status(fid, {"accept": "accepted", "reject": "rejected",
                             "reset": "proposed"}[action])
     return {"findings": aimeta.findings_list(), "counts": aimeta.findings_counts()}
+
+
+@app.post("/api/aimeta/accept-all")
+def aimeta_accept_all(body: dict = Body(default={})):
+    """Bulk-accept every proposed finding (optionally at/above a confidence)."""
+    minc = float((body or {}).get("min_confidence") or 0)
+    n = 0
+    for f in aimeta.findings_list(status="proposed", limit=5000):
+        if f["confidence"] >= minc:
+            aimeta.set_status(f["id"], "accepted")
+            n += 1
+    return {"accepted": n, "counts": aimeta.findings_counts()}
+
+
+def _aimeta_apply(should_stop):
+    """Make accepted findings real: write AI provider-matches into igdb_resolution
+    (+ fetch their IGDB records), then rebuild the catalog so accepted supplements
+    and new provider links + their trusted attributes/media flow in."""
+    import igdb
+    cache = os.path.join(DIR, "metadata-cache.sqlite")
+    now = int(time.time())
+    pms = aimeta.accepted_provider_matches()
+    mc = sqlite3.connect(cache)
+    mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY "
+               "KEY, igdb_id INTEGER, slug TEXT, matched_by TEXT, resolved_at INTEGER)")
+    mc.execute("CREATE TABLE IF NOT EXISTS igdb_meta(igdb_id INTEGER PRIMARY KEY, "
+               "payload_json TEXT, fetched_at INTEGER)")
+    need = []
+    for pm in pms:
+        mc.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,slug,"
+                   "matched_by,resolved_at) VALUES(?,?,?,?,?)",
+                   (pm["norm_key"], pm["igdb_id"], None, "ai_name", now))
+        if not mc.execute("SELECT 1 FROM igdb_meta WHERE igdb_id=?",
+                          (pm["igdb_id"],)).fetchone():
+            need.append(pm["igdb_id"])
+    mc.commit()
+    cid, tok = _igdb_token()
+    if tok and need:                     # fetch the trusted records for new matches
+        for i in range(0, len(need), 200):
+            batch = need[i:i + 200]
+            body = ("fields %s; where id = (%s); limit 500;"
+                    % (igdb.GAME_FIELDS, ",".join(str(x) for x in batch)))
+            try:
+                for g in igdb.query("games", body, cid, tok):
+                    mc.execute("INSERT OR REPLACE INTO igdb_meta(igdb_id,"
+                               "payload_json,fetched_at) VALUES(?,?,?)",
+                               (g["id"], json.dumps(g, ensure_ascii=False), now))
+                mc.commit()
+            except Exception:
+                pass
+    mc.close()
+    _run_script("build_library.py", timeout=1800)
+
+
+@app.post("/api/aimeta/apply")
+def aimeta_apply():
+    """Apply accepted findings to the catalog (background: link provider matches,
+    fetch their records, rebuild). Accepted supplements bake in via the rebuild."""
+    _start_job("aimeta-apply", "aimeta-apply", "Apply AI metadata + rebuild",
+               lambda stop: _aimeta_apply(stop))
+    return {"started": True}
 
 
 @app.get("/api/games/{norm_key}")

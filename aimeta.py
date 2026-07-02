@@ -38,9 +38,13 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS scan_runs(
         id INTEGER PRIMARY KEY, target TEXT, total INTEGER, done INTEGER DEFAULT 0,
         findings INTEGER DEFAULT 0, status TEXT, created REAL, finished REAL,
-        web INTEGER DEFAULT 0)""")
-    if "web" not in {r[1] for r in con.execute("PRAGMA table_info(scan_runs)")}:
-        con.execute("ALTER TABLE scan_runs ADD COLUMN web INTEGER DEFAULT 0")
+        web INTEGER DEFAULT 0, match_provider INTEGER DEFAULT 0, keys_json TEXT)""")
+    cols = {r[1] for r in con.execute("PRAGMA table_info(scan_runs)")}
+    for col, decl in (("web", "INTEGER DEFAULT 0"),
+                      ("match_provider", "INTEGER DEFAULT 0"),
+                      ("keys_json", "TEXT")):
+        if col not in cols:
+            con.execute("ALTER TABLE scan_runs ADD COLUMN %s %s" % (col, decl))
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_nk ON findings(norm_key)")
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_status ON findings(status)")
     return con
@@ -175,7 +179,8 @@ def store_finding(run_id, ctx, result, model=""):
     payload = {"match": match, "attributes": attrs,
                "notes": result.get("notes", ""),
                "current_match": ctx.get("match"), "missing": ctx.get("missing"),
-               "sources": result.get("sources") or [], "web": bool(result.get("web"))}
+               "sources": result.get("sources") or [], "web": bool(result.get("web")),
+               "provider_match": result.get("provider_match")}   # real IGDB hit, if found
     con = _con()
     # a re-scan supersedes an earlier *un-reviewed* finding for the same game;
     # accepted/rejected findings are the user's decision and are left alone.
@@ -259,12 +264,27 @@ def accepted_supplements():
     return out
 
 
-# --------------------------------------------------------------------- scan runs
-def scan_new(target, total, web=0):
+def accepted_provider_matches():
+    """Accepted findings that carry a real provider (IGDB) match — [{norm_key,
+    igdb_id}] — to write into igdb_resolution so a rebuild links them."""
     con = _con()
-    cur = con.execute("INSERT INTO scan_runs(target,total,web,status,created) "
-                      "VALUES(?,?,?, 'running', ?)",
-                      (target, total, 1 if web else 0, time.time()))
+    out = []
+    for r in con.execute("SELECT norm_key, payload_json FROM findings "
+                         "WHERE status='accepted'"):
+        pm = (json.loads(r["payload_json"] or "{}").get("provider_match") or {})
+        if pm.get("igdb_id"):
+            out.append({"norm_key": r["norm_key"], "igdb_id": int(pm["igdb_id"])})
+    con.close()
+    return out
+
+
+# --------------------------------------------------------------------- scan runs
+def scan_new(target, keys, web=0, match_provider=0):
+    con = _con()
+    cur = con.execute("INSERT INTO scan_runs(target,total,web,match_provider,"
+                      "keys_json,status,created) VALUES(?,?,?,?,?, 'running', ?)",
+                      (target, len(keys), 1 if web else 0, 1 if match_provider else 0,
+                       json.dumps(keys), time.time()))
     rid = cur.lastrowid
     con.commit()
     con.close()
@@ -291,7 +311,11 @@ def scan_get(run_id):
     con = _con()
     r = con.execute("SELECT * FROM scan_runs WHERE id=?", (run_id,)).fetchone()
     con.close()
-    return dict(r) if r else None
+    if not r:
+        return None
+    d = dict(r)
+    d["keys"] = json.loads(d.get("keys_json") or "[]")
+    return d
 
 
 def scan_delete(run_id):
