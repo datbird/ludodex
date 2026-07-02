@@ -103,8 +103,9 @@ export interface AiApplySelection {
   match: boolean
 }
 export type AiFindingCounts = Record<string, Record<string, number>>
-export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number; web_capable: boolean }
-export interface ScanOpts { web?: boolean; match_provider?: boolean }
+export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number; web_capable: boolean; attributes: string[]; media_kinds: string[] }
+export type ScopeValue = boolean | string[]   // true=all, false=none, [kinds]=subset
+export interface ScanOpts { web?: boolean; match_provider?: boolean; metadata?: ScopeValue; media?: ScopeValue }
 export interface AiScanRun {
   id: number
   target: string
@@ -833,10 +834,13 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ accepted: number; counts: AiFindingCounts }>
   },
-  aimetaApply: async (selections?: AiApplySelection[]) => {
+  aimetaApply: async (selections?: AiApplySelection[], media?: ScopeValue) => {
+    const body: { selections?: AiApplySelection[]; media?: ScopeValue } = {}
+    if (selections) body.selections = selections
+    if (media !== undefined) body.media = media
     const r = await fetch('/api/aimeta/apply', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(selections ? { selections } : {}),
+      body: JSON.stringify(body),
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ started: boolean; selected: number | null }>

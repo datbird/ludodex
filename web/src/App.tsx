@@ -11,7 +11,7 @@ import type {
   FileVariable, FileProfile, FileDetect, FilePlan, FileCommandResult,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
-  AiFindingPayload, ProviderMatch,
+  AiFindingPayload, ProviderMatch, ScopeValue,
 } from './api'
 import './App.css'
 
@@ -3695,6 +3695,55 @@ function AimActions({ f, onAct }: { f: AiFinding; onAct: (a: 'accept' | 'reject'
   )
 }
 
+// true = all, false = none, [kinds] = a chosen subset
+function scopeValue(master: boolean, picked: Set<string>): ScopeValue {
+  if (master) return true
+  return picked.size ? Array.from(picked) : false
+}
+
+// the wand's media scope is remembered so Apply pulls the same kinds it scanned for
+const WAND_MEDIA_KEY = 'ludodex_wand_media'
+function wandMedia(): ScopeValue {
+  try { const v = localStorage.getItem(WAND_MEDIA_KEY); if (v) return JSON.parse(v) } catch { /* */ }
+  return true
+}
+
+function ScopeCategory({ name, unit, items, master, setMaster, picked, setPicked }: {
+  name: string; unit: string; items: string[]
+  master: boolean; setMaster: (b: boolean) => void
+  picked: Set<string>; setPicked: (s: Set<string>) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const n = master ? items.length : picked.size
+  const label = master ? `all ${items.length} ${unit}` : n === 0 ? `no ${unit}` : `${n} of ${items.length} ${unit}`
+  const toggle = (k: string) => {
+    const s = new Set(picked); s.has(k) ? s.delete(k) : s.add(k); setPicked(s)
+  }
+  return (
+    <div className={'wand-scope' + (!master && picked.size === 0 ? ' off' : '')}>
+      <div className="wand-scope-h">
+        <label className="wand-check wand-scope-master">
+          <input type="checkbox" checked={master} onChange={(e) => setMaster(e.target.checked)} />
+          <span>{name} <span className="dim">— {label}</span></span>
+        </label>
+        <button type="button" className="wand-scope-exp" title={open ? 'Collapse' : 'Expand'}
+          onClick={() => setOpen((v) => !v)}>{open ? '▾' : '▸'}</button>
+      </div>
+      {open && (
+        <div className="wand-scope-kinds">
+          {items.map((k) => (
+            <label key={k} className={'wand-kchip' + ((master || picked.has(k)) ? ' on' : '') + (master ? ' locked' : '')}
+              title={master ? 'All selected — uncheck the master to pick individually' : ''}>
+              <input type="checkbox" checked={master || picked.has(k)} disabled={master} onChange={() => toggle(k)} />
+              {k.replace(/_/g, ' ')}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function MagicWandOverlay({ filterQuery, filterCount, onClose }: {
   filterQuery: GamesQuery; filterCount: number; onClose: () => void
 }) {
@@ -3706,13 +3755,26 @@ function MagicWandOverlay({ filterQuery, filterCount, onClose }: {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
+  // metadata + media scope: master "all" flag + a picked subset when master is off
+  const [mdMaster, setMdMaster] = useState(true)
+  const [mdPicked, setMdPicked] = useState<Set<string>>(new Set())
+  const [mediaMaster, setMediaMaster] = useState(true)
+  const [mediaPicked, setMediaPicked] = useState<Set<string>>(new Set())
   useEffect(() => { api.aimetaTargets().then(setTargets).catch(() => {}) }, [])
   const hasFilter = !!(filterQuery.q || (filterQuery.include || []).length || (filterQuery.exclude || []).length)
+
+  const metadataVal = scopeValue(mdMaster, mdPicked)
+  const mediaVal = scopeValue(mediaMaster, mediaPicked)
+  const nothingToDo = metadataVal === false && mediaVal === false
 
   const wave = async () => {
     setBusy(true); setErr(''); setMsg('')
     try {
-      const opts = { web: web && !!targets?.web_capable, match_provider: matchProvider }
+      const opts = {
+        web: web && !!targets?.web_capable, match_provider: matchProvider,
+        metadata: metadataVal, media: mediaVal,
+      }
+      try { localStorage.setItem(WAND_MEDIA_KEY, JSON.stringify(mediaVal)) } catch { /* */ }
       let r
       if (scope === 'all') {
         r = await api.aimetaScan({ target: 'all', limit, ...opts })
@@ -3777,9 +3839,18 @@ function MagicWandOverlay({ filterQuery, filterCount, onClose }: {
                 attributes and media when you Apply the results.</div>
             </div>
 
+            <div className="wand-sec">
+              <div className="wand-sec-h">Fill</div>
+              <ScopeCategory name="Metadata" unit="attributes" items={targets?.attributes || []}
+                master={mdMaster} setMaster={setMdMaster} picked={mdPicked} setPicked={setMdPicked} />
+              <ScopeCategory name="Media" unit="types" items={targets?.media_kinds || []}
+                master={mediaMaster} setMaster={setMediaMaster} picked={mediaPicked} setPicked={setMediaPicked} />
+              {nothingToDo && <div className="wand-info dim">Turn on Metadata or Media — nothing is selected to fill.</div>}
+            </div>
+
             {err && <div className="fo-warn">⚠ {err}</div>}
             <div className="settings-actions wand-actions">
-              <button className="go wand-go" disabled={busy} onClick={wave}>
+              <button className="go wand-go" disabled={busy || nothingToDo} onClick={wave}>
                 {busy ? 'Starting…' : '✨ Wave the wand'}</button>
             </div>
           </>
@@ -3947,7 +4018,7 @@ function MetadataChangeset() {
     if (!selections.length) return
     setBusy(true); setNote('')
     try {
-      await api.aimetaApply(selections)
+      await api.aimetaApply(selections, wandMedia())
       setNote(`✨ Applying ${selectedCount} change(s) across ${gamesTouched} game(s) — linking provider matches and rebuilding. Track it in the job monitor.`)
       load()
     } catch (e) { setNote((e as Error).message) } finally { setBusy(false) }
@@ -4042,7 +4113,7 @@ function MetadataReview() {
   }
   const apply = async () => {
     setNote('')
-    try { await api.aimetaApply(); setNote('✨ Applying accepted findings — linking provider matches and rebuilding the catalog. Track it in the job monitor.') }
+    try { await api.aimetaApply(undefined, wandMedia()); setNote('✨ Applying accepted findings — linking provider matches and rebuilding the catalog. Track it in the job monitor.') }
     catch (e) { setNote((e as Error).message) }
   }
   const countFor = (k: string) => {

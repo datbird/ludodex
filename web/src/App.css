@@ -2005,6 +2005,25 @@ a.idchip:hover { background: var(--accent-bg); }
 .wand-actions { justify-content: flex-end; }
 .wand-go { font-size: 15px; }
 .wand-ok { line-height: 1.5; }
+.wand-scope { border: 1px solid var(--border); border-radius: 9px; padding: 4px 10px; margin-bottom: 8px; }
+.wand-scope.off { opacity: 0.6; }
+.wand-scope-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wand-scope-master { flex: 1; padding: 8px 0; }
+.wand-scope-exp { background: none; border: 0; color: var(--text); opacity: 0.7; cursor: pointer; font-size: 13px; padding: 4px 6px; }
+.wand-scope-exp:hover { opacity: 1; color: var(--accent); }
+.wand-scope-kinds { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0 10px; border-top: 1px solid var(--border); margin-top: 2px; }
+.wand-kchip {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  font-size: 12px; text-transform: capitalize; color: var(--text);
+  padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg);
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.wand-kchip input { display: none; }
+.wand-kchip:hover { border-color: var(--accent); }
+.wand-kchip.on { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+.wand-kchip.locked { cursor: not-allowed; opacity: 0.55; }
+.wand-kchip.locked:hover { border-color: var(--border); }
 
 /* ---- provider match + sources in review ---- */
 .aim-provmatch { display: flex; align-items: center; gap: 10px; background: rgba(34,197,94,0.10); border: 1px solid rgba(34,197,94,0.4); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
