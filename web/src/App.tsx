@@ -6,7 +6,7 @@ import type {
   DedupeSuggestion, ArtPick, Service, ServiceConnect, Achievements as AchData,
   MediaLibrary, MediaAsset, MediaKind,
   OpsStatus, OpsDatabase, SyncService, SyncJob, TagRef, Scores,
-  Spotlight as SpotlightData, EmuLocation, IdentifyCandidate, RecognizedGame,
+  Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device,
   FileVariable, FileProfile, FileDetect, FilePlan, FileCommandResult,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
@@ -781,7 +781,6 @@ const SECTIONS = [
   { id: 'connections', name: 'Connections', icon: '🔌' },
   { id: 'library', name: 'Library', icon: '📚' },
   { id: 'dashboard', name: 'Dashboard', icon: '🎛️' },
-  { id: 'emulation', name: 'Emulation', icon: '🕹️' },
   { id: 'files', name: 'File ops', icon: '🗂️' },
   { id: 'metadata', name: 'AI Metadata', icon: '🔎' },
 ]
@@ -793,7 +792,6 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
                 { id: 'limits', name: 'Rate limits' }],
   library: [{ id: 'preferences', name: 'Preferences' }],
   dashboard: [{ id: 'spotlight', name: 'Spotlight' }],
-  emulation: [{ id: 'storage', name: 'Storage locations' }],
   files: [{ id: 'operations', name: 'Operations' },
           { id: 'profiles', name: 'Profiles' },
           { id: 'history', name: 'History' }],
@@ -842,8 +840,6 @@ function Settings({ onClose, onPrefsChanged }: { onClose: () => void; onPrefsCha
               ? <LibraryPrefs onChanged={onPrefsChanged} />
               : section === 'dashboard'
               ? <DashboardPrefs onChanged={onPrefsChanged} />
-              : section === 'emulation'
-              ? <EmulationStorage />
               : section === 'files'
               ? (sub === 'operations' ? <FileOpsOperations />
                 : sub === 'profiles' ? <FileProfiles />
@@ -936,125 +932,7 @@ function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
   )
 }
 
-const ROLE_LABEL: Record<string, string> = { both: 'ROMs + Media', roms: 'ROMs', media: 'Media' }
 
-function EmulationStorage() {
-  const [locs, setLocs] = useState<EmuLocation[] | null>(null)
-  const [kinds, setKinds] = useState<MediaKind[]>([])
-  const [name, setName] = useState('')
-  const [path, setPath] = useState('')
-  const [role, setRole] = useState<'roms' | 'media' | 'both'>('both')
-  const [pick, setPick] = useState<Set<string>>(new Set())   // empty = all kinds
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState('')
-
-  const load = () => api.emuLocations().then((d) => setLocs(d.locations)).catch(() => setLocs([]))
-  useEffect(() => { load(); api.mediaKinds().then((d) => setKinds(d.kinds)).catch(() => {}) }, [])
-
-  const add = async () => {
-    if (!name.trim() || !path.trim()) return
-    setBusy(true); setErr('')
-    try {
-      const d = await api.setEmuLocation({
-        name: name.trim(), path: path.trim(), role,
-        kinds: role === 'roms' ? [] : Array.from(pick),
-      })
-      setLocs(d.locations); setName(''); setPath(''); setRole('both'); setPick(new Set())
-    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
-  }
-  const remove = async (n: string) => { setLocs((await api.removeEmuLocation(n)).locations) }
-  const toggle = async (n: string, on: boolean) => { setLocs((await api.setEmuLocationEnabled(n, on)).locations) }
-  const togglePick = (k: string) =>
-    setPick((prev) => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n })
-
-  const STATUS = {
-    mounted: { label: 'Mounted', cls: 'ok' }, present: { label: 'Present', cls: 'ok' },
-    MISSING: { label: 'Missing', cls: 'err' }, unset: { label: 'Unset', cls: 'dim' },
-  } as Record<string, { label: string; cls: string }>
-  const showMedia = role === 'media' || role === 'both'
-
-  if (!locs) return <div className="loading">Loading…</div>
-  return (
-    <div className="emu-storage">
-      <div className="pref-hint" style={{ marginBottom: 14 }}>
-        Folders ludodex scans for emulation. A location can hold <b>ROMs + Media</b>
-        {' '}(default — everything in one place), <b>ROMs</b> only, or <b>Media</b>
-        {' '}only. Add local paths, or the mount point of an SMB/network share (mount
-        it at the OS level first). Media is read from the ES-DE
-        {' '}<code>downloaded_media</code> layout; for a Media location you can pick
-        which media types to index.
-      </div>
-
-      <div className="emu-list">
-        {locs.length === 0 && <div className="sync-note dim">No locations yet.</div>}
-        {locs.map((a) => (
-          <div key={a.name} className={'emu-row' + (a.enabled ? '' : ' off')}>
-            <label className="switch">
-              <input type="checkbox" checked={a.enabled}
-                onChange={(e) => toggle(a.name, e.target.checked)} />
-              <span className="track"><span className="knob" /></span>
-            </label>
-            <div className="emu-info">
-              <div className="emu-name">{a.name}
-                <span className={'emu-kind role-' + a.role}>{ROLE_LABEL[a.role]}</span>
-                {(a.role !== 'roms') && (
-                  <span className="emu-media-count">
-                    {a.kinds.length ? `${a.kinds.length} media type${a.kinds.length === 1 ? '' : 's'}` : 'all media'}</span>
-                )}
-                <span className={'emu-status ' + (STATUS[a.status]?.cls || 'dim')}>
-                  {STATUS[a.status]?.label || a.status}</span>
-              </div>
-              <code className="emu-path">{a.path}</code>
-            </div>
-            <button className="emu-rm" title="Remove location"
-              onClick={() => remove(a.name)}>×</button>
-          </div>
-        ))}
-      </div>
-
-      <div className="emu-add">
-        <div className="emu-add-title">＋ Add a location</div>
-        <div className="emu-add-grid">
-          <input placeholder="Name (e.g. Deck SD, NAS roms)" value={name}
-            onChange={(e) => setName(e.target.value)} />
-          <input placeholder="Path (e.g. /run/media/deck/SD or /mnt/roms)" value={path}
-            onChange={(e) => setPath(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') add() }} />
-          <select value={role} onChange={(e) => setRole(e.target.value as 'roms' | 'media' | 'both')}>
-            <option value="both">ROMs + Media (default)</option>
-            <option value="roms">ROMs only</option>
-            <option value="media">Media only</option>
-          </select>
-          <button className="go" disabled={busy || !name.trim() || !path.trim()}
-            onClick={add}>{busy ? 'Adding…' : 'Add'}</button>
-        </div>
-
-        {showMedia && (
-          <div className="emu-kinds">
-            <div className="emu-kinds-head">
-              Media types to index
-              <span className="emu-kinds-note">
-                {pick.size === 0 ? 'all types (nothing selected = everything)'
-                  : `${pick.size} selected`}</span>
-              {pick.size > 0 && <button className="emu-kinds-clear" onClick={() => setPick(new Set())}>Reset to all</button>}
-            </div>
-            <div className="emu-kinds-grid">
-              {kinds.map((k) => (
-                <label key={k.kind} className={'emu-kchip' + (pick.has(k.kind) ? ' on' : '')}
-                  title={k.description}>
-                  <input type="checkbox" checked={pick.has(k.kind)}
-                    onChange={() => togglePick(k.kind)} />
-                  {k.kind.replace(/_/g, ' ')}
-                </label>
-              ))}
-            </div>
-          </div>
-        )}
-        {err && <div className="connect-msg err">{err}</div>}
-      </div>
-    </div>
-  )
-}
 
 const ADD_SOURCES = ['manual', 'steam', 'gog', 'epic', 'itch', 'ea', 'psn', 'xbox', 'emulation']
 

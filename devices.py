@@ -67,6 +67,51 @@ def _con():
     return con
 
 
+def local_device_id():
+    """The 'This server (local)' device id, created on demand — the home for local
+    storage now that emulation-storage locations live in Connections."""
+    con = _con()
+    r = con.execute("SELECT id FROM devices WHERE transport='local' ORDER BY id "
+                    "LIMIT 1").fetchone()
+    if r:
+        con.close()
+        return r["id"]
+    cur = con.execute("INSERT INTO devices(name,transport,enabled,created) "
+                      "VALUES('This server (local)','local',1,?)", (time.time(),))
+    did = cur.lastrowid
+    con.commit()
+    con.close()
+    return did
+
+
+def migrate_storage():
+    """One-time, idempotent: fold legacy Emulation-storage locations into
+    Connections as managers on the local device, then drop the old rows. ROM
+    archives → ROM folder managers; ES-DE media mounts (not device-created) →
+    Media folder managers. Returns {roms, media} migrated counts."""
+    if config.get("storage_migrated") == "1":
+        return {"roms": 0, "media": 0, "skipped": True}
+    did = None
+    n_roms = n_media = 0
+    for a in config.archives_list():
+        did = did or local_device_id()
+        manager_set({"device_id": did, "kind": "roms", "name": a["name"],
+                     "rom_path": a["path"], "enabled": a["enabled"]})
+        config.archive_rm(a["name"])
+        n_roms += 1
+    for m in config.media_mounts_list(provider="esde"):
+        if (m["name"] or "").startswith("device-"):     # already a device mount
+            continue
+        did = did or local_device_id()
+        manager_set({"device_id": did, "kind": "media", "name": m["name"],
+                     "media_path": m["path"], "media_kinds": m.get("kinds") or [],
+                     "enabled": m["enabled"]})
+        config.media_mount_rm(m["name"])
+        n_media += 1
+    config.set_("storage_migrated", "1")
+    return {"roms": n_roms, "media": n_media}
+
+
 # --------------------------------------------------------------------------- #
 #  CRUD
 # --------------------------------------------------------------------------- #

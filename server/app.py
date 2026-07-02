@@ -907,9 +907,20 @@ def identify_folder(body: dict = Body(...)):
 #  Connections › Devices: machines hosting library managers (RetroDECK/ES-DE,
 #  RetroBat, Playnite, LaunchBox…), reached over SSH to pull ROMs + media.
 # --------------------------------------------------------------------------- #
+try:                       # fold legacy Emulation-storage locations into Connections
+    devices.migrate_storage()
+except Exception as _e:    # noqa: BLE001 — never block startup on the migration
+    print("storage migration skipped: %s" % _e, file=sys.stderr)
+
+
 @app.get("/api/devices")
 def list_devices():
     return {"devices": devices.devices_list(), "lm_kinds": devices.LM_KINDS}
+
+
+@app.post("/api/devices/migrate-storage")
+def migrate_storage_ep():
+    return devices.migrate_storage()
 
 
 @app.post("/api/devices")
