@@ -20,6 +20,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(DIR, "ai-metadata.sqlite")
 LIBRARY_DB = os.path.join(DIR, "game-library.sqlite")
 CACHE_DB = os.path.join(DIR, "metadata-cache.sqlite")
+MEDIA_INDEX = os.path.join(DIR, "media-index.sqlite")
 
 # Factual attributes the model can reasonably supply; scores/subjective kinds are
 # deliberately excluded. Holes in these drive the "missing" list + "missing" target.
@@ -84,6 +85,30 @@ def _match_info(gid, lib):
     return info
 
 
+# media kinds worth reporting coverage/gaps on (for the AI's cross-reference)
+KEY_MEDIA = ["cover", "background", "logo", "screenshot", "video", "marquee"]
+
+
+def _media_by_provider(norm_key):
+    """{provider: [kinds]} of media indexed for a game, so the AI can see what
+    each provider (ScreenScraper, IGDB, Steam, …) already supplies + the gaps."""
+    if not os.path.exists(MEDIA_INDEX):
+        return {"by_provider": {}, "have": [], "missing": KEY_MEDIA}
+    out = {}
+    have = set()
+    try:
+        mi = sqlite3.connect(MEDIA_INDEX)
+        for kind, prov in mi.execute("SELECT DISTINCT kind, provider FROM media "
+                                     "WHERE norm_key=?", (norm_key,)):
+            out.setdefault(prov or "?", set()).add(kind)
+            have.add(kind)
+        mi.close()
+    except Exception:
+        return {"by_provider": {}, "have": [], "missing": KEY_MEDIA}
+    return {"by_provider": {p: sorted(k) for p, k in out.items()},
+            "have": sorted(have), "missing": [k for k in KEY_MEDIA if k not in have]}
+
+
 def game_context(norm_key, lib=None):
     """Assemble the AI context dict for one game (or None if it's gone)."""
     own = lib or _lib()
@@ -94,9 +119,14 @@ def game_context(norm_key, lib=None):
             return None
         gid = g["id"]
         have = {}
-        for r in own.execute("SELECT kind, value FROM game_attributes WHERE game_id=?",
-                             (gid,)):
+        by_source = {}            # origin -> set(kinds) — who supplied what
+        for r in own.execute("SELECT kind, value, origin FROM game_attributes "
+                             "WHERE game_id=?", (gid,)):
             have.setdefault(r["kind"], []).append(r["value"])
+            for o in (r["origin"] or "").split(","):
+                o = o.strip()
+                if o:
+                    by_source.setdefault(o, set()).add(r["kind"])
         systems, sources = [], []
         for r in own.execute("SELECT DISTINCT source, platform FROM sources "
                              "WHERE game_id=?", (gid,)):
@@ -107,7 +137,9 @@ def game_context(norm_key, lib=None):
         missing = [k for k in SUPPLEMENT_KINDS if k not in have]
         return {"norm_key": norm_key, "title": g["canonical_title"],
                 "systems": systems, "sources": sources, "have": have,
-                "missing": missing, "match": _match_info(gid, own)}
+                "missing": missing, "match": _match_info(gid, own),
+                "by_source": {k: sorted(v) for k, v in by_source.items()},
+                "media": _media_by_provider(norm_key)}
     finally:
         if lib is None:
             own.close()

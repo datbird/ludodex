@@ -316,6 +316,11 @@ DEFAULT_PROMPTS = {
         "flag that as wrong.\n"
         "2) If there is NO current match, IDENTIFY the game (canonical title + year).\n"
         "3) SUPPLEMENT — give best-known values ONLY for the listed missing attributes.\n"
+        "You are shown which provider (IGDB, ScreenScraper, Steam…) supplied each "
+        "attribute and each media kind, plus the gaps. CROSS-REFERENCE them: where "
+        "providers agree, trust it; where one provider is missing a field another has "
+        "or the web contradicts it, note that in \"notes\"; fill only the gaps no "
+        "provider covers.\n"
         "Use only well-established facts. If unsure, LOWER the confidence and say so — "
         "never invent a value.\n"
         "Respond with ONLY a JSON object (no prose, no code fence):\n"
@@ -942,6 +947,20 @@ def _metadata_user(game):
         shown = "; ".join("%s=%s" % (k, ", ".join(map(str, v))[:80])
                           for k, v in have.items())
         lines.append("Known attributes: " + shown)
+    # per-provider coverage so the AI can cross-reference what each source supplies
+    by_source = game.get("by_source") or {}
+    if by_source:
+        lines.append("Attributes BY PROVIDER (who supplied what):")
+        for src, kinds in by_source.items():
+            lines.append("  - %s: %s" % (src, ", ".join(kinds)))
+    media = game.get("media") or {}
+    if media.get("by_provider"):
+        parts = ["%s(%s)" % (p, ", ".join(k))
+                 for p, k in media["by_provider"].items()]
+        lines.append("Media present by provider: " + "; ".join(parts))
+    if media.get("missing"):
+        lines.append("Media MISSING (no provider has it): %s"
+                     % ", ".join(media["missing"]))
     lines.append("MISSING attributes to fill: %s"
                  % (", ".join(game.get("missing") or []) or "(none)"))
     return "\n".join(lines)
