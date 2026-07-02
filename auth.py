@@ -32,6 +32,8 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS sessions(
         token_hash TEXT PRIMARY KEY, user_id INTEGER,
         created REAL, expires REAL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS email_map(
+        email TEXT PRIMARY KEY COLLATE NOCASE, user_id INTEGER, created REAL)""")
     con.row_factory = sqlite3.Row
     return con
 
@@ -187,3 +189,53 @@ def set_role(uid, role):
     con.execute("UPDATE users SET role=? WHERE id=?", (role, uid))
     con.commit()
     con.close()
+
+
+# --------------------------------------------------------------------------- #
+#  Cloudflare Access: map a verified SSO email to a ludodex user
+# --------------------------------------------------------------------------- #
+def _norm_email(email):
+    return (email or "").strip().lower()
+
+
+def list_email_maps():
+    con = _con()
+    rows = con.execute(
+        "SELECT m.email, m.user_id, m.created, u.username, u.role "
+        "FROM email_map m JOIN users u ON u.id = m.user_id "
+        "ORDER BY u.username, m.email").fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def map_email(email, user_id):
+    email = _norm_email(email)
+    if "@" not in email:
+        raise ValueError("enter a valid email address")
+    con = _con()
+    if not con.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone():
+        con.close()
+        raise ValueError("no such user")
+    con.execute("INSERT INTO email_map(email,user_id,created) VALUES(?,?,?) "
+                "ON CONFLICT(email) DO UPDATE SET user_id=excluded.user_id",
+                (email, user_id, time.time()))
+    con.commit()
+    con.close()
+
+
+def unmap_email(email):
+    con = _con()
+    con.execute("DELETE FROM email_map WHERE email=? COLLATE NOCASE", (_norm_email(email),))
+    con.commit()
+    con.close()
+
+
+def user_for_email(email):
+    """Resolve a Cloudflare-verified email to its mapped ludodex user, or None."""
+    con = _con()
+    row = con.execute(
+        "SELECT u.id, u.username, u.role FROM email_map m "
+        "JOIN users u ON u.id = m.user_id WHERE m.email=? COLLATE NOCASE",
+        (_norm_email(email),)).fetchone()
+    con.close()
+    return dict(row) if row else None

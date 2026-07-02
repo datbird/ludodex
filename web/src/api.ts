@@ -450,6 +450,11 @@ export type AuthUser = { id?: number; username: string; role: string }
 export type AuthStatus = { needs_setup: boolean; authenticated: boolean; user: AuthUser | null }
 export type AuthUserRow = { id: number; username: string; role: string; created: number }
 export type UsersList = { users: AuthUserRow[]; me: number; roles: string[] }
+export type CfMapping = { email: string; user_id: number; username: string; role: string; created: number }
+export type CfAccessState = {
+  enabled: boolean; team_domain: string; aud: string
+  mappings: CfMapping[]; users: AuthUserRow[]
+}
 
 export const api = {
   authStatus: () => get<AuthStatus>('/api/auth/status'),
@@ -466,6 +471,13 @@ export const api = {
     postJson<{ ok: boolean }>('/api/auth/users/' + id + '/password', { password }),
   setUserRole: (id: number, role: string) =>
     postJson<{ ok: boolean }>('/api/auth/users/' + id + '/role', { role }),
+  cfAccess: () => get<CfAccessState>('/api/auth/cf-access'),
+  cfAccessSet: (patch: Partial<{ enabled: boolean; team_domain: string; aud: string }>) =>
+    postJson<CfAccessState>('/api/auth/cf-access', patch),
+  cfMapEmail: (email: string, user_id: number) =>
+    postJson<{ ok: boolean; mappings: CfMapping[] }>('/api/auth/cf-access/map', { email, user_id }),
+  cfUnmapEmail: (email: string) =>
+    postJson<{ ok: boolean; mappings: CfMapping[] }>('/api/auth/cf-access/unmap', { email }),
 
   stats: () => get<Stats>('/api/stats'),
   facets: () => get<Facets>('/api/facets'),

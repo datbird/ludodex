@@ -14,4 +14,7 @@ google-genai>=0.3    # provider: gemini
 # --- optional sync target ---
 google-auth>=2.0     # only for the Firebase/Firestore sync target (sync.py)
 
+# --- Cloudflare Access SSO (verify the Access JWT) ---
+pyjwt[crypto]>=2.8   # cryptography is already present transitively
+
 # HTTP to providers uses the standard library (urllib) — no `requests` needed.

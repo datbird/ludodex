@@ -12,7 +12,7 @@ import type {
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, ProviderMatch, ScopeValue,
-  AuthUser, AuthStatus, AuthUserRow,
+  AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping,
 } from './api'
 import './App.css'
 
@@ -873,7 +873,8 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
           { id: 'history', name: 'History' }],
   metadata: [{ id: 'scan', name: 'Scan' },
              { id: 'review', name: 'Review' }],
-  account: [{ id: 'users', name: 'Users' }],
+  account: [{ id: 'users', name: 'Users' },
+            { id: 'access', name: 'Cloudflare Access' }],
 }
 
 function Settings({ onClose, onPrefsChanged, user }: {
@@ -928,7 +929,7 @@ function Settings({ onClose, onPrefsChanged, user }: {
               : section === 'metadata'
               ? (sub === 'scan' ? <MetadataScan /> : <MetadataReview />)
               : section === 'account'
-              ? <UsersPanel currentUser={user} />
+              ? (sub === 'access' ? <CfAccessPanel /> : <UsersPanel currentUser={user} />)
               : !cfg ? <div className="loading">Loading…</div>
               : sub === 'usage' ? <AiUsage cfg={cfg} onChange={reload} />
               : sub === 'keys' ? <ApiKeys cfg={cfg} onChange={reload} />
@@ -1020,6 +1021,103 @@ function UsersPanel({ currentUser }: { currentUser: AuthUser | null }) {
           </select>
           <button className="go primary" type="submit"
             disabled={busy || !nu.username.trim() || nu.password.length < 8}>Add user</button>
+        </div>
+      </form>
+    </>
+  )
+}
+
+function CfAccessPanel() {
+  const [st, setSt] = useState<CfAccessState | null>(null)
+  const [err, setErr] = useState('')
+  const [team, setTeam] = useState('')
+  const [aud, setAud] = useState('')
+  const [saved, setSaved] = useState(false)
+  const [nm, setNm] = useState<{ email: string; user_id: number }>({ email: '', user_id: 0 })
+
+  const load = () => api.cfAccess()
+    .then((d) => { setSt(d); setTeam(d.team_domain); setAud(d.aud); setErr('') })
+    .catch((e) => setErr((e as Error).message))
+  useEffect(() => { load() }, [])
+
+  const patch = async (p: Partial<{ enabled: boolean; team_domain: string; aud: string }>) => {
+    try { setSt(await api.cfAccessSet(p)); setErr('') } catch (e) { setErr((e as Error).message) }
+  }
+  const saveCfg = async () => {
+    await patch({ team_domain: team.trim().replace(/\/+$/, ''), aud: aud.trim() })
+    setSaved(true); setTimeout(() => setSaved(false), 1500)
+  }
+  const addMap = async (e: FormEvent) => {
+    e.preventDefault(); setErr('')
+    try {
+      const r = await api.cfMapEmail(nm.email.trim(), nm.user_id)
+      setSt((s) => s ? { ...s, mappings: r.mappings } : s); setNm({ email: '', user_id: 0 })
+    } catch (e) { setErr((e as Error).message) }
+  }
+  const rm = async (email: string) => {
+    try { const r = await api.cfUnmapEmail(email); setSt((s) => s ? { ...s, mappings: r.mappings } : s) }
+    catch (e) { setErr((e as Error).message) }
+  }
+
+  if (!st) return err ? <div className="connect-msg err">{err}</div> : <div className="loading">Loading…</div>
+  return (
+    <>
+      <h2>Cloudflare Access (SSO)</h2>
+      <p className="dim">Put ludodex behind a Cloudflare Access application and users are signed in
+        automatically from their Cloudflare identity — no separate ludodex password. ludodex verifies
+        the signed Access token (your team’s certificates + this app’s <b>AUD</b> tag), reads the
+        authenticated email, and logs the request in as the ludodex user you map that email to below.
+        Full setup steps are in <b>CLOUDFLARE.md</b>.</p>
+      {err && <div className="connect-msg err">{err}</div>}
+
+      <label className="switch cf-enable">
+        <input type="checkbox" checked={st.enabled} onChange={(e) => patch({ enabled: e.target.checked })} />
+        <span className="track"><span className="knob" /></span>
+        <span className="switch-text">{st.enabled ? 'Enabled' : 'Disabled'}</span>
+      </label>
+
+      <div className="cf-cfg">
+        <label className="dm-field">
+          <span>Team domain</span>
+          <input placeholder="yourteam.cloudflareaccess.com" value={team}
+            onChange={(e) => setTeam(e.target.value)} />
+        </label>
+        <label className="dm-field">
+          <span>Application Audience (AUD) tag</span>
+          <input placeholder="AUD from your Access application" value={aud}
+            onChange={(e) => setAud(e.target.value)} />
+        </label>
+        <div className="cf-cfg-actions">
+          <button className="go primary" onClick={saveCfg}>Save</button>
+          {saved && <span className="saved">Saved ✓</span>}
+        </div>
+      </div>
+
+      <h3>Email → user mappings</h3>
+      <p className="dim">When Cloudflare presents one of these emails, ludodex signs in as the mapped
+        user. You can point several emails at the same user; unmapped emails are simply not signed in.</p>
+      <div className="users-list">
+        {st.mappings.length === 0 && <div className="sync-note dim">No emails mapped yet.</div>}
+        {st.mappings.map((m: CfMapping) => (
+          <div key={m.email} className="user-row cf-map-row">
+            <span className="cf-email">{m.email}</span>
+            <span className="cf-arrow">→</span>
+            <span className="cf-target">{m.username}<span className="user-you">{m.role}</span></span>
+            <button className="emu-rm" title="Remove mapping" onClick={() => rm(m.email)}>×</button>
+          </div>
+        ))}
+      </div>
+      <form className="user-add" onSubmit={addMap}>
+        <div className="user-add-title">＋ Map an email to a user</div>
+        <div className="user-add-grid">
+          <input type="email" placeholder="email@example.com" value={nm.email}
+            onChange={(e) => setNm({ ...nm, email: e.target.value })} />
+          <select value={nm.user_id} onChange={(e) => setNm({ ...nm, user_id: Number(e.target.value) })}>
+            <option value={0}>— pick a user —</option>
+            {st.users.map((u) => <option key={u.id} value={u.id}>{u.username}</option>)}
+          </select>
+          <button className="go primary" type="submit"
+            disabled={!nm.email.trim() || !nm.user_id}>Map email</button>
         </div>
       </form>
     </>

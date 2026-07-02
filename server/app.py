@@ -38,6 +38,7 @@ import fileops         # noqa: E402  file-operations engine (profiles + runbooks
 import aimeta          # noqa: E402  AI metadata audit/supplement store + context
 import overrides       # noqa: E402  per-attribute provenance overrides (re-pointing)
 import auth            # noqa: E402  local username/password accounts + sessions
+import cf_access       # noqa: E402  Cloudflare Access SSO (verify the Access JWT)
 from . import ai       # noqa: E402  AI features (server package)
 
 LIBRARY_DB = os.path.join(DATA, "game-library.sqlite")
@@ -106,8 +107,28 @@ SESSION_COOKIE = "ludodex_session"
 _AUTH_OPEN = ("/api/auth/", "/api/health")
 
 
+def _cf_cfg():
+    return {
+        "enabled": config.get("cf_access_enabled") == "1",
+        "team_domain": config.get("cf_access_team_domain") or "",
+        "aud": config.get("cf_access_aud") or "",
+    }
+
+
 def _current_user(request: Request):
-    return auth.session_user(request.cookies.get(SESSION_COOKIE))
+    # 1) a normal ludodex session cookie
+    user = auth.session_user(request.cookies.get(SESSION_COOKIE))
+    if user:
+        return user
+    # 2) Cloudflare Access SSO: verify the Access JWT, map its email to a user
+    cf = _cf_cfg()
+    if cf["enabled"] and cf["team_domain"] and cf["aud"]:
+        token = (request.headers.get("Cf-Access-Jwt-Assertion")
+                 or request.cookies.get("CF_Authorization"))
+        email = cf_access.verify_email(token, cf["team_domain"], cf["aud"])
+        if email:
+            return auth.user_for_email(email)   # None if that email isn't mapped
+    return None
 
 
 def _set_session_cookie(resp, token):
@@ -233,6 +254,49 @@ def auth_set_role(request: Request, uid: int, body: dict = Body(...)):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+#  Cloudflare Access SSO: config + email→user mappings (admin)
+# --------------------------------------------------------------------------- #
+def _cf_state():
+    return {**_cf_cfg(), "mappings": auth.list_email_maps(), "users": auth.list_users()}
+
+
+@app.get("/api/auth/cf-access")
+def cf_access_get(request: Request):
+    _require_admin(request)
+    return _cf_state()
+
+
+@app.post("/api/auth/cf-access")
+def cf_access_set(request: Request, body: dict = Body(...)):
+    _require_admin(request)
+    b = body or {}
+    if "enabled" in b:
+        config.set_("cf_access_enabled", "1" if b["enabled"] else "0")
+    if "team_domain" in b:
+        config.set_("cf_access_team_domain", (b["team_domain"] or "").strip().strip("/"))
+    if "aud" in b:
+        config.set_("cf_access_aud", (b["aud"] or "").strip())
+    return _cf_state()
+
+
+@app.post("/api/auth/cf-access/map")
+def cf_access_map(request: Request, body: dict = Body(...)):
+    _require_admin(request)
+    try:
+        auth.map_email((body or {}).get("email", ""), (body or {}).get("user_id"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "mappings": auth.list_email_maps()}
+
+
+@app.post("/api/auth/cf-access/unmap")
+def cf_access_unmap(request: Request, body: dict = Body(...)):
+    _require_admin(request)
+    auth.unmap_email((body or {}).get("email", ""))
+    return {"ok": True, "mappings": auth.list_email_maps()}
 
 
 # ----------------------------------------------------------------------------- db
