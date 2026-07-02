@@ -106,6 +106,8 @@ def scan_esde(con, owned, now):
             print("media_index: esde mount %r missing (%s) — skipped"
                   % (mount["name"], root), file=sys.stderr)
             continue
+        # per-mount kinds filter: empty = index every media kind found
+        want_kinds = set(mount.get("kinds") or ())
         for system in sorted(os.listdir(root)):
             sysdir = os.path.join(root, system)
             if not os.path.isdir(sysdir):
@@ -122,6 +124,8 @@ def scan_esde(con, owned, now):
                         _SEEN_UNKNOWN_ESDE.add(mtype)
                         print("media_index: esde unmapped media folder %r -> "
                               "'other'" % mtype, file=sys.stderr)
+                if want_kinds and kind not in want_kinds:
+                    continue                # this mount opted out of this kind
                 for dirpath, _d, files in os.walk(tdir):
                     for fn in files:
                         base, ext = os.path.splitext(fn)

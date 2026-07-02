@@ -15,7 +15,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 
-KEY = os.environ.get("STEAM_API_KEY", "").strip()
+KEY = config.steam_key()   # env STEAM_API_KEY > config steam_api_key
 # No arg -> the configured account. NOTE: a vanity URL can resolve to a DIFFERENT
 # account than the one that owns the API key — prefer the explicit steam_id.
 who = sys.argv[1] if len(sys.argv) > 1 else config.get("steam_id")

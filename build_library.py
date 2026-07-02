@@ -60,22 +60,64 @@ def add(title, source, platform, sid, detail=""):
     if source not in ("emulation", "archive") and not g["store_title"]:
         g["store_title"] = title
     row = (source, platform, str(sid), title, detail)
-    # dedup PROVIDER rows by (source, id) so a Playnite Steam entry enriches the
-    # Steam pull instead of duplicating it — but keep every emulation/archive
-    # variant (their source_id is a system/archive name, not a unique id).
+    # dedup PROVIDER rows by (source, id, platform) so a Playnite Steam entry
+    # enriches the Steam pull instead of duplicating it — but keep every
+    # emulation/archive variant (source_id = system/archive name, not unique) AND
+    # every console a console title is owned on (same id, different platform:
+    # e.g. an Xbox title on both xbox one + xbox series).
     if source in ("emulation", "archive") or \
-       (source, str(sid)) not in {(s[0], s[2]) for s in g["sources"]}:
+       (source, str(sid), platform) not in {(s[0], s[2], s[1]) for s in g["sources"]}:
         g["sources"].append(row)
     return key
 
 
-def add_attrs(key, source, sid, record):
+def add_attrs(key, source, sid, record, origin=None):
     """Attach a full Playnite-style attribute record to a game (for the
-    attributes tables + export round-trip)."""
+    attributes tables + export round-trip). `origin` names the importer that
+    supplied the record (e.g. 'playnite'), used to attribute its tags."""
     if not key:
         return
     games_attrs.setdefault(key, {"src": []})["src"].append(
-        (source, str(sid), record))
+        (source, str(sid), record, origin))
+
+
+# ---- carry-over: keep sources whose primary input isn't present on THIS host ----
+# A consumer server (syncs only PC stores) has no roms-index / crawl-index / Playnite
+# export, so a from-scratch rebuild would drop the emulation/archive/Playnite catalog
+# produced on the Deck. Re-seed those source rows from the existing library first;
+# metadata enrichment (run later from the local caches) re-derives their attributes.
+# On the producer (all inputs present) every category is regenerated, so this is a
+# no-op there.
+_REGEN = set()
+for _s in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox"):
+    if config.source_enabled(_s) and os.path.exists(OWN + "/%s_games.tsv" % _s):
+        _REGEN.add(_s)
+if config.source_enabled("emulation") and ROM_DB and os.path.exists(ROM_DB):
+    _REGEN.add("emulation")
+if os.path.exists(os.path.join(DIR, "crawl-index.sqlite")):
+    _REGEN.add("archive")
+_pn_json = config.get("playnite_import_json")
+_lb_json = config.get("launchbox_import_json")
+_regen_pn = bool(config.source_enabled("playnite") and _pn_json and os.path.exists(_pn_json))
+_regen_lb = bool(config.source_enabled("launchbox") and _lb_json and os.path.exists(_lb_json))
+
+if os.path.exists(OUT):
+    _prev = sqlite3.connect(OUT)
+    try:
+        for nk, in_pn, in_lb in _prev.execute(
+                "SELECT norm_key, in_playnite, in_launchbox FROM games"):
+            if in_pn and not _regen_pn:
+                playnite_keys.add(nk)
+            if in_lb and not _regen_lb:
+                launchbox_keys.add(nk)
+        for src, plat, sid, title, detail in _prev.execute(
+                "SELECT source, platform, source_id, title_raw, detail FROM sources"):
+            if src in _REGEN or not config.source_enabled(src):
+                continue                       # regenerated fresh, or turned off
+            add(title, src, plat, sid, detail or "")
+    except sqlite3.OperationalError:
+        pass                                   # no prior library / schema mismatch
+    _prev.close()
 
 
 # ---- emulation (distinct game per system, ROM files only) ----
@@ -98,14 +140,34 @@ def load_tsv(path, source):
         line = line.rstrip("\n")
         if not line:
             continue
-        sid, _, title = line.partition("\t")
+        parts = line.split("\t")
+        sid = parts[0]
+        title = parts[1] if len(parts) > 1 else ""
+        # optional 3rd column = specific console/platform (psn/xbox emit it);
+        # otherwise the platform is just the source label
+        platform = parts[2] if len(parts) > 2 and parts[2] else source
         if title:
-            add(title, source, source, sid)
+            add(title, source, platform, sid)
 
 
-for _src in ("steam", "epic", "gog", "itch", "ea"):
+for _src in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox"):
     if config.source_enabled(_src):
         load_tsv(OWN + "/%s_games.tsv" % _src, _src)
+
+
+# ---- hand-added games (durable manual-games.sqlite; the library '+' add flow) ----
+MANUAL_DB = os.path.join(DIR, "manual-games.sqlite")
+if os.path.exists(MANUAL_DB):
+    mgc = sqlite3.connect(MANUAL_DB)
+    try:
+        for title, src, plat, detail in mgc.execute(
+                "SELECT title, source, platform, detail FROM manual_games"):
+            if title:
+                add(title, src or "manual", plat or (src or "manual"),
+                    "manual:" + norm(title), detail or "")
+    except sqlite3.OperationalError:
+        pass
+    mgc.close()
 
 
 # ---- crawled local archives (crawl.py -> process.py -> extracted) ----
@@ -153,7 +215,7 @@ if config.source_enabled("playnite") and PN_JSON and os.path.exists(PN_JSON):
         key = add(title, provider, platform, sid, detail)
         if key:
             playnite_keys.add(key)
-            add_attrs(key, provider, sid, rec)
+            add_attrs(key, provider, sid, rec, "playnite")
 
 
 # ---- LaunchBox library (launchbox_import.py -> JSON) ----
@@ -177,7 +239,7 @@ if config.source_enabled("launchbox") and LB_JSON and os.path.exists(LB_JSON):
         key = add(title, provider, platform, sid, detail)
         if key:
             launchbox_keys.add(key)
-            add_attrs(key, provider, sid, rec)
+            add_attrs(key, provider, sid, rec, "launchbox")
 
 
 # ---- write ----
@@ -198,6 +260,7 @@ CREATE TABLE source_attrs (game_id INTEGER, source TEXT, source_id TEXT,
 CREATE TABLE game_attributes (game_id INTEGER, kind TEXT, value TEXT);  -- queryable
 CREATE TABLE metadata_links (game_id INTEGER, provider TEXT, provider_id TEXT,
   slug TEXT, url TEXT);                    -- canonical ids from metadata providers
+CREATE TABLE game_tags (game_id INTEGER, tag TEXT, origin TEXT);  -- origin: playnite/ludodex/…
 """)
 
 key_to_gid = {}
@@ -233,18 +296,27 @@ for key, g in games.items():
         " VALUES(?,?,?,?,?,?)", [(gid,) + s for s in srcs])
 
 # ---- attribute tables (Playnite parity) ----
+# Tags are handled apart from other attribute kinds: we keep each tag's ORIGIN
+# (which importer supplied it) in game_tags, while still exposing tags as a normal
+# "tags" attribute so search/filter treat them like any other kind.
+tag_map = {}                        # game_id -> {tag: set(origins)}
 for key, data in games_attrs.items():
     gid = key_to_gid.get(key)
     if gid is None:
         continue
     agg = {}                       # kind -> set of values (multi) / single (scalar)
-    for source, sid, rec in data["src"]:
+    for source, sid, rec, origin in data["src"]:
         cur.execute("INSERT INTO source_attrs(game_id,source,source_id,attrs_json)"
                     " VALUES(?,?,?,?)",
                     (gid, source, sid, json.dumps(rec, ensure_ascii=False)))
         for k in LIST_KINDS:
             for v in (rec.get(k) or []):
-                if v not in (None, ""):
+                if v in (None, ""):
+                    continue
+                if k == "tags":
+                    tag_map.setdefault(gid, {}).setdefault(str(v), set()).add(
+                        origin or "import")
+                else:
                     agg.setdefault(k, set()).add(str(v))
         for k in SCALAR_KINDS:
             v = rec.get(k)
@@ -253,6 +325,42 @@ for key, data in games_attrs.items():
     rows = [(gid, k, v) for k, vs in agg.items() for v in sorted(vs)]
     cur.executemany("INSERT INTO game_attributes(game_id,kind,value) VALUES(?,?,?)",
                     rows)
+
+# ---- user-defined tags (origin 'ludodex', durable in tags.sqlite) ----
+TAGS_DB = os.path.join(DIR, "tags.sqlite")
+if os.path.exists(TAGS_DB):
+    tc = sqlite3.connect(TAGS_DB)
+    try:
+        for nk, tag in tc.execute("SELECT norm_key, tag FROM user_tags"):
+            gid = key_to_gid.get(nk)
+            if gid is not None and tag:
+                tag_map.setdefault(gid, {}).setdefault(str(tag), set()).add("ludodex")
+    except sqlite3.OperationalError:
+        pass
+    tc.close()
+
+# ---- Steam community tags (origin 'steam', fetched cache from SteamSpy) ----
+STEAM_TAGS_DB = os.path.join(DIR, "steam-tags.sqlite")
+if config.metadata_enabled("steamspy") and os.path.exists(STEAM_TAGS_DB):
+    stc = sqlite3.connect(STEAM_TAGS_DB)
+    try:
+        for nk, tag in stc.execute("SELECT norm_key, tag FROM steam_tags"):
+            gid = key_to_gid.get(nk)
+            if gid is not None and tag:
+                tag_map.setdefault(gid, {}).setdefault(str(tag), set()).add("steam")
+    except sqlite3.OperationalError:
+        pass
+    stc.close()
+
+# write game_tags (per origin) + expose tags as a normal attribute (deduped value)
+_gt_rows, _ga_rows = [], []
+for gid, tags in tag_map.items():
+    for tag, origins in tags.items():
+        for o in sorted(origins):
+            _gt_rows.append((gid, tag, o))
+        _ga_rows.append((gid, "tags", tag))
+cur.executemany("INSERT INTO game_tags(game_id,tag,origin) VALUES(?,?,?)", _gt_rows)
+cur.executemany("INSERT INTO game_attributes(game_id,kind,value) VALUES(?,?,?)", _ga_rows)
 
 # ---- IGDB enrichment (metadata provider, fill-gaps only) ----
 # IGDB is NOT a source: it only fills attribute KINDS a game still lacks. If a
@@ -358,6 +466,7 @@ CREATE INDEX ix_sattr_game ON source_attrs(game_id);
 CREATE INDEX ix_gattr_game ON game_attributes(game_id);
 CREATE INDEX ix_gattr_kv ON game_attributes(kind, value);
 CREATE INDEX ix_mlink_game ON metadata_links(game_id);
+CREATE INDEX ix_gtag_game ON game_tags(game_id);
 """)
 con.commit()
 

@@ -63,7 +63,7 @@ the `media/` content-addressed repo (`<sha1>.<ext>`). The Deck-local ROM index i
 - **`README.md`** — user-facing overview: why, quick start, how it works, schema, per-
   feature sections (media, Playnite, LaunchBox, sync), configuration, auth.
 - **`AUTH.md`** — every integration's credentials: how to obtain each token/key, a
-  quick-reference table, 1Password resolution, commercial-use posture.
+  quick-reference table, credential resolution (env > config), commercial-use posture.
 - **`DESIGN.md`** — the canonical spec & roadmap: vision, IS/IS-NOT boundary, the
   **Device layer** model (Accounts, Devices, channels, install ledger, detect/pin,
   `origin` provenance, changelog, conflict awareness), and the Build-now / Next /
@@ -83,9 +83,8 @@ credential steps; `python3 config.py integrations <id>` drills in.
 ## 4. Dev is moving to the AI-server VM
 
 Going forward the server lives on the **AI-server VM** (the locked decision — it's
-always-on; the Deck can be off). See the `ai-server` memory: `<user>@<ai-server>`
-(Ubuntu VM on the Unraid box, SSH-only; creds in `op://<vault>/AI Server
-Ubuntu VM`).
+always-on; the Deck can be off). Host address and SSH access creds are tracked
+outside this repo (operational notes / your own secret store), never committed here.
 
 **Producer/consumer split (important):** the **Deck stays the producer** for
 Deck-local sources it alone can see — ES-DE/RetroDECK media on the microSD, the ROM
@@ -223,7 +222,8 @@ credits. Store any API key per `AUTH.md`'s credential convention (add an integra
 - `uvicorn` under **systemd**; **nginx/caddy** for TLS + static SPA.
 - SQLite **WAL**; the DBs are read-mostly (writes only for ledger edits + serve-cache
   sha1 backfill).
-- Secrets via the existing **1Password** path (`op`/`opx`, `<vault>`).
+- Secrets live in `config.sqlite` (env var > config value); ludodex never reads
+  1Password at runtime.
 - Optionally containerize (Docker) for a one-command deploy — the original vision
   mentioned a "single Linux/Docker deployment."
 - Add a `requirements.txt` (fastapi, uvicorn, pillow, anthropic, …) when build starts.

@@ -32,8 +32,8 @@ to re-assert every record and prune anything stale — it converges with no dupl
 
 - `sync_target` — `pocketbase` | `firebase` | `both` (blank = off)
 - **PocketBase**: `pocketbase_url`, `pocketbase_admin_email`, and a password via
-  `pocketbase_admin_password` (local, gitignored), `pocketbase_op_item` (1Password),
-  or the `POCKETBASE_PASSWORD` env. Collections `games`/`sources` are auto-created;
+  `pocketbase_admin_password` (local, gitignored) or the `POCKETBASE_PASSWORD` env.
+  Collections `games`/`sources` are auto-created;
   each run is a full replace.
 - **Firebase**: `firebase_project_id` + `firebase_sa_json` (service-account key path),
   optional `firebase_database` (named DB) and `firebase_collection_prefix`. Requires

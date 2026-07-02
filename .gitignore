@@ -15,6 +15,8 @@ ludodex_to_playnite.json
 .gog/
 .ea/
 .steam/
+.psn/
+.xbox/
 tokens.json
 *service-account*.json
 *serviceaccount*.json
@@ -37,3 +39,12 @@ __pycache__/
 .venv/
 venv/
 media/
+
+# rsync'd device media
+device-media/
+
+# sqlite sidecar + backup files (data, never commit)
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite.bak*
+*.bak-*

@@ -26,7 +26,7 @@ if ! enabled steam; then echo "  steam: disabled"; else
     STEAM_API_KEY="$KEY" python3 steam_owned.py > steam_games.tsv 2>steam.err \
       && echo "  steam: $(wc -l < steam_games.tsv) games" \
       || echo "  steam FAILED: $(tail -1 steam.err)"
-  else echo "  steam: no API key (run ./setup.sh, or set steam_api_key / op_vault+steam_key_op_item)"; fi
+  else echo "  steam: no API key (run ./setup.sh, or set steam_api_key)"; fi
 fi
 
 echo "== Epic =="

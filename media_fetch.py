@@ -233,11 +233,51 @@ def fetch_screenscraper(con, now):
           % (n, len(rows)), file=sys.stderr)
 
 
+def prune_dead(con, workers=16):
+    """HEAD-check un-materialized public URL refs and drop the definitively-dead
+    ones (404/410). Candidate refs are recorded speculatively (esp. Steam CDN,
+    which has no per-asset manifest — not every appid has every art type), so
+    without this they'd render as blank cards. Cached (sha1) refs are already
+    proven; screenscraper is skipped (its URLs need auth, so a bare HEAD lies)."""
+    import urllib.error
+    from concurrent.futures import ThreadPoolExecutor
+    rows = con.execute(
+        "SELECT id, ref FROM media WHERE ref_type='url' AND (sha1 IS NULL OR sha1='')"
+        " AND provider IN ('steam','igdb','steamgriddb')").fetchall()
+
+    def check(row):
+        rid, url = row
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            req.add_header("User-Agent", "Mozilla/5.0")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return rid, r.status
+        except urllib.error.HTTPError as e:
+            return rid, e.code
+        except Exception:
+            return rid, None                       # transient — keep the ref
+    dead = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for rid, st in ex.map(check, rows):
+            if st in (404, 410):
+                dead.append(rid)
+    if dead:
+        con.executemany("DELETE FROM media WHERE id=?", [(d,) for d in dead])
+        con.commit()
+    print("media_fetch: prune — checked %d url refs, removed %d dead"
+          % (len(rows), len(dead)), file=sys.stderr)
+    return len(dead)
+
+
 def main(argv):
     only = argv[argv.index("--provider") + 1] if "--provider" in argv else None
     limit = int(argv[argv.index("--limit") + 1]) if "--limit" in argv else None
     con = con_index()
     now = int(time.time())
+    if argv and argv[0] == "prune":               # standalone cleanup pass
+        prune_dead(con)
+        con.close()
+        return
     if only in (None, "steam") and config.media_enabled("steam"):
         con.execute("DELETE FROM media WHERE provider='steam'")
         fetch_steam(con, now)
@@ -253,6 +293,9 @@ def main(argv):
             config.media_enabled("steamgriddb"):
         con.execute("DELETE FROM media WHERE provider='steamgriddb'")
         fetch_steamgriddb(con, now, limit)
+    # after (re)fetching speculative URL candidates, drop the dead ones so they
+    # never surface as blank media cards
+    prune_dead(con)
     tot = con.execute("SELECT COUNT(*) FROM media").fetchone()[0]
     con.commit()
     con.close()

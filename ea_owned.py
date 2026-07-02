@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Pull owned games from an EA account (EA app / Origin) — the 3rd PC-store leg.
 
-Mirrors the GOG model: log in ONCE in a browser, capture the durable ``remid``
-"remember-me" cookie; thereafter exchange it for short-lived access tokens
-NON-INTERACTIVELY via a ``prompt=none`` grant — auth once, run headless forever.
+EA sits behind Akamai Bot Manager, so auth has TWO paths (see AUTH.md § EA):
+
+  A. remid cookie (preferred). Capture the durable "remember-me" cookie once; we
+     exchange it for short-lived access tokens NON-INTERACTIVELY (``prompt=none``).
+     This is set-and-forget WHERE IT WORKS — but Akamai frequently BLOCKS the silent
+     refresh from datacenter/VPS/server IPs (it works from residential IPs). If it's
+     blocked you'll get an auth error on fetch_token; use path B.
+  B. browser-minted access token (always works, ~4h). Grab a token from the
+     logged-in browser and inject it with --token; cached in .ea/token.json. This is
+     a re-grab-on-demand flow — no headless refresh once it expires.
 
 Uses EA's current (2026) GraphQL API at service-aggregation-layer.juno.ea.com;
 the old api*.origin.com REST endpoints were degraded by the Origin -> EA-app
@@ -11,10 +18,14 @@ migration. Modeled on Lutris ``lutris/services/ea_app.py``. stdlib-only (urllib 
 http.cookiejar + an SSL context that re-enables legacy renegotiation, which
 accounts.ea.com still requires and OpenSSL 3 refuses by default).
 
-  python3 ea_owned.py --login          # one-time: log in, paste your remid cookie
+  python3 ea_owned.py --login --remid <val>   # path A: cache the remid cookie
+  python3 ea_owned.py --token '<json|value>'  # path B: inject a browser token (~4h)
   python3 ea_owned.py                  # print owned games as <offerId>\\t<title>
   python3 ea_owned.py > ea_games.tsv   # (update.sh does this)
   python3 ea_owned.py --whoami         # just verify auth (prints EA display name)
+
+remid resolves env EA_REMID > .ea/cookies.json > config ea_remid. ludodex never
+reads 1Password at runtime — the cookie/token live in config.sqlite or .ea/.
 """
 import json
 import os
@@ -75,7 +86,7 @@ def _post(url, body, headers=None, timeout=30):
 
 
 # --------------------------------------------------------------------------- #
-#  durable credential = the remid cookie (env > local file > 1Password)
+#  durable credential = the remid cookie (env > local file > config)
 # --------------------------------------------------------------------------- #
 def load_cookies():
     env = os.environ.get("EA_REMID", "").strip()
@@ -86,13 +97,9 @@ def load_cookies():
             c = json.load(f)
         if c.get("remid"):
             return c
-    item = config.get("ea_op_item")
-    vault = config.get("op_vault")
-    if item and vault:
-        remid = config._op_field(item, vault, "credential") or \
-            config._op_field(item, vault, "password")
-        if remid:
-            return {"remid": remid}
+    remid = config.get("ea_remid")
+    if remid:
+        return {"remid": remid}
     return {}
 
 

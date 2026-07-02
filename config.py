@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """ludodex configuration — account/environment settings stored in SQLite.
 
-All personal & environment-specific values (your SteamID, 1Password item name,
-ROM host/paths, etc.) live in a `config` table inside config.sqlite, which is
+All personal & environment-specific values (your SteamID, API keys, ROM
+host/paths, etc.) live in a `config` table inside config.sqlite, which is
 gitignored — they are NOT hardcoded in any committed script. Other scripts read
-them with:  `import config; config.get("steam_id")`.
+them with:  `import config; config.get("steam_id")`. Secrets resolve env var >
+config value only; ludodex never reads 1Password (or any external store) at runtime.
 
 Only SAFE/PUBLIC defaults ship in this file's SCHEMA. Fill your real values
 locally (they go into config.sqlite, never into git):
@@ -13,7 +14,7 @@ locally (they go into config.sqlite, never into git):
   python3 config.py list           # show all keys, values, descriptions
   python3 config.py get <key>      # print one value (used by the shell scripts)
   python3 config.py set <key> <value>
-  python3 config.py steam-key      # resolve the Steam key (env > config > 1Password)
+  python3 config.py steam-key      # resolve the Steam key (env > config)
   python3 config.py init           # just create/seed config.sqlite
 
   python3 config.py integrations                  # how to get every credential
@@ -31,7 +32,6 @@ For first-time onboarding with credential how-to guidance, run ./setup.sh instea
 """
 import os
 import sqlite3
-import subprocess
 import sys
 
 DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,22 +44,12 @@ SCHEMA = [
      "Your SteamID64 — the account that owns the Steam Web API key. Find it in "
      "~/.steam/steam/config/loginusers.vdf (17-digit key). NOT the vanity URL, "
      "which can be a different account."),
-    ("op_vault", "",
-     "1Password vault holding the Steam Web API key item (read via the `opx` CLI)."),
-    ("steam_key_op_item", "",
-     "1Password item name whose 'apikey' field is your Steam Web API key "
-     "(used only if steam_api_key below is blank)."),
     ("steam_api_key", "",
-     "Steam Web API key stored locally (config.sqlite is gitignored). Optional — "
-     "leave blank to fetch it from 1Password via op_vault/steam_key_op_item. The "
-     "STEAM_API_KEY env var overrides both."),
+     "Steam Web API key stored locally (config.sqlite is gitignored). The "
+     "STEAM_API_KEY env var overrides it."),
     ("itch_api_key", "",
      "itch.io API key stored locally (gitignored). Get one at "
-     "https://itch.io/user/settings/api-keys. Optional — leave blank to use "
-     "1Password via op_vault/itch_key_op_item. ITCH_API_KEY env overrides both."),
-    ("itch_key_op_item", "",
-     "1Password item name whose 'apikey' field is your itch.io API key "
-     "(used only if itch_api_key is blank)."),
+     "https://itch.io/user/settings/api-keys. ITCH_API_KEY env overrides it."),
     ("library_db", os.path.join(DIR, "game-library.sqlite"),
      "Output path for the unified deduped catalog."),
     ("roms_index_db", os.path.join(DIR, "roms-index.sqlite"),
@@ -90,10 +80,10 @@ SCHEMA = [
     ("source_gog_enabled", "1", "[source] Pull GOG ownership."),
     ("source_itch_enabled", "1", "[source] Pull itch.io ownership."),
     ("source_ea_enabled", "1", "[source] Pull EA app/Origin ownership."),
-    ("ea_op_item", "",
-     "1Password item holding the EA 'remid' cookie (durable login) in its "
-     "'credential'/'password' field. Used if .ea/cookies.json is absent. Set up "
-     "the login once with: python3 ea_owned.py --login."),
+    ("ea_remid", "",
+     "EA 'remid' cookie (durable login) stored locally (gitignored). Grab it from "
+     "your browser after logging in to EA; it mints short-lived tokens "
+     "non-interactively. The EA_REMID env var overrides it."),
     ("source_emulation_enabled", "1", "[source] Include the emulation ROM index."),
     ("source_playnite_enabled", "1", "[source] Include an imported Playnite library."),
     ("playnite_import_json", "", "Path to the Playnite export JSON produced by "
@@ -135,13 +125,8 @@ SCHEMA = [
      "http://localhost; Category 'Application Integration'). The IGDB_CLIENT_ID "
      "env var overrides this."),
     ("igdb_client_secret", "",
-     "Twitch application Client Secret, stored locally (gitignored). Optional — "
-     "leave blank to fetch from 1Password via igdb_op_item. IGDB_CLIENT_SECRET "
-     "env overrides both."),
-    ("igdb_op_item", "",
-     "1Password item holding the Twitch/IGDB creds: its 'username' field = Client "
-     "ID, its 'credential' (or 'password') field = Client Secret. Used only if "
-     "the local values above are blank."),
+     "Twitch application Client Secret, stored locally (gitignored). "
+     "IGDB_CLIENT_SECRET env overrides it."),
     ("igdb_meta_ttl_days", "30",
      "[metadata] Days before a cached IGDB record is considered stale and "
      "re-fetched by igdb_enrich.py."),
@@ -157,25 +142,13 @@ SCHEMA = [
     ("screenscraper_devid", "",
      "ScreenScraper developer id (software credential). Request one at "
      "https://www.screenscraper.fr/forumsujets.php?frub=12 — free/non-commercial "
-     "software qualifies. Blank = fetch from screenscraper_dev_op_item. Env: "
-     "SS_DEVID."),
+     "software qualifies. Env: SS_DEVID."),
     ("screenscraper_devpassword", "",
-     "ScreenScraper developer password (pairs with the devid). Blank = 1Password "
-     "via screenscraper_dev_op_item. Env: SS_DEVPASSWORD."),
-    ("screenscraper_dev_op_item", "",
-     "1Password item holding the dev credential: 'username'=devid, "
-     "'credential'/'password'=devpassword."),
+     "ScreenScraper developer password (pairs with the devid). Env: SS_DEVPASSWORD."),
     ("screenscraper_ssid", "",
-     "Your ScreenScraper account login (sets your tier/quota). Blank = 1Password "
-     "via screenscraper_op_item. Env: SS_SSID."),
+     "Your ScreenScraper account login (sets your tier/quota). Env: SS_SSID."),
     ("screenscraper_sspassword", "",
-     "Your ScreenScraper account password. Blank = 1Password. Env: SS_SSPASSWORD."),
-    ("screenscraper_op_item", "",
-     "1Password item with your ScreenScraper account: 'username'=ssid (login), "
-     "'password'=sspassword."),
-    ("screenscraper_op_vault", "",
-     "Vault for screenscraper_op_item / screenscraper_dev_op_item if different "
-     "from op_vault (e.g. the account item may live in another vault)."),
+     "Your ScreenScraper account password. Env: SS_SSPASSWORD."),
     ("screenscraper_media", "1",
      "[media] Ingest the media URLs returned by each ScreenScraper scrape into "
      "the media index (no extra API calls — they come free with the metadata)."),
@@ -204,16 +177,12 @@ SCHEMA = [
      "the Twitch creds already configured for metadata."),
     ("media_steamgriddb_enabled", "0",
      "[media] Resolve SteamGridDB community art (grids/heroes/logos/icons). "
-     "Remote; needs an API key (steamgriddb_api_key or steamgriddb_op_item)."),
+     "Remote; needs an API key (steamgriddb_api_key)."),
     ("steam_grid_path", "",
      "Steam userdata grid folder for the steamgrid media provider. Blank = "
      "autodetect ~/.steam/steam/userdata/<id>/config/grid."),
     ("steamgriddb_api_key", "",
-     "SteamGridDB API key (https://www.steamgriddb.com/profile/preferences/api). "
-     "Blank = fetch from 1Password via steamgriddb_op_item."),
-    ("steamgriddb_op_item", "",
-     "1Password item holding the SteamGridDB API key in its 'credential' (or "
-     "'password') field. Used only if steamgriddb_api_key is blank."),
+     "SteamGridDB API key (https://www.steamgriddb.com/profile/preferences/api)."),
     ("media_repo", "",
      "Local content-addressed repo where CHOSEN media is materialized for "
      "export/sync/serving. Blank = <scripts-dir>/media."),
@@ -230,10 +199,8 @@ SCHEMA = [
     ("pocketbase_admin_email", "",
      "PocketBase admin/superuser email used for the sync."),
     ("pocketbase_admin_password", "",
-     "PocketBase admin password, stored locally (gitignored). Optional — leave "
-     "blank to use 1Password via pocketbase_op_item. POCKETBASE_PASSWORD env wins."),
-    ("pocketbase_op_item", "",
-     "1Password item (its 'password' field) for the PocketBase admin, if not local."),
+     "PocketBase admin password, stored locally (gitignored). POCKETBASE_PASSWORD "
+     "env wins."),
     ("firebase_project_id", "",
      "Firebase/GCP project id for the Firestore sync."),
     ("firebase_sa_json", "",
@@ -308,62 +275,26 @@ def set_(key, value):
     con.close()
 
 
-def _op_field(item, vault, field):
-    """Read one field of a 1Password item via the opx CLI ("" on any failure)."""
-    if not (item and vault):
-        return ""
-    try:
-        r = subprocess.run(
-            ["opx", "item", "get", item, "--vault", vault,
-             "--fields", field, "--reveal"],
-            capture_output=True, text=True, timeout=30)
-        if r.returncode == 0:
-            return r.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    return ""
-
-
-def _resolve_key(env_var, local_key, op_item_key, field="apikey"):
-    """Resolve a secret: env var > local config value > 1Password (opx)."""
-    k = os.environ.get(env_var, "").strip()
-    if k:
-        return k
-    k = get(local_key)
-    if k:
-        return k
-    return _op_field(get(op_item_key), get("op_vault"), field)
-
-
+# Credentials resolve env var > local config value only. ludodex never reads
+# 1Password (or any external secret store) at runtime — populate config.sqlite.
 def steam_key():
-    return _resolve_key("STEAM_API_KEY", "steam_api_key", "steam_key_op_item")
+    return os.environ.get("STEAM_API_KEY", "").strip() or get("steam_api_key")
 
 
 def itch_key():
-    return _resolve_key("ITCH_API_KEY", "itch_api_key", "itch_key_op_item")
+    return os.environ.get("ITCH_API_KEY", "").strip() or get("itch_api_key")
 
 
 def pocketbase_password():
-    return _resolve_key("POCKETBASE_PASSWORD", "pocketbase_admin_password",
-                        "pocketbase_op_item", field="password")
+    return os.environ.get("POCKETBASE_PASSWORD", "").strip() or \
+        get("pocketbase_admin_password")
 
 
 def igdb_creds():
-    """Resolve the Twitch (IGDB) Client ID + Secret -> (client_id, client_secret).
-
-    env (IGDB_CLIENT_ID / IGDB_CLIENT_SECRET) > local config > 1Password
-    (igdb_op_item: 'username' = id, 'credential'/'password' = secret)."""
+    """Twitch (IGDB) Client ID + Secret -> (client_id, client_secret).
+    env (IGDB_CLIENT_ID / IGDB_CLIENT_SECRET) > local config."""
     cid = os.environ.get("IGDB_CLIENT_ID", "").strip() or get("igdb_client_id")
     csec = os.environ.get("IGDB_CLIENT_SECRET", "").strip() or get("igdb_client_secret")
-    if cid and csec:
-        return cid, csec
-    vault, item = get("op_vault"), get("igdb_op_item")
-    if vault and item:
-        if not cid:
-            cid = _op_field(item, vault, "username")
-        if not csec:
-            csec = _op_field(item, vault, "credential") or \
-                _op_field(item, vault, "password")
     return cid, csec
 
 
@@ -375,7 +306,7 @@ BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "ea", "emulation", "playnite"
 
 # Metadata providers are CONSULTED to enrich attributes — they are NOT sources
 # (they add no ownership). Toggled like sources but tracked separately.
-METADATA_PROVIDERS = ("igdb", "screenscraper")
+METADATA_PROVIDERS = ("igdb", "screenscraper", "steamspy")
 
 
 def metadata_enabled(name):
@@ -383,28 +314,31 @@ def metadata_enabled(name):
     return get_bool("metadata_%s_enabled" % name, True)
 
 
-def screenscraper_creds():
-    """Resolve ScreenScraper API params -> dict, or {} if the devid is missing.
+def _ss_dev_embedded():
+    """The app's built-in ScreenScraper devid/devpassword (see _ssauth.py). Ships
+    with ludodex so any deployment authenticates as this one app. Obfuscated, not
+    secret — overridable via env/config below."""
+    try:
+        import _ssauth
+        return _ssauth.dev_credentials()
+    except Exception:
+        return ("", "")
 
-    devid/devpassword (software) and ssid/sspassword (your account) each resolve
-    env > local config > 1Password. The account item may live in a different
-    vault (screenscraper_op_vault). softname always set; ssid/sspassword optional
-    (they raise your tier) but devid/devpassword are mandatory for the API."""
-    vault = get("screenscraper_op_vault") or get("op_vault")
-    devid = os.environ.get("SS_DEVID", "").strip() or get("screenscraper_devid")
-    devpw = os.environ.get("SS_DEVPASSWORD", "").strip() or get("screenscraper_devpassword")
-    dev_item = get("screenscraper_dev_op_item")
-    if (not devid or not devpw) and dev_item and vault:
-        devid = devid or _op_field(dev_item, vault, "username")
-        devpw = devpw or _op_field(dev_item, vault, "credential") or \
-            _op_field(dev_item, vault, "password")
+
+def screenscraper_creds():
+    """ScreenScraper API params -> dict, or {} if no devid is available.
+
+    devid/devpassword identify the SOFTWARE (ludodex) and are shipped embedded so
+    every deployment authenticates as this app; they resolve env > config >
+    embedded. ssid/sspassword identify the END USER's account (optional; they
+    raise the request tier) and resolve env > config only."""
+    _edev, _epw = _ss_dev_embedded()
+    devid = (os.environ.get("SS_DEVID", "").strip()
+             or get("screenscraper_devid") or _edev)
+    devpw = (os.environ.get("SS_DEVPASSWORD", "").strip()
+             or get("screenscraper_devpassword") or _epw)
     ssid = os.environ.get("SS_SSID", "").strip() or get("screenscraper_ssid")
     sspw = os.environ.get("SS_SSPASSWORD", "").strip() or get("screenscraper_sspassword")
-    user_item = get("screenscraper_op_item")
-    if (not ssid or not sspw) and user_item and vault:
-        ssid = ssid or _op_field(user_item, vault, "username")
-        sspw = sspw or _op_field(user_item, vault, "password") or \
-            _op_field(user_item, vault, "credential")
     if not (devid and devpw):
         return {}                       # API unusable without the software devid
     creds = {"devid": devid, "devpassword": devpw,
@@ -425,29 +359,38 @@ def media_enabled(name):
     return get_bool("media_%s_enabled" % name, name != "steamgriddb")
 
 
+def rate_limits(service):
+    """Resolved rate-limit settings for a service (Settings › Services › Limits).
+    Returns {cooldown_ms, per_min, per_day}; 0 means unset / unlimited."""
+    def n(field):
+        try:
+            return int(get("%s_limit_%s" % (service, field)) or 0)
+        except (TypeError, ValueError):
+            return 0
+    return {"cooldown_ms": n("cooldown_ms"), "per_min": n("per_min"),
+            "per_day": n("per_day")}
+
+
 def steamgriddb_key():
-    """Resolve the SteamGridDB API key: env > local config > 1Password."""
-    k = os.environ.get("STEAMGRIDDB_API_KEY", "").strip() or get("steamgriddb_api_key")
-    if k:
-        return k
-    vault, item = get("op_vault"), get("steamgriddb_op_item")
-    if vault and item:
-        return _op_field(item, vault, "credential") or \
-            _op_field(item, vault, "password") or ""
-    return ""
+    """SteamGridDB API key: env > local config."""
+    return os.environ.get("STEAMGRIDDB_API_KEY", "").strip() or get("steamgriddb_api_key")
 
 
 def _media_con():
     con = sqlite3.connect(DB)
     con.execute("CREATE TABLE IF NOT EXISTS media_mounts("
                 "name TEXT PRIMARY KEY, path TEXT, provider TEXT, "
-                "enabled INTEGER DEFAULT 1)")
+                "enabled INTEGER DEFAULT 1, kinds TEXT DEFAULT '')")
+    # migrate older tables that predate the per-mount kinds filter
+    cols = {r[1] for r in con.execute("PRAGMA table_info(media_mounts)")}
+    if "kinds" not in cols:
+        con.execute("ALTER TABLE media_mounts ADD COLUMN kinds TEXT DEFAULT ''")
     return con
 
 
 def media_mounts_list(only_enabled=False, provider=None):
     con = _media_con()
-    q = "SELECT name,path,provider,enabled FROM media_mounts"
+    q = "SELECT name,path,provider,enabled,kinds FROM media_mounts"
     cond = []
     if only_enabled:
         cond.append("enabled=1")
@@ -455,18 +398,22 @@ def media_mounts_list(only_enabled=False, provider=None):
         cond.append("provider=%r" % provider)
     if cond:
         q += " WHERE " + " AND ".join(cond)
-    rows = [{"name": n, "path": p, "provider": pr, "enabled": e}
-            for n, p, pr, e in con.execute(q + " ORDER BY name")]
+    rows = [{"name": n, "path": p, "provider": pr, "enabled": e,
+             # kinds: which canonical media kinds to index; empty list = all
+             "kinds": [k for k in (kd or "").split(",") if k]}
+            for n, p, pr, e, kd in con.execute(q + " ORDER BY name")]
     con.close()
     return rows
 
 
-def media_mount_set(name, path, provider="esde", enabled=1):
+def media_mount_set(name, path, provider="esde", enabled=1, kinds=None):
     con = _media_con()
-    con.execute("INSERT INTO media_mounts(name,path,provider,enabled) "
-                "VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+    kstr = ",".join(kinds) if kinds else ""
+    con.execute("INSERT INTO media_mounts(name,path,provider,enabled,kinds) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
                 "path=excluded.path, provider=excluded.provider, "
-                "enabled=excluded.enabled", (name, path, provider, int(enabled)))
+                "enabled=excluded.enabled, kinds=excluded.kinds",
+                (name, path, provider, int(enabled), kstr))
     con.commit()
     con.close()
 
@@ -568,9 +515,9 @@ INTEGRATIONS = [
          "'steamid' in ~/.steam/steam/config/loginusers.vdf. Do NOT use a vanity "
          "URL (/id/<name>) — that can be a different account.",
          "Store: config.py set steam_id <id>  and  config.py set steam_api_key "
-         "<key>  (or put the key in 1Password and set steam_key_op_item)."],
-     "config_keys": ["steam_id", "steam_api_key", "steam_key_op_item"],
-     "env": ["STEAM_API_KEY"], "op_item": "steam_key_op_item", "op_field": "apikey",
+         "<key>  (or enter both in the web UI: Settings › Services)."],
+     "config_keys": ["steam_id", "steam_api_key"],
+     "env": ["STEAM_API_KEY"],
      "verify": "python3 steam_owned.py | head"},
 
     {"id": "epic", "name": "Epic Games", "kind": "source",
@@ -581,7 +528,7 @@ INTEGRATIONS = [
          "Open https://legendary.gl/epiclogin, log in, and copy the "
          "'authorizationCode' value.",
          "Paste it when legendary prompts. Token is cached in ~/.config/legendary."],
-     "config_keys": [], "env": [], "op_item": None,
+     "config_keys": [], "env": [],
      "verify": "legendary status"},
 
     {"id": "gog", "name": "GOG", "kind": "source",
@@ -592,18 +539,16 @@ INTEGRATIONS = [
          "Log in, then copy the 'code=...' value from the redirected URL.",
          "Run: python3 gog_owned.py --code <code>   (caches .gog/tokens.json)."],
      "config_keys": ["gog_client_id", "gog_client_secret"], "env": [],
-     "op_item": None, "verify": "python3 gog_owned.py | head"},
+     "verify": "python3 gog_owned.py | head"},
 
     {"id": "itch", "name": "itch.io", "kind": "source",
      "purpose": "Owned itch.io games via a personal API key.",
      "url": "https://itch.io/user/settings/api-keys",
      "steps": [
          "Generate a key at https://itch.io/user/settings/api-keys.",
-         "Store: config.py set itch_api_key <key>  (or put it in 1Password and "
-         "set itch_key_op_item). The itch *login* is separate — you only need "
-         "the API key."],
-     "config_keys": ["itch_api_key", "itch_key_op_item"], "env": ["ITCH_API_KEY"],
-     "op_item": "itch_key_op_item", "op_field": "apikey",
+         "Store: config.py set itch_api_key <key>  (or enter it in the web UI). "
+         "The itch *login* is separate — you only need the API key."],
+     "config_keys": ["itch_api_key"], "env": ["ITCH_API_KEY"],
      "verify": "python3 itch_owned.py | head"},
 
     {"id": "ea", "name": "EA app / Origin", "kind": "source",
@@ -617,9 +562,10 @@ INTEGRATIONS = [
          "https://accounts.ea.com/connect/auth?client_id=ORIGIN_JS_SDK"
          "&response_type=token&redirect_uri=nucleus:rest&prompt=none",
          "Inject the token: python3 ea_owned.py --token '<the JSON>'  (cached in "
-         ".ea/token.json). Re-grab when it expires — EA libraries rarely change."],
-     "config_keys": ["ea_op_item"], "env": [], "op_item": "ea_op_item",
-     "op_field": "credential", "verify": "python3 ea_owned.py --whoami"},
+         ".ea/token.json). Or store the durable 'remid' cookie for headless "
+         "refresh: config.py set ea_remid <cookie> (or enter it in the web UI)."],
+     "config_keys": ["ea_remid"], "env": ["EA_REMID"],
+     "verify": "python3 ea_owned.py --whoami"},
 
     {"id": "launchbox", "name": "LaunchBox (frontend)", "kind": "source",
      "purpose": "Two-way sync with a LaunchBox install: import its library + art "
@@ -638,7 +584,7 @@ INTEGRATIONS = [
          "launchbox_media_mode=link). Close LaunchBox before exporting."],
      "config_keys": ["launchbox_path", "launchbox_media_mode",
                      "launchbox_import_json"],
-     "env": [], "op_item": None,
+     "env": [],
      "verify": "python3 launchbox_import.py --no-media | head"},
 
     {"id": "playnite", "name": "Playnite (frontend)", "kind": "source",
@@ -659,7 +605,7 @@ INTEGRATIONS = [
          "playnite_icon_source (logo|cover|none)."],
      "config_keys": ["playnite_import_json", "playnite_export_json",
                      "playnite_media_overwrite", "playnite_icon_source"],
-     "env": [], "op_item": None,
+     "env": [],
      "verify": "python3 playnite_export.py --no-media /tmp/pn_check.json"},
 
     {"id": "igdb", "name": "IGDB (metadata)", "kind": "metadata",
@@ -672,11 +618,10 @@ INTEGRATIONS = [
          "Integration'.",
          "Copy the Client ID and generate a Client Secret.",
          "Store: config.py set igdb_client_id <id>  and  config.py set "
-         "igdb_client_secret <secret>  (or set igdb_op_item: username=Client ID, "
-         "credential=Secret), then: config.py enable igdb."],
-     "config_keys": ["igdb_client_id", "igdb_client_secret", "igdb_op_item"],
-     "env": ["IGDB_CLIENT_ID", "IGDB_CLIENT_SECRET"], "op_item": "igdb_op_item",
-     "op_field": "username=Client ID, credential=Secret",
+         "igdb_client_secret <secret>  (or enter both in the web UI), then: "
+         "config.py enable igdb."],
+     "config_keys": ["igdb_client_id", "igdb_client_secret"],
+     "env": ["IGDB_CLIENT_ID", "IGDB_CLIENT_SECRET"],
      "verify": "python3 igdb_enrich.py --limit 1"},
 
     {"id": "screenscraper", "name": "ScreenScraper (metadata + media)",
@@ -693,20 +638,16 @@ INTEGRATIONS = [
          "non-commercial use qualifies; can take days/weeks — request early). "
          "This is MANDATORY and separate from your account.",
          "Store dev creds: config.py set screenscraper_devid <id>; config.py set "
-         "screenscraper_devpassword <pw> (or screenscraper_dev_op_item). Store "
-         "your account: screenscraper_op_item/_op_vault (username=ssid, "
-         "password=sspassword).",
+         "screenscraper_devpassword <pw>. Store your account: "
+         "screenscraper_ssid / screenscraper_sspassword (or enter all in the web UI).",
          "Check tier/quota: python3 ss_scrape.py --status. Scrape: python3 "
          "ss_scrape.py (resumable; stops at the daily cap). Tiers: free ≈1 "
          "thread / ~20k req-day; ~5€/mo +1 thread; ~10€/mo +5 threads / ~50k "
          "req-day. The engine reads your live quota and adapts."],
      "config_keys": ["screenscraper_devid", "screenscraper_devpassword",
-                     "screenscraper_dev_op_item", "screenscraper_ssid",
-                     "screenscraper_sspassword", "screenscraper_op_item",
-                     "screenscraper_op_vault", "screenscraper_softname"],
+                     "screenscraper_ssid", "screenscraper_sspassword",
+                     "screenscraper_softname"],
      "env": ["SS_DEVID", "SS_DEVPASSWORD", "SS_SSID", "SS_SSPASSWORD"],
-     "op_item": "screenscraper_op_item",
-     "op_field": "username=ssid, password=sspassword",
      "verify": "python3 ss_scrape.py --status"},
 
     {"id": "steamgriddb", "name": "SteamGridDB (media)", "kind": "media",
@@ -715,11 +656,11 @@ INTEGRATIONS = [
      "steps": [
          "Get a free API key at "
          "https://www.steamgriddb.com/profile/preferences/api.",
-         "Store: config.py set steamgriddb_api_key <key>  (or set "
-         "steamgriddb_op_item), then: config.py enable steamgriddb."],
-     "config_keys": ["steamgriddb_api_key", "steamgriddb_op_item"],
-     "env": ["STEAMGRIDDB_API_KEY"], "op_item": "steamgriddb_op_item",
-     "op_field": "credential", "verify": "python3 media_fetch.py --steamgriddb --limit 1"},
+         "Store: config.py set steamgriddb_api_key <key>  (or enter it in the web "
+         "UI), then: config.py enable steamgriddb."],
+     "config_keys": ["steamgriddb_api_key"],
+     "env": ["STEAMGRIDDB_API_KEY"],
+     "verify": "python3 media_fetch.py --steamgriddb --limit 1"},
 
     {"id": "esde", "name": "ES-DE media (RetroDECK / EmuDeck)", "kind": "media",
      "purpose": "Local emulation art (covers/marquees/screenshots/…). No auth — "
@@ -730,7 +671,7 @@ INTEGRATIONS = [
          "<Emulation>/tools/downloaded_media.",
          "Register it: config.py media-mount add \"<path>\" esde [name].",
          "Index: python3 media_index.py."],
-     "config_keys": [], "env": [], "op_item": None,
+     "config_keys": [], "env": [],
      "verify": "python3 config.py media-mounts"},
 
     {"id": "pocketbase", "name": "PocketBase (sync)", "kind": "sync",
@@ -741,12 +682,11 @@ INTEGRATIONS = [
          "/pb/pocketbase superuser upsert <email> <password>.",
          "Store: config.py set pocketbase_url <url>; config.py set "
          "pocketbase_admin_email <email>; config.py set pocketbase_admin_password "
-         "<pw>  (or set pocketbase_op_item).",
+         "<pw>  (or enter it in the web UI).",
          "Enable auto-sync: config.py set sync_target pocketbase."],
      "config_keys": ["pocketbase_url", "pocketbase_admin_email",
-                     "pocketbase_admin_password", "pocketbase_op_item"],
-     "env": ["POCKETBASE_PASSWORD"], "op_item": "pocketbase_op_item",
-     "op_field": "username / password", "verify": "python3 sync.py --dry-run"},
+                     "pocketbase_admin_password"],
+     "env": ["POCKETBASE_PASSWORD"], "verify": "python3 sync.py --dry-run"},
 
     {"id": "firebase", "name": "Firebase Firestore (sync)", "kind": "sync",
      "purpose": "Mirror the catalog to Firestore (alternative/addition to PocketBase).",
@@ -759,7 +699,7 @@ INTEGRATIONS = [
          "pip install -r requirements-firebase.txt; config.py set sync_target "
          "firebase (or 'both')."],
      "config_keys": ["firebase_project_id", "firebase_sa_json"], "env": [],
-     "op_item": None, "verify": "python3 sync.py firebase --dry-run"},
+     "verify": "python3 sync.py firebase --dry-run"},
 ]
 
 NO_AUTH_NOTE = ("emulation/archive (local ROM index + crawl mounts), Steam-grid "
@@ -812,7 +752,7 @@ def _has_cred(it):
         return bool(screenscraper_creds())
     if it["id"] == "ea":
         return os.path.exists(os.path.join(DIR, ".ea", "token.json")) or \
-            bool(get("ea_op_item"))
+            bool(get("ea_remid"))
     if it["id"] == "epic":
         return os.path.exists(os.path.expanduser("~/.config/legendary/user.json"))
     if it["id"] == "gog":
@@ -844,9 +784,6 @@ def print_integration(it, detail=True):
         print("    config keys: %s" % ", ".join(it["config_keys"]))
     if it.get("env"):
         print("    env override: %s" % ", ".join(it["env"]))
-    if it.get("op_item"):
-        print("    1Password: set %s (field: %s)"
-              % (it["op_item"], it.get("op_field", "credential")))
     if it.get("verify"):
         print("    verify: %s" % it["verify"])
     print()
@@ -906,7 +843,7 @@ def main(argv):
             mark = "x" if metadata_enabled(m) else " "
             extra = "" if m != "igdb" else (
                 "" if all(igdb_creds()) else "  (no Twitch creds — set igdb_client_id"
-                "/igdb_client_secret or igdb_op_item)")
+                "/igdb_client_secret)")
             print("  [%s] %s%s" % (mark, m, extra))
         archs = archives_list()
         print("crawl mounts/paths:" if archs else
@@ -920,7 +857,7 @@ def main(argv):
             mark = "x" if media_enabled(m) else " "
             extra = ""
             if m == "steamgriddb" and media_enabled(m) and not steamgriddb_key():
-                extra = "  (no API key — set steamgriddb_api_key/op_item)"
+                extra = "  (no API key — set steamgriddb_api_key)"
             print("  [%s] %s%s" % (mark, m, extra))
         mms = media_mounts_list()
         if mms:

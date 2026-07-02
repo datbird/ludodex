@@ -7,7 +7,7 @@ export PATH="$HOME/.local/bin:$PATH"
 # --- Steam (Web API key + configured SteamID; key never expires) ---
 KEY=$(python3 config.py steam-key)
 if [ -z "$KEY" ]; then
-  echo "steam: BROKEN  no API key (run ./setup.sh, or set steam_api_key / op_vault+steam_key_op_item)"
+  echo "steam: BROKEN  no API key (run ./setup.sh, or set steam_api_key)"
 else
   N=$(STEAM_API_KEY="$KEY" python3 steam_owned.py 2>/dev/null | wc -l)
   if [ "$N" -gt 0 ]; then echo "steam: OK  ($N games)"
@@ -37,9 +37,9 @@ else
 fi
 rm -f .itchchk
 
-# --- EA app/Origin (durable remid cookie -> silent token refresh) ---
-if [ ! -f .ea/cookies.json ] && [ -z "$(python3 config.py get ea_op_item)" ] && [ -z "$EA_REMID" ]; then
-  echo "ea: BROKEN  not logged in — run: python3 ea_owned.py --login"
+# --- EA app/Origin (remid cookie -> silent token refresh, or browser token) ---
+if [ ! -f .ea/cookies.json ] && [ ! -f .ea/token.json ] && [ -z "$(python3 config.py get ea_remid)" ] && [ -z "$EA_REMID" ]; then
+  echo "ea: BROKEN  not logged in — see AUTH.md § EA (remid cookie, or --token)"
 elif WHO=$(python3 ea_owned.py --whoami 2>.eachk); then
   echo "ea: OK  ($WHO)"
 else

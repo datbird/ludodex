@@ -40,7 +40,6 @@ command -v python3 >/dev/null || { echo "  python3 is required."; exit 1; }
 echo "  python3: ok"
 command -v sqlite3 >/dev/null && echo "  sqlite3: ok" || echo "  sqlite3: MISSING (needed to query the catalog)"
 command -v legendary >/dev/null && echo "  legendary: ok (Epic)" || echo "  legendary: not found — needed only for Epic (pipx install legendary)"
-command -v opx >/dev/null && echo "  opx: ok (optional 1Password)" || echo "  opx: not found — optional (only if you store the Steam key in 1Password)"
 echo
 python3 config.py init
 echo
@@ -65,18 +64,8 @@ TXT
 echo
 ask steam_id "  SteamID64"
 echo
-echo "  Where should the API key live?"
-echo "    1) here, in the local config DB (config.sqlite is gitignored)   [simplest]"
-echo "    2) in 1Password, read via the opx CLI"
-read -rp "  choice [1]: " skc; skc=${skc:-1}
-if [ "$skc" = 2 ]; then
-  ask op_vault "  1Password vault"
-  ask steam_key_op_item "  1Password item name (its 'apikey' field holds the key)"
-  setcfg steam_api_key ""
-else
-  read -rp "  paste your Steam Web API key (leave blank to skip): " sk
-  [ -n "$sk" ] && setcfg steam_api_key "$sk"
-fi
+read -rp "  paste your Steam Web API key (leave blank to skip): " sk
+[ -n "$sk" ] && setcfg steam_api_key "$sk"
 if [ -n "$(python3 config.py steam-key)" ]; then echo "  steam key: resolved ok"; else echo "  steam key: not set yet (you can add it later)"; fi
 echo
 
@@ -125,18 +114,8 @@ itch.io ownership is read with a personal API key.
   Click "Generate new API key" and copy it (any scope can read your library).
 TXT
 echo
-echo "  Where should the itch.io API key live?"
-echo "    1) here, in the local config DB (gitignored)   [simplest]"
-echo "    2) in 1Password, read via the opx CLI"
-read -rp "  choice [1]: " ikc; ikc=${ikc:-1}
-if [ "$ikc" = 2 ]; then
-  ask op_vault "  1Password vault"
-  ask itch_key_op_item "  1Password item name (its 'apikey' field holds the key)"
-  setcfg itch_api_key ""
-else
-  read -rp "  paste your itch.io API key (leave blank to skip): " ik
-  [ -n "$ik" ] && setcfg itch_api_key "$ik"
-fi
+read -rp "  paste your itch.io API key (leave blank to skip): " ik
+[ -n "$ik" ] && setcfg itch_api_key "$ik"
 if [ -n "$(python3 config.py itch-key)" ]; then echo "  itch key: resolved ok"; else echo "  itch key: not set yet (you can add it later)"; fi
 echo
 
@@ -181,7 +160,7 @@ credentials:
 TXT
 ask igdb_client_id "  IGDB/Twitch Client ID (blank to skip)"
 if [ -n "$(cfg igdb_client_id)" ]; then
-  read -rp "  IGDB/Twitch Client Secret (blank to use 1Password/env): " igs
+  read -rp "  IGDB/Twitch Client Secret (blank to skip; env IGDB_CLIENT_SECRET overrides): " igs
   [ -n "$igs" ] && setcfg igdb_client_secret "$igs"
 fi
 echo
@@ -198,7 +177,7 @@ case "$T" in
   *pocketbase*|*both*)
     ask pocketbase_url "  PocketBase URL (https://...)"
     ask pocketbase_admin_email "  PocketBase admin email"
-    read -rp "  PocketBase admin password (blank to use 1Password/env): " pbp
+    read -rp "  PocketBase admin password (blank to skip; env POCKETBASE_PASSWORD overrides): " pbp
     [ -n "$pbp" ] && setcfg pocketbase_admin_password "$pbp" ;;
 esac
 case "$T" in

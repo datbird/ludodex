@@ -4,27 +4,23 @@ How to obtain and wire up the auth for **every** ludodex integration: ownership
 sources, metadata providers, media providers, and remote sync. This is the single
 source of truth — the README links here.
 
-No secrets live in this repo. Your real values go into `config.sqlite` (gitignored)
-or 1Password; only code, skills, and docs are tracked.
+No secrets live in this repo. Your real values go into `config.sqlite` (gitignored).
+ludodex reads credentials **only** from environment variables or `config.sqlite` —
+it never reaches out to 1Password (or any external secret store) at runtime.
 
 ---
 
 ## How ludodex resolves a credential
 
-Every credential follows the same **precedence**, so you can store it whichever way
-you prefer:
+Every credential follows the same **precedence**:
 
 ```
-environment variable   >   local config (config.sqlite)   >   1Password
+environment variable   >   local config (config.sqlite)
 ```
 
 - **Env var** — highest priority; handy for one-off runs / CI.
-- **Local config** — `python3 config.py set <key> <value>`; stored in
-  `config.sqlite` (gitignored).
-- **1Password** — leave the local value blank and point a `*_op_item` key at a
-  1Password item. Requires the `op` CLI signed in (this repo's environment uses an
-  `opx` wrapper that loads a service-account token from `~/.config/op/token`). The
-  vault is `op_vault` (default `<vault>`).
+- **Local config** — `python3 config.py set <key> <value>` (or enter it in the web
+  UI: **Settings › Services**); stored in `config.sqlite` (gitignored).
 
 Resolver helpers (used by the pull scripts and `auth_status.sh`):
 
@@ -36,28 +32,28 @@ Resolver helpers (used by the pull scripts and `auth_status.sh`):
 | `config.steamgriddb_key()` | SteamGridDB API key |
 
 **Verify everything at once:** `bash auth_status.sh` → prints `OK` / `BROKEN` per
-source. The `games-auth` skill wraps this with re-auth walkthroughs.
+source.
 
 ---
 
 ## Quick reference
 
-| Integration | Type | Credential | Get it from | Config key(s) | 1Password item key | Expires? |
-|---|---|---|---|---|---|---|
-| **Steam** | source | Web API key + SteamID | steamcommunity.com/dev/apikey | `steam_api_key`, `steam_id` | `steam_key_op_item` (field `apikey`) | no |
-| **Epic** | source | OAuth (legendary) | legendary.gl/epiclogin | — (`~/.config/legendary`) | — | auto-refresh |
-| **GOG** | source | Galaxy OAuth code | login URL in `gog_owned.py` | `gog_client_id/secret` (public) | — (`.gog/tokens.json`) | auto-refresh |
-| **itch.io** | source | personal API key | itch.io/user/settings/api-keys | `itch_api_key` | `itch_key_op_item` (field `apikey`) | no |
-| **EA** | source | browser access token | URL below (returns JSON) | `ea_op_item` | `ea_op_item` (field `credential`) | ~4h (re-grab) |
-| **emulation / archive** | source | none (local files / SSH) | — | mounts (see below) | — | — |
-| **LaunchBox** | source (frontend) | none (local/networked files) | a LaunchBox install folder | `launchbox_path`, `launchbox_media_mode` | — | — |
-| **Playnite** | source (frontend) | none (PowerShell bridge in-app) | your Playnite install | `playnite_import_json`, `playnite_media_overwrite`, `playnite_icon_source` | — | — |
-| **IGDB** | metadata | Twitch app Client ID+Secret | dev.twitch.tv/console/apps | `igdb_client_id/secret` | `igdb_op_item` (`username`=ID, `credential`=secret) | token auto-mints |
-| **ScreenScraper** | metadata + media | software `devid`/`devpassword` + account `ssid`/`sspassword` | forum (devid) + screenscraper.fr (account) | `screenscraper_devid/devpassword/ssid/sspassword` | `screenscraper_op_item` (`username`=ssid, `password`=sspassword) | no (devid is approval-gated) |
-| **SteamGridDB** | media | API key | steamgriddb.com/profile/preferences/api | `steamgriddb_api_key` | `steamgriddb_op_item` (field `credential`) | no |
-| **ES-DE / Steam-grid / Steam CDN / IGDB images** | media | none / reuses IGDB | — | media mounts | — | — |
-| **PocketBase** | sync | superuser email+password | your PocketBase admin | `pocketbase_admin_email/password`, `pocketbase_url` | `pocketbase_op_item` (`username`/`password`) | no |
-| **Firebase** | sync | service-account JSON | Firebase console | `firebase_project_id`, `firebase_sa_json` | — | no |
+| Integration | Type | Credential | Get it from | Config key(s) | Expires? |
+|---|---|---|---|---|---|
+| **Steam** | source | Web API key + SteamID | steamcommunity.com/dev/apikey | `steam_api_key`, `steam_id` | no |
+| **Epic** | source | OAuth (legendary) | legendary.gl/epiclogin | — (`~/.config/legendary`) | auto-refresh |
+| **GOG** | source | Galaxy OAuth code | login URL in `gog_owned.py` | `gog_client_id/secret` (public) | auto-refresh |
+| **itch.io** | source | personal API key | itch.io/user/settings/api-keys | `itch_api_key` | no |
+| **EA** | source | remid cookie (preferred) / browser access token (fallback) | see EA section | `ea_remid` | remid: durable · token: ~4h |
+| **emulation / archive** | source | none (local files / SSH) | — | mounts (see below) | — |
+| **LaunchBox** | source (frontend) | none (local/networked files) | a LaunchBox install folder | `launchbox_path`, `launchbox_media_mode` | — |
+| **Playnite** | source (frontend) | none (PowerShell bridge in-app) | your Playnite install | `playnite_import_json`, `playnite_media_overwrite`, `playnite_icon_source` | — |
+| **IGDB** | metadata | Twitch app Client ID+Secret | dev.twitch.tv/console/apps | `igdb_client_id/secret` | token auto-mints |
+| **ScreenScraper** | metadata + media | software `devid`/`devpassword` + account `ssid`/`sspassword` | forum (devid) + screenscraper.fr (account) | `screenscraper_devid/devpassword/ssid/sspassword` | no (devid is approval-gated) |
+| **SteamGridDB** | media | API key | steamgriddb.com/profile/preferences/api | `steamgriddb_api_key` | no |
+| **ES-DE / Steam-grid / Steam CDN / IGDB images** | media | none / reuses IGDB | — | media mounts | — |
+| **PocketBase** | sync | superuser email+password | your PocketBase admin | `pocketbase_admin_email/password`, `pocketbase_url` | no |
+| **Firebase** | sync | service-account JSON | Firebase console | `firebase_project_id`, `firebase_sa_json` | no |
 
 ---
 
@@ -76,8 +72,7 @@ profile**.
 3. Store:
    ```
    python3 config.py set steam_id <SteamID64>
-   python3 config.py set steam_api_key <key>      # or use 1Password instead:
-   python3 config.py set steam_key_op_item "<1Password item>"   # field: apikey
+   python3 config.py set steam_api_key <key>
    ```
    (Env override: `STEAM_API_KEY`.)
 - Pull: `python3 steam_owned.py` → `steam_games.tsv`
@@ -104,33 +99,51 @@ A personal **API key**.
 1. Create one at **https://itch.io/user/settings/api-keys**.
 2. Store:
    ```
-   python3 config.py set itch_api_key <key>          # or 1Password:
-   python3 config.py set itch_key_op_item "<1Password item>"   # field: apikey
+   python3 config.py set itch_api_key <key>
    ```
    (Env override: `ITCH_API_KEY`.) Pull: `python3 itch_owned.py` → `itch_games.tsv`.
    > The itch *login* (user/pass) is separate from the API key — you only need the key.
 
 ### EA (EA app / Origin)
-EA's auth sits behind **Akamai Bot Manager** (bot cookies + TLS fingerprint), so a
-headless cookie→token refresh is rejected. The reliable path is a **browser-minted
-access token**:
+EA is the fiddliest source because its auth sits behind **Akamai Bot Manager** (bot
+cookies + TLS fingerprint). There are **two ways in**; ludodex tries the first and
+falls back to the second.
 
+**Path A — `remid` cookie (preferred; can be set-and-forget).** Capture the durable
+`remid` "remember-me" cookie once, and ludodex exchanges it for short-lived access
+tokens non-interactively (`prompt=none` grant), refreshing on its own.
 1. Log in to your EA account in a normal browser.
-2. Visit this URL in that browser — it returns raw **JSON**:
+2. Dev tools (F12) → Application/Storage → Cookies → `https://accounts.ea.com` → copy
+   the **`remid`** value (the long durable one).
+3. Store it (either):
+   ```
+   python3 ea_owned.py --login --remid <value>     # validates + caches to .ea/cookies.json
+   python3 config.py set ea_remid <value>           # or enter it in the web UI
+   ```
+   (Env override: `EA_REMID`.)
+
+> ⚠️ **The silent `remid`→token refresh is frequently blocked by Akamai from
+> datacenter/VPS/server IPs** (it was blocked from this project's build VM). It tends
+> to work from **residential IPs** (a normal home machine). If Path A fails with an
+> auth error, use Path B.
+
+**Path B — browser-minted access token (always works; ~4h).** Grab a token straight
+from your logged-in browser:
+1. Logged in at EA, visit this URL in that same browser — it returns raw **JSON**:
    ```
    https://accounts.ea.com/connect/auth?client_id=ORIGIN_JS_SDK&response_type=token&redirect_uri=nucleus:rest&prompt=none
    ```
-3. Inject the token (whole JSON or just the value):
+2. Inject it (whole JSON or just the token value):
    ```
    python3 ea_owned.py --token '{"access_token":"...","expires_in":14400}'
    ```
-   It's cached in `.ea/token.json` for ~4 hours; pulls run headless until it expires.
-- Pull: `python3 ea_owned.py` → `ea_games.tsv`
-- **Durability:** the token is short-lived and EA blocks headless refresh, so EA is a
-  **re-grab-on-demand** source (fine — EA libraries rarely change). True automation
-  would need a real browser engine (Playwright) like Lutris uses.
-- The `remid`/`sid` cookies (`config.py ... ea_op_item`, `.ea/cookies.json`) are
-  stored for reference but **cannot** mint tokens headlessly.
+   Cached in `.ea/token.json` for **~4 hours**; pulls run headless until it expires.
+
+- Pull (either path): `python3 ea_owned.py` → `ea_games.tsv`
+- **Durability:** with a working `remid` (Path A) EA is effectively set-and-forget.
+  Where Akamai blocks it (Path B), EA is a **re-grab-on-demand** source — re-do the
+  URL→JSON step when you want to refresh ownership (EA libraries change rarely). Full
+  server-side automation would need a real browser engine (Playwright), as Lutris uses.
 
 ### emulation / local archives
 No cloud auth. The emulation ROM index is built from `roms-index.sqlite`
@@ -198,11 +211,12 @@ client-credentials, the access token auto-mints/refreshes).
    - OAuth Redirect URL: `http://localhost`
    - Category: *Application Integration*
 2. Copy the **Client ID** and generate a **Client Secret**.
-3. Store either locally or in 1Password, then enable:
+   > ⚠️ The Client Secret is shown **once**. If you lose it, generate a new one — the
+   > Client ID stays the same.
+3. Store + enable:
    ```
    python3 config.py set igdb_client_id <id>
-   python3 config.py set igdb_client_secret <secret>     # or 1Password:
-   python3 config.py set igdb_op_item "<item>"   # username=Client ID, credential=Secret
+   python3 config.py set igdb_client_secret <secret>
    python3 config.py enable igdb
    ```
    (Env overrides: `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET`.)
@@ -219,11 +233,10 @@ IGDB misses and the backgrounds ES-DE lacks.
 **Auth = a software credential + your account** (both required):
 1. **Account** — make a free account at screenscraper.fr; your login is `ssid`.
    Past contribution / a Patreon pledge raises your **tier** (more threads + a
-   higher daily request cap). Store it (often in its own vault):
+   higher daily request cap). Store it:
    ```
-   python3 config.py set screenscraper_op_item "<1Password item>"   # username=ssid, password=sspassword
-   python3 config.py set screenscraper_op_vault "<vault>"           # if not op_vault
-   # …or locally: config.py set screenscraper_ssid / screenscraper_sspassword
+   python3 config.py set screenscraper_ssid <login>
+   python3 config.py set screenscraper_sspassword <password>
    ```
 2. **`devid`/`devpassword`** — a *software* credential the API **requires** (you
    cannot call it with only an account). Request one on the **dev forum**
@@ -231,8 +244,9 @@ IGDB misses and the backgrounds ES-DE lacks.
    non-commercial use. ⚠️ Manual approval, **can take days–weeks — request early.**
    ```
    python3 config.py set screenscraper_devid <id>
-   python3 config.py set screenscraper_devpassword <pw>     # or screenscraper_dev_op_item
+   python3 config.py set screenscraper_devpassword <pw>
    ```
+   (Env overrides: `SS_DEVID`, `SS_DEVPASSWORD`, `SS_SSID`, `SS_SSPASSWORD`.)
 
 **Tiers & quota (the engine adapts to whatever you have):**
 
@@ -274,8 +288,7 @@ lists registered local paths.
 1. Get a free API key at **https://www.steamgriddb.com/profile/preferences/api**.
 2. Store + enable:
    ```
-   python3 config.py set steamgriddb_api_key <key>          # or 1Password:
-   python3 config.py set steamgriddb_op_item "<item>"   # field: credential
+   python3 config.py set steamgriddb_api_key <key>
    python3 config.py enable steamgriddb
    ```
    (Env override: `STEAMGRIDDB_API_KEY`.)
@@ -289,8 +302,7 @@ Mirrors the catalog to a PocketBase instance. Auth = a dedicated **superuser**.
 ```
 python3 config.py set pocketbase_url https://<host>:8090
 python3 config.py set pocketbase_admin_email <email>
-python3 config.py set pocketbase_admin_password <password>   # or 1Password:
-python3 config.py set pocketbase_op_item "<item>"   # fields: username / password
+python3 config.py set pocketbase_admin_password <password>
 python3 config.py set sync_target pocketbase        # auto-sync after each rebuild
 ```
 Create the superuser on the server:
@@ -307,16 +319,6 @@ pip install -r requirements-firebase.txt        # google-auth, etc.
 Get the service-account JSON from the Firebase console → Project settings →
 Service accounts → Generate new private key. (Keep the JSON out of git — `*.json`
 SA files are gitignored.)
-
----
-
-## 1Password (optional, for any `*_op_item`)
-
-Any credential above can be kept in 1Password instead of `config.sqlite`. Point the
-relevant `*_op_item` key at an item in `op_vault`, and leave the local value blank.
-The resolver reads the field named in the table above (`apikey`, `credential`,
-`username`/`password`, …). The `op` CLI must be authenticated (service-account token
-or desktop-app integration).
 
 ---
 

@@ -161,7 +161,7 @@ store or Playnite), IGDB leaves that kind untouched, so owned-source data always
 ```bash
 # one-time: Twitch app creds (free) at https://dev.twitch.tv/console/apps
 python3 config.py set igdb_client_id     <client-id>
-python3 config.py set igdb_client_secret <client-secret>   # or use igdb_op_item (1Password)
+python3 config.py set igdb_client_secret <client-secret>   # env IGDB_CLIENT_SECRET overrides
 python3 config.py enable igdb            # on by default; no-ops without creds
 ```
 
@@ -283,8 +283,8 @@ re-asserts every record, and prunes any remote doc missing locally — use it af
 cache, manual remote edits, or a failed partial run.
 
 - **PocketBase** — set `pocketbase_url`, `pocketbase_admin_email`, and a password
-  (`pocketbase_admin_password` locally, or `pocketbase_op_item` in 1Password, or the
-  `POCKETBASE_PASSWORD` env). Collections `games`/`sources` are auto-created. Upserts are
+  (`pocketbase_admin_password` locally, or the `POCKETBASE_PASSWORD` env). Collections
+  `games`/`sources` are auto-created. Upserts are
   idempotent (create↔patch self-heal per record); uses the batch API when enabled, else
   parallel per-record writes.
 - **Firebase (Firestore)** — one-time setup:
@@ -325,9 +325,8 @@ python3 config.py get steam_id                 # read one (used by the shell scr
 | key | what it is |
 |-----|------------|
 | `steam_id` | SteamID64 of the account that **owns** your Steam Web API key |
-| `steam_api_key` | the Steam key, stored locally (gitignored) — *or* leave blank and use 1Password |
-| `itch_api_key` | itch.io API key, stored locally — *or* blank + use 1Password (`itch_key_op_item`) |
-| `op_vault` / `steam_key_op_item` | 1Password vault + item holding the Steam key (`apikey` field) |
+| `steam_api_key` | the Steam Web API key, stored locally (gitignored); env `STEAM_API_KEY` overrides |
+| `itch_api_key` | itch.io API key, stored locally (gitignored); env `ITCH_API_KEY` overrides |
 | `library_db` / `roms_index_db` | output catalog + ROM-index DB paths |
 | `unraid_host` / `roms_path` | ssh target + ROM archive path (only for `update.sh --roms`) |
 | `gog_client_id` / `gog_client_secret` | GOG Galaxy's public OAuth client (defaults work) |
@@ -340,15 +339,15 @@ Behavior **preferences** live in the same table (`1`/`0`):
 | `dedupe_preserve_years` | keep `(YYYY)` in the dedupe key so a remake stays separate from the original (`1`) |
 | `dedupe_strip_editions` | merge remasters/editions (Remastered, GOTY…) into the base game (`1`) |
 
-The Steam key is resolved at runtime as **`STEAM_API_KEY` env → `steam_api_key` config →
-1Password** (`config.py steam-key`), so you can store it whichever way you prefer; config
-and 1Password both stay out of git.
+The Steam key is resolved at runtime as **`STEAM_API_KEY` env → `steam_api_key` config**
+(`config.py steam-key`). ludodex reads credentials only from env vars or
+`config.sqlite` (gitignored) — never from 1Password or any external store at runtime.
 
 ## Auth
 
 **See [AUTH.md](AUTH.md) for the complete, authoritative guide** to obtaining and
 wiring up the credentials for *every* integration (ownership sources, metadata and
-media providers, and remote sync), plus the env → config → 1Password precedence.
+media providers, and remote sync), plus the env → config credential precedence.
 
 Quick version — once cached, auth needs no further interaction:
 

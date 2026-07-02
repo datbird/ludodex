@@ -67,8 +67,8 @@ def main(argv):
         return
     cid, csec = config.igdb_creds()
     if not (cid and csec):
-        print("igdb: no Twitch credentials — set igdb_client_id/igdb_client_secret "
-              "(or igdb_op_item). See README. Skipping.", file=sys.stderr)
+        print("igdb: no Twitch credentials — set igdb_client_id/igdb_client_secret. "
+              "See README. Skipping.", file=sys.stderr)
         return
     if not os.path.exists(LIB):
         print("igdb: no catalog yet — run build_library.py first.", file=sys.stderr)

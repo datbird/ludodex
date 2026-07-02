@@ -11,12 +11,17 @@ only live on the producer (the Deck). See HANDOFF.md §6.
 Run:  uvicorn server.app:app --host 0.0.0.0 --port 8001
 """
 import io
+import json
 import os
+import random
 import re
 import sqlite3
+import subprocess
 import sys
+import threading
+import time
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
@@ -25,10 +30,54 @@ sys.path.insert(0, DIR)
 import config          # noqa: E402  pipeline config store (config.sqlite)
 import media           # noqa: E402  pipeline vocab/priority (pure data)
 import media_choose    # noqa: E402  reuse _materialize_row (non-destructive)
+import titlenorm       # noqa: E402  shared title -> norm_key (matches build_library)
+import devices         # noqa: E402  device connections + library-manager pull
+import fileops         # noqa: E402  file-operations engine (profiles + runbooks)
 from . import ai       # noqa: E402  AI features (server package)
 
 LIBRARY_DB = os.path.join(DIR, "game-library.sqlite")
 INDEX_DB = os.path.join(DIR, "media-index.sqlite")
+RA_DB = os.path.join(DIR, "ra.sqlite")
+PINS_DB = os.path.join(DIR, "pins.sqlite")  # durable art pins (survives media rescan)
+OS_DB = os.path.join(DIR, "os.sqlite")      # durable OS support (windows/mac/linux) per store entry
+TAGS_DB = os.path.join(DIR, "tags.sqlite")  # durable user-defined tags (survives rebuild)
+UMEDIA_DB = os.path.join(DIR, "user-media.sqlite")  # durable user uploads (survives rebuild)
+SCORES_DB = os.path.join(DIR, "scores.sqlite")  # multi-source ratings + unified score
+MANUAL_DB = os.path.join(DIR, "manual-games.sqlite")  # durable hand-added games (survives rebuild)
+
+LEGENDARY = os.path.expanduser("~/.local/bin/legendary")  # Epic OAuth CLI
+EPIC_LOGIN_URL = ("https://www.epicgames.com/id/api/redirect"
+                  "?clientId=34a02cf8f4414e29b15921876da36f9a&responseType=code")
+# GOG Galaxy's public OAuth client (same one gog_owned.py exchanges against). After
+# login the browser lands on embed.gog.com/on_login_success?...&code=<code>; the user
+# copies that code (or the whole address) into the connect field.
+GOG_LOGIN_URL = ("https://auth.gog.com/auth?client_id=46899977096215655"
+                 "&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient"
+                 "&response_type=code&layout=client2")
+
+_STARTED = time.time()
+
+# Server-managed SQLite databases, for the Server Operations panel.
+# role: "durable" = user/app state (back up before recovery), "cache"/"output" = regenerable.
+DATABASES = [
+    ("config", "Config", "config.sqlite", "durable"),
+    ("pins", "Art pins", "pins.sqlite", "durable"),
+    ("os", "OS support", "os.sqlite", "durable"),
+    ("tags", "User tags", "tags.sqlite", "durable"),
+    ("usermedia", "User media", "user-media.sqlite", "durable"),
+    ("scores", "Ratings & scores", "scores.sqlite", "durable"),
+    ("manual_games", "Manual games", "manual-games.sqlite", "durable"),
+    ("ai_usage", "AI usage", "ai-usage.sqlite", "durable"),
+    ("connections", "Device connections", "connections.sqlite", "durable"),
+    ("fileops", "File operations", "file-profiles.sqlite", "durable"),
+    ("ra", "RetroAchievements", "ra.sqlite", "durable"),
+    ("library", "Game library", "game-library.sqlite", "output"),
+    ("media", "Media index", "media-index.sqlite", "output"),
+    ("metadata", "Metadata cache", "metadata-cache.sqlite", "cache"),
+    # NB: roms-index.sqlite is a Deck-side *input* (config roms_index_db →
+    # /home/deck/...), not a DB this server owns, so it's intentionally not listed.
+]
+DB_BY_ID = {d[0]: d for d in DATABASES}
 REPO = media_choose.repo_dir()            # content-addressed media repo (DIR/media)
 THUMBS = os.path.join(REPO, ".thumbs")
 os.makedirs(THUMBS, exist_ok=True)
@@ -50,10 +99,78 @@ def ro(path):
     return con
 
 
+def _tags_con():
+    """Durable user-tag store (origin 'ludodex'); survives catalog rebuilds, like
+    pins/os. One row per (game, tag)."""
+    con = sqlite3.connect(TAGS_DB)
+    con.execute("""CREATE TABLE IF NOT EXISTS user_tags(
+        norm_key TEXT, tag TEXT, created REAL, PRIMARY KEY(norm_key, tag))""")
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _umedia_con():
+    """Durable user-uploaded media store; survives catalog/media rebuilds. Bytes
+    live in the content-addressed REPO as <sha1>.<ext>; this indexes them per game."""
+    con = sqlite3.connect(UMEDIA_DB)
+    con.execute("""CREATE TABLE IF NOT EXISTS user_media(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, norm_key TEXT, kind TEXT,
+        sha1 TEXT, ext TEXT, width INTEGER, height INTEGER,
+        origin TEXT, created REAL)""")
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _scores_con():
+    """Durable multi-source ratings + computed Ludodex score store (scores_fetch.py)."""
+    con = sqlite3.connect(SCORES_DB)
+    con.execute("PRAGMA journal_mode=WAL")   # concurrent read while scores_fetch writes
+    con.execute("""CREATE TABLE IF NOT EXISTS ratings(
+        norm_key TEXT, source TEXT, kind TEXT, score REAL, votes INTEGER,
+        raw TEXT, updated REAL, PRIMARY KEY(norm_key, source, kind))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS game_scores(
+        norm_key TEXT PRIMARY KEY, universal INTEGER, critic INTEGER,
+        user INTEGER, n_sources INTEGER, updated REAL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS steam_type(
+        norm_key TEXT PRIMARY KEY, type TEXT, updated REAL)""")
+    con.row_factory = sqlite3.Row
+    return con
+
+
+# Steam appdetails `type`s that aren't games — hidden when hide_non_games is on.
+NON_GAME_TYPES = ("application", "tool", "music", "video", "hardware", "series", "mod")
+
+# Storefront labels are Sources, not Systems — PC-store games get platform=source,
+# so exclude these (and the generic psn/xbox fallbacks) from the Systems facet.
+# Real consoles (ps4/ps5/xbox one/…/windows) are kept.
+NON_SYSTEM_PLATFORMS = ("steam", "gog", "epic", "itch", "ea", "psn", "xbox")
+
+
+def _manual_con():
+    """Durable hand-added games (the library '+' add flow); survives rebuilds.
+    build_library merges these back in as source rows keyed by norm_key."""
+    con = sqlite3.connect(MANUAL_DB)
+    con.execute("""CREATE TABLE IF NOT EXISTS manual_games(
+        norm_key TEXT, title TEXT, source TEXT, platform TEXT,
+        detail TEXT, added REAL, PRIMARY KEY(norm_key, source, platform))""")
+    con.row_factory = sqlite3.Row
+    return con
+
+
+_tags_con().close()     # ensure files + schema exist so lib() can ATTACH them ro
+_umedia_con().close()
+_scores_con().close()
+_manual_con().close()
+
+
 def lib():
-    """game-library connection with media-index ATTACHed read-only as `m`."""
+    """game-library connection, ATTACHing media-index as `m`, user-tags as `t`,
+    user-media as `u`, and ratings/scores as `sco` (all read-only)."""
     con = ro(LIBRARY_DB)
     con.execute("ATTACH DATABASE ? AS m", ("file:%s?mode=ro" % INDEX_DB,))
+    con.execute("ATTACH DATABASE ? AS t", ("file:%s?mode=ro" % TAGS_DB,))
+    con.execute("ATTACH DATABASE ? AS u", ("file:%s?mode=ro" % UMEDIA_DB,))
+    con.execute("ATTACH DATABASE ? AS sco", ("file:%s?mode=ro" % SCORES_DB,))
     return con
 
 
@@ -64,6 +181,12 @@ def stats():
     try:
         g = con.execute("SELECT COUNT(*) FROM games").fetchone()[0]
         cross = con.execute("SELECT COUNT(*) FROM games WHERE n_kinds>1").fetchone()[0]
+        unmatched = con.execute(
+            "SELECT COUNT(*) FROM games g WHERE NOT EXISTS("
+            "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)").fetchone()[0]
+        no_media = con.execute(
+            "SELECT COUNT(*) FROM games g WHERE NOT EXISTS("
+            "SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key)").fetchone()[0]
         by_source = {}
         for s in COLUMN_SOURCES:
             by_source[s] = con.execute(
@@ -81,6 +204,8 @@ def stats():
         return {
             "games": g,
             "cross_source": cross,
+            "unmatched": unmatched,
+            "no_media": no_media,
             "by_source": by_source,
             "media": {"games_with_art": total_with, "by_kind": coverage},
         }
@@ -97,7 +222,9 @@ def facets():
             "SELECT DISTINCT source FROM sources ORDER BY source")]
         platforms = [r["platform"] for r in con.execute(
             "SELECT platform, COUNT(*) c FROM sources WHERE platform IS NOT NULL "
-            "AND platform!='' GROUP BY platform ORDER BY c DESC")]
+            "AND platform!='' AND platform NOT IN (%s) "
+            "GROUP BY platform ORDER BY c DESC"
+            % ",".join("?" * len(NON_SYSTEM_PLATFORMS)), NON_SYSTEM_PLATFORMS)]
         return {"sources": sources, "platforms": platforms}
     finally:
         con.close()
@@ -114,8 +241,11 @@ FLAG_SQL = {
     "playnite": "g.in_playnite=1",
     "launchbox": "g.in_launchbox=1",
     "matched": "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)",
-    "has_cover": "EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
-                 "AND md.chosen=1 AND md.kind='cover')",
+    "has_cover": "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
+                 "AND md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM "
+                 "u.user_media um WHERE um.norm_key=g.norm_key AND um.kind='cover'))",
+    "has_media": "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key) "
+                 "OR EXISTS(SELECT 1 FROM u.user_media um WHERE um.norm_key=g.norm_key))",
     "cross_source": "g.n_sources>1",
 }
 
@@ -134,13 +264,24 @@ SORT_SQL = {
 }
 
 
-def _order_by(sort):
-    """Build an ORDER BY clause from an ordered list of SORT_SQL keys; always
-    ends with a stable title tiebreak."""
+def _ludodex_weight():
+    """Critic weight (0..1) for the unified Ludodex score; user weight is 1-this.
+    Default 0.6 (critic-leaning). Tunable via config `ludodex_critic_weight`."""
+    try:
+        w = float(config.get("ludodex_critic_weight") or 0.6)
+    except (TypeError, ValueError):
+        w = 0.6
+    return min(1.0, max(0.0, w))
+
+
+def _order_by(sort, extra=None):
+    """Build an ORDER BY clause from an ordered list of SORT_SQL keys (plus any
+    `extra` key->(expr,dir)); always ends with a stable title tiebreak."""
+    table = dict(SORT_SQL, **(extra or {}))
     parts = []
     for k in (sort or []):
-        if k in SORT_SQL:
-            expr, d = SORT_SQL[k]
+        if k in table:
+            expr, d = table[k]
             parts.append("%s %s" % (expr, d))
     parts.append("g.canonical_title COLLATE NOCASE ASC")
     return " ORDER BY " + ", ".join(parts)
@@ -187,19 +328,52 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         where.append("g.norm_key IN (SELECT norm_key FROM m.media "
                      "WHERE chosen=1 AND kind=?)")
         args.append(has_kind)
+    if config.get_bool("hide_non_games", True):
+        where.append("g.norm_key NOT IN (SELECT norm_key FROM sco.steam_type "
+                     "WHERE type IN (%s))" % ",".join("?" * len(NON_GAME_TYPES)))
+        args += list(NON_GAME_TYPES)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
 
     total = con.execute("SELECT COUNT(*) FROM games g" + clause, args).fetchone()[0]
-    rows = con.execute(
+    # unified Ludodex score is precomputed per game (scores_fetch.py -> sco.game_scores)
+    score = "(SELECT gs.universal FROM sco.game_scores gs WHERE gs.norm_key=g.norm_key)"
+    base = (
         "SELECT g.norm_key, g.canonical_title, g.n_sources, g.n_kinds, "
         "g.sources_summary, "
         "(SELECT group_concat(DISTINCT s.platform) FROM sources s "
         "   WHERE s.game_id=g.id AND s.platform IS NOT NULL AND s.platform!='') AS platforms, "
         "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
-        "EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
-        "       AND md.chosen=1 AND md.kind='cover') AS has_cover "
-        "FROM games g" + clause + _order_by(sort) + " LIMIT ? OFFSET ?",
-        args + [limit, offset]).fetchall()
+        "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
+        "        AND md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM "
+        "  u.user_media um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, "
+        + score + " AS ludodex_score, "
+        "%s"
+        "(SELECT group_concat('ludodex:'||ut.tag, char(31)) FROM t.user_tags ut "
+        "   WHERE ut.norm_key=g.norm_key) AS usr_tags "
+        "FROM games g" + clause +
+        _order_by(sort, {"ludodex_score": (score, "DESC")}) + " LIMIT ? OFFSET ?")
+    # imported-origin tags live in the catalog's game_tags (absent in an older DB)
+    imp = ("(SELECT group_concat(gt.origin||':'||gt.tag, char(31)) FROM game_tags gt "
+           "   WHERE gt.game_id=g.id AND gt.origin<>'ludodex') AS imp_tags, ")
+    try:
+        rows = con.execute(base % imp, args + [limit, offset]).fetchall()
+    except sqlite3.OperationalError:
+        rows = con.execute(base % "", args + [limit, offset]).fetchall()
+
+    def _tags(r):
+        keys = r.keys()
+        d = {}
+        for col in ("imp_tags", "usr_tags"):
+            blob = r[col] if col in keys else None
+            for pair in (blob or "").split("\x1f"):
+                if not pair:
+                    continue
+                origin, _, tag = pair.partition(":")
+                if tag:
+                    d.setdefault(tag, set()).add(origin)
+        return [{"tag": t, "origins": sorted(o)}
+                for t, o in sorted(d.items(), key=lambda kv: kv[0].lower())]
+
     items = [{
         "norm_key": r["norm_key"],
         "title": r["canonical_title"],
@@ -209,6 +383,8 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "platforms": r["platforms"] or "",
         "matched": bool(r["matched"]),
         "has_cover": bool(r["has_cover"]),
+        "ludodex_score": round(r["ludodex_score"]) if r["ludodex_score"] is not None else None,
+        "tags": _tags(r),
     } for r in rows]
     return {"total": total, "limit": limit, "offset": offset, "items": items}
 
@@ -235,6 +411,846 @@ def games(
         con.close()
 
 
+# --------------------------------------------------------------------- spotlight
+# Platform code -> friendly label for spotlight titles (falls back to the raw code).
+_PLAT_LABEL = {
+    "snes": "Super Nintendo", "nes": "NES", "n64": "Nintendo 64", "gba": "Game Boy Advance",
+    "gb": "Game Boy", "gbc": "Game Boy Color", "nds": "Nintendo DS", "3ds": "Nintendo 3DS",
+    "gc": "GameCube", "wii": "Wii", "wiiu": "Wii U", "switch": "Switch",
+    "genesis": "Sega Genesis", "megadrive": "Mega Drive", "dreamcast": "Dreamcast",
+    "saturn": "Sega Saturn", "gamegear": "Game Gear", "sms": "Master System",
+    "psx": "PlayStation", "ps2": "PlayStation 2", "ps3": "PlayStation 3", "psp": "PSP",
+    "psvita": "PS Vita", "arcade": "Arcade", "mame": "Arcade (MAME)", "c64": "Commodore 64",
+    "amiga": "Amiga", "dos": "DOS", "atari2600": "Atari 2600", "pcengine": "PC Engine",
+    "neogeo": "Neo Geo", "3do": "3DO", "wonderswan": "WonderSwan", "lynx": "Atari Lynx",
+}
+
+
+def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
+    sql = ("SELECT g.norm_key, g.canonical_title AS title, gs.universal AS score, "
+           "g.sources_summary AS sources, "
+           "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
+           "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 "
+           "        AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media um "
+           "        WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover "
+           "FROM games g JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
+           + (("WHERE " + where + " ") if where else "")
+           + "ORDER BY " + order + ", g.canonical_title LIMIT ?")
+    return [{"norm_key": r["norm_key"], "title": r["title"], "score": r["score"],
+             "sources": r["sources"], "matched": bool(r["matched"]),
+             "has_cover": bool(r["has_cover"])} for r in con.execute(sql, args + [limit])]
+
+
+def _spotlight_pool(con):
+    """All concrete spotlight ids worth showing (enough scored games)."""
+    pool = ["overall", "emulation", "underrated", "hidden_gems", "acclaimed", "beloved"]
+    try:
+        for (plat,) in con.execute(
+            "SELECT s.platform FROM sources s JOIN games g ON g.id=s.game_id "
+            "JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
+            "WHERE s.platform!='' AND s.platform NOT IN (%s) "
+            "GROUP BY s.platform HAVING COUNT(DISTINCT g.norm_key)>=8"
+            % ",".join("?" * len(NON_SYSTEM_PLATFORMS)), NON_SYSTEM_PLATFORMS):
+            pool.append("platform:" + plat)
+        for (src,) in con.execute(
+            "SELECT DISTINCT s.source FROM sources s JOIN games g ON g.id=s.game_id "
+            "JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
+            "WHERE s.source IN ('steam','gog','epic')"):
+            pool.append("source:" + src)
+        for (dec,) in con.execute(
+            "SELECT (CAST(ga.value AS INT)/10)*10 d FROM game_attributes ga "
+            "JOIN games g ON g.id=ga.game_id JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
+            "WHERE ga.kind='release_year' AND CAST(ga.value AS INT) BETWEEN 1970 AND 2035 "
+            "GROUP BY d HAVING COUNT(DISTINCT g.norm_key)>=8"):
+            pool.append("decade:%d" % dec)
+    except sqlite3.OperationalError:
+        pass
+    return pool
+
+
+def _resolve_spotlight(kind):
+    """kind -> (title, subtitle, where, args, order)."""
+    if kind == "emulation":
+        return ("Best on emulation", "Top games across your ROM library",
+                "g.has_emulation=1", [], "gs.universal DESC")
+    if kind == "underrated":
+        return ("Underrated", "Players rate these higher than the critics did",
+                "gs.critic IS NOT NULL AND gs.user IS NOT NULL AND gs.user-gs.critic>=8 "
+                "AND gs.universal>=68", [], "(gs.user-gs.critic) DESC")
+    if kind == "hidden_gems":
+        return ("Hidden gems", "Great games you own in just one place",
+                "gs.universal>=78 AND g.n_sources=1", [], "gs.universal DESC")
+    if kind == "acclaimed":
+        return ("Critically acclaimed", "Where the critics are all-in",
+                "gs.critic>=85", [], "gs.critic DESC")
+    if kind == "beloved":
+        return ("Player favorites", "Loved by the people who actually play them",
+                "gs.user>=88", [], "gs.user DESC")
+    if kind.startswith("platform:"):
+        p = kind.split(":", 1)[1]
+        lbl = _PLAT_LABEL.get(p, p.upper() if len(p) <= 4 else p.title())
+        return ("Best on %s" % lbl, "Top %s games you own" % lbl,
+                "EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id AND s.platform=?)",
+                [p], "gs.universal DESC")
+    if kind.startswith("source:"):
+        s = kind.split(":", 1)[1]
+        lbl = {"gog": "GOG", "epic": "Epic", "psn": "PlayStation",
+               "xbox": "Xbox"}.get(s, s.title())
+        return ("Best on %s" % lbl, "Top of your %s library" % lbl,
+                "EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id AND s.source=?)",
+                [s], "gs.universal DESC")
+    if kind.startswith("decade:"):
+        d = int(kind.split(":", 1)[1])
+        return ("Best of the %ds" % d, "Top games from %d–%d" % (d, d + 9),
+                "EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
+                "AND ga.kind='release_year' AND CAST(ga.value AS INT) BETWEEN ? AND ?)",
+                [d, d + 9], "gs.universal DESC")
+    return ("Top rated", "The highest-scoring games you own", "", [], "gs.universal DESC")
+
+
+@app.get("/api/spotlight")
+def spotlight(kind: str = Query("random")):
+    """A themed top-N for the dashboard 'Spotlight'. `random` (default) rotates
+    through overall / per-platform / per-store / per-decade / underrated / etc."""
+    con = lib()
+    try:
+        if kind == "random":
+            pool = _spotlight_pool(con)
+            kind = random.choice(pool) if pool else "overall"
+        title, subtitle, where, args, order = _resolve_spotlight(kind)
+        items = _spotlight_rows(con, where, args, order)
+        if len(items) < 4 and kind != "overall":         # thin theme -> fall back
+            kind = "overall"
+            title, subtitle, where, args, order = _resolve_spotlight(kind)
+            items = _spotlight_rows(con, where, args, order)
+        return {"kind": kind, "title": title, "subtitle": subtitle, "items": items}
+    finally:
+        con.close()
+
+
+SPOTLIGHT_SECONDS_DEFAULT = 12
+SPOTLIGHT_SECONDS_MIN = 3
+SPOTLIGHT_SECONDS_MAX = 120
+
+
+def _spotlight_seconds():
+    try:
+        v = int(config.get("spotlight_seconds") or SPOTLIGHT_SECONDS_DEFAULT)
+    except (TypeError, ValueError):
+        v = SPOTLIGHT_SECONDS_DEFAULT
+    return max(SPOTLIGHT_SECONDS_MIN, min(SPOTLIGHT_SECONDS_MAX, v))
+
+
+@app.get("/api/prefs")
+def get_prefs():
+    """Global app preferences (not per-service): hide non-game apps + how long each
+    dashboard Spotlight stays before rotating."""
+    return {
+        "hide_non_games": config.get_bool("hide_non_games", True),
+        "spotlight_seconds": _spotlight_seconds(),
+    }
+
+
+@app.post("/api/prefs")
+def set_prefs(body: dict = Body(...)):
+    body = body or {}
+    if "hide_non_games" in body:
+        config.set_("hide_non_games", "1" if body["hide_non_games"] else "0")
+    if "spotlight_seconds" in body:
+        try:
+            v = max(SPOTLIGHT_SECONDS_MIN,
+                    min(SPOTLIGHT_SECONDS_MAX, int(body["spotlight_seconds"])))
+            config.set_("spotlight_seconds", str(v))
+        except (TypeError, ValueError):
+            pass
+    return get_prefs()
+
+
+# --------------------------------------------------------------------------- #
+#  Emulation storage locations. A location holds ROMs, Media, or both:
+#    roms  -> an `archives` row (scanned by crawl/build_romdb)
+#    media -> a `media_mounts` ES-DE row + a per-location media-kinds filter
+#    both  -> the same path registered in BOTH (default)
+#  Registers pre-mounted paths; status reflects how the path looks on disk now.
+# --------------------------------------------------------------------------- #
+def _emu_locations():
+    """Merge ROM archives + media mounts into one list keyed by name."""
+    by_name = {}
+    for a in config.archives_list():
+        by_name[a["name"]] = {"name": a["name"], "path": a["path"],
+                              "role": "roms", "kinds": [], "enabled": bool(a["enabled"])}
+    for m in config.media_mounts_list(provider="esde"):
+        e = by_name.get(m["name"])
+        if e:                                    # in both tables -> combined
+            e["role"] = "both"
+            e["kinds"] = m["kinds"]
+            e["enabled"] = e["enabled"] and bool(m["enabled"])
+        else:
+            by_name[m["name"]] = {"name": m["name"], "path": m["path"],
+                                  "role": "media", "kinds": m["kinds"],
+                                  "enabled": bool(m["enabled"])}
+    out = [dict(e, status=config.path_status(e["path"]))
+           for e in by_name.values()]
+    out.sort(key=lambda e: e["name"].lower())
+    return {"locations": out}
+
+
+@app.get("/api/archives")
+def list_emu_locations():
+    return _emu_locations()
+
+
+@app.post("/api/archives")
+def set_emu_location(body: dict = Body(...)):
+    body = body or {}
+    name = (body.get("name") or "").strip()
+    path = (body.get("path") or "").strip()
+    role = (body.get("role") or "both").strip().lower()
+    if not name or not path:
+        raise HTTPException(400, "both a name and a path are required")
+    if role not in ("roms", "media", "both"):
+        role = "both"
+    enabled = 1 if body.get("enabled", True) else 0
+    kinds = [k for k in (body.get("kinds") or []) if k in media.KINDS]
+    # write to the right table(s); drop the other so a role change is clean
+    if role in ("roms", "both"):
+        config.archive_set(name, path, "rom", enabled)
+    else:
+        config.archive_rm(name)
+    if role in ("media", "both"):
+        config.media_mount_set(name, path, "esde", enabled, kinds)
+    else:
+        config.media_mount_rm(name)
+    return _emu_locations()
+
+
+@app.delete("/api/archives/{name}")
+def remove_emu_location(name: str):
+    config.archive_rm(name)
+    config.media_mount_rm(name)
+    return _emu_locations()
+
+
+@app.post("/api/archives/{name}/enabled")
+def set_emu_location_enabled(name: str, body: dict = Body(...)):
+    on = bool((body or {}).get("enabled"))
+    config.archive_set_enabled(name, on)
+    config.media_mount_set_enabled(name, on)
+    return _emu_locations()
+
+
+# --------------------------------------------------------------------------- #
+#  Add a game manually: identify across providers (IGDB) by name, or recognize
+#  games from uploaded images (AI vision). Adds persist to manual-games.sqlite
+#  (durable) and are inserted into the live catalog immediately.
+# --------------------------------------------------------------------------- #
+_IGDB_TOK = {"token": None, "exp": 0.0, "cid": None}
+
+
+def _igdb_token():
+    cid = config.get("igdb_client_id")
+    secret = config.get("igdb_client_secret")
+    if not (cid and secret):
+        return None, None
+    now = time.time()
+    if _IGDB_TOK["token"] and _IGDB_TOK["cid"] == cid and _IGDB_TOK["exp"] > now + 60:
+        return cid, _IGDB_TOK["token"]
+    import igdb
+    try:
+        tok, ttl = igdb.get_token(cid, secret)
+    except Exception:
+        return None, None
+    _IGDB_TOK.update(token=tok, exp=now + (ttl or 3600), cid=cid)
+    return cid, tok
+
+
+def _igdb_search(name, limit=8):
+    """IGDB free-text search -> candidate matches (id, name, year, platforms, cover)."""
+    cid, tok = _igdb_token()
+    if not tok:
+        return []
+    import igdb
+    body = ('search "%s"; fields id,name,slug,first_release_date,'
+            'platforms.abbreviation,cover.image_id; limit %d;'
+            % (name.replace('"', ""), limit))
+    try:
+        hits = igdb.query("games", body, cid, tok)
+    except Exception:
+        return []
+    out = []
+    for h in hits or []:
+        img = (h.get("cover") or {}).get("image_id")
+        yr = None
+        if h.get("first_release_date"):
+            try:
+                yr = time.gmtime(h["first_release_date"]).tm_year
+            except (ValueError, OverflowError, OSError):
+                yr = None
+        out.append({
+            "igdb_id": h.get("id"), "name": h.get("name"), "year": yr,
+            "platforms": [p.get("abbreviation") for p in (h.get("platforms") or [])
+                          if p.get("abbreviation")],
+            "cover": ("https://images.igdb.com/igdb/image/upload/t_cover_small/"
+                      "%s.jpg" % img) if img else None,
+        })
+    return out
+
+
+@app.get("/api/identify")
+def identify_game(name: str = Query(...)):
+    """Search providers for a game by name → candidate matches to confirm."""
+    name = (name or "").strip()
+    if not name:
+        raise HTTPException(400, "a name is required")
+    cands = _igdb_search(name)
+    return {"query": name, "candidates": cands,
+            "provider": "igdb" if cands or _igdb_token()[1] else None}
+
+
+def _refresh_game_row(con, gid, new_source):
+    """Recompute n_sources/n_kinds/summary (+ set has_<source>) after adding a row."""
+    srcs = con.execute("SELECT source, platform FROM sources WHERE game_id=?",
+                       (gid,)).fetchall()
+    kinds = {}
+    for s, p in srcs:
+        kinds.setdefault(s, set()).add(p)
+    parts = [grp + ":" + ",".join(sorted(kinds[grp]))
+             for grp in ("emulation", "archive") if grp in kinds]
+    parts += sorted(k for k in kinds if k not in ("emulation", "archive"))
+    sets = "sources_summary=?, n_sources=?, n_kinds=?"
+    args = ["; ".join(parts), len(srcs), len(kinds)]
+    if new_source in COLUMN_SOURCES:
+        sets += ", has_%s=1" % new_source
+    con.execute("UPDATE games SET %s WHERE id=?" % sets, args + [gid])
+
+
+def _insert_source_row(nk, title, source, platform, detail=""):
+    """Add a source row to the live catalog (creating the game if new). Returns
+    True if a brand-new game row was created."""
+    sid = "manual:" + nk
+    con = sqlite3.connect(LIBRARY_DB, timeout=15)
+    try:
+        con.execute("PRAGMA busy_timeout=15000")
+        g = con.execute("SELECT id FROM games WHERE norm_key=?", (nk,)).fetchone()
+        if g:
+            gid = g[0]
+            dup = con.execute("SELECT 1 FROM sources WHERE game_id=? AND source=? "
+                              "AND platform=?", (gid, source, platform)).fetchone()
+            if not dup:
+                con.execute("INSERT INTO sources(game_id,source,platform,source_id,"
+                            "title_raw,detail) VALUES(?,?,?,?,?,?)",
+                            (gid, source, platform, sid, title, detail))
+                _refresh_game_row(con, gid, source)
+            con.commit()
+            return False
+        summary = (source + ":" + platform) if source in ("emulation", "archive") else source
+        flags = {c: 0 for c in ("emulation", "steam", "gog", "epic", "itch", "archive")}
+        if source in COLUMN_SOURCES:
+            flags[source] = 1
+        cur = con.execute(
+            "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,"
+            "sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
+            "has_archive,in_playnite,in_launchbox) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (title, nk, 1, 1, summary, flags["emulation"], flags["steam"],
+             flags["gog"], flags["epic"], flags["itch"], flags["archive"], 0, 0))
+        con.execute("INSERT INTO sources(game_id,source,platform,source_id,title_raw,"
+                    "detail) VALUES(?,?,?,?,?,?)",
+                    (cur.lastrowid, source, platform, sid, title, detail))
+        con.commit()
+        return True
+    finally:
+        con.close()
+
+
+@app.post("/api/games/add")
+def add_game(body: dict = Body(...)):
+    """Add a game by name + source + system. Persists durably (survives rebuilds)
+    and inserts into the live catalog so it appears immediately."""
+    body = body or {}
+    title = (body.get("title") or "").strip()
+    source = (body.get("source") or "manual").strip().lower()
+    platform = (body.get("platform") or "").strip() or source
+    detail = (body.get("detail") or "").strip()
+    if not title:
+        raise HTTPException(400, "a title is required")
+    nk = titlenorm.norm(title)
+    if not nk:
+        raise HTTPException(400, "couldn't make a key from that title")
+    mc = _manual_con()
+    try:
+        mc.execute("INSERT OR REPLACE INTO manual_games(norm_key,title,source,"
+                   "platform,detail,added) VALUES(?,?,?,?,?,?)",
+                   (nk, title, source, platform, detail, time.time()))
+        mc.commit()
+    finally:
+        mc.close()
+    new_game = _insert_source_row(nk, title, source, platform, detail)
+    return {"ok": True, "norm_key": nk, "new_game": new_game}
+
+
+def _decode_data_url(d, max_px=1536):
+    """data:<mime>;base64,<data> -> (mime, bytes), downscaled if large. (None,None) on failure."""
+    m = re.match(r"data:([^;]+);base64,(.+)$", d or "", re.S)
+    if not m:
+        return None, None
+    import base64
+    try:
+        raw = base64.b64decode(m.group(2))
+    except Exception:
+        return None, None
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(raw))
+        if max(im.size) > max_px:
+            im.thumbnail((max_px, max_px))
+            if im.mode in ("RGBA", "P", "LA"):
+                im = im.convert("RGB")
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=85)
+            return "image/jpeg", buf.getvalue()
+    except Exception:
+        pass
+    return m.group(1), raw
+
+
+@app.post("/api/games/identify-image")
+def identify_image(body: dict = Body(...)):
+    """Recognize every game across uploaded image(s) via the AI vision model.
+    `images` = list of data-URL strings. Returns candidate games to add."""
+    if not ai.area_available("identify"):
+        raise HTTPException(503, "AI image recognition isn't set up — set an image-"
+                            "analysis default (a vision model) in Settings › AI.")
+    images = []
+    for d in ((body or {}).get("images") or [])[:8]:
+        mime, data = _decode_data_url(d)
+        if data:
+            images.append((mime, data))
+    if not images:
+        raise HTTPException(400, "no images provided")
+    try:
+        games = ai.identify_games(images)
+    except Exception as e:
+        raise HTTPException(502, "image recognition failed: %s" % e)
+    return {"games": games, "count": len(games)}
+
+
+IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+
+
+def _image_file_scaled(path, max_px=1536):
+    """Load an image file, downscaled for vision. (mime, bytes) or None."""
+    try:
+        from PIL import Image
+        im = Image.open(path)
+        if max(im.size) > max_px:
+            im.thumbnail((max_px, max_px))
+        if im.mode in ("RGBA", "P", "LA"):
+            im = im.convert("RGB")
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=85)
+        return "image/jpeg", buf.getvalue()
+    except Exception:
+        return None
+
+
+@app.post("/api/games/identify-folder")
+def identify_folder(body: dict = Body(...)):
+    """Recognize games across every image in a server-side folder (for when the
+    user has a lot). Walks the folder, sends images to the vision model in small
+    batches, aggregates + de-dups the recognized games."""
+    if not ai.area_available("identify"):
+        raise HTTPException(503, "AI image recognition isn't set up — set an image-"
+                            "analysis default (a vision model) in Settings › AI.")
+    body = body or {}
+    path = (body.get("path") or "").strip()
+    if not path or not os.path.isdir(path):
+        raise HTTPException(400, "that folder isn't a directory on the server")
+    limit = max(1, min(int(body.get("limit") or 60), 300))
+    batch = max(1, min(int(body.get("batch") or 6), 12))
+    files = []
+    for root, _dirs, fns in os.walk(path):
+        for fn in sorted(fns):
+            if fn.lower().endswith(IMG_EXTS):
+                files.append(os.path.join(root, fn))
+    total = len(files)
+    files = files[:limit]
+    seen, errs = {}, 0
+    for i in range(0, len(files), batch):
+        imgs = [im for im in (_image_file_scaled(fp) for fp in files[i:i + batch]) if im]
+        if not imgs:
+            continue
+        try:
+            for g in ai.identify_games(imgs):
+                k = (g.get("title") or "").strip().lower()
+                if k and k not in seen:
+                    seen[k] = g
+        except Exception:
+            errs += 1
+    games = sorted(seen.values(), key=lambda g: (g.get("title") or "").lower())
+    return {"games": games, "count": len(games), "scanned": len(files),
+            "total_found": total, "batch_errors": errs}
+
+
+# --------------------------------------------------------------------------- #
+#  Connections › Devices: machines hosting library managers (RetroDECK/ES-DE,
+#  RetroBat, Playnite, LaunchBox…), reached over SSH to pull ROMs + media.
+# --------------------------------------------------------------------------- #
+@app.get("/api/devices")
+def list_devices():
+    return {"devices": devices.devices_list(), "lm_kinds": devices.LM_KINDS}
+
+
+@app.post("/api/devices")
+def set_device(body: dict = Body(...)):
+    body = body or {}
+    if not (body.get("name") or "").strip():
+        raise HTTPException(400, "a device name is required")
+    devices.device_set(body)
+    return {"devices": devices.devices_list()}
+
+
+@app.delete("/api/devices/{dev_id}")
+def remove_device(dev_id: int):
+    devices.device_rm(dev_id)
+    return {"devices": devices.devices_list()}
+
+
+@app.post("/api/devices/{dev_id}/test")
+def test_device(dev_id: int):
+    d = devices._device(dev_id)
+    if not d:
+        raise HTTPException(404, "no such device")
+    return devices.test_connection(d)
+
+
+@app.post("/api/devices/{dev_id}/sync")
+def sync_device_ep(dev_id: int):
+    if not devices._device(dev_id):
+        raise HTTPException(404, "no such device")
+    try:
+        return devices.sync_device(dev_id)
+    except Exception as e:
+        raise HTTPException(502, "device sync failed: %s" % e)
+
+
+@app.post("/api/devices/managers")
+def set_manager(body: dict = Body(...)):
+    body = body or {}
+    if not body.get("device_id") or not body.get("kind"):
+        raise HTTPException(400, "device_id and kind are required")
+    devices.manager_set(body)
+    return {"devices": devices.devices_list()}
+
+
+@app.delete("/api/devices/managers/{mid}")
+def remove_manager(mid: int):
+    devices.manager_rm(mid)
+    return {"devices": devices.devices_list()}
+
+
+# --------------------------------------------------------------------------- #
+#  File-operations engine: profiles + runbooks over any device path.
+#  Flow: detect → plan (preview) → runbook (persist) → execute (background,
+#  pausable/resumable) → undo/troubleshoot. AI can infer a profile or turn a
+#  natural-language request into a plan.
+# --------------------------------------------------------------------------- #
+def _dev_id(body):
+    v = (body or {}).get("device_id")
+    return int(v) if v not in (None, "", "local") else 0
+
+
+def _fileops_ctx(device_id, root, scope, system):
+    """Detect current layout + build the context strings the AI areas consume."""
+    det = fileops.detect(device_id, root, scope, system)
+    variables_text = "; ".join("{%s} = %s (e.g. %s)" % (v[0], v[2], v[3])
+                               for v in fileops.VARIABLES)
+    systems_text = ", ".join(det["systems"]) or "(none detected)"
+    sample_text = "\n".join(det["sample"][:150])
+    return det, variables_text, systems_text, sample_text
+
+
+@app.get("/api/fileops/variables")
+def fileops_variables():
+    return {"variables": [{"token": v[0], "label": v[1], "description": v[2],
+                           "example": v[3]} for v in fileops.VARIABLES]}
+
+
+@app.get("/api/fileops/profiles")
+def fileops_profiles():
+    return {"profiles": fileops.profiles_list()}
+
+
+@app.post("/api/fileops/profiles")
+def fileops_profile_save(body: dict = Body(...)):
+    try:
+        pid = fileops.profile_set(body or {})
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"id": pid, "profiles": fileops.profiles_list()}
+
+
+@app.delete("/api/fileops/profiles/{pid:path}")
+def fileops_profile_delete(pid: str):
+    fileops.profile_rm(pid)
+    return {"profiles": fileops.profiles_list()}
+
+
+@app.post("/api/fileops/detect")
+def fileops_detect_ep(body: dict = Body(...)):
+    root = (body or {}).get("root")
+    if not root:
+        raise HTTPException(400, "a root path is required")
+    try:
+        return fileops.detect(_dev_id(body), root, body.get("scope", "multi_system"),
+                              body.get("system"))
+    except Exception as e:
+        raise HTTPException(502, "scan failed: %s" % e)
+
+
+@app.post("/api/fileops/plan")
+def fileops_plan_ep(body: dict = Body(...)):
+    root, profile = (body or {}).get("root"), (body or {}).get("profile")
+    if not root or not profile:
+        raise HTTPException(400, "root and profile are required")
+    try:
+        pl = fileops.plan(_dev_id(body), root, profile,
+                          body.get("scope", "multi_system"), body.get("system"))
+    except Exception as e:
+        raise HTTPException(502, "planning failed: %s" % e)
+    return {"summary": pl["summary"], "warnings": pl["warnings"],
+            "sample": pl["sample"]}
+
+
+@app.post("/api/fileops/infer")
+def fileops_infer_ep(body: dict = Body(...)):
+    root = (body or {}).get("root")
+    if not root:
+        raise HTTPException(400, "a root path is required")
+    did = _dev_id(body)
+    det, vars_t, sys_t, sample_t = _fileops_ctx(
+        did, root, body.get("scope", "multi_system"), body.get("system"))
+    try:
+        prof = ai.infer_file_profile(sample_t, sys_t, vars_t, det["current"])
+    except Exception as e:
+        raise HTTPException(502, "AI inference failed: %s" % e)
+    return {"profile": prof, "detected": det}
+
+
+@app.post("/api/fileops/command")
+def fileops_command_ep(body: dict = Body(...)):
+    root, text = (body or {}).get("root"), (body or {}).get("text")
+    if not root or not text:
+        raise HTTPException(400, "root and text are required")
+    did = _dev_id(body)
+    scope = body.get("scope", "multi_system")
+    det, vars_t, sys_t, sample_t = _fileops_ctx(did, root, scope, body.get("system"))
+    profiles_text = "\n".join(
+        "- %s (id=%s): %s -> %s" % (p["name"], p["id"], p["description"], p["target"])
+        for p in fileops.profiles_list())
+    try:
+        intent = ai.file_command(text, profiles_text, sys_t, vars_t, det["current"])
+    except Exception as e:
+        raise HTTPException(502, "AI command failed: %s" % e)
+    scope = intent.get("scope") or scope
+    system = intent.get("system") or body.get("system")
+    if intent.get("profile_id"):
+        profile = fileops.profile_get(intent["profile_id"])
+        if not profile:
+            raise HTTPException(502, "AI referenced an unknown profile")
+    else:
+        profile = {"name": "AI plan", "description": intent.get("explanation", ""),
+                   "target": intent.get("target", ""),
+                   "m3u": bool(intent.get("m3u")), "rename": bool(intent.get("rename")),
+                   "prune_empty": intent.get("prune_empty", True) is not False,
+                   "archive_policy": "keep"}
+    try:
+        pl = fileops.plan(did, root, profile, scope, system)
+    except Exception as e:
+        raise HTTPException(502, "planning the AI request failed: %s" % e)
+    return {"explanation": intent.get("explanation", ""), "profile": profile,
+            "scope": scope, "system": system, "summary": pl["summary"],
+            "warnings": pl["warnings"], "sample": pl["sample"]}
+
+
+@app.post("/api/fileops/runbook")
+def fileops_make_runbook(body: dict = Body(...)):
+    root, profile = (body or {}).get("root"), (body or {}).get("profile")
+    if not root or not profile:
+        raise HTTPException(400, "root and profile are required")
+    did = _dev_id(body)
+    scope, system = body.get("scope", "multi_system"), body.get("system")
+    try:
+        pl = fileops.plan(did, root, profile, scope, system)
+    except Exception as e:
+        raise HTTPException(502, "planning failed: %s" % e)
+    if not pl["ops"]:
+        raise HTTPException(400, "nothing to do — files already match this layout")
+    rid = fileops.create_runbook(did, root, profile, pl["ops"], scope, system,
+                                 body.get("note", ""))
+    return {"run_id": rid, "runbook": fileops.runbook(rid), "warnings": pl["warnings"]}
+
+
+@app.get("/api/fileops/runbook/{run_id}")
+def fileops_get_runbook(run_id: int):
+    try:
+        rb = fileops.runbook(run_id)
+    except RuntimeError:
+        raise HTTPException(404, "no such runbook")
+    rec = _JOBS.get("run:%d" % run_id)
+    rb["running"] = bool(rec and rec["thread"].is_alive())
+    rb["job_error"] = rec["error"] if rec else None
+    return rb
+
+
+@app.post("/api/fileops/runbook/{run_id}/execute")
+def fileops_execute_runbook(run_id: int):
+    try:
+        fileops.runbook(run_id)
+    except RuntimeError:
+        raise HTTPException(404, "no such runbook")
+    _start_runbook_job(run_id)
+    return {"started": True, "run_id": run_id}
+
+
+@app.post("/api/fileops/runbook/{run_id}/undo")
+def fileops_undo_runbook(run_id: int):
+    try:
+        fileops.runbook(run_id)
+    except RuntimeError:
+        raise HTTPException(404, "no such runbook")
+    _start_job("undo:%d" % run_id, "fileops-undo", "Undo runbook #%d" % run_id,
+               lambda stop: fileops.undo(run_id), run_id=run_id, cancelable=False)
+    return {"started": True, "run_id": run_id}
+
+
+@app.get("/api/fileops/runbook/{run_id}/troubleshoot")
+def fileops_troubleshoot(run_id: int):
+    try:
+        return fileops.troubleshoot(run_id)
+    except RuntimeError:
+        raise HTTPException(404, "no such runbook")
+
+
+@app.get("/api/fileops/history")
+def fileops_history():
+    return {"runs": fileops.history()}
+
+
+# --------------------------------------------------------------------------- #
+#  Unified job monitor: long-running work (library sync + file-op runbooks),
+#  with pause / restart / delete. Live worker threads live in _JOBS; runbook
+#  status is authoritative from the fileops DB.
+# --------------------------------------------------------------------------- #
+_JOBS = {}                         # jid -> {kind,label,cancel,thread,error,run_id,started}
+_JOBS_LOCK = threading.Lock()
+
+
+def _start_job(jid, kind, label, fn, run_id=None, cancelable=False):
+    """Run fn(should_stop) on a daemon thread, tracked as job `jid`."""
+    with _JOBS_LOCK:
+        cur = _JOBS.get(jid)
+        if cur and cur["thread"] and cur["thread"].is_alive():
+            raise HTTPException(409, "that job is already running")
+        cancel = threading.Event()
+        rec = {"kind": kind, "label": label, "cancel": cancel, "thread": None,
+               "error": None, "run_id": run_id, "cancelable": cancelable,
+               "started": time.time()}
+
+        def worker():
+            try:
+                fn(cancel.is_set)
+            except Exception as e:      # noqa: BLE001 — surface to the monitor
+                rec["error"] = str(e)[:300]
+        t = threading.Thread(target=worker, daemon=True)
+        rec["thread"] = t
+        _JOBS[jid] = rec
+        t.start()
+    return jid
+
+
+def _start_runbook_job(run_id):
+    return _start_job("run:%d" % run_id, "fileops-run",
+                      "Runbook #%d" % run_id,
+                      lambda stop: fileops.execute_runbook(run_id, should_stop=stop),
+                      run_id=run_id, cancelable=True)
+
+
+def _jobs_list():
+    """Normalize the live sync job + recent runbooks into one job feed."""
+    out = []
+    sj = _SYNC.get("job")
+    if sj:
+        done = sum(1 for s in sj.get("services", {}).values() if s["state"] == "ok")
+        tot = len(sj.get("services", {})) or 1
+        out.append({
+            "id": "sync", "kind": "sync", "label": "Library sync",
+            "status": ("running" if sj.get("running") else
+                       "error" if sj.get("error") else "done"),
+            "detail": sj.get("step", ""), "error": sj.get("error"),
+            "progress": {"done": done, "total": tot, "failed": 0},
+            "when": None, "cancelable": False, "restartable": False,
+            "deletable": not sj.get("running")})
+    for r in fileops.history(limit=40):
+        jid = "run:%d" % r["id"]
+        rec = _JOBS.get(jid)
+        live = bool(rec and rec["thread"] and rec["thread"].is_alive())
+        status = "running" if live else r["status"]
+        out.append({
+            "id": jid, "kind": "fileops", "run_id": r["id"],
+            "label": "%s — %s" % (r["profile"], posixbase(r["root"])),
+            "status": status, "detail": r["note"] or "",
+            "error": (rec or {}).get("error"),
+            "progress": {"done": r["done"], "total": r["n_ops"],
+                         "failed": r["failed"]},
+            "when": r["finished"] or r["started"] or r["created"],
+            "cancelable": live, "restartable": r["status"] in
+            ("paused", "partial", "planned") or r["pending"] > 0,
+            "deletable": not live})
+    return out
+
+
+def posixbase(p):
+    return (p or "").rstrip("/").rsplit("/", 1)[-1] or (p or "")
+
+
+@app.get("/api/jobs")
+def jobs_list():
+    return {"jobs": _jobs_list()}
+
+
+@app.post("/api/jobs/{jid:path}/pause")
+def jobs_pause(jid: str):
+    rec = _JOBS.get(jid)
+    if not rec or not rec.get("cancelable"):
+        raise HTTPException(400, "this job can't be paused")
+    rec["cancel"].set()
+    return {"paused": True, "id": jid}
+
+
+@app.post("/api/jobs/{jid:path}/restart")
+def jobs_restart(jid: str):
+    if jid.startswith("run:"):
+        _start_runbook_job(int(jid.split(":", 1)[1]))
+        return {"restarted": True, "id": jid}
+    raise HTTPException(400, "start a library sync from the Library page")
+
+
+@app.delete("/api/jobs/{jid:path}")
+def jobs_delete(jid: str):
+    if jid == "sync":
+        _SYNC["job"] = None
+        return {"deleted": True}
+    if jid.startswith("run:"):
+        rid = int(jid.split(":", 1)[1])
+        rec = _JOBS.get(jid)
+        if rec and rec["thread"] and rec["thread"].is_alive():
+            rec["cancel"].set()
+        fileops.run_delete(rid)
+        _JOBS.pop(jid, None)
+        return {"deleted": True}
+    raise HTTPException(400, "unknown job")
+
+
 @app.get("/api/games/{norm_key}")
 def game_detail(norm_key: str):
     con = lib()
@@ -246,6 +1262,15 @@ def game_detail(norm_key: str):
         sources = [dict(r) for r in con.execute(
             "SELECT source, platform, source_id, title_raw, detail "
             "FROM sources WHERE game_id=?", (gid,))]
+        osmap = _os_map()
+        for s in sources:
+            oss = osmap.get((s["source"], str(s["source_id"])))
+            if oss:
+                s["os"] = [o for o in ("windows", "mac", "linux") if oss.get(o)]
+            elif s["source"] == "epic":
+                s["os"] = ["windows"]  # Epic Games Store is Windows-only (no Linux client)
+            else:
+                s["os"] = None
         attrs = {}
         for r in con.execute("SELECT kind, value FROM game_attributes "
                              "WHERE game_id=?", (gid,)):
@@ -261,11 +1286,571 @@ def game_detail(norm_key: str):
             "title": g["canonical_title"],
             "sources": sources,
             "attributes": attrs,
+            "tags": _game_tags(con, gid, norm_key),
+            "scores": _score_breakdown(con, norm_key),
             "metadata_links": links,
             "media_kinds": media_kinds,
         }
     finally:
         con.close()
+
+
+# Friendly names + type for each rating source (drives the per-source display).
+SCORE_SOURCES = {
+    "igdb": "IGDB", "steam": "Steam players", "metacritic": "Metacritic",
+    "screenscraper": "ScreenScraper", "gog": "GOG players",
+}
+
+
+def _score_breakdown(con, norm_key):
+    """Unified Ludodex score + pooled critic/user + every source's original rating,
+    from the multi-source ratings store (scores_fetch.py)."""
+    gs = con.execute("SELECT universal, critic, user FROM sco.game_scores "
+                     "WHERE norm_key=?", (norm_key,)).fetchone()
+    srcs = [{"source": r["source"], "name": SCORE_SOURCES.get(r["source"], r["source"]),
+             "kind": r["kind"], "score": round(r["score"]) if r["score"] is not None else None,
+             "votes": r["votes"], "raw": r["raw"]}
+            for r in con.execute(
+                "SELECT source, kind, score, votes, raw FROM sco.ratings "
+                "WHERE norm_key=? AND score IS NOT NULL ORDER BY kind DESC, source",
+                (norm_key,))]
+    return {"ludodex": gs["universal"] if gs else None,
+            "critic": gs["critic"] if gs else None,
+            "players": gs["user"] if gs else None,
+            "critic_weight": _ludodex_weight(),
+            "sources": srcs}
+
+
+def _game_tags(con, gid, norm_key):
+    """Merged tags for a game: imported-origin tags baked into the catalog
+    (e.g. Playnite) + live user tags (origin 'ludodex'). -> [{tag, origins}]."""
+    try:
+        rows = con.execute(
+            "SELECT tag, group_concat(DISTINCT origin) AS o FROM ("
+            "  SELECT tag, origin FROM game_tags WHERE game_id=? AND origin<>'ludodex'"
+            "  UNION SELECT tag, 'ludodex' FROM t.user_tags WHERE norm_key=?"
+            ") GROUP BY tag ORDER BY tag COLLATE NOCASE", (gid, norm_key)).fetchall()
+    except sqlite3.OperationalError:            # catalog predates game_tags
+        rows = con.execute(
+            "SELECT tag, 'ludodex' AS o FROM t.user_tags WHERE norm_key=? "
+            "ORDER BY tag COLLATE NOCASE", (norm_key,)).fetchall()
+    return [{"tag": r["tag"], "origins": (r["o"] or "").split(",")} for r in rows]
+
+
+@app.get("/api/games/{norm_key}/tags")
+def get_game_tags(norm_key: str):
+    """All tags for a game (imported + user), each with its origin(s)."""
+    con = lib()
+    try:
+        row = con.execute("SELECT id FROM games WHERE norm_key=?", (norm_key,)).fetchone()
+        return {"norm_key": norm_key,
+                "tags": _game_tags(con, row["id"] if row else -1, norm_key)}
+    finally:
+        con.close()
+
+
+@app.post("/api/games/{norm_key}/tags")
+def add_game_tag(norm_key: str, body: dict = Body(...)):
+    """Add a user (ludodex-origin) tag. Durable — survives catalog rebuilds."""
+    tag = (body or {}).get("tag", "").strip()
+    if not tag:
+        raise HTTPException(400, "tag is required")
+    if len(tag) > 60:
+        raise HTTPException(400, "tag too long (max 60 chars)")
+    tc = _tags_con()
+    tc.execute("INSERT OR IGNORE INTO user_tags(norm_key,tag,created) VALUES(?,?,?)",
+               (norm_key, tag, time.time()))
+    tc.commit()
+    tc.close()
+    return get_game_tags(norm_key)
+
+
+@app.delete("/api/games/{norm_key}/tags/{tag}")
+def remove_game_tag(norm_key: str, tag: str):
+    """Remove a user tag (imported-origin tags can't be removed here)."""
+    tc = _tags_con()
+    tc.execute("DELETE FROM user_tags WHERE norm_key=? AND tag=?", (norm_key, tag))
+    tc.commit()
+    tc.close()
+    return get_game_tags(norm_key)
+
+
+@app.get("/api/games/{norm_key}/achievements")
+def game_achievements(norm_key: str):
+    """RetroAchievements for a game: full set + which the user earned.
+    Populated by ra_fetch.py; empty/unmatched if never pulled."""
+    if not os.path.exists(RA_DB):
+        return {"matched": False, "num_ach": 0, "num_earned": 0, "achievements": []}
+    con = ro(RA_DB)
+    try:
+        prog = con.execute("SELECT ra_id, num_ach, num_earned, pulled_at "
+                           "FROM ra_progress WHERE norm_key=?", (norm_key,)).fetchone()
+        rows = con.execute(
+            "SELECT ra_ach_id, title, description, points, badge, earned, earned_date "
+            "FROM ra_ach WHERE norm_key=? ORDER BY earned DESC, points, title",
+            (norm_key,)).fetchall()
+    finally:
+        con.close()
+    achs = [{
+        "id": r["ra_ach_id"], "title": r["title"], "description": r["description"],
+        "points": r["points"], "earned": bool(r["earned"]),
+        "earned_date": r["earned_date"],
+        "badge": ("https://media.retroachievements.org/Badge/%s%s.png"
+                  % (r["badge"], "" if r["earned"] else "_lock")) if r["badge"] else None,
+    } for r in rows]
+    return {"matched": bool(prog), "ra_id": prog["ra_id"] if prog else None,
+            "num_ach": prog["num_ach"] if prog else 0,
+            "num_earned": prog["num_earned"] if prog else 0,
+            "pulled_at": prog["pulled_at"] if prog else None,
+            "achievements": achs}
+
+
+# ------------------------------------------------------------------- media library
+
+# Human-readable "why this asset exists" copy for every canonical kind (media.KINDS).
+KIND_DESC = {
+    "cover": "Front box art / portrait poster — the game's primary face, used on cards and grids.",
+    "box_back": "Back of the box — screenshots, blurb and credits printed on the reverse.",
+    "box_3d": "3D box render — the case shown at an angle, the way storefronts display it.",
+    "box_spine": "Box spine — the narrow edge that shows when the case sits on a shelf.",
+    "physical_media": "The physical medium itself — cartridge, disc or tape with its label.",
+    "background": "Full-bleed backdrop art shown behind the page (Steam-style library background).",
+    "hero": "Wide key-art banner, usually with the logo baked in (Steam library hero).",
+    "header": "Small wide capsule/banner used in store rows and lists (~460×215).",
+    "logo": "Transparent title logo — the game's name as stylised art, no background.",
+    "icon": "Small square app icon.",
+    "marquee": "Illuminated arcade marquee art that sits atop the cabinet.",
+    "bezel": "Screen bezel / overlay that frames the play area on arcade & emulator screens.",
+    "arcade_cabinet": "Photo or render of the full arcade cabinet.",
+    "arcade_controls": "The control-panel (CPO) art / button-and-stick layout.",
+    "pcb": "Photo of the game's circuit board.",
+    "screenshot": "In-game screenshot.",
+    "title_screen": "The game's title / attract screen.",
+    "mix": "Composited “mix” image — logo, character and background combined (EmulationStation miximage).",
+    "flyer": "Promotional flyer / advertisement poster.",
+    "map": "Game world or level map.",
+    "video": "Preview or trailer video.",
+    "manual": "Scanned instruction manual (PDF).",
+    "other": "Uncategorised asset that didn't match a known classification (never dropped; logged).",
+}
+SCALAR_SET = set(media.SCALAR_KINDS)
+MULTI_CAP = 10  # non-scalar kinds (screenshots, video, …) can pin up to this many
+
+
+def _pins():
+    """Durable pin store (survives media-index rescans). One row per pinned asset,
+    keyed by the stable (provider, kind, ref) identity + norm_key, with a rank."""
+    con = sqlite3.connect(PINS_DB)
+    con.execute("""CREATE TABLE IF NOT EXISTS pins(
+        norm_key TEXT, kind TEXT, provider TEXT, ref TEXT, rank INTEGER,
+        PRIMARY KEY(norm_key, kind, provider, ref))""")
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _os_map():
+    """(source, source_id) -> {windows, mac, linux} bools, from the durable OS store.
+    Populated by os_fetch.py; empty until then, so OS shows as “—”."""
+    if not os.path.exists(OS_DB):
+        return {}
+    con = ro(OS_DB)
+    try:
+        return {(r["source"], r["source_id"]):
+                {"windows": r["windows"], "mac": r["mac"], "linux": r["linux"]}
+                for r in con.execute("SELECT source, source_id, windows, mac, linux "
+                                     "FROM os_support")}
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        con.close()
+
+
+def _pin_map(norm_key):
+    """(kind, provider, ref) -> rank for a game's pinned assets."""
+    if not os.path.exists(PINS_DB):
+        return {}
+    con = _pins()
+    try:
+        return {(r["kind"], r["provider"], r["ref"]): r["rank"]
+                for r in con.execute("SELECT kind, provider, ref, rank FROM pins "
+                                     "WHERE norm_key=?", (norm_key,))}
+    finally:
+        con.close()
+
+
+@app.get("/api/media-kinds")
+def media_kinds():
+    """The full media classification vocabulary, in display order, with the copy
+    shown in tooltips and whether each kind holds a single asset or many."""
+    return {"kinds": [{"kind": k, "scalar": k in SCALAR_SET,
+                       "cap": 1 if k in SCALAR_SET else MULTI_CAP,
+                       "description": KIND_DESC.get(k, "")}
+                      for k in media.KINDS]}
+
+
+@app.get("/api/games/{norm_key}/media")
+def game_media(norm_key: str):
+    """Every media asset a game has, grouped by kind, annotated with pin state.
+    `pinned`/`rank` come from the durable pin store; unpinned assets are excluded
+    from exports downstream."""
+    con = lib()
+    try:
+        rows = con.execute(
+            "SELECT id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1 "
+            "FROM m.media WHERE norm_key=? ORDER BY kind", (norm_key,)).fetchall()
+    finally:
+        con.close()
+    pins = _pin_map(norm_key)
+    assets = []
+    for r in rows:
+        # Don't surface assets that can't actually be served on THIS host, or they
+        # render as blank placeholders: a `file` ref whose file lives only on the
+        # producer (Deck) and isn't materialized here. URL refs stay (materialized
+        # on demand; genuinely-dead ones are removed by `media_fetch.py prune`).
+        if r["ref_type"] == "file" and not r["sha1"] and not os.path.exists(r["ref"]):
+            continue
+        rank = pins.get((r["kind"], r["provider"], r["ref"]))
+        is_img = (r["ext"] or "").lower() in ("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        assets.append({
+            "id": r["id"], "kind": r["kind"], "provider": r["provider"],
+            "ref_type": r["ref_type"], "ext": r["ext"],
+            "width": r["width"], "height": r["height"],
+            "is_image": is_img,
+            "pinned": rank is not None, "rank": rank,
+            "url": "/api/media-asset/%d" % r["id"],
+            "thumb": "/api/media-asset/%d?size=thumb" % r["id"] if is_img else None,
+            "user": False,
+        })
+    # durable user uploads (added via the All Media upload buttons) — always "active"
+    uc = _umedia_con()
+    try:
+        urows = uc.execute(
+            "SELECT id, kind, sha1, ext, width, height, origin FROM user_media "
+            "WHERE norm_key=? ORDER BY created DESC", (norm_key,)).fetchall()
+    finally:
+        uc.close()
+    for r in urows:
+        is_img = (r["ext"] or "").lower() in ("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        assets.append({
+            "id": r["id"], "kind": r["kind"], "provider": "user",
+            "ref_type": "user", "ext": r["ext"],
+            "width": r["width"], "height": r["height"],
+            "is_image": is_img, "pinned": True, "rank": None,
+            "url": "/api/user-media-asset/%d" % r["id"],
+            "thumb": "/api/user-media-asset/%d?size=thumb" % r["id"] if is_img else None,
+            "user": True,
+        })
+    return {"norm_key": norm_key, "scalar_kinds": list(media.SCALAR_KINDS),
+            "multi_cap": MULTI_CAP, "assets": assets}
+
+
+@app.post("/api/games/{norm_key}/pins")
+def set_pins(norm_key: str, body: dict = Body(...)):
+    """Set the pinned assets (and their order) for one kind of a game. Send the
+    full ordered list of asset ids you want pinned — this replaces the prior set.
+    Scalar kinds keep at most 1; other kinds keep up to MULTI_CAP, in order."""
+    kind = body.get("kind")
+    ids = body.get("ids") or []
+    if not kind:
+        raise HTTPException(400, "kind required")
+    cap = 1 if kind in SCALAR_SET else MULTI_CAP
+    # Resolve each id to its stable identity, keeping only assets of this game+kind.
+    con = lib()
+    try:
+        rows = {r["id"]: r for r in con.execute(
+            "SELECT id, provider, ref FROM m.media WHERE norm_key=? AND kind=?",
+            (norm_key, kind))}
+    finally:
+        con.close()
+    ordered = [i for i in ids if i in rows][:cap]
+    pc = _pins()
+    try:
+        pc.execute("DELETE FROM pins WHERE norm_key=? AND kind=?", (norm_key, kind))
+        for rank, aid in enumerate(ordered, start=1):
+            r = rows[aid]
+            pc.execute("INSERT OR REPLACE INTO pins VALUES(?,?,?,?,?)",
+                       (norm_key, kind, r["provider"], r["ref"], rank))
+        pc.commit()
+    finally:
+        pc.close()
+    return game_media(norm_key)
+
+
+# --------------------------------------------------------------- user media upload
+IMAGE_EXTS = {"jpg", "jpeg", "png", "webp", "gif", "bmp"}
+ALLOWED_EXTS = IMAGE_EXTS | {"mp4", "webm", "pdf"}
+MAX_UPLOAD = 80 * 1024 * 1024      # 80 MB
+_MIME_EXT = {
+    "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+    "image/webp": "webp", "image/gif": "gif", "image/bmp": "bmp",
+    "video/mp4": "mp4", "video/webm": "webm", "application/pdf": "pdf",
+}
+
+
+def _norm_ext(ext):
+    ext = (ext or "").lower().lstrip(".").split("?")[0].strip()
+    return "jpg" if ext == "jpeg" else ext
+
+
+def _ext_from(name, content_type=None):
+    """Best-effort extension from a filename and/or content-type header."""
+    if name and "." in name:
+        e = _norm_ext(name.rsplit(".", 1)[1])
+        if e in ALLOWED_EXTS:
+            return e
+    ct = (content_type or "").split(";")[0].strip().lower()
+    return _MIME_EXT.get(ct)
+
+
+def _umedia_path(norm_key, kind):
+    """Local (path, ext) of the active user upload for a kind (most recent), or None."""
+    uc = _umedia_con()
+    try:
+        r = uc.execute("SELECT sha1, ext FROM user_media WHERE norm_key=? AND kind=? "
+                       "ORDER BY created DESC LIMIT 1", (norm_key, kind)).fetchone()
+    finally:
+        uc.close()
+    if not r:
+        return None
+    p = os.path.join(REPO, "%s.%s" % (r["sha1"], r["ext"]))
+    return (p, r["ext"]) if os.path.exists(p) else None
+
+
+def _store_upload(norm_key, kind, data, ext, origin):
+    """Write bytes into the content-addressed REPO and index them as a user upload."""
+    if kind not in media.KINDS:
+        raise HTTPException(400, "unknown media kind %r" % kind)
+    ext = _norm_ext(ext)
+    if ext not in ALLOWED_EXTS:
+        raise HTTPException(400, "unsupported file type %r (allowed: %s)"
+                            % (ext, ", ".join(sorted(ALLOWED_EXTS))))
+    if not data:
+        raise HTTPException(400, "empty file")
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, "file too large (max %d MB)" % (MAX_UPLOAD // 1048576))
+    import hashlib
+    sha = hashlib.sha1(data).hexdigest()
+    os.makedirs(REPO, exist_ok=True)
+    path = os.path.join(REPO, "%s.%s" % (sha, ext))
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(data)
+    w = h = None
+    if ext in IMAGE_EXTS:
+        try:
+            from PIL import Image
+            w, h = Image.open(io.BytesIO(data)).size
+        except Exception:
+            pass
+    uc = _umedia_con()
+    try:
+        uc.execute("INSERT INTO user_media(norm_key,kind,sha1,ext,width,height,"
+                   "origin,created) VALUES(?,?,?,?,?,?,?,?)",
+                   (norm_key, kind, sha, ext, w, h, origin, time.time()))
+        uc.commit()
+    finally:
+        uc.close()
+
+
+@app.post("/api/games/{norm_key}/media/{kind}/upload")
+async def upload_media(norm_key: str, kind: str, request: Request,
+                       filename: str = Query("")):
+    """Upload a media file from the device. The file is sent as the raw request
+    body (no multipart); `filename` (or the Content-Type) sets the extension."""
+    data = await request.body()
+    ext = _ext_from(filename, request.headers.get("content-type"))
+    if not ext:
+        raise HTTPException(400, "couldn't determine file type — include a filename")
+    _store_upload(norm_key, kind, data, ext, "upload:" + (filename or ""))
+    return game_media(norm_key)
+
+
+@app.post("/api/games/{norm_key}/media/{kind}/url")
+def add_media_from_url(norm_key: str, kind: str, body: dict = Body(...)):
+    """Download media from a direct URL and store it as a user upload."""
+    url = (body or {}).get("url", "").strip()
+    if not url or not re.match(r"^https?://", url, re.I):
+        raise HTTPException(400, "a valid http(s) URL is required")
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "ludodex/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            ct = resp.headers.get("content-type")
+            data = resp.read(MAX_UPLOAD + 1)
+    except Exception as e:
+        raise HTTPException(502, "couldn't fetch that URL: %s" % e)
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, "remote file too large (max %d MB)"
+                            % (MAX_UPLOAD // 1048576))
+    ext = _ext_from(url, ct)
+    if not ext:
+        raise HTTPException(400, "couldn't tell the media type from that URL")
+    _store_upload(norm_key, kind, data, ext, url)
+    return game_media(norm_key)
+
+
+@app.delete("/api/games/{norm_key}/media/user/{asset_id}")
+def delete_user_media(norm_key: str, asset_id: int):
+    """Remove a user-uploaded asset (leaves shared repo bytes; they're content-addressed)."""
+    uc = _umedia_con()
+    try:
+        uc.execute("DELETE FROM user_media WHERE id=? AND norm_key=?",
+                   (asset_id, norm_key))
+        uc.commit()
+    finally:
+        uc.close()
+    return game_media(norm_key)
+
+
+@app.get("/api/user-media-asset/{asset_id}")
+def user_media_asset(asset_id: int, size: str = Query(None, pattern="^thumb$")):
+    """Serve a user-uploaded asset by id."""
+    uc = _umedia_con()
+    try:
+        r = uc.execute("SELECT sha1, ext FROM user_media WHERE id=?",
+                       (asset_id,)).fetchone()
+    finally:
+        uc.close()
+    if not r:
+        raise HTTPException(404, "no such asset")
+    p = os.path.join(REPO, "%s.%s" % (r["sha1"], r["ext"]))
+    if not os.path.exists(p):
+        raise HTTPException(404, "asset bytes missing")
+    return _serve(p, r["ext"], size)
+
+
+# ------------------------------------------------------------------- server ops
+
+def _db_path(db_id):
+    d = DB_BY_ID.get(db_id)
+    if not d:
+        raise HTTPException(404, "unknown database %r" % db_id)
+    return os.path.join(DIR, d[2])
+
+
+def _db_info(db_id, name, fname, role):
+    path = os.path.join(DIR, fname)
+    exists = os.path.exists(path)
+    return {"id": db_id, "name": name, "role": role, "path": fname,
+            "exists": exists,
+            "size": os.path.getsize(path) if exists else 0}
+
+
+@app.get("/api/ops/status")
+def ops_status():
+    """Snapshot for the Server Operations panel: the running service + each database."""
+    return {
+        "services": [{
+            "id": "server", "name": "Ludodex server (web + API)",
+            "state": "running", "pid": os.getpid(),
+            "uptime_seconds": int(time.time() - _STARTED),
+            "host": "0.0.0.0", "port": 8001,
+        }],
+        "databases": [_db_info(*d) for d in DATABASES],
+    }
+
+
+@app.post("/api/ops/restart")
+def ops_restart():
+    """Restart the server in place (re-exec the exact launch command). The current
+    HTTP response is sent first; the process then replaces itself, so the client
+    should poll /api/health until it answers again."""
+    def _reexec():
+        time.sleep(0.8)
+        try:
+            with open("/proc/self/cmdline", "rb") as f:
+                argv = [a for a in f.read().split(b"\0") if a]
+            os.execv(argv[0], argv)          # same PID, inherits stdout/stderr fds
+        except Exception:                    # pragma: no cover — last-ditch
+            os._exit(3)                      # exit non-zero so a supervisor can restart
+    threading.Thread(target=_reexec, daemon=True).start()
+    return {"restarting": True, "pid": os.getpid()}
+
+
+def _check_one(db_id, name, fname, role):
+    info = _db_info(db_id, name, fname, role)
+    if not info["exists"] or info["size"] == 0:
+        info["status"] = "empty"
+        info["detail"] = "no data" if info["exists"] else "missing"
+        return info
+    try:
+        con = sqlite3.connect(_db_path(db_id), timeout=5)
+        con.execute("PRAGMA busy_timeout=4000")
+        qc = con.execute("PRAGMA quick_check").fetchone()[0]
+        free = con.execute("PRAGMA freelist_count").fetchone()[0]
+        page = con.execute("PRAGMA page_size").fetchone()[0]
+        con.close()
+        info["status"] = "ok" if qc == "ok" else "error"
+        info["detail"] = "healthy" if qc == "ok" else qc
+        info["reclaimable"] = free * page
+    except sqlite3.Error as e:
+        info["status"] = "error"
+        info["detail"] = str(e)
+    return info
+
+
+@app.post("/api/ops/db-check")
+def ops_db_check(body: dict = Body(default={})):
+    """Run PRAGMA quick_check on one database (id) or all of them."""
+    which = (body or {}).get("db", "all")
+    dbs = DATABASES if which == "all" else [DB_BY_ID.get(which)]
+    if dbs == [None]:
+        raise HTTPException(404, "unknown database %r" % which)
+    return {"results": [_check_one(*d) for d in dbs]}
+
+
+@app.post("/api/ops/db-fix")
+def ops_db_fix(body: dict = Body(...)):
+    """Maintenance / repair on one database.
+      optimize — PRAGMA optimize + REINDEX + VACUUM (safe; reclaims space).
+      recover  — rebuild from a SQL dump into a fresh file (backs up the original
+                 as <name>.bak first); for a database that fails its health check."""
+    db_id = body.get("db")
+    action = body.get("action")
+    path = _db_path(db_id)
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        raise HTTPException(400, "database is empty/missing")
+    before = os.path.getsize(path)
+
+    if action == "optimize":
+        try:
+            con = sqlite3.connect(path, timeout=10)
+            con.execute("PRAGMA busy_timeout=8000")
+            con.execute("PRAGMA optimize")
+            con.execute("REINDEX")
+            con.execute("VACUUM")
+            con.commit(); con.close()
+        except sqlite3.Error as e:
+            raise HTTPException(409, "optimize failed: %s (is a scan running?)" % e)
+        after = os.path.getsize(path)
+        return {"db": db_id, "action": action, "ok": True,
+                "before": before, "after": after, "reclaimed": before - after}
+
+    if action == "recover":
+        bak = path + ".bak"
+        tmp = path + ".recovered"
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            src = sqlite3.connect(path, timeout=10)
+            dst = sqlite3.connect(tmp)
+            with dst:
+                dst.executescript("\n".join(src.iterdump()))
+            src.close(); dst.close()
+            # keep the original as .bak, swap the rebuilt file in
+            if os.path.exists(bak):
+                os.remove(bak)
+            os.rename(path, bak)
+            os.rename(tmp, path)
+        except sqlite3.Error as e:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise HTTPException(409, "recover failed: %s" % e)
+        return {"db": db_id, "action": action, "ok": True,
+                "before": before, "after": os.path.getsize(path),
+                "backup": os.path.basename(bak)}
+
+    raise HTTPException(400, "unknown action %r (optimize | recover)" % action)
 
 
 # ------------------------------------------------------------------- media resolver
@@ -299,7 +1884,13 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
     1. chosen row with sha1 + repo file present     -> stream it.
     2. chosen URL ref not yet materialized          -> fetch, cache, backfill, stream.
     3. chosen `file` ref (lives only on the producer)-> 404 (push it from the Deck).
+
+    A user upload for this kind always wins (most recent), so uploads take effect
+    immediately without a pipeline re-run.
     """
+    up = _umedia_path(norm_key, kind)
+    if up:
+        return _serve(up[0], up[1], size)
     rcon = ro(INDEX_DB)
     try:
         r = rcon.execute(
@@ -390,6 +1981,17 @@ def ai_config_set(body: dict):
         if provider not in ai.PROVIDERS:
             raise HTTPException(400, "unknown provider %r" % provider)
         config.set_("ai_provider", provider)
+    # global image-analysis (vision) default: {"vision": {"provider","model"}} —
+    # provider/model are set independently so one can change without clearing the other.
+    vis = body.get("vision")
+    if isinstance(vis, dict):
+        if "provider" in vis:
+            vp = vis.get("provider") or ""
+            if vp and vp not in ai.PROVIDERS:
+                raise HTTPException(400, "unknown provider %r" % vp)
+            config.set_("ai_vision_provider", vp)
+        if "model" in vis:
+            config.set_("ai_vision_model", vis.get("model") or "")
     valid_keys = {cfg for (_, cfg, _, _) in ai.PROVIDERS.values()}
     valid_models = {m for (_, _, _, m) in ai.PROVIDERS.values()}
     for k, v in (body.get("keys") or {}).items():
@@ -403,24 +2005,593 @@ def ai_config_set(body: dict):
     for area_id, val in (body.get("areas") or {}).items():
         if area_id not in ai.AREA_IDS:
             raise HTTPException(400, "unknown area %r" % area_id)
-        if isinstance(val, dict):
-            prov, mdl = val.get("provider", ""), val.get("model", None)
-        else:
-            prov, mdl = (val or ""), None
-        if prov and prov not in ai.PROVIDERS:
-            raise HTTPException(400, "unknown provider %r" % prov)
-        config.set_("ai_area_" + area_id, prov or "")
-        if mdl is not None:
-            config.set_("ai_area_" + area_id + "_model", mdl or "")
+        if not isinstance(val, dict):
+            val = {"provider": val or ""}
+        # each of provider/model/prompt is set only when present (so editing the
+        # prompt doesn't clobber the provider, and vice-versa). "" clears/resets.
+        if "provider" in val:
+            prov = val.get("provider") or ""
+            if prov and prov not in ai.PROVIDERS:
+                raise HTTPException(400, "unknown provider %r" % prov)
+            config.set_("ai_area_" + area_id, prov)
+        if "model" in val:
+            config.set_("ai_area_" + area_id + "_model", val.get("model") or "")
+        if "prompt" in val:
+            config.set_("ai_area_" + area_id + "_prompt", val.get("prompt") or "")
     return ai.status()
 
 
+@app.get("/api/ai/usage")
+def ai_usage():
+    """Per provider/model token usage (lifetime + this month) + configured caps."""
+    return ai.usage_summary()
+
+
+@app.get("/api/ai/usage/series")
+def ai_usage_series(provider: str = Query(...), model: str = Query(...)):
+    """Daily token usage for a model over the last 31 days (today + 30 preceding)."""
+    return {"provider": provider, "model": model,
+            "days": ai.usage_series(provider, model)}
+
+
+@app.post("/api/ai/limit")
+def ai_limit(body: dict = Body(...)):
+    """Set (or clear, when 0) a monthly token cap for a provider or a model.
+    Body: {"scope": "provider"|"model", "key": "<id>", "monthly_tokens": N}."""
+    body = body or {}
+    scope = (body.get("scope") or "").strip()
+    key = (body.get("key") or "").strip()
+    if scope not in ("provider", "model") or not key:
+        raise HTTPException(400, "scope must be provider|model and key required")
+    try:
+        ai.set_limit(scope, key, int(body.get("monthly_tokens") or 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "monthly_tokens must be a number")
+    return ai.usage_summary()
+
+
 @app.get("/api/ai/models/{provider}")
-def ai_models(provider: str, refresh: bool = False):
-    """All models the provider's API reports (cached; curated fallback)."""
+def ai_models(provider: str, refresh: bool = False, vision: bool = False):
+    """All models the provider's API reports (cached; curated fallback).
+    vision=true → only image-capable models (for the image-analysis default/areas)."""
     if provider not in ai.PROVIDERS:
         raise HTTPException(400, "unknown provider %r" % provider)
-    return {"provider": provider, "models": ai.list_models(provider, refresh=refresh)}
+    return {"provider": provider,
+            "models": ai.list_models(provider, refresh=refresh, vision_only=vision)}
+
+
+# ----------------------------------------------------------- service credentials
+# Credentials the pipeline reads (config.py resolves env > local config value only;
+# this UI writes the config value). role: source=ownership, provider=enrichment.
+def _limits(prefix, cooldown="", per_min="", per_day=""):
+    """Uniform rate-limit fields for a service (config key <prefix>_limit_<f>).
+    Blank default = unlimited / unset."""
+    return [
+        {"key": prefix + "_limit_cooldown_ms", "label": "Cooldown between requests",
+         "unit": "ms", "default": cooldown},
+        {"key": prefix + "_limit_per_min", "label": "Max requests / minute",
+         "unit": "req", "default": per_min},
+        {"key": prefix + "_limit_per_day", "label": "Max requests / day",
+         "unit": "req", "default": per_day},
+    ]
+
+
+SERVICES = [
+    {"id": "steam", "name": "Steam", "role": "both",
+     "hint": "steamcommunity.com/dev/apikey",
+     "creds": [
+         {"key": "steam_api_key", "label": "Web API key", "secret": True},
+         {"key": "steam_id", "label": "Steam ID (64-bit)", "secret": False}],
+     "limits": _limits("steam", cooldown="200", per_day="100000")},
+    {"id": "gog", "name": "GOG", "role": "source",
+     "hint": "Connect your GOG account: click Get GOG code (opens GOG — sign in if "
+             "asked). It lands on a blank/‘success’ page — the code is in the browser "
+             "ADDRESS BAR, not on the page. Copy that whole address (or just the code "
+             "after code=) and paste it below, then Connect. One-time login. "
+             "The Client ID/Secret above are shared defaults — leave them as-is.",
+     "creds": [
+         {"key": "gog_client_id", "label": "Client ID", "secret": False},
+         {"key": "gog_client_secret", "label": "Client secret", "secret": True}],
+     "connect": {"url": GOG_LOGIN_URL,
+                 "action_label": "Get GOG code",
+                 "field_label": "Paste the GOG address bar URL (or code)",
+                 "note": "After signing in the page looks blank — the code is in the "
+                         "browser’s address bar. Paste that whole URL here; we read it "
+                         "either way. If it won't connect, paste JUST the code value "
+                         "(the part after code= in the address bar).",
+                 "post": "/api/services/gog/code"},
+     "limits": _limits("gog", cooldown="300")},
+    {"id": "itch", "name": "itch.io", "role": "source",
+     "hint": "itch.io/user/settings/api-keys",
+     "creds": [{"key": "itch_api_key", "label": "API key", "secret": True}],
+     "limits": _limits("itch", cooldown="300")},
+    {"id": "epic", "name": "Epic Games", "role": "source",
+     "hint": "Connect your Epic account: click Get Epic code (opens Epic — sign in "
+             "if asked), copy the text it shows, paste it below, and Connect. "
+             "This is a one-time login — Epic keeps you signed in after that.",
+     "creds": [],
+     "connect": {"url": EPIC_LOGIN_URL,
+                 "action_label": "Get Epic code", "field_label": "Paste Epic code",
+                 "note": "We read whatever you paste — the whole JSON, one line, or "
+                         "the redirect URL. If it won't connect, paste JUST the "
+                         "authorizationCode value (the long code between the quotes).",
+                 "post": "/api/services/epic/code"},
+     "limits": _limits("epic")},
+    {"id": "ea", "name": "EA app / Origin", "role": "source",
+     "hint": "Connect your EA account: click Get EA token (opens EA — sign in if "
+             "asked), copy the text it shows, paste it below, and Connect. "
+             "The connection lasts ~4 hours; reconnect the same way to refresh.",
+     "creds": [],
+     "connect": {"url": ("https://accounts.ea.com/connect/auth?client_id=ORIGIN_JS_SDK"
+                         "&response_type=token&redirect_uri=nucleus:rest&prompt=none"),
+                 "action_label": "Get EA token", "field_label": "Paste EA token",
+                 "note": "We read whatever you paste — the whole JSON or one line. If "
+                         "it won't connect, paste JUST the access_token value (the "
+                         "long token between the quotes).",
+                 "post": "/api/services/ea/token"},
+     "limits": _limits("ea")},
+    {"id": "psn", "name": "PlayStation Network", "role": "source",
+     "hint": "Connect your PSN account: sign in at playstation.com, then click Get "
+             "PSN token (opens the ssocookie page) and copy the npsso value it "
+             "shows. Paste it below and Connect. One-time login — it refreshes for "
+             "~2 months. The token is only on that page, not the main site.",
+     "creds": [],
+     "connect": {"url": "https://ca.account.sony.com/api/v1/ssocookie",
+                 "action_label": "Get PSN token",
+                 "field_label": "Paste PSN npsso (or the whole {\"npsso\":…})",
+                 "note": "You must be signed in at playstation.com first, in the "
+                         "same browser. The Get PSN token link then shows "
+                         "{\"npsso\":\"…\"} — we read the whole thing, one line, or "
+                         "the bare token. If it won't connect, paste JUST the npsso "
+                         "value (the ~64 characters between the quotes).",
+                 "post": "/api/services/psn/npsso"},
+     "limits": _limits("psn", cooldown="500")},
+    {"id": "xbox", "name": "Xbox / Microsoft Store", "role": "source",
+     "hint": "Connect your Microsoft account: click Get Xbox code (opens Microsoft "
+             "sign-in) and approve access. The FIRST time you may land on a page "
+             "that says ‘you have reached a page that is not normally shown’ with no "
+             "code — that's the consent step; approve it and it redirects again with "
+             "the code. The code is in the browser ADDRESS BAR (?code=…). Copy that "
+             "whole address (or just the code) and paste it, then Connect. One-time "
+             "login — it refreshes automatically. Pulls games from your Xbox library.",
+     "creds": [],
+     "connect": {"url": ("https://login.live.com/oauth20_authorize.srf"
+                         "?client_id=000000004c12ae6f&response_type=code"
+                         "&approval_prompt=auto"
+                         "&scope=Xboxlive.signin+Xboxlive.offline_access"
+                         "&redirect_uri=https://login.live.com/oauth20_desktop.srf"),
+                 "action_label": "Get Xbox code",
+                 "field_label": "Paste the Microsoft address bar URL (or code)",
+                 "note": "First time: if the page says ‘…not normally shown’ with no "
+                         "code, approve access and it redirects again. The code is in "
+                         "the address bar (?code=…) — paste that whole URL. If it "
+                         "won't connect, paste JUST the code value (between code= and "
+                         "the next & in the address bar).",
+                 "post": "/api/services/xbox/code"},
+     "limits": _limits("xbox", cooldown="500")},
+    {"id": "igdb", "name": "IGDB", "role": "provider",
+     "hint": "dev.twitch.tv — IGDB authenticates via Twitch (≈4 req/sec)",
+     "creds": [
+         {"key": "igdb_client_id", "label": "Twitch Client ID", "secret": False},
+         {"key": "igdb_client_secret", "label": "Twitch Client Secret", "secret": True}],
+     "limits": _limits("igdb", cooldown="250", per_min="240")},
+    {"id": "screenscraper", "name": "ScreenScraper", "role": "provider",
+     "hint": "screenscraper.fr — the app authenticates automatically. Optionally add "
+             "YOUR screenscraper.fr account below to raise the daily request quota.",
+     "creds": [
+         {"key": "screenscraper_ssid", "label": "Your account user (optional)", "secret": False},
+         {"key": "screenscraper_sspassword", "label": "Your account password (optional)", "secret": True}],
+     "limits": _limits("screenscraper", cooldown="1000")},
+    {"id": "steamgriddb", "name": "SteamGridDB", "role": "provider",
+     "hint": "steamgriddb.com/profile/preferences/api",
+     "creds": [{"key": "steamgriddb_api_key", "label": "API key", "secret": True}],
+     "limits": _limits("steamgriddb", cooldown="200")},
+    {"id": "steamspy", "name": "SteamSpy", "role": "provider",
+     "hint": "steamspy.com — Steam community tags for your owned Steam games. "
+             "No account or API key needed (SteamSpy's API is public). Rate-limited "
+             "to ~1 request/second, so a full pass runs in the background.",
+     "creds": [],
+     "limits": _limits("steamspy", cooldown="1100")},
+    {"id": "retroachievements", "name": "RetroAchievements", "role": "provider",
+     "hint": "retroachievements.org — Settings › Keys. Rate-limited; keep it gentle.",
+     "creds": [
+         {"key": "retroachievements_username", "label": "Username", "secret": False},
+         {"key": "retroachievements_api_key", "label": "Web API key", "secret": True}],
+     "limits": _limits("retroachievements", cooldown="400", per_min="60")},
+]
+ALL_SETTABLE_KEYS = {f["key"] for s in SERVICES
+                     for f in (s["creds"] + s["limits"])}
+
+
+def _svc_state(s):
+    creds = []
+    for f in s["creds"]:
+        v = config.get(f["key"]) or ""
+        creds.append({"key": f["key"], "label": f["label"], "secret": f["secret"],
+                      "configured": bool(v),
+                      "value": (ai._mask(v) if f["secret"] else v) if v else ""})
+    limits = []
+    for f in s["limits"]:
+        limits.append({"key": f["key"], "label": f["label"], "unit": f["unit"],
+                       "default": f["default"], "value": config.get(f["key"]) or ""})
+    out = {"id": s["id"], "name": s["name"], "role": s["role"], "hint": s["hint"],
+           "fields": creds, "limits": limits}
+    if s["role"] in ("source", "both"):
+        out["enabled"] = config.source_enabled(s["id"])
+    if s.get("connect"):
+        checker = {"ea": _ea_connected, "epic": _epic_connected}.get(s["id"])
+        out["connect"] = dict(s["connect"], connected=bool(checker and checker()))
+    return out
+
+
+def _ea_connected():
+    """(bool) True if a valid cached EA browser token exists."""
+    tokf = os.path.join(DIR, ".ea", "token.json")
+    if not os.path.exists(tokf):
+        return False
+    try:
+        import json as _json
+        t = _json.load(open(tokf))
+        return bool(t.get("access_token")) and t.get("expires_at", 0) > time.time()
+    except Exception:
+        return False
+
+
+@app.get("/api/services")
+def services_config():
+    """Per-service credentials + rate-limit settings (secrets returned masked)."""
+    return {"services": [_svc_state(s) for s in SERVICES]}
+
+
+@app.post("/api/services")
+def services_set(body: dict):
+    """Set service credential / limit values in config.sqlite (""=clear)."""
+    for k, v in ((body or {}).get("values") or {}).items():
+        if k not in ALL_SETTABLE_KEYS:
+            raise HTTPException(400, "unknown service setting %r" % k)
+        config.set_(k, (v or "").strip())
+    return services_config()
+
+
+def _extract_token(raw, keys):
+    """Pull an auth value out of whatever the user pasted. Tolerates three shapes:
+    the whole JSON blob ({"access_token": "..."}), a `key=value` / `key: value`
+    pair (as copied from devtools), or the bare value on its own. `keys` lists the
+    field names to look for, in priority order."""
+    import json as _json
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    # 1. Full JSON object
+    try:
+        obj = _json.loads(raw)
+        if isinstance(obj, dict):
+            for k in keys:
+                if obj.get(k):
+                    return str(obj[k]).strip()
+    except (ValueError, TypeError):
+        pass
+    # 2. `key: value`, `key=value`, or `key value` (quotes/commas tolerated)
+    for k in keys:
+        m = re.search(r'["\']?%s["\']?\s*[:=\s]\s*["\']?([^"\',\s}&]+)' % re.escape(k),
+                      raw, re.I)
+        if m:
+            return m.group(1).strip()
+    # 3. Bare value — drop any stray wrapping quotes
+    return raw.strip().strip('"\'')
+
+
+_SOURCE_IDS = {s["id"] for s in SERVICES if s["role"] in ("source", "both")}
+
+
+@app.post("/api/services/{sid}/enabled")
+def service_set_enabled(sid: str, body: dict = Body(...)):
+    """Turn a source on/off for syncing (persists source_<id>_enabled)."""
+    if sid not in _SOURCE_IDS:
+        raise HTTPException(404, "no such source %r" % sid)
+    config.set_("source_%s_enabled" % sid, "1" if (body or {}).get("enabled") else "0")
+    return {"id": sid, "enabled": config.source_enabled(sid)}
+
+
+@app.post("/api/services/ea/token")
+def ea_connect(body: dict = Body(...)):
+    """Accept whatever the user copies from EA's auth URL — the full JSON, an
+    `access_token=…` pair, or the bare token — cache it (.ea/token.json, ~4h),
+    and verify by fetching the EA display name."""
+    tok = _extract_token((body or {}).get("value", ""), ["access_token"])
+    if not tok:
+        raise HTTPException(400, "no access token found in what you pasted")
+    import ea_owned
+    ea_owned.save_token(tok)
+    try:
+        player, _ = ea_owned.whoami({}, tok)          # verify against EA
+        return {"ok": True, "account": player.get("displayName")}
+    except Exception:
+        return {"ok": False, "account": None,
+                "error": "That token didn't work — make sure you're signed into EA "
+                         "in the browser, then Get a fresh token and paste it."}
+
+
+def _epic_connected():
+    """(bool) True if legendary has a cached Epic login (user.json w/ a name)."""
+    uf = os.path.expanduser("~/.config/legendary/user.json")
+    if not os.path.exists(uf):
+        return False
+    try:
+        import json as _json
+        return bool(_json.load(open(uf)).get("displayName"))
+    except Exception:
+        return False
+
+
+@app.post("/api/services/epic/code")
+def epic_connect(body: dict = Body(...)):
+    """Accept whatever the user copies from Epic's redirect page — the full JSON,
+    an `authorizationCode=…` pair, or the bare code — and hand it to legendary,
+    which exchanges it for a refresh token that auto-renews from then on."""
+    import subprocess
+    code = _extract_token((body or {}).get("value", ""),
+                          ["authorizationCode", "code"])
+    if not code:
+        raise HTTPException(400, "no authorization code found in what you pasted")
+    try:
+        r = subprocess.run([LEGENDARY, "auth", "--code", code],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "account": None, "error": "Couldn't reach Epic: %s" % e}
+    if r.returncode != 0 or not _epic_connected():
+        return {"ok": False, "account": None,
+                "error": "That code didn't work — codes are single-use, so open "
+                         "Get Epic code again for a fresh one and paste it."}
+    try:
+        import json as _json
+        name = _json.load(open(os.path.expanduser(
+            "~/.config/legendary/user.json"))).get("displayName")
+    except Exception:
+        name = None
+    return {"ok": True, "account": name}
+
+
+def _gog_connected():
+    """(bool) True if a GOG OAuth login has been cached (.gog/tokens.json)."""
+    return os.path.exists(os.path.join(DIR, ".gog", "tokens.json"))
+
+
+@app.post("/api/services/gog/code")
+def gog_connect(body: dict = Body(...)):
+    """Accept whatever the user copies from GOG's login-success page — the full
+    redirect URL, a `code=…` pair, or the bare code — and hand it to gog_owned.py,
+    which exchanges it for OAuth tokens that auto-refresh from then on."""
+    code = _extract_token((body or {}).get("value", ""), ["code"])
+    if not code:
+        raise HTTPException(400, "no login code found in what you pasted")
+    try:
+        r = subprocess.run([sys.executable, os.path.join(DIR, "gog_owned.py"),
+                            "--code", code],
+                           capture_output=True, text=True, timeout=60, cwd=DIR)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "account": None, "error": "Couldn't reach GOG: %s" % e}
+    if r.returncode != 0 or not _gog_connected():
+        return {"ok": False, "account": None,
+                "error": "That code didn't work — codes are single-use, so open "
+                         "Get GOG code again for a fresh one and paste it."}
+    return {"ok": True, "account": None}
+
+
+def _psn_connected():
+    """(bool) True if a PSN login has been cached (.psn/tokens.json)."""
+    return os.path.exists(os.path.join(DIR, ".psn", "tokens.json"))
+
+
+@app.post("/api/services/psn/npsso")
+def psn_connect(body: dict = Body(...)):
+    """Accept the PSN npsso — the bare 64-char token, the {"npsso":"…"} JSON, or
+    the whole ssocookie response — and hand it to psn_owned.py, which exchanges it
+    for tokens that auto-refresh (~2 months) from then on."""
+    npsso = _extract_token((body or {}).get("value", ""), ["npsso"])
+    if not npsso:
+        raise HTTPException(400, "no npsso token found in what you pasted")
+    try:
+        r = subprocess.run([sys.executable, os.path.join(DIR, "psn_owned.py"),
+                            "--npsso", npsso],
+                           capture_output=True, text=True, timeout=60, cwd=DIR)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "account": None, "error": "Couldn't reach PSN: %s" % e}
+    if r.returncode != 0 or not _psn_connected():
+        detail = (r.stderr or "").strip().splitlines()[-1:] or [""]
+        return {"ok": False, "account": None,
+                "error": "That npsso didn't work — it expires quickly, so grab a "
+                         "fresh one from the ssocookie page and paste it. (%s)"
+                         % detail[0]}
+    return {"ok": True, "account": None}
+
+
+def _xbox_connected():
+    """(bool) True if an Xbox/Microsoft login has been cached (.xbox/tokens.json)."""
+    return os.path.exists(os.path.join(DIR, ".xbox", "tokens.json"))
+
+
+@app.post("/api/services/xbox/code")
+def xbox_connect(body: dict = Body(...)):
+    """Accept the Microsoft auth code — the whole oauth20_desktop.srf?code=… URL,
+    a code=… pair, or the bare code — and hand it to xbox_owned.py, which runs the
+    OAuth→XSTS chain and caches a refresh token that auto-renews."""
+    code = _extract_token((body or {}).get("value", ""), ["code"])
+    if not code:
+        raise HTTPException(400, "no auth code found in what you pasted")
+    try:
+        r = subprocess.run([sys.executable, os.path.join(DIR, "xbox_owned.py"),
+                            "--code", code],
+                           capture_output=True, text=True, timeout=90, cwd=DIR)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "account": None, "error": "Couldn't reach Xbox: %s" % e}
+    if r.returncode != 0 or not _xbox_connected():
+        detail = (r.stderr or "").strip().splitlines()[-1:] or [""]
+        return {"ok": False, "account": None,
+                "error": "That code didn't work — codes are single-use, so open Get "
+                         "Xbox code again for a fresh one and paste it. (%s)"
+                         % detail[0]}
+    return {"ok": True, "account": None}
+
+
+# --------------------------------------------------------------------------- #
+#  Ownership sync — pull owned games from each store, then rebuild the catalog
+# --------------------------------------------------------------------------- #
+# id -> (fetch script, output TSV, capture_stdout). Fetchers that write their own
+# file (epic) set capture_stdout=False.
+SYNC_SPECS = {
+    "steam": ("steam_owned.py", "steam_games.tsv", True),
+    "gog":   ("gog_owned.py",   "gog_games.tsv",   True),
+    "itch":  ("itch_owned.py",  "itch_games.tsv",  True),
+    "epic":  ("epic_owned.py",  "epic_games.tsv",  False),
+    "ea":    ("ea_owned.py",    "ea_games.tsv",    True),
+    "psn":   ("psn_owned.py",   "psn_games.tsv",   True),
+    "xbox":  ("xbox_owned.py",  "xbox_games.tsv",  True),
+}
+_SVC_NAME = {s["id"]: s["name"] for s in SERVICES}
+
+
+def _sync_ready(sid):
+    """(bool) True if this source can pull ownership right now (creds/login present)."""
+    if sid == "steam":
+        return bool(config.steam_key() and config.get("steam_id"))
+    if sid == "itch":
+        return bool(config.itch_key())
+    if sid == "gog":
+        return _gog_connected()
+    if sid == "epic":
+        return _epic_connected()
+    if sid == "ea":
+        return _ea_connected()
+    if sid == "psn":
+        return _psn_connected()
+    if sid == "xbox":
+        return _xbox_connected()
+    return False
+
+
+def _tsv_count(out):
+    """Games recorded in a fetcher's output TSV (None if it doesn't exist yet)."""
+    p = os.path.join(DIR, out)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return sum(1 for ln in f if ln.strip())
+    except OSError:
+        return None
+
+
+def _sync_services():
+    """Per-source sync metadata for the Sync menu."""
+    out = []
+    for s in SERVICES:
+        sid = s["id"]
+        if sid not in SYNC_SPECS:
+            continue
+        _, tsv, _ = SYNC_SPECS[sid]
+        ready = _sync_ready(sid)
+        conn = s.get("connect")
+        out.append({
+            "id": sid, "name": s["name"],
+            "enabled": config.source_enabled(sid),
+            "ready": ready,
+            "needs_auth": bool(conn) and not ready,
+            "connect": dict(conn, connected=ready) if conn else None,
+            "count": _tsv_count(tsv),
+        })
+    return out
+
+
+_SYNC = {"job": None}
+_SYNC_LOCK = threading.Lock()
+
+
+def _lib_keys():
+    db = config.get("library_db")
+    if not db or not os.path.exists(db):
+        return set()
+    try:
+        con = sqlite3.connect(db)
+        keys = {r[0] for r in con.execute("SELECT norm_key FROM games")}
+        con.close()
+        return keys
+    except sqlite3.Error:
+        return set()
+
+
+def _run_script(script, out=None, capture=False, timeout=300):
+    """Run a pipeline script with the server's interpreter; return (ok, error_tail)."""
+    argv = [sys.executable, script]
+    try:
+        if capture and out:
+            with open(os.path.join(DIR, out), "w", encoding="utf-8") as f:
+                r = subprocess.run(argv, cwd=DIR, stdout=f, stderr=subprocess.PIPE,
+                                   text=True, timeout=timeout)
+        else:
+            r = subprocess.run(argv, cwd=DIR, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    if r.returncode != 0:
+        return False, ((r.stderr or "").strip()[-300:] or "exit %d" % r.returncode)
+    return True, ""
+
+
+def _sync_worker(job, services):
+    prev = _lib_keys()
+    any_ok = False
+    for sid in services:
+        st = job["services"][sid]
+        st["state"] = "running"
+        job["step"] = "Syncing %s…" % _SVC_NAME.get(sid, sid)
+        script, tsv, cap = SYNC_SPECS[sid]
+        ok, err = _run_script(script, tsv, cap, timeout=240)
+        if ok:
+            st["state"], st["count"], any_ok = "ok", _tsv_count(tsv), True
+        else:
+            st["state"], st["error"] = "failed", err
+    if any_ok:
+        job["step"] = "Rebuilding catalog…"
+        ok, err = _run_script("build_library.py", timeout=900)
+        if ok:
+            job["added"] = len(_lib_keys() - prev)
+        else:
+            job["error"] = "catalog rebuild failed: " + err
+    job["step"] = "Done"
+    job["running"] = False
+    job["finished"] = True
+
+
+@app.get("/api/sync/status")
+def sync_status():
+    """Syncable sources (enabled/ready/needs-auth) + current-or-last job progress."""
+    return {"services": _sync_services(), "job": _SYNC["job"]}
+
+
+@app.post("/api/sync/run")
+def sync_run(body: dict = Body(default={})):
+    """Start a sync of the given source ids, or 'all' = every enabled+ready source.
+    Sources that need a browser sign-in (epic/ea) are skipped until connected."""
+    with _SYNC_LOCK:
+        cur = _SYNC["job"]
+        if cur and cur.get("running"):
+            raise HTTPException(409, "a sync is already running")
+        req = (body or {}).get("services") or ["all"]
+        if req in ("all", ["all"]):
+            targets = [s["id"] for s in _sync_services() if s["enabled"] and s["ready"]]
+        else:
+            targets = [sid for sid in req if sid in SYNC_SPECS
+                       and config.source_enabled(sid) and _sync_ready(sid)]
+        if not targets:
+            raise HTTPException(400, "nothing ready to sync")
+        job = {"running": True, "finished": False, "step": "Starting…",
+               "error": None, "added": None,
+               "services": {sid: {"state": "pending", "count": None, "error": None}
+                            for sid in targets}}
+        _SYNC["job"] = job
+    threading.Thread(target=_sync_worker, args=(job, targets), daemon=True).start()
+    return job
 
 
 @app.get("/api/health")

@@ -36,7 +36,8 @@ GAME_FIELDS = (
     "genres.name,themes.name,game_modes.name,player_perspectives.name,"
     "franchises.name,involved_companies.developer,"
     "involved_companies.publisher,involved_companies.company.name,"
-    "total_rating,aggregated_rating"
+    "total_rating,total_rating_count,aggregated_rating,aggregated_rating_count,"
+    "rating,rating_count"
 )
 
 MIN_INTERVAL = 0.26            # IGDB rate limit ~4 req/s — throttle to stay under

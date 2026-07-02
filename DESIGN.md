@@ -97,7 +97,7 @@ ACCOUNT
 ├─ ecosystem   steam | ea | gog | epic | itch | psn | xbox | …
 ├─ label       "Bob's main" · "Bob's alt" · "household EA"
 ├─ identity    steamid / email / gamertag / …
-└─ creds       1Password ref (each account its own creds)
+└─ creds       config.sqlite value (each account its own creds; env var > config)
         └─ owns ──► games        (detection runs PER ACCOUNT)
 ```
 
@@ -108,7 +108,7 @@ Ownership is therefore *"account X owns game G"*, not just *"steam owns G"*.
 DEVICE
 ├─ name        "Steam Deck" · "Basement Arcade" · "Gaming PC"
 ├─ kind        handheld | desktop | arcade-cabinet | server
-├─ transport   how to reach it: local | ssh/rsync | smb/nfs mount   (creds = 1Password)
+├─ transport   how to reach it: local | ssh/rsync | smb/nfs mount   (creds in config)
 ├─ selection   which games go here  (see §9 — OPEN)
 └─ channels[]  the ecosystems this device hosts (each account-aware)
 ```

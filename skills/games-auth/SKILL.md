@@ -10,7 +10,7 @@ ownership from **Steam, Epic, GOG, itch.io**. All cache credentials so normal up
 need no interaction — this skill is only for the rare re-auth (token expired, password
 changed, fresh machine).
 
-Account/environment values (SteamID, 1Password vault & item, ROM host/paths) are NOT
+Account/environment values (SteamID, API keys, ROM host/paths) are NOT
 hardcoded — they live in a `config` table. For a fresh machine / full onboarding, run
 the guided wizard which also explains where to obtain each credential:
 ```bash
@@ -43,9 +43,8 @@ CM and WebAuth flows here; the API key is the only working path.
 If `steam: BROKEN`:
 1. Ask the user to generate a key at **https://steamcommunity.com/dev/apikey** while
    logged into the account whose `steam_id` is in config; domain field = `localhost`.
-2. Save it to the configured 1Password item (`config.py get steam_key_op_item` in vault
-   `config.py get op_vault`), e.g.:
-   `opx item edit "$(python3 config.py get steam_key_op_item)" --vault "$(python3 config.py get op_vault)" "apikey[password]=<KEY>"`
+2. Store it: `python3 config.py set steam_api_key <KEY>` (local, gitignored; env
+   `STEAM_API_KEY` overrides).
 3. Verify: `bash ~/game-ownership/auth_status.sh`.
 
 ### Epic — legendary (browser authorization code)
@@ -65,8 +64,8 @@ Token then auto-refreshes; cached in `~/.config/legendary`.
 ### itch.io — personal API key (does not expire)
 1. Ask the user to open **https://itch.io/user/settings/api-keys**, click "Generate new
    API key", and copy it (any scope can read the library).
-2. Store it: `python3 config.py set itch_api_key <KEY>` (local, gitignored) — or in
-   1Password, then set `itch_key_op_item` (+ `op_vault`) to that item's name.
+2. Store it: `python3 config.py set itch_api_key <KEY>` (local, gitignored; env
+   `ITCH_API_KEY` overrides).
 3. Verify: `bash ~/game-ownership/auth_status.sh` (the resolver is `config.py itch-key`).
 
 ## Step 3 — confirm + refresh data
@@ -76,4 +75,4 @@ pull and rebuild.
 ## Notes
 - Codes (Epic/GOG) are single-use and expire in minutes — request a fresh one if it sits.
 - Steam Guard codes rotate ~30s; not needed for the API-key path anyway.
-- `opx` = the 1Password CLI wrapper (service-account token).
+- Credentials resolve env var > `config.sqlite` only; ludodex never reads 1Password.

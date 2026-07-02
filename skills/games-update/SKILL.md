@@ -12,7 +12,7 @@ itch.io** PC ownership. Each game lists all the sources it's available from.
 - Working dir / scripts: `~/game-ownership/`
 - Unified DB: `~/game-ownership/game-library.sqlite`
 - ROM index (input): `~/roms-index.sqlite`
-- Account/environment settings (SteamID, 1Password item, ROM host/paths) live in a
+- Account/environment settings (SteamID, API keys, ROM host/paths) live in a
   `config` table — `python3 config.py list` to see them, `config.py set <key> <value>`
   to change. Nothing personal is hardcoded in the scripts.
 - Sources can be toggled and extended: `python3 config.py sources` (list + on/off),
@@ -30,8 +30,8 @@ itch.io** PC ownership. Each game lists all the sources it's available from.
 bash ~/game-ownership/update.sh
 ```
 
-This pulls all three stores (auth is cached — Steam via the API key in the configured
-1Password item, Epic via legendary, GOG via cached OAuth token), rebuilds
+This pulls all stores (auth is cached — Steam via the configured API key, Epic via
+legendary, GOG via cached OAuth token), rebuilds
 `game-library.sqlite`, and prints the games added since the last run. Report that
 "new games" list to the user, plus the totals line.
 
@@ -70,7 +70,7 @@ sqlite3 ~/game-ownership/game-library.sqlite \
 
 ## Auth notes (only relevant if a pull fails)
 
-- **Steam**: Web API key (configured 1Password item) + the SteamID in config
+- **Steam**: Web API key (`steam_api_key` in config) + the SteamID in config
   (`python3 config.py get steam_id`) — must be the account that *owns the key*. NOTE a
   vanity URL can resolve to a different account and return 0 games. The key bypasses
   profile privacy only for its owner's SteamID, so no public profile / login / 2FA.
