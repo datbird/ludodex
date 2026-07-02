@@ -17,10 +17,11 @@ import sqlite3
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(DIR, "ai-metadata.sqlite")
-LIBRARY_DB = os.path.join(DIR, "game-library.sqlite")
-CACHE_DB = os.path.join(DIR, "metadata-cache.sqlite")
-MEDIA_INDEX = os.path.join(DIR, "media-index.sqlite")
+DATA = os.environ.get("LUDODEX_DATA", DIR)
+DB = os.path.join(DATA, "ai-metadata.sqlite")
+LIBRARY_DB = os.path.join(DATA, "game-library.sqlite")
+CACHE_DB = os.path.join(DATA, "metadata-cache.sqlite")
+MEDIA_INDEX = os.path.join(DATA, "media-index.sqlite")
 
 # Factual attributes the model can reasonably supply; scores/subjective kinds are
 # deliberately excluded. Holes in these drive the "missing" list + "missing" target.

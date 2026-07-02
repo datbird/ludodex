@@ -22,12 +22,13 @@ import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 import igdb
 from titlenorm import norm
 
-CACHE = os.path.join(DIR, "metadata-cache.sqlite")
+CACHE = os.path.join(DATA, "metadata-cache.sqlite")
 LIB = config.get("library_db")
 
 

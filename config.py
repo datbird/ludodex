@@ -35,7 +35,8 @@ import sqlite3
 import sys
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(DIR, "config.sqlite")
+DATA = os.environ.get("LUDODEX_DATA", DIR)
+DB = os.path.join(DATA, "config.sqlite")
 
 # (key, default, description). Defaults are SAFE/PUBLIC only. Personal values are
 # filled locally via `setup`/`set` and stored in the gitignored config.sqlite.
@@ -50,9 +51,9 @@ SCHEMA = [
     ("itch_api_key", "",
      "itch.io API key stored locally (gitignored). Get one at "
      "https://itch.io/user/settings/api-keys. ITCH_API_KEY env overrides it."),
-    ("library_db", os.path.join(DIR, "game-library.sqlite"),
+    ("library_db", os.path.join(DATA, "game-library.sqlite"),
      "Output path for the unified deduped catalog."),
-    ("roms_index_db", os.path.join(DIR, "roms-index.sqlite"),
+    ("roms_index_db", os.path.join(DATA, "roms-index.sqlite"),
      "Path to the ROM index DB (emulation input, built by build_romdb.py)."),
     ("unraid_host", "",
      "ssh target where the ROM archive lives, e.g. root@192.168.1.10 "
@@ -751,12 +752,12 @@ def _has_cred(it):
     if it["id"] == "screenscraper":
         return bool(screenscraper_creds())
     if it["id"] == "ea":
-        return os.path.exists(os.path.join(DIR, ".ea", "token.json")) or \
+        return os.path.exists(os.path.join(DATA, ".ea", "token.json")) or \
             bool(get("ea_remid"))
     if it["id"] == "epic":
         return os.path.exists(os.path.expanduser("~/.config/legendary/user.json"))
     if it["id"] == "gog":
-        return os.path.exists(os.path.join(DIR, ".gog", "tokens.json"))
+        return os.path.exists(os.path.join(DATA, ".gog", "tokens.json"))
     if it["id"] == "esde":
         return bool(media_mounts_list(only_enabled=True, provider="esde"))
     for k in it.get("config_keys", []):

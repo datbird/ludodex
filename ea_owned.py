@@ -36,10 +36,11 @@ import urllib.parse
 import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 
-EA_DIR = os.path.join(DIR, ".ea")
+EA_DIR = os.path.join(DATA, ".ea")
 COOKIES = os.path.join(EA_DIR, "cookies.json")
 TOKEN = os.path.join(EA_DIR, "token.json")
 

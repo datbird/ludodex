@@ -15,6 +15,7 @@ import json
 import sqlite3
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 from titlenorm import norm      # shared dedupe normalizer (honors config prefs)
@@ -35,7 +36,7 @@ def _rom_indexes():
     paths = []
     if ROM_DB and os.path.exists(ROM_DB):
         paths.append(ROM_DB)
-    for p in sorted(glob.glob(os.path.join(DIR, "roms-index-mgr*.sqlite"))):
+    for p in sorted(glob.glob(os.path.join(DATA, "roms-index-mgr*.sqlite"))):
         paths.append(p)
     return paths
 
@@ -113,7 +114,7 @@ for _s in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox"):
 # true from-scratch purge (producer / removed roms should leave) uses --fresh.
 if "--fresh" in sys.argv and config.source_enabled("emulation") and _rom_indexes():
     _REGEN.add("emulation")
-if os.path.exists(os.path.join(DIR, "crawl-index.sqlite")):
+if os.path.exists(os.path.join(DATA, "crawl-index.sqlite")):
     _REGEN.add("archive")
 _pn_json = config.get("playnite_import_json")
 _lb_json = config.get("launchbox_import_json")
@@ -182,7 +183,7 @@ for _src in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox"):
 
 
 # ---- hand-added games (durable manual-games.sqlite; the library '+' add flow) ----
-MANUAL_DB = os.path.join(DIR, "manual-games.sqlite")
+MANUAL_DB = os.path.join(DATA, "manual-games.sqlite")
 if os.path.exists(MANUAL_DB):
     mgc = sqlite3.connect(MANUAL_DB)
     try:
@@ -197,7 +198,7 @@ if os.path.exists(MANUAL_DB):
 
 
 # ---- crawled local archives (crawl.py -> process.py -> extracted) ----
-CRAWL_DB = os.path.join(DIR, "crawl-index.sqlite")
+CRAWL_DB = os.path.join(DATA, "crawl-index.sqlite")
 if os.path.exists(CRAWL_DB):
     enabled = {a["name"] for a in config.archives_list(only_enabled=True)}
     cc = sqlite3.connect(CRAWL_DB)
@@ -355,7 +356,7 @@ for key, data in games_attrs.items():
                     "VALUES(?,?,?,?)", rows)
 
 # ---- user-defined tags (origin 'ludodex', durable in tags.sqlite) ----
-TAGS_DB = os.path.join(DIR, "tags.sqlite")
+TAGS_DB = os.path.join(DATA, "tags.sqlite")
 if os.path.exists(TAGS_DB):
     tc = sqlite3.connect(TAGS_DB)
     try:
@@ -368,7 +369,7 @@ if os.path.exists(TAGS_DB):
     tc.close()
 
 # ---- Steam community tags (origin 'steam', fetched cache from SteamSpy) ----
-STEAM_TAGS_DB = os.path.join(DIR, "steam-tags.sqlite")
+STEAM_TAGS_DB = os.path.join(DATA, "steam-tags.sqlite")
 if config.metadata_enabled("steamspy") and os.path.exists(STEAM_TAGS_DB):
     stc = sqlite3.connect(STEAM_TAGS_DB)
     try:
@@ -401,7 +402,7 @@ have = {}                           # game_id -> set(kinds already populated)
 for gid, kind in cur.execute("SELECT game_id, kind FROM game_attributes"):
     have.setdefault(gid, set()).add(kind)
 
-CACHE_DB = os.path.join(DIR, "metadata-cache.sqlite")
+CACHE_DB = os.path.join(DATA, "metadata-cache.sqlite")
 n_link = n_attr = 0
 if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
     mc = sqlite3.connect(CACHE_DB)
@@ -444,7 +445,7 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
 # One scrape per game yields metadata + media; here we merge the metadata (media
 # is ingested into the media index separately). Fill-gaps after IGDB, so owned
 # and IGDB data still win.
-SS_CACHE = os.path.join(DIR, "screenscraper-cache.sqlite")
+SS_CACHE = os.path.join(DATA, "screenscraper-cache.sqlite")
 ss_link = ss_attr = 0
 if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
     from screenscraper import extract_metadata as ss_map

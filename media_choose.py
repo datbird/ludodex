@@ -22,15 +22,16 @@ import time
 import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 import media
 
-INDEX = os.path.join(DIR, "media-index.sqlite")
+INDEX = os.path.join(DATA, "media-index.sqlite")
 
 
 def repo_dir():
-    p = config.get("media_repo") or os.path.join(DIR, "media")
+    p = config.get("media_repo") or os.path.join(DATA, "media")
     os.makedirs(p, exist_ok=True)
     return p
 

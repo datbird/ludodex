@@ -1,0 +1,17 @@
+# ludodex server runtime — the full set the container installs.
+# (Local dev can still use requirements-server.txt; this is the superset.)
+
+# --- web server ---
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pillow>=10.0
+
+# --- AI providers (BYOAI — supply only the key(s) for the provider you use) ---
+anthropic>=0.114     # provider: anthropic
+openai>=1.40         # provider: openai AND openrouter (OpenAI-compatible endpoint)
+google-genai>=0.3    # provider: gemini
+
+# --- optional sync target ---
+google-auth>=2.0     # only for the Firebase/Firestore sync target (sync.py)
+
+# HTTP to providers uses the standard library (urllib) — no `requests` needed.

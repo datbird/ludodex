@@ -1,0 +1,29 @@
+services:
+  ludodex:
+    build: .
+    image: ludodex:latest
+    container_name: ludodex
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env                       # copy .env.example → .env and fill in
+    volumes:
+      - ludodex-data:/data         # all durable state (DBs, tokens, media)
+      # Optional: expose host-mounted shares as plain paths. Mount an NFS/SMB
+      # share on the host, then point a "Local" device at /media/<name> in the UI:
+      # - /mnt/media:/media:ro
+
+    # --- Mounting SMB/NFS *from inside* the container (instead of on the host)
+    # needs elevated privileges. Leave commented unless you use the in-container
+    # mount transport; the host-mount approach above needs none of this.
+    # cap_add:
+    #   - SYS_ADMIN
+    #   - DAC_READ_SEARCH
+    # security_opt:
+    #   - apparmor:unconfined
+    # devices:
+    #   - /dev/fuse
+
+volumes:
+  ludodex-data:

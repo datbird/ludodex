@@ -48,3 +48,8 @@ device-media/
 *.sqlite-shm
 *.sqlite.bak*
 *.bak-*
+
+# docker env (secrets)
+.env
+.env.*
+!.env.example

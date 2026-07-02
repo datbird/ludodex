@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
 DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config          # noqa: E402  pipeline config store (config.sqlite)
 import media           # noqa: E402  pipeline vocab/priority (pure data)
@@ -37,15 +38,15 @@ import aimeta          # noqa: E402  AI metadata audit/supplement store + contex
 import overrides       # noqa: E402  per-attribute provenance overrides (re-pointing)
 from . import ai       # noqa: E402  AI features (server package)
 
-LIBRARY_DB = os.path.join(DIR, "game-library.sqlite")
-INDEX_DB = os.path.join(DIR, "media-index.sqlite")
-RA_DB = os.path.join(DIR, "ra.sqlite")
-PINS_DB = os.path.join(DIR, "pins.sqlite")  # durable art pins (survives media rescan)
-OS_DB = os.path.join(DIR, "os.sqlite")      # durable OS support (windows/mac/linux) per store entry
-TAGS_DB = os.path.join(DIR, "tags.sqlite")  # durable user-defined tags (survives rebuild)
-UMEDIA_DB = os.path.join(DIR, "user-media.sqlite")  # durable user uploads (survives rebuild)
-SCORES_DB = os.path.join(DIR, "scores.sqlite")  # multi-source ratings + unified score
-MANUAL_DB = os.path.join(DIR, "manual-games.sqlite")  # durable hand-added games (survives rebuild)
+LIBRARY_DB = os.path.join(DATA, "game-library.sqlite")
+INDEX_DB = os.path.join(DATA, "media-index.sqlite")
+RA_DB = os.path.join(DATA, "ra.sqlite")
+PINS_DB = os.path.join(DATA, "pins.sqlite")  # durable art pins (survives media rescan)
+OS_DB = os.path.join(DATA, "os.sqlite")      # durable OS support (windows/mac/linux) per store entry
+TAGS_DB = os.path.join(DATA, "tags.sqlite")  # durable user-defined tags (survives rebuild)
+UMEDIA_DB = os.path.join(DATA, "user-media.sqlite")  # durable user uploads (survives rebuild)
+SCORES_DB = os.path.join(DATA, "scores.sqlite")  # multi-source ratings + unified score
+MANUAL_DB = os.path.join(DATA, "manual-games.sqlite")  # durable hand-added games (survives rebuild)
 
 LEGENDARY = os.path.expanduser("~/.local/bin/legendary")  # Epic OAuth CLI
 EPIC_LOGIN_URL = ("https://www.epicgames.com/id/api/redirect"
@@ -1556,7 +1557,7 @@ def _aimeta_apply(should_stop, media=True):
     and new provider links + their trusted attributes/media flow in. `media` is
     True (all art), False (skip art), or a list of media kinds to (re)choose."""
     import igdb
-    cache = os.path.join(DIR, "metadata-cache.sqlite")
+    cache = os.path.join(DATA, "metadata-cache.sqlite")
     now = int(time.time())
     pms = aimeta.accepted_provider_matches()
     mc = sqlite3.connect(cache)
@@ -1608,7 +1609,7 @@ def _apply_ss_matches(now):
     creds = config.screenscraper_creds()
     if not creds:
         return
-    sc = sqlite3.connect(os.path.join(DIR, "screenscraper-cache.sqlite"))
+    sc = sqlite3.connect(os.path.join(DATA, "screenscraper-cache.sqlite"))
     sc.execute("CREATE TABLE IF NOT EXISTS ss_game(norm_key TEXT, system TEXT, "
                "ss_id INTEGER, status TEXT, payload_json TEXT, fetched_at INTEGER, "
                "PRIMARY KEY(norm_key, system))")
@@ -2658,7 +2659,7 @@ def _svc_state(s):
 
 def _ea_connected():
     """(bool) True if a valid cached EA browser token exists."""
-    tokf = os.path.join(DIR, ".ea", "token.json")
+    tokf = os.path.join(DATA, ".ea", "token.json")
     if not os.path.exists(tokf):
         return False
     try:
@@ -2786,7 +2787,7 @@ def epic_connect(body: dict = Body(...)):
 
 def _gog_connected():
     """(bool) True if a GOG OAuth login has been cached (.gog/tokens.json)."""
-    return os.path.exists(os.path.join(DIR, ".gog", "tokens.json"))
+    return os.path.exists(os.path.join(DATA, ".gog", "tokens.json"))
 
 
 @app.post("/api/services/gog/code")
@@ -2812,7 +2813,7 @@ def gog_connect(body: dict = Body(...)):
 
 def _psn_connected():
     """(bool) True if a PSN login has been cached (.psn/tokens.json)."""
-    return os.path.exists(os.path.join(DIR, ".psn", "tokens.json"))
+    return os.path.exists(os.path.join(DATA, ".psn", "tokens.json"))
 
 
 @app.post("/api/services/psn/npsso")
@@ -2840,7 +2841,7 @@ def psn_connect(body: dict = Body(...)):
 
 def _xbox_connected():
     """(bool) True if an Xbox/Microsoft login has been cached (.xbox/tokens.json)."""
-    return os.path.exists(os.path.join(DIR, ".xbox", "tokens.json"))
+    return os.path.exists(os.path.join(DATA, ".xbox", "tokens.json"))
 
 
 @app.post("/api/services/xbox/code")

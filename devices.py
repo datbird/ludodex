@@ -23,11 +23,12 @@ import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 
-DB = os.path.join(DIR, "connections.sqlite")
-MEDIA_DIR = os.path.join(DIR, "device-media")     # rsync'd device media lands here
+DB = os.path.join(DATA, "connections.sqlite")
+MEDIA_DIR = os.path.join(DATA, "device-media")     # rsync'd device media lands here
 
 # library-manager kind -> (label, provides_roms, provides_media). A plain directory
 # of game files (e.g. an Unraid share) is just a "ROM folder" — the same SSH-find +
@@ -212,7 +213,7 @@ def manager_rm(mid):
     con.commit()
     con.close()
     try:                                   # drop this manager's ROM index, if any
-        os.remove(os.path.join(DIR, "roms-index-mgr%d.sqlite" % int(mid)))
+        os.remove(os.path.join(DATA, "roms-index-mgr%d.sqlite" % int(mid)))
     except (OSError, ValueError):
         pass
 
@@ -287,7 +288,7 @@ def _rsync_ssh_e(dev):
 
 
 def _rom_index_path(lm):
-    return os.path.join(DIR, "roms-index-mgr%d.sqlite" % lm["id"])
+    return os.path.join(DATA, "roms-index-mgr%d.sqlite" % lm["id"])
 
 
 def pull_roms(dev, lm):
@@ -301,7 +302,7 @@ def pull_roms(dev, lm):
     out = _rom_index_path(lm)                          # per-manager index
     if dev.get("transport") == "local":
         # scan + build directly on this server (no SSH)
-        scan = os.path.join(DIR, "ldx_romscan_mgr%d.tsv" % lm["id"])
+        scan = os.path.join(DATA, "ldx_romscan_mgr%d.tsv" % lm["id"])
         r = _run(["bash", "-c", "find %s -type f -printf '%%s\\t%%T@\\t%%P\\n' > %s"
                   % (shlex.quote(root), shlex.quote(scan))], timeout=300)
         if r.returncode != 0:

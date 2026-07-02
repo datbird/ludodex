@@ -23,12 +23,13 @@ import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 import screenscraper as ss
 from titlenorm import norm
 
-CACHE = os.path.join(DIR, "screenscraper-cache.sqlite")
+CACHE = os.path.join(DATA, "screenscraper-cache.sqlite")
 REGION_RANK = {"usa": 0, "world": 1, "europe": 2, "japan": 3}
 
 

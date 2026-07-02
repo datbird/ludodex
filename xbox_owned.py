@@ -35,10 +35,11 @@ import urllib.parse
 import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 
-XBOX_DIR = os.path.join(DIR, ".xbox")
+XBOX_DIR = os.path.join(DATA, ".xbox")
 TOKFILE = os.path.join(XBOX_DIR, "tokens.json")
 os.makedirs(XBOX_DIR, exist_ok=True)
 

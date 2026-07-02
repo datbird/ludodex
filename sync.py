@@ -31,7 +31,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_DB = os.path.join(DIR, "sync_cache.sqlite")
+DATA = os.environ.get("LUDODEX_DATA", DIR)
+CACHE_DB = os.path.join(DATA, "sync_cache.sqlite")
 CTX = ssl.create_default_context()
 WORKERS = 12
 

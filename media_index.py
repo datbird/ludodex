@@ -27,12 +27,13 @@ import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 import media
 from titlenorm import norm
 
-INDEX = os.path.join(DIR, "media-index.sqlite")
+INDEX = os.path.join(DATA, "media-index.sqlite")
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 VID_EXTS = (".mp4", ".webm", ".mkv", ".flv")
 DOC_EXTS = (".pdf",)

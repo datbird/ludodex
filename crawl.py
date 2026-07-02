@@ -20,7 +20,8 @@ import config
 from romtags import ROM_EXTS
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(DIR, "crawl-index.sqlite")
+DATA = os.environ.get("LUDODEX_DATA", DIR)
+DB = os.path.join(DATA, "crawl-index.sqlite")
 SKIP_DIRS = {".git", "@eaDir", "#recycle", "lost+found", "System Volume Information"}
 
 

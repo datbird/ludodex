@@ -28,11 +28,12 @@ import sys
 import time
 
 DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config  # noqa: E402
 
 # --- token usage tracking + monthly limits (per provider / per model) --------
-USAGE_DB = os.path.join(DIR, "ai-usage.sqlite")
+USAGE_DB = os.path.join(DATA, "ai-usage.sqlite")
 
 
 def _usage_con():

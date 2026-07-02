@@ -35,10 +35,11 @@ import urllib.parse
 import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 
-PSN_DIR = os.path.join(DIR, ".psn")
+PSN_DIR = os.path.join(DATA, ".psn")
 TOKFILE = os.path.join(PSN_DIR, "tokens.json")
 os.makedirs(PSN_DIR, exist_ok=True)
 

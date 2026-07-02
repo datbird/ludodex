@@ -28,11 +28,12 @@ import urllib.request
 import urllib.parse
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config          # noqa: E402
 import scoring         # noqa: E402
 
-SCORES_DB = os.path.join(DIR, "scores.sqlite")
+SCORES_DB = os.path.join(DATA, "scores.sqlite")
 CTX = ssl.create_default_context()
 FRESH_DAYS = 7          # skip a (game,source) refreshed within this window
 
@@ -101,7 +102,7 @@ def _library_ids(source):
 
 # --------------------------------------------------------------------------- IGDB
 def fetch_igdb(con, refresh=False, limit=None):
-    cache = os.path.join(DIR, "metadata-cache.sqlite")
+    cache = os.path.join(DATA, "metadata-cache.sqlite")
     if not os.path.exists(cache):
         log("igdb: no metadata cache")
         return 0
@@ -143,7 +144,7 @@ def fetch_igdb(con, refresh=False, limit=None):
 
 # ---------------------------------------------------------------------- ScreenScraper
 def fetch_ss(con, refresh=False, limit=None):
-    cache = os.path.join(DIR, "screenscraper-cache.sqlite")
+    cache = os.path.join(DATA, "screenscraper-cache.sqlite")
     if not os.path.exists(cache):
         log("screenscraper: no scrape cache on this host (Deck-side) — skipped")
         return 0

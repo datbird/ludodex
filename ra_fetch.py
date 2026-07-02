@@ -23,8 +23,9 @@ from titlenorm import norm
 
 # Use the local repo copies (config.library_db points at the Deck producer path).
 DIR = os.path.dirname(os.path.abspath(__file__))
-RA_DB = os.path.join(DIR, "ra.sqlite")
-LIB_DB = os.path.join(DIR, "game-library.sqlite")
+DATA = os.environ.get("LUDODEX_DATA", DIR)
+RA_DB = os.path.join(DATA, "ra.sqlite")
+LIB_DB = os.path.join(DATA, "game-library.sqlite")
 
 
 def _now():

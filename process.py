@@ -24,7 +24,8 @@ from romtags import parse_name
 from titlenorm import norm
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(DIR, "crawl-index.sqlite")
+DATA = os.environ.get("LUDODEX_DATA", DIR)
+DB = os.path.join(DATA, "crawl-index.sqlite")
 
 
 def log(m):

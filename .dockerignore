@@ -1,0 +1,51 @@
+# Keep the distributable image clean: no local data, secrets, or build cruft.
+
+# vcs / editor
+.git
+.gitignore
+*.md
+!README.md
+
+# python
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+
+# node / built frontend (dist is rebuilt in the web stage)
+web/node_modules/
+web/dist/
+
+# --- local data / state / secrets — must NEVER be baked into the image ---
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite.bak*
+*.bak-*
+*.tsv
+*.json.bak
+media/
+device-media/
+.ea/
+.gog/
+.psn/
+.xbox/
+.steam/
+tokens.json
+*service-account*.json
+*serviceaccount*.json
+firebase*.json
+*-sa.json
+.env
+.env.*
+!.env.example
+*.log
+*.pid
+*.err
+.prev_keys
+.cur_keys
+.new_keys
+.gogchk
+server.pid

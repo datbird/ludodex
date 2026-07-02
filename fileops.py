@@ -33,13 +33,14 @@ import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config          # noqa: E402
 import devices         # noqa: E402  transport (_device/_ssh/_run/_wrap_pw/...)
 import romtags         # noqa: E402  parse_name()
 import titlenorm       # noqa: E402  norm()
 
-DB = os.path.join(DIR, "file-profiles.sqlite")
+DB = os.path.join(DATA, "file-profiles.sqlite")
 
 # Container/sidecar extensions whose *contents* reference sibling member files.
 CONTAINER_EXTS = {"cue", "gdi", "m3u", "ccd"}

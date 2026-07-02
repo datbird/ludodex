@@ -25,11 +25,12 @@ import time
 import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 
-INDEX = os.path.join(DIR, "media-index.sqlite")
-META_CACHE = os.path.join(DIR, "metadata-cache.sqlite")
+INDEX = os.path.join(DATA, "media-index.sqlite")
+META_CACHE = os.path.join(DATA, "metadata-cache.sqlite")
 
 # Steam store CDN. library_600x900 (portrait cover), library_hero (wide hero),
 # header.jpg (capsule/header banner), logo. Not every appid has every asset —
@@ -204,7 +205,7 @@ def fetch_screenscraper(con, now):
     """Ingest media URLs from the local ScreenScraper cache (no API calls — they
     came free with each metadata scrape). Stored as URL refs; downloading them
     later appends auth via screenscraper.media_url_with_auth."""
-    cache = os.path.join(DIR, "screenscraper-cache.sqlite")
+    cache = os.path.join(DATA, "screenscraper-cache.sqlite")
     if not os.path.exists(cache):
         print("media_fetch: screenscraper — no cache yet (run ss_scrape.py)",
               file=sys.stderr)

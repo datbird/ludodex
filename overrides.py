@@ -12,7 +12,8 @@ import sqlite3
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(DIR, "attr-overrides.sqlite")
+DATA = os.environ.get("LUDODEX_DATA", DIR)
+DB = os.path.join(DATA, "attr-overrides.sqlite")
 
 
 def _con():

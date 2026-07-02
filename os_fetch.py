@@ -25,8 +25,9 @@ import time
 import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-OS_DB = os.path.join(DIR, "os.sqlite")
-LIB_DB = os.path.join(DIR, "game-library.sqlite")
+DATA = os.environ.get("LUDODEX_DATA", DIR)
+OS_DB = os.path.join(DATA, "os.sqlite")
+LIB_DB = os.path.join(DATA, "game-library.sqlite")
 UA = "ludodex/1.0 (+https://github.com/datbird/ludodex)"
 APPDETAILS = "https://store.steampowered.com/api/appdetails?appids=%s&filters=platforms"
 GOG_PRODUCT = "https://api.gog.com/products/%s"

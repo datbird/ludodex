@@ -24,10 +24,11 @@ import urllib.error
 import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 
-DB = os.path.join(DIR, "steam-tags.sqlite")
+DB = os.path.join(DATA, "steam-tags.sqlite")
 API = "https://steamspy.com/api.php?request=appdetails&appid=%s"
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/120.0 Safari/537.36")
