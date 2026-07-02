@@ -301,6 +301,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [showProfile, setShowProfile] = useState(false)
   const [showAddGame, setShowAddGame] = useState(false)
+  const [showWand, setShowWand] = useState(false)
   const [prefsTick, setPrefsTick] = useState(0)   // bump to push prefs changes live
   // Dashboard is always the landing page (not persisted), per product decision.
   const [tab, setTab] = useState<'library' | 'dashboard'>('dashboard')
@@ -664,6 +665,10 @@ export default function App() {
               )}
             </div>
           )}
+          <button className="filter-btn wand-btn" title="Let AI complete your library"
+            onClick={() => setShowWand(true)}>
+            <span className="wand-spark">✨</span> Magic wand
+          </button>
           <button className="filter-btn add-game" title="Add a game"
             onClick={() => setShowAddGame(true)}>
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
@@ -745,6 +750,14 @@ export default function App() {
         onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} />}
       {showAddGame && <AddGame facets={facets} onClose={() => setShowAddGame(false)}
         onAdded={() => load(true)} />}
+      {showWand && <MagicWandOverlay
+        filterQuery={{
+          q: q || undefined,
+          include: Object.keys(filters).filter((k) => filters[k] === 'include'),
+          exclude: Object.keys(filters).filter((k) => filters[k] === 'exclude'),
+        }}
+        filterCount={total}
+        onClose={() => setShowWand(false)} />}
     </div>
   )
 }
@@ -2517,6 +2530,84 @@ function ScoreBadge({ v }: { v: number }) {
 
 // The "About" block: description, scores, key facts and tag groups — built from
 // the raw game_attributes so nothing is shown as a cryptic key/value dump.
+function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () => void }) {
+  const prov = d.attribute_provenance || {}
+  const overrides = d.attribute_overrides || {}
+  const [editing, setEditing] = useState<string | null>(null)
+  const [manual, setManual] = useState('')
+  const kinds = Object.keys(prov).sort()
+  if (!kinds.length) return null
+
+  const setOv = async (kind: string, value: string, origin: string) => {
+    try { await api.setAttributeOverride(d.norm_key, kind, value, origin) } catch { /* ignore */ }
+    setEditing(null); setManual(''); onChanged()
+  }
+  const clearOv = async (kind: string) => {
+    try { await api.clearAttributeOverride(d.norm_key, kind) } catch { /* ignore */ }
+    onChanged()
+  }
+
+  return (
+    <section className="attr-prov">
+      <h3>Attribute sources
+        <span className="sec-help">where each value came from — ✨ = AI-derived. Click a row to set the canonical value.</span>
+      </h3>
+      <div className="ap-list">
+        {kinds.map((kind) => {
+          const vals = prov[kind]
+          const ov = overrides[kind]
+          const open = editing === kind
+          return (
+            <div key={kind} className={'ap-row' + (open ? ' open' : '')}>
+              <button className="ap-kind" onClick={() => { setEditing(open ? null : kind); setManual('') }}>
+                <span className="ap-kname">{kind.replace(/_/g, ' ')}</span>
+                <span className="ap-vals">
+                  {ov ? (
+                    <span className="ap-chip ap-chosen">{ov.value}
+                      <span className="attr-origin">{ov.origin}</span></span>
+                  ) : vals.slice(0, 6).map((v, i) => (
+                    <span key={i} className="ap-chip">{v.ai && <span className="attr-sparkle" title="AI-derived">✨</span>}
+                      {v.value}
+                      {v.origins.map((o) => <span key={o} className="attr-origin">{o}</span>)}</span>
+                  ))}
+                  {!ov && vals.length > 6 && <span className="dim">+{vals.length - 6}</span>}
+                </span>
+                <span className="ap-caret">{open ? '▾' : '▸'}</span>
+              </button>
+              {open && (
+                <div className="attr-repoint">
+                  <div className="ar-h">Canonical value for “{kind.replace(/_/g, ' ')}”</div>
+                  {ov && (
+                    <div className="ar-cur">Currently pinned: <b>{ov.value}</b>
+                      <span className="attr-origin">{ov.origin}</span>
+                      <button className="link-btn" onClick={() => clearOv(kind)}>revert to sources</button>
+                    </div>
+                  )}
+                  <div className="ar-opts">
+                    {vals.map((v, i) => (
+                      <button key={i} className="ar-opt" onClick={() => setOv(kind, v.value, v.origins[0] || 'provider')}>
+                        {v.ai && <span className="attr-sparkle">✨</span>}{v.value}
+                        {v.origins.map((o) => <span key={o} className="attr-origin">{o}</span>)}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="ar-manual">
+                    <input placeholder="or type a manual value…" value={manual}
+                      onChange={(e) => setManual(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && manual.trim()) setOv(kind, manual.trim(), 'manual') }} />
+                    <button className="ops-btn go" disabled={!manual.trim()}
+                      onClick={() => setOv(kind, manual.trim(), 'manual')}>Set</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
 function About({ attrs, scores }: { attrs: Record<string, string[]>; scores?: Scores }) {
   const first = (k: string) => attrs[k]?.[0]
   const desc = first('description')
@@ -2639,6 +2730,8 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
                   <AiMetaCallout finding={d.ai_meta} onChanged={reloadDetail} />}
 
                 <About attrs={d.attributes} scores={d.scores} />
+
+                <AttributeProvenance d={d} onChanged={reloadDetail} />
 
                 <TagSection nk={d.norm_key} initial={d.tags} />
 
@@ -3527,9 +3620,29 @@ function AimFindingBody({ f }: { f: AiFinding }) {
           {m.issue && <div className="aim-issue">{m.issue}</div>}
         </div>
       )}
+      {p.provider_match && (
+        <div className="aim-provmatch">
+          {p.provider_match.cover && <img className="aim-pm-cover" src={p.provider_match.cover} alt="" />}
+          <div className="aim-pm-txt">
+            <span className="aim-pm-tag">✓ Matched to IGDB</span>
+            <b>{p.provider_match.name}</b>
+            {p.provider_match.year ? ` (${p.provider_match.year})` : ''}
+          </div>
+        </div>
+      )}
       {f.kind === 'supplement' && Object.keys(p.attributes || {}).length > 0 &&
         <div className="aim-fills-label">Fills gaps:</div>}
       <AimAttrList attrs={p.attributes} />
+      {p.web && (p.sources || []).length > 0 && (
+        <details className="aim-sources">
+          <summary>🔎 {p.sources!.length} web source{p.sources!.length === 1 ? '' : 's'}</summary>
+          <ul>
+            {p.sources!.map((s, i) => (
+              <li key={i}><a href={s.url} target="_blank" rel="noreferrer">{s.title || s.url}</a></li>
+            ))}
+          </ul>
+        </details>
+      )}
       {p.notes && <div className="aim-notes">{p.notes}</div>}
     </div>
   )
@@ -3550,10 +3663,106 @@ function AimActions({ f, onAct }: { f: AiFinding; onAct: (a: 'accept' | 'reject'
   )
 }
 
+function MagicWandOverlay({ filterQuery, filterCount, onClose }: {
+  filterQuery: GamesQuery; filterCount: number; onClose: () => void
+}) {
+  const [targets, setTargets] = useState<AiScanTargets | null>(null)
+  const [scope, setScope] = useState<'all' | 'filtered'>('filtered')
+  const [web, setWeb] = useState(false)
+  const [matchProvider, setMatchProvider] = useState(true)
+  const [limit, setLimit] = useState(100)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+  useEffect(() => { api.aimetaTargets().then(setTargets).catch(() => {}) }, [])
+  const hasFilter = !!(filterQuery.q || (filterQuery.include || []).length || (filterQuery.exclude || []).length)
+
+  const wave = async () => {
+    setBusy(true); setErr(''); setMsg('')
+    try {
+      const opts = { web: web && !!targets?.web_capable, match_provider: matchProvider }
+      let r
+      if (scope === 'all') {
+        r = await api.aimetaScan({ target: 'all', limit, ...opts })
+      } else {
+        // resolve the current filter to an explicit set of norm_keys
+        const page = await api.games({ ...filterQuery, limit: 2000, offset: 0 })
+        const keys = page.items.map((g) => g.norm_key)
+        if (!keys.length) { setErr('No games in the current filter.'); setBusy(false); return }
+        r = await api.aimetaScan({ norm_keys: keys, label: 'filtered', ...opts })
+      }
+      setMsg(`✨ Scan started on ${r.count.toLocaleString()} game(s)${r.web ? ' (web search on)' : ''} — watch the job monitor by the sync button, then review in Settings → AI Metadata → Review.`)
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="panel wand-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose}>×</button>
+        <h2 className="wand-title"><span className="wand-spark">✨</span> Magic wand</h2>
+        <p className="dim">Let AI make your library as complete as possible — identify unmatched
+          games, match them to a real provider, and fill in the gaps.</p>
+
+        {msg ? (
+          <>
+            <div className="sync-note wand-ok">{msg}</div>
+            <div className="settings-actions"><button className="go" onClick={onClose}>Done</button></div>
+          </>
+        ) : (
+          <>
+            <div className="wand-sec">
+              <div className="wand-sec-h">Scope</div>
+              <label className="wand-radio">
+                <input type="radio" checked={scope === 'filtered'} onChange={() => setScope('filtered')} />
+                <span>{hasFilter ? 'Only what’s currently filtered' : 'Current view'}
+                  <span className="wand-n">{filterCount.toLocaleString()} games</span></span>
+              </label>
+              <label className="wand-radio">
+                <input type="radio" checked={scope === 'all'} onChange={() => setScope('all')} />
+                <span>All games<span className="wand-n">{targets ? targets.all.toLocaleString() : '…'}</span></span>
+              </label>
+              {scope === 'all' && (
+                <label className="wand-limit">Max games this run
+                  <input type="number" min={1} value={limit}
+                    onChange={(e) => setLimit(Math.max(1, parseInt(e.target.value, 10) || 1))} />
+                </label>
+              )}
+            </div>
+
+            <div className="wand-sec">
+              <div className="wand-sec-h">Options</div>
+              <label className={'wand-check' + (targets && !targets.web_capable ? ' off' : '')}
+                title={targets && !targets.web_capable ? 'The metadata AI provider has no web search — pick Gemini/Anthropic/OpenAI in AI settings' : 'Slower, but verifies against live web sources'}>
+                <input type="checkbox" checked={web} disabled={!targets?.web_capable}
+                  onChange={(e) => setWeb(e.target.checked)} />
+                <span>Search the web for verification <span className="dim">(slower)</span></span>
+              </label>
+              <label className="wand-check">
+                <input type="checkbox" checked={matchProvider} onChange={(e) => setMatchProvider(e.target.checked)} />
+                <span>Match to a provider (IGDB) <span className="dim">— turn AI identities into real links</span></span>
+              </label>
+              <div className="wand-info">Matching a provider also pulls that provider’s trusted
+                attributes and media when you Apply the results.</div>
+            </div>
+
+            {err && <div className="fo-warn">⚠ {err}</div>}
+            <div className="settings-actions wand-actions">
+              <button className="go wand-go" disabled={busy} onClick={wave}>
+                {busy ? 'Starting…' : '✨ Wave the wand'}</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function MetadataScan() {
   const [targets, setTargets] = useState<AiScanTargets | null>(null)
   const [scans, setScans] = useState<AiScanRun[]>([])
   const [limit, setLimit] = useState(100)
+  const [web, setWeb] = useState(false)
+  const [matchProvider, setMatchProvider] = useState(true)
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
@@ -3569,13 +3778,13 @@ function MetadataScan() {
   const start = async (target: string) => {
     setBusy(target); setErr(''); setMsg('')
     try {
-      const r = await api.aimetaScan(target, limit)
+      const r = await api.aimetaScan({ target, limit, web: web && !!targets?.web_capable, match_provider: matchProvider })
       setMsg(`Scanning ${r.count.toLocaleString()} game(s) — track progress in the job monitor by the sync button, then review results in the Review tab.`)
       loadScans()
     } catch (e) { setErr((e as Error).message) } finally { setBusy('') }
   }
 
-  const CARDS: { id: keyof AiScanTargets; name: string; desc: string }[] = [
+  const CARDS: { id: 'unmatched' | 'matched' | 'missing' | 'all'; name: string; desc: string }[] = [
     { id: 'unmatched', name: 'Unmatched', desc: 'Games no provider matched — AI proposes an identity + fills attributes.' },
     { id: 'matched', name: 'Verify matches', desc: 'Audit existing matches and flag likely-wrong ones (remake vs original).' },
     { id: 'missing', name: 'Missing attributes', desc: 'Fill holes providers left — year, genres, developer, and more.' },
@@ -3610,6 +3819,13 @@ function MetadataScan() {
           <input type="number" min={1} value={limit}
             onChange={(e) => setLimit(Math.max(1, parseInt(e.target.value, 10) || 1))} />
         </label>
+        <label className="wand-check" title={targets && !targets.web_capable ? 'Provider has no web search' : 'Slower; verifies against live web sources'}>
+          <input type="checkbox" checked={web} disabled={!targets?.web_capable}
+            onChange={(e) => setWeb(e.target.checked)} /> Web search
+        </label>
+        <label className="wand-check">
+          <input type="checkbox" checked={matchProvider} onChange={(e) => setMatchProvider(e.target.checked)} /> Match provider (IGDB)
+        </label>
       </div>
 
       {msg && <div className="sync-note">{msg}</div>}
@@ -3640,9 +3856,21 @@ function MetadataReview() {
     [status, kind])
   useEffect(() => { reload() }, [reload])
 
+  const [note, setNote] = useState('')
   const act = async (id: number, action: 'accept' | 'reject' | 'reset') => {
     try { await api.aimetaFindingAction(id, action) } catch { /* ignore */ }
     reload()
+  }
+  const acceptAll = async () => {
+    setNote('')
+    try { const r = await api.aimetaAcceptAll(); setNote(`Accepted ${r.accepted} proposal(s).`) }
+    catch (e) { setNote((e as Error).message) }
+    reload()
+  }
+  const apply = async () => {
+    setNote('')
+    try { await api.aimetaApply(); setNote('✨ Applying accepted findings — linking provider matches and rebuilding the catalog. Track it in the job monitor.') }
+    catch (e) { setNote((e as Error).message) }
   }
   const countFor = (k: string) => {
     const c = data?.counts || {}
@@ -3657,6 +3885,14 @@ function MetadataReview() {
       <h2>Metadata review</h2>
       <p className="dim">AI proposals from your scans. Accept to keep (accepted supplements
         show on the game and bake into the catalog on the next rebuild); reject to dismiss.</p>
+
+      <div className="aim-toolbar">
+        <button className="ops-btn" onClick={acceptAll}>✓ Accept all proposed</button>
+        <button className="ops-btn go" onClick={apply}>✨ Apply to catalog</button>
+        <span className="dim aim-toolbar-hint">Apply links accepted provider matches and rebuilds
+          the catalog (runs in the job monitor).</span>
+      </div>
+      {note && <div className="sync-note">{note}</div>}
 
       <div className="aim-filters">
         <div className="aim-tabs">
@@ -3713,6 +3949,8 @@ function AiMetaCallout({ finding, onChanged }: { finding: AiFinding; onChanged: 
           {m.suggested_title}{m.suggested_year ? ` (${m.suggested_year})` : ''}</>}
         {finding.kind === 'supplement' && <><b>AI can fill:</b>{' '}
           {Object.keys(p.attributes || {}).map((k) => k.replace(/_/g, ' ')).join(', ')}</>}
+        {p.provider_match && <div className="aim-issue">✓ Real IGDB match found:{' '}
+          {p.provider_match.name}{p.provider_match.year ? ` (${p.provider_match.year})` : ''} — Apply in AI Metadata to link it.</div>}
       </div>
       {finding.status === 'proposed'
         ? <div className="aim-actions">

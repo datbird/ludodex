@@ -51,7 +51,18 @@ export interface GameDetail {
   metadata_links: { provider: string; provider_id: string; slug: string; url: string }[]
   media_kinds: string[]
   ai_meta?: AiFinding | null
+  attribute_provenance?: Record<string, { value: string; origins: string[]; ai: boolean }[]>
+  attribute_overrides?: Record<string, { value: string; origin: string }>
 }
+
+export interface ProviderMatch {
+  igdb_id: number
+  name: string
+  year: number | null
+  cover: string | null
+  platforms: string[]
+}
+export interface SourceCite { title: string; url: string }
 
 export interface AiMatch {
   status: 'ok' | 'wrong' | 'unmatched' | 'unsure'
@@ -66,6 +77,9 @@ export interface AiFindingPayload {
   notes: string
   current_match: { title: string | null; year: number | null; slug: string } | null
   missing: string[]
+  provider_match?: ProviderMatch | null
+  sources?: SourceCite[]
+  web?: boolean
 }
 export interface AiFinding {
   id: number
@@ -80,7 +94,8 @@ export interface AiFinding {
   payload: AiFindingPayload
 }
 export type AiFindingCounts = Record<string, Record<string, number>>
-export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number }
+export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number; web_capable: boolean }
+export interface ScanOpts { web?: boolean; match_provider?: boolean }
 export interface AiScanRun {
   id: number
   target: string
@@ -786,17 +801,45 @@ export const api = {
     return get<{ findings: AiFinding[]; counts: AiFindingCounts }>(
       '/api/aimeta/findings' + (q ? '?' + q : ''))
   },
-  aimetaScan: async (target: string, limit: number) => {
+  aimetaScan: async (
+    body: ({ target: string; limit?: number } | { norm_keys: string[]; label?: string }) & ScanOpts,
+  ) => {
     const r = await fetch('/api/aimeta/scan', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ target, limit }),
+      body: JSON.stringify(body),
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ run_id: number; target: string; count: number }>
+    return r.json() as Promise<{ run_id: number; target: string; count: number; web: boolean; match_provider: boolean }>
   },
   aimetaFindingAction: async (id: number, action: 'accept' | 'reject' | 'reset') => {
     const r = await fetch('/api/aimeta/finding/' + id + '/' + action, { method: 'POST' })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ findings: AiFinding[]; counts: AiFindingCounts }>
+  },
+  aimetaAcceptAll: async (minConfidence?: number) => {
+    const r = await fetch('/api/aimeta/accept-all', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ min_confidence: minConfidence || 0 }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ accepted: number; counts: AiFindingCounts }>
+  },
+  aimetaApply: async () => {
+    const r = await fetch('/api/aimeta/apply', { method: 'POST' })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ started: boolean }>
+  },
+  setAttributeOverride: async (nk: string, kind: string, value: string, origin: string) => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/attribute', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind, value, origin }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ override: { value: string; origin: string } }>
+  },
+  clearAttributeOverride: async (nk: string, kind: string) => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/attribute/' + encodeURIComponent(kind), { method: 'DELETE' })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ cleared: boolean }>
   },
 }
