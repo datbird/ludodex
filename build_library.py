@@ -106,7 +106,12 @@ _REGEN = set()
 for _s in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox"):
     if config.source_enabled(_s) and os.path.exists(OWN + "/%s_games.tsv" % _s):
         _REGEN.add(_s)
-if config.source_enabled("emulation") and _rom_indexes():
+# Emulation is ADDITIVE by default: prior emulation games are carried over AND the
+# current ROM indexes are merged in (union by norm_key). This prevents a device
+# sync from silently dropping emulation games that only exist via carry-over (e.g.
+# a Deck-produced library when the Deck isn't yet a synced ROM manager here). A
+# true from-scratch purge (producer / removed roms should leave) uses --fresh.
+if "--fresh" in sys.argv and config.source_enabled("emulation") and _rom_indexes():
     _REGEN.add("emulation")
 if os.path.exists(os.path.join(DIR, "crawl-index.sqlite")):
     _REGEN.add("archive")

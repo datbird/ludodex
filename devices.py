@@ -166,6 +166,10 @@ def manager_rm(mid):
     con.execute("DELETE FROM library_managers WHERE id=?", (mid,))
     con.commit()
     con.close()
+    try:                                   # drop this manager's ROM index, if any
+        os.remove(os.path.join(DIR, "roms-index-mgr%d.sqlite" % int(mid)))
+    except (OSError, ValueError):
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -237,39 +241,59 @@ def _rsync_ssh_e(dev):
     return e
 
 
+def _rom_index_path(lm):
+    return os.path.join(DIR, "roms-index-mgr%d.sqlite" % lm["id"])
+
+
 def pull_roms(dev, lm):
-    """Run find→build_romdb on the device and scp the ROM index back. Mirrors
-    update.sh's --roms path. Returns the ROM count."""
+    """Build a ROM index for this manager's rom_path → roms-index-mgr<id>.sqlite,
+    which build_library merges into the emulation source. Runs build_romdb in place
+    for a local device, or over SSH (scan+build on the device, scp the index back)
+    for a remote one. Returns the ROM count."""
     root = (lm.get("rom_path") or "").strip()
     if not root:
         raise RuntimeError("no ROM path set for this library manager")
-    tgt = _target(dev)
-    sopts = _scp_opts(dev)
-    # the pulled index lives on THIS server (the consumer); point the catalog at it
-    out = os.path.join(DIR, "roms-index.sqlite")
-    # ship the builder, scan + build on the device, fetch the index back
-    scp = _wrap_pw(dev, ["scp"] + sopts + [os.path.join(DIR, "build_romdb.py"),
-                   os.path.join(DIR, "romtags.py"), tgt + ":/tmp/"])
-    r = _run(scp, timeout=60)
-    if r.returncode != 0:
-        raise RuntimeError("scp builder failed: " + (r.stderr or "")[:160])
-    remote = ("find %s -type f -printf '%%s\\t%%T@\\t%%P\\n' > /tmp/ldx_romscan.tsv "
-              "&& python3 /tmp/build_romdb.py /tmp/ldx_romscan.tsv "
-              "/tmp/ldx-roms-index.sqlite %s" % (shlex.quote(root), shlex.quote(root)))
-    r = _ssh(dev, remote, timeout=300)
-    if r.returncode != 0:
-        raise RuntimeError("remote scan failed: " + (r.stderr or r.stdout or "")[:200])
-    back = _wrap_pw(dev, ["scp"] + sopts + [tgt + ":/tmp/ldx-roms-index.sqlite", out])
-    r = _run(back, timeout=120)
-    if r.returncode != 0:
-        raise RuntimeError("scp index back failed: " + (r.stderr or "")[:160])
+    out = _rom_index_path(lm)                          # per-manager index
+    if dev.get("transport") == "local":
+        # scan + build directly on this server (no SSH)
+        scan = os.path.join(DIR, "ldx_romscan_mgr%d.tsv" % lm["id"])
+        r = _run(["bash", "-c", "find %s -type f -printf '%%s\\t%%T@\\t%%P\\n' > %s"
+                  % (shlex.quote(root), shlex.quote(scan))], timeout=300)
+        if r.returncode != 0:
+            raise RuntimeError("local scan failed: " + (r.stderr or "")[:200])
+        r = _run([sys.executable, os.path.join(DIR, "build_romdb.py"), scan, out,
+                  root], timeout=600)
+        if r.returncode != 0:
+            raise RuntimeError("build_romdb failed: " + (r.stderr or "")[:200])
+        try:
+            os.remove(scan)
+        except OSError:
+            pass
+    else:
+        tgt = _target(dev)
+        sopts = _scp_opts(dev)
+        scp = _wrap_pw(dev, ["scp"] + sopts + [os.path.join(DIR, "build_romdb.py"),
+                       os.path.join(DIR, "romtags.py"), tgt + ":/tmp/"])
+        r = _run(scp, timeout=60)
+        if r.returncode != 0:
+            raise RuntimeError("scp builder failed: " + (r.stderr or "")[:160])
+        remote = ("find %s -type f -printf '%%s\\t%%T@\\t%%P\\n' > /tmp/ldx_romscan.tsv"
+                  " && python3 /tmp/build_romdb.py /tmp/ldx_romscan.tsv "
+                  "/tmp/ldx-roms-index.sqlite %s"
+                  % (shlex.quote(root), shlex.quote(root)))
+        r = _ssh(dev, remote, timeout=300)
+        if r.returncode != 0:
+            raise RuntimeError("remote scan failed: " + (r.stderr or r.stdout or "")[:200])
+        back = _wrap_pw(dev, ["scp"] + sopts + [tgt + ":/tmp/ldx-roms-index.sqlite",
+                        out])
+        r = _run(back, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError("scp index back failed: " + (r.stderr or "")[:160])
     con = sqlite3.connect(out)
     try:
         n = con.execute("SELECT COUNT(*) FROM roms").fetchone()[0]
     finally:
         con.close()
-    if config.get("roms_index_db") != out:            # catalog reads the local index
-        config.set_("roms_index_db", out)
     return n
 
 
