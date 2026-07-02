@@ -1718,7 +1718,7 @@ function AddDevice({ onAdded }: { onAdded: (d: { devices: Device[] }) => void })
 function DevicesPanel() {
   const [data, setData] = useState<{ devices: Device[]; lm_kinds: LmKinds } | null>(null)
   const [test, setTest] = useState<Record<number, { ok: boolean; detail: string }>>({})
-  const [sync, setSync] = useState<Record<number, { device?: string; results?: { manager: string; ok: boolean; roms?: number; media?: string; archive?: number; error?: string }[]; error?: string }>>({})
+  const [sync, setSync] = useState<Record<number, { device?: string; results?: { manager: string; ok: boolean; roms?: number; media?: string; error?: string }[]; error?: string }>>({})
   const [busy, setBusy] = useState<number | null>(null)
 
   const load = () => api.devices().then(setData).catch(() => setData({ devices: [], lm_kinds: {} }))
@@ -1768,7 +1768,7 @@ function DevicesPanel() {
           {sync[d.id] && (sync[d.id].error
             ? <div className="connect-msg err">{sync[d.id].error}</div>
             : sync[d.id].results && <div className="dev-sync">{sync[d.id].results!.map((r, i) =>
-                <div key={i} className={r.ok ? 'ok' : 'err'}>{r.ok ? '✓' : '✗'} {r.manager}: {r.ok ? (r.archive != null ? `${r.archive} archived files` : `${r.roms ?? 0} roms${r.media ? ' + media' : ''}`) : r.error}</div>)}</div>)}
+                <div key={i} className={r.ok ? 'ok' : 'err'}>{r.ok ? '✓' : '✗'} {r.manager}: {r.ok ? `${r.roms ?? 0} roms${r.media ? ' + media' : ''}` : r.error}</div>)}</div>)}
           <div className="dev-mgrs">
             {d.managers.map((m) => (
               <div key={m.id} className="dev-mgr">

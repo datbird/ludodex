@@ -29,7 +29,9 @@ import config
 DB = os.path.join(DIR, "connections.sqlite")
 MEDIA_DIR = os.path.join(DIR, "device-media")     # rsync'd device media lands here
 
-# library-manager kind -> (label, provides_roms, provides_media)
+# library-manager kind -> (label, provides_roms, provides_media). A plain directory
+# of game files (e.g. an Unraid share) is just a "ROM folder" — the same SSH-find +
+# filename index as any other ROM tree, so there's no separate "storage archive" kind.
 LM_KINDS = {
     "retrodeck": ("RetroDECK / ES-DE", True, True),
     "esde":      ("EmulationStation-DE", True, True),
@@ -37,18 +39,7 @@ LM_KINDS = {
     "playnite":  ("Playnite", True, False),
     "launchbox": ("LaunchBox", True, True),
     "roms":      ("ROM folder", True, False),
-    # a plain storage bucket of game files/archives (e.g. an Unraid share) — not a
-    # per-system ROM tree or a frontend; indexed as the catalog's `archive` source
-    "archive":   ("Storage archive", False, False),
 }
-
-# game-file extensions to index for a storage archive (ROM/disc exts + containers)
-try:
-    from romtags import ROM_EXTS as _ROM_EXTS
-except Exception:
-    _ROM_EXTS = set()
-ARCHIVE_EXTS = set(_ROM_EXTS) | {"zip", "7z", "rar", "iso", "chd", "cso", "rvz",
-                                 "wbfs", "pbp", "cue", "gdi", "rom"}
 
 
 def _con():
@@ -61,6 +52,10 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS library_managers(
         id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER, kind TEXT,
         name TEXT, rom_path TEXT, media_path TEXT, enabled INTEGER DEFAULT 1)""")
+    # the former "storage archive" kind was folded into "ROM folder" — migrate any
+    # existing rows so they sync via the normal ROM path
+    con.execute("UPDATE library_managers SET kind='roms' WHERE kind='archive'")
+    con.commit()
     con.row_factory = sqlite3.Row
     return con
 
@@ -281,55 +276,6 @@ def pull_media(dev, lm):
     return dest
 
 
-def pull_archive(dev, lm):
-    """Index a remote storage archive into the catalog's `archive` source. SSH-find
-    the game files on the device, populate crawl-index.sqlite with their (remote)
-    paths, register the archive name, and run process.py — which extracts titles
-    from filenames only, so no file contents need transferring. Returns file count."""
-    root = (lm.get("rom_path") or lm.get("media_path") or "").strip()
-    if not root:
-        raise RuntimeError("no path set for this storage archive")
-    name = "device-%d" % lm["id"]
-    r = _ssh(dev, "find %s -type f -printf '%%s\\t%%T@\\t%%P\\n'" % shlex.quote(root),
-             timeout=300)
-    if r.returncode != 0:
-        raise RuntimeError("remote find failed: " + (r.stderr or r.stdout or "")[:200])
-    now = time.time()
-    crawl = os.path.join(DIR, "crawl-index.sqlite")
-    con = sqlite3.connect(crawl)
-    con.execute("""CREATE TABLE IF NOT EXISTS files(
-        id INTEGER PRIMARY KEY, archive TEXT, kind TEXT, fullpath TEXT UNIQUE,
-        filename TEXT, ext TEXT, size_bytes INTEGER, mtime REAL,
-        first_seen REAL, last_seen REAL, processed INTEGER DEFAULT 0)""")
-    con.execute("DELETE FROM files WHERE archive=?", (name,))     # fresh each pull
-    n = 0
-    for line in r.stdout.splitlines():
-        try:
-            size_s, mtime_s, rel = line.split("\t", 2)
-        except ValueError:
-            continue
-        fn = rel.rsplit("/", 1)[-1]
-        ext = fn.rsplit(".", 1)[1].lower() if "." in fn else ""
-        if ext not in ARCHIVE_EXTS:
-            continue
-        con.execute("INSERT OR REPLACE INTO files(archive,kind,fullpath,filename,ext,"
-                    "size_bytes,mtime,first_seen,last_seen,processed) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,0)",
-                    (name, "rom", os.path.join(root, rel), fn, ext,
-                     int(size_s) if size_s.isdigit() else 0,
-                     float(mtime_s) if mtime_s.replace(".", "", 1).isdigit() else 0.0,
-                     now, now))
-        n += 1
-    con.commit()
-    con.close()
-    # register the archive so build_library includes it (name-gated), then extract
-    config.archive_set(name, root, "rom", 1)
-    pr = _run([sys.executable, os.path.join(DIR, "process.py")], timeout=300)
-    if pr.returncode != 0:
-        raise RuntimeError("process.py failed: " + (pr.stderr or "")[:160])
-    return n
-
-
 def sync_device(dev_id):
     """Pull every enabled library manager on a device. Returns a per-manager report."""
     dev = _device(dev_id)
@@ -340,27 +286,23 @@ def sync_device(dev_id):
         "SELECT * FROM library_managers WHERE device_id=? AND enabled=1", (dev_id,))]
     con.close()
     report = []
-    rebuild = False       # did any manager change catalog inputs (roms/archive)?
+    rebuild = False       # did any manager pull ROMs (→ catalog needs a rebuild)?
     for lm in lms:
         prov = LM_KINDS.get(lm["kind"], ("", True, True))
         item = {"manager": lm["name"] or lm["kind"], "kind": lm["kind"]}
         try:
-            if lm["kind"] == "archive":
-                item["archive"] = pull_archive(dev, lm)     # → catalog 'archive' source
+            if prov[1] and lm.get("rom_path"):
+                item["roms"] = pull_roms(dev, lm)
                 rebuild = True
-            else:
-                if prov[1] and lm.get("rom_path"):
-                    item["roms"] = pull_roms(dev, lm)
-                    rebuild = True
-                if prov[2] and lm.get("media_path"):
-                    item["media"] = pull_media(dev, lm)
+            if prov[2] and lm.get("media_path"):
+                item["media"] = pull_media(dev, lm)
             item["ok"] = True
         except Exception as e:
             item["ok"] = False
             item["error"] = str(e)[:200]
         report.append(item)
     out = {"device": dev["name"], "results": report}
-    if rebuild:      # rebuild the catalog so pulled roms/archive titles appear (build_library
+    if rebuild:      # rebuild the catalog so pulled ROM titles appear (build_library
         try:         # runs the consumer carry-over pass internally — the blessed rebuild path)
             r = _run([sys.executable, os.path.join(DIR, "build_library.py")], timeout=900)
             out["rebuilt"] = (r.returncode == 0)

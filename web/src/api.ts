@@ -522,7 +522,7 @@ export const api = {
   syncDevice: async (id: number) => {
     const r = await fetch('/api/devices/' + id + '/sync', { method: 'POST' })
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)
-    return r.json() as Promise<{ device: string; results: { manager: string; kind: string; ok: boolean; roms?: number; media?: string; archive?: number; error?: string }[] }>
+    return r.json() as Promise<{ device: string; results: { manager: string; kind: string; ok: boolean; roms?: number; media?: string; error?: string }[] }>
   },
   setManager: async (m: Partial<LibraryManager>) => {
     const r = await fetch('/api/devices/managers', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(m) })
