@@ -215,7 +215,8 @@ def store_finding(run_id, ctx, result, model=""):
                "notes": result.get("notes", ""),
                "current_match": ctx.get("match"), "missing": ctx.get("missing"),
                "sources": result.get("sources") or [], "web": bool(result.get("web")),
-               "provider_match": result.get("provider_match")}   # real IGDB hit, if found
+               "provider_match": result.get("provider_match"),   # IGDB hit (compat)
+               "provider_matches": result.get("provider_matches") or []}  # all providers
     con = _con()
     # a re-scan supersedes an earlier *un-reviewed* finding for the same game;
     # accepted/rejected findings are the user's decision and are left alone.
@@ -320,19 +321,45 @@ def accepted_supplements():
     return out
 
 
-def accepted_provider_matches():
-    """Accepted findings that carry a real provider (IGDB) match — [{norm_key,
-    igdb_id}] — to write into igdb_resolution so a rebuild links them."""
+def _accepted_matches_raw():
+    """Every provider match on accepted findings whose match was selected — each
+    as {norm_key, provider, igdb_id?, ss_id?, system?}. Reads both the legacy
+    single provider_match and the provider_matches list."""
     con = _con()
     out = []
     for r in con.execute("SELECT norm_key, payload_json, selection_json FROM "
                          "findings WHERE status='accepted'"):
-        pm = (json.loads(r["payload_json"] or "{}").get("provider_match") or {})
+        pl = json.loads(r["payload_json"] or "{}")
         sel = json.loads(r["selection_json"] or "null")
-        if pm.get("igdb_id") and (not sel or sel.get("match", True)):
-            out.append({"norm_key": r["norm_key"], "igdb_id": int(pm["igdb_id"])})
+        if sel and not sel.get("match", True):
+            continue
+        pms = list(pl.get("provider_matches") or [])
+        if not pms and pl.get("provider_match"):        # legacy single (IGDB)
+            pms = [dict(pl["provider_match"], provider="igdb")]
+        for pm in pms:
+            prov = pm.get("provider") or ("igdb" if pm.get("igdb_id") else None)
+            if prov:
+                out.append({"norm_key": r["norm_key"], "provider": prov,
+                            "igdb_id": pm.get("igdb_id"), "ss_id": pm.get("ss_id"),
+                            "system": pm.get("system")})
     con.close()
     return out
+
+
+def accepted_provider_matches():
+    """Accepted IGDB matches — [{norm_key, igdb_id}] — for igdb_resolution."""
+    return [{"norm_key": m["norm_key"], "igdb_id": int(m["igdb_id"])}
+            for m in _accepted_matches_raw()
+            if m["provider"] == "igdb" and m.get("igdb_id")]
+
+
+def accepted_ss_matches():
+    """Accepted ScreenScraper matches — [{norm_key, ss_id, system}] — to fetch +
+    cache into ss_game so a rebuild links them and pulls SS's rich media."""
+    return [{"norm_key": m["norm_key"], "ss_id": int(m["ss_id"]),
+             "system": m.get("system") or ""}
+            for m in _accepted_matches_raw()
+            if m["provider"] == "screenscraper" and m.get("ss_id")]
 
 
 # --------------------------------------------------------------------- scan runs

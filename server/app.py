@@ -1333,9 +1333,61 @@ def _provider_match(title, year=None):
         if best is None or s > best[0]:
             best = (s, h)
     h = best[1]
-    return {"igdb_id": h.get("igdb_id"), "name": h.get("name"),
+    return {"provider": "igdb", "igdb_id": h.get("igdb_id"), "name": h.get("name"),
             "year": h.get("year"), "cover": h.get("cover"),
             "platforms": h.get("platforms")}
+
+
+def _ss_match(queries, system, year=None):
+    """Search ScreenScraper by name (jeuRecherche) → the best candidate. Unlike
+    IGDB, SS is media-rich and covers the console/arcade long-tail. `queries` is
+    one or more title strings to try (e.g. the AI's clean title + the raw title),
+    since SS naming varies ('007 : Tomorrow Never Dies' vs 'James Bond 007: …').
+    Matches by token overlap, not exact equality. Returns a match dict or None."""
+    import screenscraper as ss
+    creds = config.screenscraper_creds()
+    if not creds:
+        return None
+    sid = ss.systeme_id(system) if system else None
+    raw = [q for q in (queries if isinstance(queries, (list, tuple)) else [queries])
+           if q]
+    # SS name-search is picky: strip file extensions + (region)/[tag] noise, and
+    # keep the raw forms too. Dedup while preserving order.
+    qlist, seenq = [], set()
+    for q in raw:
+        clean = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "",
+                       re.sub(r"\.\w{2,4}$", "", q)).strip()
+        for cand in (clean, q):
+            if cand and cand.lower() not in seenq:
+                seenq.add(cand.lower())
+                qlist.append(cand)
+    best, seen = None, set()
+    for q in qlist:
+        try:
+            cands = ss.jeu_recherche(creds, q, systemeid=sid, limit=8)
+        except Exception:
+            continue
+        qtok = set(titlenorm.norm(q).split())
+        for j in cands:
+            jid = j.get("id")
+            if jid in seen:
+                continue
+            seen.add(jid)
+            ntok = set(titlenorm.norm(ss.jeu_name(j)).split())
+            if not ntok:
+                continue
+            overlap = len(qtok & ntok) / len(ntok)   # SS-name tokens covered by query
+            yr = ss.jeu_year(j)
+            score = overlap + (0.3 if year and yr == str(year) else 0)
+            if overlap >= 0.6 and (best is None or score > best[0]):
+                best = (score, j, ss.jeu_name(j), yr)
+        if best and best[0] >= 1.0:                  # strong hit — stop trying variants
+            break
+    if not best:
+        return None
+    _, j, nm, yr = best
+    return {"provider": "screenscraper", "ss_id": j.get("id"), "name": nm,
+            "year": int(yr) if yr and str(yr).isdigit() else None, "system": system}
 
 
 def _aimeta_scan(run_id, norm_keys, opts, should_stop):
@@ -1357,10 +1409,15 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                     m = res.get("match") or {}
                     if (match_prov and m.get("suggested_title")
                             and m.get("status") in ("unmatched", "wrong", "unsure")):
-                        pm = _provider_match(m.get("suggested_title"),
-                                             m.get("suggested_year"))
-                        if pm:
-                            res["provider_match"] = pm
+                        title, yr = m.get("suggested_title"), m.get("suggested_year")
+                        sys0 = (ctx.get("systems") or [None])[0]
+                        pms = [p for p in (
+                            _provider_match(title, yr),
+                            _ss_match([title, ctx.get("title")], sys0, yr)) if p]
+                        if pms:
+                            res["provider_matches"] = pms
+                            res["provider_match"] = next(  # keep single for compat
+                                (p for p in pms if p["provider"] == "igdb"), pms[0])
                     if aimeta.store_finding(run_id, ctx, res, model):
                         found += 1
             except Exception as e:               # one game's failure never aborts
@@ -1493,11 +1550,44 @@ def _aimeta_apply(should_stop):
             except Exception:
                 pass
     mc.close()
+    _apply_ss_matches(now)
     _run_script("build_library.py", timeout=1800)
-    # pull provider media for the newly-linked games (IGDB covers/art, Steam CDN),
-    # then pick the best per kind — so a provider match fills ART, not just attrs
+    # pull provider media for the newly-linked games (IGDB covers/art, Steam CDN,
+    # ScreenScraper box/marquee/video), then pick the best per kind — so a provider
+    # match fills ART, not just attrs
     _run_script("media_fetch.py", timeout=1800)
     _run_script("media_choose.py", timeout=900)
+
+
+def _apply_ss_matches(now):
+    """Fetch accepted ScreenScraper matches by game id and cache the full record in
+    ss_game, so build_library links them (metadata) and media_fetch pulls SS media."""
+    import screenscraper as ss
+    ssm = aimeta.accepted_ss_matches()
+    if not ssm:
+        return
+    creds = config.screenscraper_creds()
+    if not creds:
+        return
+    sc = sqlite3.connect(os.path.join(DIR, "screenscraper-cache.sqlite"))
+    sc.execute("CREATE TABLE IF NOT EXISTS ss_game(norm_key TEXT, system TEXT, "
+               "ss_id INTEGER, status TEXT, payload_json TEXT, fetched_at INTEGER, "
+               "PRIMARY KEY(norm_key, system))")
+    for m in ssm:
+        if sc.execute("SELECT 1 FROM ss_game WHERE norm_key=? AND system=? AND "
+                      "status='ok'", (m["norm_key"], m["system"])).fetchone():
+            continue
+        try:
+            jeu, _ = ss.jeu_infos(creds, gameid=m["ss_id"])
+        except Exception:
+            jeu = None
+        if jeu:
+            sc.execute("INSERT OR REPLACE INTO ss_game(norm_key,system,ss_id,status,"
+                       "payload_json,fetched_at) VALUES(?,?,?,?,?,?)",
+                       (m["norm_key"], m["system"], m["ss_id"], "ok",
+                        json.dumps(jeu, ensure_ascii=False), now))
+            sc.commit()
+    sc.close()
 
 
 @app.post("/api/aimeta/apply")

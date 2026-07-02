@@ -189,7 +189,8 @@ def jeu_recherche(creds, recherche, systemeid=None, limit=8):
     jeux = resp.get("jeux")
     if isinstance(jeux, dict):                 # a single-game response
         jeux = [jeux]
-    return (jeux or [])[:limit]
+    # a no-result search returns a list with one empty dict — drop those
+    return [j for j in (jeux or []) if isinstance(j, dict) and j.get("id")][:limit]
 
 
 def jeu_name(jeu, region="us"):
