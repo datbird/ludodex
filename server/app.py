@@ -1494,6 +1494,10 @@ def _aimeta_apply(should_stop):
                 pass
     mc.close()
     _run_script("build_library.py", timeout=1800)
+    # pull provider media for the newly-linked games (IGDB covers/art, Steam CDN),
+    # then pick the best per kind — so a provider match fills ART, not just attrs
+    _run_script("media_fetch.py", timeout=1800)
+    _run_script("media_choose.py", timeout=900)
 
 
 @app.post("/api/aimeta/apply")
