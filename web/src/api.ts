@@ -50,6 +50,46 @@ export interface GameDetail {
   scores: Scores
   metadata_links: { provider: string; provider_id: string; slug: string; url: string }[]
   media_kinds: string[]
+  ai_meta?: AiFinding | null
+}
+
+export interface AiMatch {
+  status: 'ok' | 'wrong' | 'unmatched' | 'unsure'
+  confidence: number
+  issue: string | null
+  suggested_title: string | null
+  suggested_year: number | null
+}
+export interface AiFindingPayload {
+  match: AiMatch
+  attributes: Record<string, string | string[]>
+  notes: string
+  current_match: { title: string | null; year: number | null; slug: string } | null
+  missing: string[]
+}
+export interface AiFinding {
+  id: number
+  run_id: number
+  norm_key: string
+  title: string
+  kind: 'match' | 'identify' | 'supplement'
+  status: 'proposed' | 'accepted' | 'rejected'
+  confidence: number
+  model: string
+  created: number
+  payload: AiFindingPayload
+}
+export type AiFindingCounts = Record<string, Record<string, number>>
+export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number }
+export interface AiScanRun {
+  id: number
+  target: string
+  total: number
+  done: number
+  findings: number
+  status: string
+  created: number
+  finished: number | null
 }
 export interface GameTags {
   norm_key: string
@@ -734,5 +774,29 @@ export const api = {
     const r = await fetch('/api/jobs/' + id, { method: 'DELETE' })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json()
+  },
+  // ---- AI metadata audit & supplement ----
+  aimetaTargets: () => get<AiScanTargets>('/api/aimeta/targets'),
+  aimetaScans: () => get<{ scans: AiScanRun[] }>('/api/aimeta/scans'),
+  aimetaFindings: (status?: string, kind?: string) => {
+    const p = new URLSearchParams()
+    if (status) p.set('status', status)
+    if (kind) p.set('kind', kind)
+    const q = p.toString()
+    return get<{ findings: AiFinding[]; counts: AiFindingCounts }>(
+      '/api/aimeta/findings' + (q ? '?' + q : ''))
+  },
+  aimetaScan: async (target: string, limit: number) => {
+    const r = await fetch('/api/aimeta/scan', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ target, limit }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ run_id: number; target: string; count: number }>
+  },
+  aimetaFindingAction: async (id: number, action: 'accept' | 'reject' | 'reset') => {
+    const r = await fetch('/api/aimeta/finding/' + id + '/' + action, { method: 'POST' })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ findings: AiFinding[]; counts: AiFindingCounts }>
   },
 }

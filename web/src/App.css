@@ -1937,3 +1937,48 @@ a.idchip:hover { background: var(--accent-bg); }
 .job-when { font-size: 11px; }
 .job-acts { display: flex; gap: 4px; }
 .job-err { grid-column: 1 / -1; }
+
+/* ---- AI metadata audit & supplement ---- */
+.run-badge.s-failed, .run-badge.s-rejected { background: rgba(239,68,68,0.16); color: #ef4444; }
+.aim-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin: 12px 0 16px; }
+.aim-card { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
+.aim-card-name { font-weight: 600; color: var(--text-h); display: flex; align-items: center; justify-content: space-between; }
+.aim-card-count { font-size: 12px; font-weight: 700; color: var(--accent); background: var(--accent-bg); border-radius: 10px; padding: 1px 9px; }
+.aim-card-desc { font-size: 12px; color: var(--text); line-height: 1.4; flex: 1; }
+.aim-card .ops-btn { align-self: flex-start; }
+.aim-limit { margin: 4px 0 8px; }
+.aim-limit label { font-size: 13px; color: var(--text); display: flex; gap: 8px; align-items: center; }
+.aim-limit input { width: 90px; padding: 6px 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; color: var(--text-h); }
+.aim-h3 { margin: 18px 0 8px; font-size: 14px; color: var(--text-h); }
+.aim-scan .run-progress { flex: 1; max-width: 220px; }
+.aim-filters { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; flex-wrap: wrap; }
+.aim-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.aim-tab-n { margin-left: 6px; font-size: 10px; font-weight: 700; background: var(--border); color: var(--text-h); border-radius: 8px; padding: 0 6px; }
+.aim-filters select { padding: 6px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; color: var(--text-h); }
+.aim-finding { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: var(--panel); }
+.aim-fhead { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.aim-ftitle { font-weight: 600; color: var(--text-h); flex: 1; }
+.aim-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; padding: 2px 7px; border-radius: 5px; background: var(--border); color: var(--text); }
+.aim-kind.k-match { background: rgba(217,119,6,0.16); color: #d97706; }
+.aim-kind.k-identify { background: var(--accent-bg); color: var(--accent); }
+.aim-kind.k-supplement { background: rgba(34,197,94,0.14); color: #16a34a; }
+.aim-conf { font-size: 11px; font-weight: 700; color: var(--text); background: var(--border); border-radius: 10px; padding: 1px 8px; }
+.aim-body { font-size: 13px; color: var(--text); }
+.aim-callout { border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; line-height: 1.4; }
+.aim-callout.info { background: var(--accent-bg); color: var(--text-h); }
+.aim-callout.warn { background: rgba(217,119,6,0.12); border: 1px solid rgba(217,119,6,0.4); color: var(--text-h); }
+.aim-issue { font-size: 12px; color: var(--text); margin-top: 4px; font-style: italic; }
+.aim-fills-label { font-size: 12px; font-weight: 600; color: var(--text-h); margin-bottom: 4px; }
+.aim-attrs { display: flex; flex-direction: column; gap: 3px; }
+.aim-attr { display: flex; gap: 8px; font-size: 12px; }
+.aim-attr-k { min-width: 130px; color: var(--text); text-transform: capitalize; opacity: 0.8; }
+.aim-attr-v { color: var(--text-h); flex: 1; }
+.aim-notes { font-size: 12px; color: var(--text); opacity: 0.7; margin-top: 6px; font-style: italic; }
+.aim-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+/* detail-view callout */
+.aim-detail { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+.aim-detail.warn { background: rgba(217,119,6,0.12); border: 1px solid rgba(217,119,6,0.4); }
+.aim-detail.info { background: var(--accent-bg); }
+.aim-detail.soft { background: var(--panel); border: 1px solid var(--border); }
+.aim-detail-text { flex: 1; font-size: 13px; color: var(--text-h); line-height: 1.4; min-width: 200px; }
+.aim-detail .aim-issue { display: inline; font-style: normal; }

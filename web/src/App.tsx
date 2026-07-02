@@ -10,6 +10,7 @@ import type {
   Device,
   FileVariable, FileProfile, FileDetect, FilePlan, FileCommandResult,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
+  AiFinding, AiFindingCounts, AiScanTargets, AiScanRun,
 } from './api'
 import './App.css'
 
@@ -767,6 +768,7 @@ const SECTIONS = [
   { id: 'dashboard', name: 'Dashboard', icon: '🎛️' },
   { id: 'emulation', name: 'Emulation', icon: '🕹️' },
   { id: 'files', name: 'File ops', icon: '🗂️' },
+  { id: 'metadata', name: 'AI Metadata', icon: '🔎' },
 ]
 const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
   ai: [{ id: 'usage', name: 'AI Usage' }, { id: 'keys', name: 'API Keys' },
@@ -780,6 +782,8 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
   files: [{ id: 'operations', name: 'Operations' },
           { id: 'profiles', name: 'Profiles' },
           { id: 'history', name: 'History' }],
+  metadata: [{ id: 'scan', name: 'Scan' },
+             { id: 'review', name: 'Review' }],
 }
 
 function Settings({ onClose, onPrefsChanged }: { onClose: () => void; onPrefsChanged: () => void }) {
@@ -829,6 +833,8 @@ function Settings({ onClose, onPrefsChanged }: { onClose: () => void; onPrefsCha
               ? (sub === 'operations' ? <FileOpsOperations />
                 : sub === 'profiles' ? <FileProfiles />
                 : sub === 'history' ? <FileHistory /> : null)
+              : section === 'metadata'
+              ? (sub === 'scan' ? <MetadataScan /> : <MetadataReview />)
               : !cfg ? <div className="loading">Loading…</div>
               : sub === 'usage' ? <AiUsage cfg={cfg} onChange={reload} />
               : sub === 'keys' ? <ApiKeys cfg={cfg} onChange={reload} />
@@ -2582,7 +2588,8 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
   const [kinds, setKinds] = useState<MediaKind[]>([])
   const [tab, setTab] = useState<'attributes' | 'media'>('attributes')
 
-  useEffect(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
+  const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
+  useEffect(() => { reloadDetail() }, [reloadDetail])
   useEffect(() => { setMedia(null); api.mediaLibrary(nk).then(setMedia).catch(() => {}) }, [nk])
   useEffect(() => {
     api.mediaKinds().then((r) => {
@@ -2627,6 +2634,9 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
             {tab === 'attributes' ? (
               <div className="panel-body">
                 <Achievements nk={d.norm_key} />
+
+                {d.ai_meta && d.ai_meta.status !== 'rejected' &&
+                  <AiMetaCallout finding={d.ai_meta} onChanged={reloadDetail} />}
 
                 <About attrs={d.attributes} scores={d.scores} />
 
@@ -3471,6 +3481,246 @@ function FileHistory() {
       ))}
       {openRun != null && <RunbookModal runId={openRun} onClose={() => { setOpenRun(null); reload() }} />}
     </>
+  )
+}
+
+// ---- AI metadata audit & supplement ----
+const AIM_KIND_LABEL: Record<string, string> = {
+  match: 'Match flag', identify: 'Identify', supplement: 'Supplement',
+}
+
+function fmtAttrVal(v: string | string[]): string {
+  return Array.isArray(v) ? v.join(', ') : String(v)
+}
+
+function AimAttrList({ attrs }: { attrs: Record<string, string | string[]> }) {
+  const keys = Object.keys(attrs || {})
+  if (!keys.length) return null
+  return (
+    <div className="aim-attrs">
+      {keys.map((k) => (
+        <div key={k} className="aim-attr">
+          <span className="aim-attr-k">{k.replace(/_/g, ' ')}</span>
+          <span className="aim-attr-v">{fmtAttrVal(attrs[k])}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function AimFindingBody({ f }: { f: AiFinding }) {
+  const p = f.payload
+  const m = p.match || ({} as AiFinding['payload']['match'])
+  return (
+    <div className="aim-body">
+      {f.kind === 'identify' && (
+        <div className="aim-callout info">
+          No provider match → AI: <b>{m.suggested_title || '—'}</b>
+          {m.suggested_year ? ` (${m.suggested_year})` : ''}
+        </div>
+      )}
+      {f.kind === 'match' && (
+        <div className="aim-callout warn">
+          ⚠ Match may be wrong — currently <b>{p.current_match?.title || '—'}</b>
+          {p.current_match?.year ? ` (${p.current_match.year})` : ''}; AI thinks this is{' '}
+          <b>{m.suggested_title || '—'}</b>{m.suggested_year ? ` (${m.suggested_year})` : ''}.
+          {m.issue && <div className="aim-issue">{m.issue}</div>}
+        </div>
+      )}
+      {f.kind === 'supplement' && Object.keys(p.attributes || {}).length > 0 &&
+        <div className="aim-fills-label">Fills gaps:</div>}
+      <AimAttrList attrs={p.attributes} />
+      {p.notes && <div className="aim-notes">{p.notes}</div>}
+    </div>
+  )
+}
+
+function AimActions({ f, onAct }: { f: AiFinding; onAct: (a: 'accept' | 'reject' | 'reset') => void }) {
+  if (f.status === 'proposed') return (
+    <div className="aim-actions">
+      <button className="ops-btn go" onClick={() => onAct('accept')}>✓ Accept</button>
+      <button className="ops-btn" onClick={() => onAct('reject')}>✕ Reject</button>
+    </div>
+  )
+  return (
+    <div className="aim-actions">
+      <span className={'run-badge s-' + (f.status === 'accepted' ? 'done' : 'failed')}>{f.status}</span>
+      <button className="link-btn" onClick={() => onAct('reset')}>reset</button>
+    </div>
+  )
+}
+
+function MetadataScan() {
+  const [targets, setTargets] = useState<AiScanTargets | null>(null)
+  const [scans, setScans] = useState<AiScanRun[]>([])
+  const [limit, setLimit] = useState(100)
+  const [busy, setBusy] = useState('')
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+  const loadScans = useCallback(() => api.aimetaScans().then((d) => setScans(d.scans)).catch(() => {}), [])
+  useEffect(() => { api.aimetaTargets().then(setTargets).catch(() => {}); loadScans() }, [loadScans])
+  const anyRunning = scans.some((s) => s.status === 'running')
+  useEffect(() => {
+    if (!anyRunning) return
+    const t = setInterval(loadScans, 3000)
+    return () => clearInterval(t)
+  }, [anyRunning, loadScans])
+
+  const start = async (target: string) => {
+    setBusy(target); setErr(''); setMsg('')
+    try {
+      const r = await api.aimetaScan(target, limit)
+      setMsg(`Scanning ${r.count.toLocaleString()} game(s) — track progress in the job monitor by the sync button, then review results in the Review tab.`)
+      loadScans()
+    } catch (e) { setErr((e as Error).message) } finally { setBusy('') }
+  }
+
+  const CARDS: { id: keyof AiScanTargets; name: string; desc: string }[] = [
+    { id: 'unmatched', name: 'Unmatched', desc: 'Games no provider matched — AI proposes an identity + fills attributes.' },
+    { id: 'matched', name: 'Verify matches', desc: 'Audit existing matches and flag likely-wrong ones (remake vs original).' },
+    { id: 'missing', name: 'Missing attributes', desc: 'Fill holes providers left — year, genres, developer, and more.' },
+    { id: 'all', name: 'Everything', desc: 'Scan the whole catalog (largest — mind your usage caps).' },
+  ]
+
+  return (
+    <>
+      <h2>Metadata scan</h2>
+      <p className="dim">Have AI audit provider matches, identify unmatched games, and fill
+        attribute gaps. Results land in the <b>Review</b> tab for you to accept or reject —
+        nothing is applied automatically. Uses the <b>Metadata search &amp; supplement</b> AI area
+        (set its provider/model in AI settings).</p>
+
+      <div className="aim-cards">
+        {CARDS.map((c) => (
+          <div key={c.id} className="aim-card">
+            <div className="aim-card-name">{c.name}
+              <span className="aim-card-count">{targets ? (targets[c.id]).toLocaleString() : '…'}</span>
+            </div>
+            <div className="aim-card-desc">{c.desc}</div>
+            <button className="ops-btn go" disabled={!!busy || !targets || !targets[c.id]}
+              onClick={() => start(c.id)}>
+              {busy === c.id ? 'Starting…' : 'Scan'}
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div className="aim-limit">
+        <label>Max games this scan
+          <input type="number" min={1} value={limit}
+            onChange={(e) => setLimit(Math.max(1, parseInt(e.target.value, 10) || 1))} />
+        </label>
+      </div>
+
+      {msg && <div className="sync-note">{msg}</div>}
+      {err && <div className="fo-warn">⚠ {err}</div>}
+
+      <h3 className="aim-h3">Recent scans</h3>
+      {scans.length === 0 && <div className="sync-note dim">No scans yet.</div>}
+      {scans.map((s) => (
+        <div key={s.id} className="fo-hrow aim-scan">
+          <StatusBadge status={s.status} />
+          <span className="fo-hprofile">{s.target}</span>
+          <ProgressBar done={s.done} total={s.total} failed={0} />
+          <span className="dim">{s.done}/{s.total} · {s.findings} findings</span>
+          <span className="dim fo-hwhen">{relTime(s.finished || s.created)}</span>
+        </div>
+      ))}
+    </>
+  )
+}
+
+function MetadataReview() {
+  const [data, setData] = useState<{ findings: AiFinding[]; counts: AiFindingCounts } | null>(null)
+  const [kind, setKind] = useState('')          // '' = all
+  const [status, setStatus] = useState('proposed')
+  const reload = useCallback(
+    () => api.aimetaFindings(status || undefined, kind || undefined)
+      .then(setData).catch(() => setData({ findings: [], counts: {} })),
+    [status, kind])
+  useEffect(() => { reload() }, [reload])
+
+  const act = async (id: number, action: 'accept' | 'reject' | 'reset') => {
+    try { await api.aimetaFindingAction(id, action) } catch { /* ignore */ }
+    reload()
+  }
+  const countFor = (k: string) => {
+    const c = data?.counts || {}
+    if (!k) return Object.values(c).reduce((n, s) => n + (s[status] || 0), 0)
+    return (c[k]?.[status]) || 0
+  }
+  const KINDS = [{ id: '', name: 'All' }, { id: 'match', name: 'Match flags' },
+    { id: 'identify', name: 'Identify' }, { id: 'supplement', name: 'Supplement' }]
+
+  return (
+    <>
+      <h2>Metadata review</h2>
+      <p className="dim">AI proposals from your scans. Accept to keep (accepted supplements
+        show on the game and bake into the catalog on the next rebuild); reject to dismiss.</p>
+
+      <div className="aim-filters">
+        <div className="aim-tabs">
+          {KINDS.map((k) => (
+            <button key={k.id} className={'tab' + (kind === k.id ? ' sel' : '')}
+              onClick={() => setKind(k.id)}>{k.name}
+              <span className="aim-tab-n">{countFor(k.id)}</span>
+            </button>
+          ))}
+        </div>
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="proposed">Proposed</option>
+          <option value="accepted">Accepted</option>
+          <option value="rejected">Rejected</option>
+        </select>
+      </div>
+
+      {!data ? <div className="loading">Loading…</div>
+        : data.findings.length === 0
+          ? <div className="sync-note dim">No findings — run a scan from the Scan tab.</div>
+          : data.findings.map((f) => (
+            <div key={f.id} className={'aim-finding k-' + f.kind}>
+              <div className="aim-fhead">
+                <span className="aim-ftitle">{f.title}</span>
+                <span className={'aim-kind k-' + f.kind}>{AIM_KIND_LABEL[f.kind]}</span>
+                <span className="aim-conf">{Math.round((f.confidence || 0) * 100)}%</span>
+              </div>
+              <AimFindingBody f={f} />
+              <AimActions f={f} onAct={(a) => act(f.id, a)} />
+            </div>
+          ))}
+    </>
+  )
+}
+
+// Compact AI-finding callout for the game detail view.
+function AiMetaCallout({ finding, onChanged }: { finding: AiFinding; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const act = async (a: 'accept' | 'reject') => {
+    setBusy(true)
+    try { await api.aimetaFindingAction(finding.id, a); onChanged() }
+    finally { setBusy(false) }
+  }
+  const p = finding.payload
+  const m = p.match || ({} as AiFinding['payload']['match'])
+  const cls = finding.kind === 'match' ? 'warn' : finding.kind === 'identify' ? 'info' : 'soft'
+  return (
+    <div className={'aim-detail ' + cls}>
+      <div className="aim-detail-text">
+        {finding.kind === 'match' && <>⚠ <b>AI: this match may be wrong</b> — suggests{' '}
+          {m.suggested_title}{m.suggested_year ? ` (${m.suggested_year})` : ''}
+          {m.issue && <span className="aim-issue"> — {m.issue}</span>}</>}
+        {finding.kind === 'identify' && <><b>AI identified this as</b>{' '}
+          {m.suggested_title}{m.suggested_year ? ` (${m.suggested_year})` : ''}</>}
+        {finding.kind === 'supplement' && <><b>AI can fill:</b>{' '}
+          {Object.keys(p.attributes || {}).map((k) => k.replace(/_/g, ' ')).join(', ')}</>}
+      </div>
+      {finding.status === 'proposed'
+        ? <div className="aim-actions">
+            <button className="ops-btn go" disabled={busy} onClick={() => act('accept')}>Accept</button>
+            <button className="ops-btn" disabled={busy} onClick={() => act('reject')}>Reject</button>
+          </div>
+        : <span className={'run-badge s-' + (finding.status === 'accepted' ? 'done' : 'failed')}>{finding.status}</span>}
+    </div>
   )
 }
 
