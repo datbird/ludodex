@@ -100,6 +100,30 @@ def limits_map():
     return out
 
 
+def _month_tokens_model(model):
+    """This month's tokens for a model name across ALL providers."""
+    try:
+        con = _usage_con()
+        n = con.execute("SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM "
+                        "usage WHERE model=? AND day LIKE ?",
+                        (model, _month_prefix() + "%")).fetchone()[0]
+        con.close()
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
+def limits_list():
+    """Configured monthly caps as a flat list with this month's usage:
+    [{scope, key, cap, month}]. Empty when nothing is capped."""
+    lm = limits_map()
+    out = [{"scope": "provider", "key": p, "cap": c, "month": month_tokens(p)}
+           for p, c in sorted(lm.get("provider", {}).items())]
+    out += [{"scope": "model", "key": m, "cap": c, "month": _month_tokens_model(m)}
+            for m, c in sorted(lm.get("model", {}).items())]
+    return out
+
+
 def set_limit(scope, key, monthly_tokens):
     """Set (or clear, when falsy) a monthly token cap for a provider or model."""
     if scope not in ("provider", "model") or not key:

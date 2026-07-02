@@ -394,6 +394,20 @@ header h1 span { color: var(--accent); }
 .settings-content h2 { margin: 0 0 8px; color: var(--text-h); }
 .settings-content p.dim { color: var(--text); font-size: 13px; margin: 0 0 18px; }
 
+.caps-panel { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 12px 0 18px; background: var(--panel); }
+.caps-head { font-size: 14px; font-weight: 600; color: var(--text-h); }
+.caps-sub { font-size: 12px; margin: 2px 0 10px; }
+.caps-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.cap-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.cap-row.over { border-color: var(--danger, #d9534f); }
+.cap-scope { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; padding: 2px 6px; border-radius: 4px; background: var(--bg); color: var(--text); }
+.cap-scope.provider { color: var(--accent); }
+.cap-key { font-weight: 600; color: var(--text-h); font-size: 13px; }
+.cap-usage { font-size: 12px; margin-left: auto; }
+.caps-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.caps-add select, .caps-add input { padding: 7px 9px; font-size: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text-h); }
+.caps-add input { flex: 1 1 160px; }
+.caps-add .cap-num { flex: 0 1 150px; }
 .area-search { display: flex; align-items: center; gap: 10px; margin: 4px 0 10px; }
 .area-search input { flex: 1; padding: 8px 12px; font-size: 13px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; color: var(--text-h); }
 .area-search input:focus { outline: none; border-color: var(--accent); }

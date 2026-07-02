@@ -100,6 +100,7 @@ export interface AiUsageModel {
 }
 export interface AiUsageProvider { provider: string; month: number; total: number; cap: number }
 export interface AiUsageDay { day: string; calls: number; input: number; output: number }
+export interface AiCap { scope: 'provider' | 'model'; key: string; cap: number; month: number }
 
 export interface AiConfig {
   active: string | null
@@ -562,13 +563,14 @@ export const api = {
   aiUsageSeries: (provider: string, model: string) =>
     get<{ provider: string; model: string; days: AiUsageDay[] }>(
       `/api/ai/usage/series?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`),
+  aiLimits: () => get<{ caps: AiCap[] }>('/api/ai/limits'),
   setAiLimit: async (scope: 'provider' | 'model', key: string, monthly_tokens: number) => {
     const r = await fetch('/api/ai/limit', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ scope, key, monthly_tokens }),
     })
-    if (!r.ok) throw new Error(`${r.status} limit`)
-    return r.json() as Promise<{ models: AiUsageModel[]; providers: AiUsageProvider[] }>
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
+    return r.json() as Promise<{ caps: AiCap[]; usage: { models: AiUsageModel[]; providers: AiUsageProvider[] } }>
   },
   // AI provider config (phase 3 — BYOAI; keys are write-only, never returned)
   aiConfig: () => get<AiConfig>('/api/ai/config'),

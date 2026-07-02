@@ -2037,10 +2037,18 @@ def ai_usage_series(provider: str = Query(...), model: str = Query(...)):
             "days": ai.usage_series(provider, model)}
 
 
+@app.get("/api/ai/limits")
+def ai_limits():
+    """The list of configured monthly caps (empty by default), each with this
+    month's usage. Independent of what's been used — caps can name any model."""
+    return {"caps": ai.limits_list()}
+
+
 @app.post("/api/ai/limit")
 def ai_limit(body: dict = Body(...)):
     """Set (or clear, when 0) a monthly token cap for a provider or a model.
-    Body: {"scope": "provider"|"model", "key": "<id>", "monthly_tokens": N}."""
+    Body: {"scope": "provider"|"model", "key": "<id>", "monthly_tokens": N}.
+    `key` may be ANY provider/model — it need not have been used yet."""
     body = body or {}
     scope = (body.get("scope") or "").strip()
     key = (body.get("key") or "").strip()
@@ -2050,7 +2058,7 @@ def ai_limit(body: dict = Body(...)):
         ai.set_limit(scope, key, int(body.get("monthly_tokens") or 0))
     except (TypeError, ValueError):
         raise HTTPException(400, "monthly_tokens must be a number")
-    return ai.usage_summary()
+    return {"caps": ai.limits_list(), "usage": ai.usage_summary()}
 
 
 @app.get("/api/ai/models/{provider}")

@@ -9,7 +9,7 @@ import type {
   Spotlight as SpotlightData, EmuLocation, IdentifyCandidate, RecognizedGame,
   Device,
   FileVariable, FileProfile, FileDetect, FilePlan, FileCommandResult,
-  Runbook, RunHistoryRow, Troubleshoot, Job,
+  Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
 } from './api'
 import './App.css'
 
@@ -1331,10 +1331,19 @@ function UsageChart({ days }: { days: AiUsageDay[] }) {
 
 function AiUsageReport() {
   const [data, setData] = useState<{ models: AiUsageModel[]; providers: AiUsageProvider[] } | null>(null)
+  const [caps, setCaps] = useState<AiCap[]>([])
   const [sel, setSel] = useState<AiUsageModel | null>(null)
   const [series, setSeries] = useState<AiUsageDay[] | null>(null)
+  // add-a-cap form
+  const [capScope, setCapScope] = useState<'provider' | 'model'>('provider')
+  const [capProv, setCapProv] = useState('anthropic')
+  const [capModel, setCapModel] = useState('')
+  const [capVal, setCapVal] = useState('')
 
-  const load = () => api.aiUsage().then(setData).catch(() => setData({ models: [], providers: [] }))
+  const load = () => {
+    api.aiUsage().then(setData).catch(() => setData({ models: [], providers: [] }))
+    api.aiLimits().then((d) => setCaps(d.caps)).catch(() => setCaps([]))
+  }
   useEffect(() => { load() }, [])
 
   const openSeries = async (m: AiUsageModel) => {
@@ -1342,7 +1351,15 @@ function AiUsageReport() {
     try { setSeries((await api.aiUsageSeries(m.provider, m.model)).days) } catch { setSeries([]) }
   }
   const setCap = async (scope: 'provider' | 'model', key: string, v: number) => {
-    setData(await api.setAiLimit(scope, key, v))
+    const r = await api.setAiLimit(scope, key, v)
+    setData(r.usage); setCaps(r.caps)
+  }
+  const addCap = async () => {
+    const key = capScope === 'provider' ? capProv : capModel.trim()
+    const n = parseInt(capVal.replace(/[,_\s]/g, ''), 10)
+    if (!key || !n || n <= 0) return
+    await setCap(capScope, key, n)
+    setCapModel(''); setCapVal('')
   }
 
   if (!data) return <div className="loading">Loading…</div>
@@ -1352,6 +1369,40 @@ function AiUsageReport() {
       <p className="dim">Token usage per provider and model. Set a monthly cap (tokens)
         to <b>stop calls</b> once a provider or model reaches it — leave blank for
         unlimited. Click a model for its 30-day history.</p>
+
+      <div className="caps-panel">
+        <div className="caps-head">Usage caps</div>
+        <div className="caps-sub dim">Cap any provider or model — it doesn’t have to
+          have been used yet. Reaching a cap stops further calls that month.</div>
+        <div className="caps-list">
+          {caps.length === 0 && <div className="sync-note dim">No caps set.</div>}
+          {caps.map((c) => (
+            <div key={c.scope + '/' + c.key} className={'cap-row' + (c.cap > 0 && c.month >= c.cap ? ' over' : '')}>
+              <span className={'cap-scope ' + c.scope}>{c.scope}</span>
+              <span className="cap-key">{c.scope === 'provider' ? providerName(c.key) : c.key}</span>
+              <span className="cap-usage dim">{fmtTok(c.month)} / {fmtTok(c.cap)}</span>
+              <CapInput value={c.cap} onSave={(v) => setCap(c.scope, c.key, v)} />
+              <button className="emu-rm" title="Remove cap" onClick={() => setCap(c.scope, c.key, 0)}>×</button>
+            </div>
+          ))}
+        </div>
+        <div className="caps-add">
+          <select value={capScope} onChange={(e) => setCapScope(e.target.value as 'provider' | 'model')}>
+            <option value="provider">Provider</option>
+            <option value="model">Model</option>
+          </select>
+          {capScope === 'provider'
+            ? <select value={capProv} onChange={(e) => setCapProv(e.target.value)}>
+                {Object.keys(PROVIDER_LABELS).map((p) => <option key={p} value={p}>{providerName(p)}</option>)}
+              </select>
+            : <input placeholder="model id (e.g. claude-opus-4-8)" value={capModel}
+                onChange={(e) => setCapModel(e.target.value)} />}
+          <input className="cap-num" inputMode="numeric" placeholder="monthly tokens" value={capVal}
+            onChange={(e) => setCapVal(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') addCap() }} />
+          <button className="ops-btn" onClick={addCap}>＋ add cap</button>
+        </div>
+      </div>
 
       {data.models.length === 0 ? (
         <div className="sync-note dim">No AI usage recorded yet — it appears here after
