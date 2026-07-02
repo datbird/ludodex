@@ -1259,9 +1259,11 @@ def jobs_restart(jid: str):
         keys = aimeta.targets(old["target"], remaining)
         if not keys:
             raise HTTPException(400, "nothing left to scan for that target")
-        rid = aimeta.scan_new(old["target"], len(keys))
-        _start_job("aimeta:%d" % rid, "aimeta", "Metadata scan (%s)" % old["target"],
-                   lambda stop: _aimeta_scan(rid, keys, stop), run_id=rid,
+        web = bool(old.get("web"))
+        rid = aimeta.scan_new(old["target"], len(keys), web)
+        _start_job("aimeta:%d" % rid, "aimeta",
+                   "Metadata scan (%s%s)" % (old["target"], ", web" if web else ""),
+                   lambda stop: _aimeta_scan(rid, keys, web, stop), run_id=rid,
                    cancelable=True)
         return {"restarted": True, "id": "aimeta:%d" % rid}
     raise HTTPException(400, "start a library sync from the Library page")
@@ -1297,9 +1299,10 @@ def jobs_delete(jid: str):
 #  Findings are proposals the user accepts/rejects; accepted supplements show
 #  in the detail view and bake into the catalog on the next rebuild.
 # --------------------------------------------------------------------------- #
-def _aimeta_scan(run_id, norm_keys, should_stop):
+def _aimeta_scan(run_id, norm_keys, web, should_stop):
     """Background scan body: analyze each game, store actionable findings."""
-    done = found = 0
+    done = found = errs = 0
+    last_err = None
     lib = aimeta._lib()
     try:
         for nk in norm_keys:
@@ -1308,12 +1311,14 @@ def _aimeta_scan(run_id, norm_keys, should_stop):
             try:
                 ctx = aimeta.game_context(nk, lib=lib)
                 if ctx:
-                    res = ai.analyze_game(ctx)
+                    res = ai.analyze_game(ctx, web=web)
                     model = ai.model_for_area("metadata")
                     if aimeta.store_finding(run_id, ctx, res, model):
                         found += 1
-            except Exception:                    # one game's failure never aborts
-                pass
+            except Exception as e:               # one game's failure never aborts
+                errs += 1
+                last_err = str(e)[:200]
+                print("aimeta scan: %s -> %s" % (nk, last_err), file=sys.stderr)
             done += 1
             aimeta.scan_progress(run_id, done, found)
     finally:
@@ -1335,20 +1340,24 @@ def aimeta_scan(body: dict = Body(default={})):
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     limit = max(1, min(int(body.get("limit") or 100), 2000))
+    web = bool(body.get("web")) and ai.supports_web(ai.provider_for_area("metadata"))
     keys = aimeta.targets(target, limit)
     if not keys:
         raise HTTPException(400, "no games match that target")
-    run_id = aimeta.scan_new(target, len(keys))
-    _start_job("aimeta:%d" % run_id, "aimeta", "Metadata scan (%s)" % target,
-               lambda stop: _aimeta_scan(run_id, keys, stop),
+    run_id = aimeta.scan_new(target, len(keys), web)
+    _start_job("aimeta:%d" % run_id, "aimeta",
+               "Metadata scan (%s%s)" % (target, ", web" if web else ""),
+               lambda stop: _aimeta_scan(run_id, keys, web, stop),
                run_id=run_id, cancelable=True)
-    return {"run_id": run_id, "target": target, "count": len(keys)}
+    return {"run_id": run_id, "target": target, "count": len(keys), "web": web}
 
 
 @app.get("/api/aimeta/targets")
 def aimeta_targets():
-    """How many games each scan target would cover (for the scan UI)."""
-    return {t: aimeta.target_count(t) for t in ("unmatched", "matched", "missing", "all")}
+    """Per-target game counts + whether the metadata provider can search the web."""
+    out = {t: aimeta.target_count(t) for t in ("unmatched", "matched", "missing", "all")}
+    out["web_capable"] = ai.supports_web(ai.provider_for_area("metadata"))
+    return out
 
 
 @app.get("/api/aimeta/findings")

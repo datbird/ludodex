@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 
 DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, DIR)
@@ -562,6 +563,123 @@ def status():
     }
 
 
+# ------------------------------------------------------------- web-grounded calls
+# Providers whose SDK can run live web searches (forums, Reddit, Wikipedia, the
+# Internet Archive, fan wikis, blogs…) and return citations. openrouter proxies
+# don't expose these tools, so they fall back to model knowledge.
+WEB_PROVIDERS = {"gemini", "anthropic", "openai"}
+
+
+def supports_web(provider):
+    return provider in WEB_PROVIDERS
+
+
+def _dedup_sources(src):
+    seen, out = set(), []
+    for s in src:
+        u = s.get("url")
+        if u and u not in seen:
+            seen.add(u)
+            out.append(s)
+    return out[:20]
+
+
+def _web_gemini(key, model, system, user):
+    from google import genai
+    from google.genai import types
+    try:
+        client = genai.Client(api_key=key,
+                              http_options=types.HttpOptions(timeout=120_000))
+    except Exception:
+        client = genai.Client(api_key=key)
+    cfg = types.GenerateContentConfig(
+        system_instruction=system, max_output_tokens=2048,
+        tools=[types.Tool(google_search=types.GoogleSearch())])
+    resp = client.models.generate_content(model=model, contents=user, config=cfg)
+    sources = []
+    try:
+        gm = resp.candidates[0].grounding_metadata
+        for ch in (gm.grounding_chunks or []):
+            w = getattr(ch, "web", None)
+            if w and getattr(w, "uri", None):
+                sources.append({"title": getattr(w, "title", None) or w.uri,
+                                "url": w.uri})
+    except Exception:
+        pass
+    u = getattr(resp, "usage_metadata", None)
+    return (resp.text, getattr(u, "prompt_token_count", 0) or 0,
+            getattr(u, "candidates_token_count", 0) or 0, _dedup_sources(sources))
+
+
+def _web_anthropic(key, model, system, user):
+    import anthropic
+    client = anthropic.Anthropic(api_key=key)
+    resp = client.messages.create(
+        model=model, max_tokens=2048, system=system,
+        messages=[{"role": "user", "content": user}],
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}])
+    parts, sources = [], []
+    for block in resp.content:
+        bt = getattr(block, "type", None)
+        if bt == "text":
+            parts.append(block.text)
+            for c in (getattr(block, "citations", None) or []):
+                url = getattr(c, "url", None)
+                if url:
+                    sources.append({"title": getattr(c, "title", None) or url,
+                                    "url": url})
+        elif bt == "web_search_tool_result":
+            for r in (getattr(block, "content", None) or []):
+                url = getattr(r, "url", None)
+                if url:
+                    sources.append({"title": getattr(r, "title", None) or url,
+                                    "url": url})
+    u = resp.usage
+    return ("".join(parts), u.input_tokens, u.output_tokens,
+            _dedup_sources(sources))
+
+
+def _web_openai(key, model, user, base_url=None):
+    from openai import OpenAI
+    client = OpenAI(api_key=key, base_url=base_url) if base_url \
+        else OpenAI(api_key=key)
+    resp = client.responses.create(
+        model=model, tools=[{"type": "web_search"}], input=user, timeout=120)
+    sources = []
+    try:
+        for item in resp.output:
+            for c in (getattr(item, "content", None) or []):
+                for a in (getattr(c, "annotations", None) or []):
+                    url = getattr(a, "url", None)
+                    if url:
+                        sources.append({"title": getattr(a, "title", None) or url,
+                                        "url": url})
+    except Exception:
+        pass
+    u = getattr(resp, "usage", None)
+    return (resp.output_text, getattr(u, "input_tokens", 0) or 0,
+            getattr(u, "output_tokens", 0) or 0, _dedup_sources(sources))
+
+
+def _complete_text_web(provider, key, model, system, user):
+    """Web-grounded completion → (text, sources). Enforces the usage limit and
+    records tokens, like _complete_text. Falls back to a plain completion (no
+    sources) for providers without a web tool."""
+    check_limit(provider, model)
+    if provider == "gemini":
+        text, i, o, src = _retry(lambda: _web_gemini(key, model, system, user))
+    elif provider == "anthropic":
+        text, i, o, src = _retry(lambda: _web_anthropic(key, model, system, user))
+    elif provider == "openai":
+        text, i, o, src = _retry(
+            lambda: _web_openai(key, model, "%s\n\n%s" % (system, user)))
+    else:                                   # no web tool (e.g. openrouter)
+        text = _complete_text(provider, key, model, system, user)
+        return text, []
+    record_usage(provider, model, i, o)
+    return text, src
+
+
 # --------------------------------------------------------------------- NL → query
 def _system_prompt(sources, platforms):
     return area_prompt("search", sources=", ".join(sources),
@@ -629,19 +747,37 @@ def _resolve(provider, model=None):
     return provider, key, (model or model_for(provider))
 
 
+_TRANSIENT = ("503", "429", "500", "unavailable", "overloaded", "rate limit",
+              "timeout", "timed out", "temporarily", "try again")
+
+
+def _retry(fn, tries=3, base=2.0):
+    """Call fn(); retry transient provider errors (503/429/overload/timeout) with
+    linear backoff. Permanent errors (bad key, 400) raise immediately."""
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as e:            # noqa: BLE001
+            if i == tries - 1 or not any(t in str(e).lower() for t in _TRANSIENT):
+                raise
+            time.sleep(base * (i + 1))
+
+
 def _complete_text(provider, key, model, system, user):
     """Single text completion dispatched to the provider's SDK. Enforces the
     monthly usage limit before calling, and records token usage after."""
     check_limit(provider, model)
-    if provider == "anthropic":
-        text, i, o = _call_anthropic(key, model, system, user)
-    elif provider in ("openai", "openrouter"):
-        base = "https://openrouter.ai/api/v1" if provider == "openrouter" else None
-        text, i, o = _call_openai(key, model, system, user, base_url=base)
-    elif provider == "gemini":
-        text, i, o = _call_gemini(key, model, system, user)
-    else:
+
+    def call():
+        if provider == "anthropic":
+            return _call_anthropic(key, model, system, user)
+        if provider in ("openai", "openrouter"):
+            base = "https://openrouter.ai/api/v1" if provider == "openrouter" else None
+            return _call_openai(key, model, system, user, base_url=base)
+        if provider == "gemini":
+            return _call_gemini(key, model, system, user)
         raise RuntimeError("unknown provider %r" % provider)
+    text, i, o = _retry(call)
     record_usage(provider, model, i, o)
     return text
 
@@ -811,18 +947,49 @@ def _metadata_user(game):
     return "\n".join(lines)
 
 
-def analyze_game(game, provider=None, model=None):
+WEB_GUIDANCE = (
+    "\n\nSEARCH THE WEB to verify — forums, Reddit, Wikipedia, MobyGames/IGDB/"
+    "GiantBomb, the Internet Archive, fan wikis, and blogs are all fair game. "
+    "Cross-check every claim across INDEPENDENT sources: prefer consensus and "
+    "authoritative pages, and DISCOUNT a single unverified forum/blog post. In "
+    "\"notes\", say how well the sources agreed and flag anything you couldn't "
+    "confirm. ADD a \"sources\" key to the JSON: an array of the page URLs you "
+    "actually consulted (empty if you did not need to search). Still respond with "
+    "ONLY the JSON object (no prose outside it)."
+)
+
+
+def analyze_game(game, provider=None, model=None, web=False):
     """Audit + enrich one game. `game` is the context dict built by the caller.
-    Returns {match:{status,confidence,issue,suggested_title,suggested_year},
-             attributes:{kind:value}, notes}. Raises on error."""
+    When `web` is set and the provider supports it, the model searches the live
+    web and the result carries a `sources` list of citations. Returns
+    {match:{...}, attributes:{...}, notes, sources:[{title,url}], web:bool}."""
     provider, key, model = _resolve(provider or provider_for_area("metadata"),
                                     model or model_for_area("metadata"))
-    system = area_prompt("metadata")
-    obj = _json(_complete_text(provider, key, model, system, _metadata_user(game)))
+    user = _metadata_user(game)
+    used_web = bool(web and supports_web(provider))
+    if used_web:
+        text, sources = _complete_text_web(provider, key, model,
+                                           area_prompt("metadata") + WEB_GUIDANCE,
+                                           user)
+    else:
+        text = _complete_text(provider, key, model, area_prompt("metadata"), user)
+        sources = []
+    obj = _json(text)
     if not isinstance(obj, dict):
         raise RuntimeError("model did not return a metadata object")
     obj.setdefault("match", {})
     obj.setdefault("attributes", {})
+    # model-reported sources may be bare URL strings — normalize, then merge with
+    # the provider's grounding citations
+    reported = []
+    for s in (obj.get("sources") or []):
+        if isinstance(s, str):
+            reported.append({"title": s, "url": s})
+        elif isinstance(s, dict) and s.get("url"):
+            reported.append({"title": s.get("title") or s["url"], "url": s["url"]})
+    obj["sources"] = _dedup_sources(sources + reported)
+    obj["web"] = used_web
     return obj
 
 

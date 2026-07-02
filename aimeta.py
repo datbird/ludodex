@@ -37,7 +37,10 @@ def _con():
         confidence REAL, model TEXT, created REAL)""")
     con.execute("""CREATE TABLE IF NOT EXISTS scan_runs(
         id INTEGER PRIMARY KEY, target TEXT, total INTEGER, done INTEGER DEFAULT 0,
-        findings INTEGER DEFAULT 0, status TEXT, created REAL, finished REAL)""")
+        findings INTEGER DEFAULT 0, status TEXT, created REAL, finished REAL,
+        web INTEGER DEFAULT 0)""")
+    if "web" not in {r[1] for r in con.execute("PRAGMA table_info(scan_runs)")}:
+        con.execute("ALTER TABLE scan_runs ADD COLUMN web INTEGER DEFAULT 0")
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_nk ON findings(norm_key)")
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_status ON findings(status)")
     return con
@@ -171,7 +174,8 @@ def store_finding(run_id, ctx, result, model=""):
             else "supplement")
     payload = {"match": match, "attributes": attrs,
                "notes": result.get("notes", ""),
-               "current_match": ctx.get("match"), "missing": ctx.get("missing")}
+               "current_match": ctx.get("match"), "missing": ctx.get("missing"),
+               "sources": result.get("sources") or [], "web": bool(result.get("web"))}
     con = _con()
     # a re-scan supersedes an earlier *un-reviewed* finding for the same game;
     # accepted/rejected findings are the user's decision and are left alone.
@@ -256,10 +260,11 @@ def accepted_supplements():
 
 
 # --------------------------------------------------------------------- scan runs
-def scan_new(target, total):
+def scan_new(target, total, web=0):
     con = _con()
-    cur = con.execute("INSERT INTO scan_runs(target,total,status,created) "
-                      "VALUES(?,?, 'running', ?)", (target, total, time.time()))
+    cur = con.execute("INSERT INTO scan_runs(target,total,web,status,created) "
+                      "VALUES(?,?,?, 'running', ?)",
+                      (target, total, 1 if web else 0, time.time()))
     rid = cur.lastrowid
     con.commit()
     con.close()
