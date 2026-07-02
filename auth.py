@@ -131,3 +131,59 @@ def delete_session(token):
     con.execute("DELETE FROM sessions WHERE token_hash=?", (_tok_hash(token),))
     con.commit()
     con.close()
+
+
+# --------------------------------------------------------------------------- #
+#  User management (admin)
+# --------------------------------------------------------------------------- #
+ROLES = ("admin", "user")
+
+
+def list_users():
+    con = _con()
+    rows = con.execute(
+        "SELECT id, username, role, created FROM users ORDER BY created").fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def get_user(uid):
+    con = _con()
+    r = con.execute("SELECT id, username, role, created FROM users WHERE id=?",
+                    (uid,)).fetchone()
+    con.close()
+    return dict(r) if r else None
+
+
+def admin_count():
+    con = _con()
+    n = con.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
+    con.close()
+    return n
+
+
+def delete_user(uid):
+    con = _con()
+    con.execute("DELETE FROM users WHERE id=?", (uid,))
+    con.execute("DELETE FROM sessions WHERE user_id=?", (uid,))   # log them out too
+    con.commit()
+    con.close()
+
+
+def set_password(uid, password):
+    if len(password or "") < MIN_PASSWORD:
+        raise ValueError("password must be at least %d characters" % MIN_PASSWORD)
+    ph, salt = _hash_pw(password)
+    con = _con()
+    con.execute("UPDATE users SET pw_hash=?, pw_salt=? WHERE id=?", (ph, salt, uid))
+    con.commit()
+    con.close()
+
+
+def set_role(uid, role):
+    if role not in ROLES:
+        raise ValueError("role must be one of %s" % ", ".join(ROLES))
+    con = _con()
+    con.execute("UPDATE users SET role=? WHERE id=?", (role, uid))
+    con.commit()
+    con.close()

@@ -164,6 +164,77 @@ def auth_logout(request: Request):
     return resp
 
 
+def _require_admin(request: Request):
+    user = _current_user(request)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "admin access required")
+    return user
+
+
+@app.get("/api/auth/users")
+def auth_users(request: Request):
+    me = _require_admin(request)
+    return {"users": auth.list_users(), "me": me["id"], "roles": list(auth.ROLES)}
+
+
+@app.post("/api/auth/users")
+def auth_add_user(request: Request, body: dict = Body(...)):
+    _require_admin(request)
+    role = (body or {}).get("role") or "user"
+    if role not in auth.ROLES:
+        raise HTTPException(400, "invalid role")
+    try:
+        uid = auth.create_user((body or {}).get("username", ""),
+                               (body or {}).get("password", ""), role=role)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "user": auth.get_user(uid)}
+
+
+@app.delete("/api/auth/users/{uid}")
+def auth_delete_user(request: Request, uid: int):
+    me = _require_admin(request)
+    target = auth.get_user(uid)
+    if not target:
+        raise HTTPException(404, "no such user")
+    if uid == me["id"]:
+        raise HTTPException(400, "you can't delete your own account")
+    if target["role"] == "admin" and auth.admin_count() <= 1:
+        raise HTTPException(400, "can't delete the last admin")
+    auth.delete_user(uid)
+    return {"ok": True}
+
+
+@app.post("/api/auth/users/{uid}/password")
+def auth_reset_password(request: Request, uid: int, body: dict = Body(...)):
+    _require_admin(request)
+    if not auth.get_user(uid):
+        raise HTTPException(404, "no such user")
+    try:
+        auth.set_password(uid, (body or {}).get("password", ""))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/auth/users/{uid}/role")
+def auth_set_role(request: Request, uid: int, body: dict = Body(...)):
+    me = _require_admin(request)
+    target = auth.get_user(uid)
+    if not target:
+        raise HTTPException(404, "no such user")
+    role = (body or {}).get("role")
+    if target["role"] == "admin" and role != "admin" and auth.admin_count() <= 1:
+        raise HTTPException(400, "can't demote the last admin")
+    if uid == me["id"] and role != "admin":
+        raise HTTPException(400, "you can't remove your own admin role")
+    try:
+        auth.set_role(uid, role)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
 # ----------------------------------------------------------------------------- db
 def ro(path):
     """Open a SQLite db read-only (one connection per request — cheap, thread-safe)."""

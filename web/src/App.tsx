@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback, Fragment, type CSSProperties, type ChangeEvent, type DragEvent } from 'react'
+import { useEffect, useState, useRef, useCallback, Fragment, type CSSProperties, type ChangeEvent, type DragEvent, type FormEvent } from 'react'
 import { api } from './api'
 import type {
   GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
@@ -12,7 +12,7 @@ import type {
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, ProviderMatch, ScopeValue,
-  AuthUser, AuthStatus,
+  AuthUser, AuthStatus, AuthUserRow,
 } from './api'
 import './App.css'
 
@@ -306,7 +306,7 @@ function AuthScreen({ needsSetup, onAuthed }: { needsSetup: boolean; onAuthed: (
   const [confirm, setConfirm] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const submit = async (e: React.FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault()
     setErr('')
     if (needsSetup && password !== confirm) { setErr('Passwords do not match'); return }
@@ -824,7 +824,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       {selected && <Detail nk={selected} onClose={() => setSelected(null)} />}
       {showSettings && <Settings onClose={() => setShowSettings(false)}
-        onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} />}
+        onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} user={user} />}
       {showAddGame && <AddGame facets={facets} onClose={() => setShowAddGame(false)}
         onAdded={() => load(true)} />}
       {showWand && <MagicWandOverlay
@@ -858,6 +858,7 @@ const SECTIONS = [
   { id: 'dashboard', name: 'Dashboard', icon: '🎛️' },
   { id: 'files', name: 'File ops', icon: '🗂️' },
   { id: 'metadata', name: 'AI Metadata', icon: '🔎' },
+  { id: 'account', name: 'Account & Users', icon: '👤' },
 ]
 const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
   ai: [{ id: 'usage', name: 'AI Usage' }, { id: 'keys', name: 'API Keys' },
@@ -872,9 +873,12 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
           { id: 'history', name: 'History' }],
   metadata: [{ id: 'scan', name: 'Scan' },
              { id: 'review', name: 'Review' }],
+  account: [{ id: 'users', name: 'Users' }],
 }
 
-function Settings({ onClose, onPrefsChanged }: { onClose: () => void; onPrefsChanged: () => void }) {
+function Settings({ onClose, onPrefsChanged, user }: {
+  onClose: () => void; onPrefsChanged: () => void; user: AuthUser | null
+}) {
   const [section, setSection] = useState('ai')
   const [sub, setSub] = useState('usage')
   const [cfg, setCfg] = useState<AiConfig | null>(null)
@@ -882,6 +886,8 @@ function Settings({ onClose, onPrefsChanged }: { onClose: () => void; onPrefsCha
   const reload = () => api.aiConfig().then(setCfg).catch(() => {})
   useEffect(() => { reload() }, [])
 
+  // "Account & Users" is admin-only.
+  const sections = SECTIONS.filter((s) => s.id !== 'account' || user?.role === 'admin')
   const subs = SUBSECTIONS[section] ?? []
 
   return (
@@ -889,7 +895,7 @@ function Settings({ onClose, onPrefsChanged }: { onClose: () => void; onPrefsCha
       <div className="settings-window" onClick={(e) => e.stopPropagation()}>
         <nav className="settings-nav">
           <div className="settings-title">Settings</div>
-          {SECTIONS.map((s) => (
+          {sections.map((s) => (
             <button key={s.id}
               className={'nav-item' + (section === s.id ? ' sel' : '')}
               onClick={() => { setSection(s.id); setSub((SUBSECTIONS[s.id] ?? [])[0]?.id ?? '') }}>
@@ -921,6 +927,8 @@ function Settings({ onClose, onPrefsChanged }: { onClose: () => void; onPrefsCha
                 : sub === 'history' ? <FileHistory /> : null)
               : section === 'metadata'
               ? (sub === 'scan' ? <MetadataScan /> : <MetadataReview />)
+              : section === 'account'
+              ? <UsersPanel currentUser={user} />
               : !cfg ? <div className="loading">Loading…</div>
               : sub === 'usage' ? <AiUsage cfg={cfg} onChange={reload} />
               : sub === 'keys' ? <ApiKeys cfg={cfg} onChange={reload} />
@@ -930,6 +938,91 @@ function Settings({ onClose, onPrefsChanged }: { onClose: () => void; onPrefsCha
         </div>
       </div>
     </div>
+  )
+}
+
+function UsersPanel({ currentUser }: { currentUser: AuthUser | null }) {
+  const [data, setData] = useState<{ users: AuthUserRow[]; me: number; roles: string[] } | null>(null)
+  const [err, setErr] = useState('')
+  const [nu, setNu] = useState({ username: '', password: '', role: 'user' })
+  const [busy, setBusy] = useState(false)
+  const [pwFor, setPwFor] = useState<number | null>(null)
+  const [pwVal, setPwVal] = useState('')
+
+  const load = () => api.listUsers().then((d) => { setData(d); setErr('') })
+    .catch((e) => setErr((e as Error).message))
+  useEffect(() => { load() }, [])
+
+  const add = async (e: FormEvent) => {
+    e.preventDefault(); setErr(''); setBusy(true)
+    try { await api.addUser(nu.username.trim(), nu.password, nu.role); setNu({ username: '', password: '', role: 'user' }); load() }
+    catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+  const del = async (u: AuthUserRow) => {
+    if (!confirm(`Delete user “${u.username}”? They’ll be signed out and removed.`)) return
+    setErr('')
+    try { await api.deleteUser(u.id); load() } catch (e) { setErr((e as Error).message) }
+  }
+  const changeRole = async (u: AuthUserRow, role: string) => {
+    setErr('')
+    try { await api.setUserRole(u.id, role); load() } catch (e) { setErr((e as Error).message); load() }
+  }
+  const resetPw = async (u: AuthUserRow) => {
+    setErr('')
+    try { await api.resetPassword(u.id, pwVal); setPwFor(null); setPwVal('') }
+    catch (e) { setErr((e as Error).message) }
+  }
+
+  if (!data) return err ? <div className="connect-msg err">{err}</div> : <div className="loading">Loading…</div>
+  const roles = data.roles.length ? data.roles : ['admin', 'user']
+  return (
+    <>
+      <h2>Users</h2>
+      <p className="dim">Local accounts for signing in to ludodex, stored on this server
+        (passwords are hashed, never plain text). Admins can add or remove users and change
+        roles. The last admin can’t be removed or demoted.
+        {currentUser && <> You’re signed in as <b>{currentUser.username}</b>.</>}</p>
+      {err && <div className="connect-msg err">{err}</div>}
+      <div className="users-list">
+        {data.users.map((u) => (
+          <div key={u.id} className="user-row">
+            <div className="user-main">
+              <span className="user-name">{u.username}
+                {u.id === data.me && <span className="user-you">you</span>}</span>
+              <span className="user-since">added {new Date(u.created * 1000).toLocaleDateString()}</span>
+            </div>
+            <select className="user-role" value={u.role} onChange={(e) => changeRole(u, e.target.value)}>
+              {roles.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+            <button className="ops-btn" onClick={() => { setPwFor(pwFor === u.id ? null : u.id); setPwVal('') }}>
+              {pwFor === u.id ? 'Cancel' : 'Reset password'}</button>
+            <button className="emu-rm" title={u.id === data.me ? "You can't delete yourself" : 'Delete user'}
+              onClick={() => del(u)} disabled={u.id === data.me}>×</button>
+            {pwFor === u.id && (
+              <div className="user-pw-row">
+                <input type="password" autoComplete="new-password" placeholder="new password (min 8)"
+                  value={pwVal} onChange={(e) => setPwVal(e.target.value)} />
+                <button className="go primary" disabled={pwVal.length < 8} onClick={() => resetPw(u)}>Set password</button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      <form className="user-add" onSubmit={add}>
+        <div className="user-add-title">＋ Add a user</div>
+        <div className="user-add-grid">
+          <input placeholder="username" autoComplete="off" value={nu.username}
+            onChange={(e) => setNu({ ...nu, username: e.target.value })} />
+          <input type="password" autoComplete="new-password" placeholder="password (min 8)" value={nu.password}
+            onChange={(e) => setNu({ ...nu, password: e.target.value })} />
+          <select value={nu.role} onChange={(e) => setNu({ ...nu, role: e.target.value })}>
+            {roles.map((r) => <option key={r} value={r}>{r}</option>)}
+          </select>
+          <button className="go primary" type="submit"
+            disabled={busy || !nu.username.trim() || nu.password.length < 8}>Add user</button>
+        </div>
+      </form>
+    </>
   )
 }
 

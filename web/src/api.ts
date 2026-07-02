@@ -433,19 +433,23 @@ async function get<T>(path: string): Promise<T> {
   return r.json()
 }
 
-// POST JSON, surfacing the server's {detail} message on failure (for auth forms).
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+// Send a mutation, surfacing the server's {detail} message on failure.
+async function mutate<T>(path: string, method: string, body?: unknown): Promise<T> {
   const r = await fetch(path, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+    method,
+    headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   const data = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error((data as { detail?: string }).detail || `${r.status} ${path}`)
   return data as T
 }
+const postJson = <T>(path: string, body: unknown) => mutate<T>(path, 'POST', body)
 
 export type AuthUser = { id?: number; username: string; role: string }
 export type AuthStatus = { needs_setup: boolean; authenticated: boolean; user: AuthUser | null }
+export type AuthUserRow = { id: number; username: string; role: string; created: number }
+export type UsersList = { users: AuthUserRow[]; me: number; roles: string[] }
 
 export const api = {
   authStatus: () => get<AuthStatus>('/api/auth/status'),
@@ -454,6 +458,14 @@ export const api = {
   authLogin: (username: string, password: string) =>
     postJson<{ ok: boolean; user: AuthUser }>('/api/auth/login', { username, password }),
   authLogout: () => postJson<{ ok: boolean }>('/api/auth/logout', {}),
+  listUsers: () => get<UsersList>('/api/auth/users'),
+  addUser: (username: string, password: string, role: string) =>
+    postJson<{ ok: boolean; user: AuthUserRow }>('/api/auth/users', { username, password, role }),
+  deleteUser: (id: number) => mutate<{ ok: boolean }>('/api/auth/users/' + id, 'DELETE'),
+  resetPassword: (id: number, password: string) =>
+    postJson<{ ok: boolean }>('/api/auth/users/' + id + '/password', { password }),
+  setUserRole: (id: number, role: string) =>
+    postJson<{ ok: boolean }>('/api/auth/users/' + id + '/role', { role }),
 
   stats: () => get<Stats>('/api/stats'),
   facets: () => get<Facets>('/api/facets'),

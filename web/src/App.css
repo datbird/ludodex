@@ -2125,3 +2125,27 @@ a.idchip:hover { background: var(--accent-bg); }
   border: 1px solid rgba(239,68,68,0.4); border-radius: 8px; padding: 8px 10px; font-size: 12px; }
 .auth-submit { margin-top: 4px; padding: 11px; font-size: 14px; width: 100%; }
 .auth-hint { text-align: center; color: var(--text); opacity: 0.7; font-size: 11px; line-height: 1.5; }
+
+/* --- Settings › Account & Users --- */
+.users-list { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 20px; }
+.user-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px;
+  align-items: center; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 14px; }
+.user-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.user-name { font-weight: 600; color: var(--text-h); display: flex; align-items: center; gap: 8px; }
+.user-you { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--accent); background: var(--accent-bg); border-radius: 5px; padding: 1px 6px; }
+.user-since { font-size: 11px; color: var(--text); }
+.user-role { padding: 6px 8px; font-size: 12px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; color: var(--text-h); text-transform: capitalize; }
+.user-pw-row { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center;
+  margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--border); }
+.user-pw-row input { flex: 1 1 auto; padding: 8px 10px; font-size: 13px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 7px; color: var(--text-h); }
+.user-add { border: 1px dashed var(--border); border-radius: 10px; padding: 14px; }
+.user-add-title { font-weight: 600; color: var(--text-h); margin-bottom: 10px; font-size: 13px; }
+.user-add-grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.user-add-grid input { flex: 1 1 160px; padding: 8px 10px; font-size: 13px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 7px; color: var(--text-h); }
+.user-add-grid select { padding: 8px 10px; font-size: 13px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 7px; color: var(--text-h); text-transform: capitalize; }
