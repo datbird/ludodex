@@ -394,6 +394,11 @@ header h1 span { color: var(--accent); }
 .settings-content h2 { margin: 0 0 8px; color: var(--text-h); }
 .settings-content p.dim { color: var(--text); font-size: 13px; margin: 0 0 18px; }
 
+.area-search { display: flex; align-items: center; gap: 10px; margin: 4px 0 10px; }
+.area-search input { flex: 1; padding: 8px 12px; font-size: 13px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; color: var(--text-h); }
+.area-search input:focus { outline: none; border-color: var(--accent); }
+.area-search-count { font-size: 12px; color: var(--text); opacity: 0.7; white-space: nowrap; }
+.area-none { text-align: center; color: var(--text); opacity: 0.6; padding: 18px; font-size: 13px; }
 .usage-table { width: 100%; border-collapse: collapse; }
 .usage-table th {
   text-align: left;

@@ -1438,6 +1438,7 @@ function AreaPromptEditor({ area, onSave }: { area: AiArea; onSave: (prompt: str
 function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
   const [dedupeOpen, setDedupeOpen] = useState(false)
   const [promptOpen, setPromptOpen] = useState<string | null>(null)
+  const [areaQuery, setAreaQuery] = useState('')
   const [liveModels, setLiveModels] = useState<Record<string, string[]>>({})
   const [visionModels, setVisionModels] = useState<Record<string, string[]>>({})
   const [refreshing, setRefreshing] = useState(false)
@@ -1534,10 +1535,26 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
         </button>
       </div>
 
+      {(() => {
+        const q = areaQuery.trim().toLowerCase()
+        const shown = q
+          ? cfg.areas.filter((a) => (a.name + ' ' + a.description + ' ' + a.id)
+              .toLowerCase().includes(q))
+          : cfg.areas
+        return (
+      <>
+      <div className="area-search">
+        <input type="search" placeholder="🔍 Search AI functions…" value={areaQuery}
+          onChange={(e) => setAreaQuery(e.target.value)} />
+        {q && <span className="area-search-count">{shown.length} of {cfg.areas.length}</span>}
+      </div>
       <table className="usage-table">
         <thead><tr><th>Interface area</th><th>Provider</th><th>Model</th></tr></thead>
         <tbody>
-          {cfg.areas.map((a) => {
+          {shown.length === 0 && (
+            <tr><td colSpan={3} className="area-none">No AI functions match “{areaQuery}”.</td></tr>
+          )}
+          {shown.map((a) => {
             const dfltProv = a.vision ? cfg.vision_default.provider : cfg.default.provider
             const effProv = a.assigned ?? dfltProv
             const open = promptOpen === a.id
@@ -1588,6 +1605,9 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
           })}
         </tbody>
       </table>
+      </>
+      )
+      })()}
 
       {dedupeOpen && <Dedupe onClose={() => setDedupeOpen(false)} />}
     </>
