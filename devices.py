@@ -39,6 +39,9 @@ LM_KINDS = {
     "playnite":  ("Playnite", True, False),
     "launchbox": ("LaunchBox", True, True),
     "roms":      ("ROM folder", True, False),
+    # a folder of just media (box art / video / manuals…), ES-DE-structured;
+    # media_kinds picks which of the ~23 kinds to ingest from it (empty = all)
+    "media":     ("Media folder", False, True),
 }
 
 
@@ -52,6 +55,10 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS library_managers(
         id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER, kind TEXT,
         name TEXT, rom_path TEXT, media_path TEXT, enabled INTEGER DEFAULT 1)""")
+    # which media kinds a "media" folder should ingest (comma-joined; '' = all)
+    if "media_kinds" not in {r[1] for r in
+                             con.execute("PRAGMA table_info(library_managers)")}:
+        con.execute("ALTER TABLE library_managers ADD COLUMN media_kinds TEXT DEFAULT ''")
     # the former "storage archive" kind was folded into "ROM folder" — migrate any
     # existing rows so they sync via the normal ROM path
     con.execute("UPDATE library_managers SET kind='roms' WHERE kind='archive'")
@@ -71,6 +78,7 @@ def devices_list():
     by_dev = {}
     for lm in lms:
         lm["kind_label"] = LM_KINDS.get(lm["kind"], (lm["kind"], True, True))[0]
+        lm["media_kinds"] = [k for k in (lm.get("media_kinds") or "").split(",") if k]
         by_dev.setdefault(lm["device_id"], []).append(lm)
     for d in devs:
         d.pop("password", None)                        # never expose the secret
@@ -129,18 +137,24 @@ def device_rm(dev_id):
 
 def manager_set(m):
     con = _con()
-    fields = ("device_id", "kind", "name", "rom_path", "media_path", "enabled")
+    # media_kinds may arrive as a list (from the UI picker) or a string
+    mk = m.get("media_kinds")
+    mk_str = ",".join(mk) if isinstance(mk, (list, tuple)) else (mk or "")
+    fields = ("device_id", "kind", "name", "rom_path", "media_path",
+              "media_kinds", "enabled")
+    vals = {"device_id": m.get("device_id"), "kind": m.get("kind"),
+            "name": m.get("name"), "rom_path": m.get("rom_path"),
+            "media_path": m.get("media_path"), "media_kinds": mk_str,
+            "enabled": 1 if m.get("enabled", True) else 0}
     if m.get("id"):
         con.execute("UPDATE library_managers SET %s WHERE id=?"
                     % ",".join("%s=?" % f for f in fields),
-                    [m.get(f) for f in fields] + [int(m["id"])])
+                    [vals[f] for f in fields] + [int(m["id"])])
         mid = int(m["id"])
     else:
-        con.execute("INSERT INTO library_managers(device_id,kind,name,rom_path,"
-                    "media_path,enabled) VALUES(?,?,?,?,?,?)",
-                    [m.get("device_id"), m.get("kind"), m.get("name"),
-                     m.get("rom_path"), m.get("media_path"),
-                     1 if m.get("enabled", True) else 0])
+        con.execute("INSERT INTO library_managers(%s) VALUES(%s)"
+                    % (",".join(fields), ",".join("?" * len(fields))),
+                    [vals[f] for f in fields])
         mid = con.execute("SELECT last_insert_rowid()").fetchone()[0]
     con.commit()
     con.close()
@@ -260,19 +274,27 @@ def pull_roms(dev, lm):
 
 
 def pull_media(dev, lm):
-    """rsync the device's media folder locally and register it as an ES-DE media
-    mount. Returns the local path (or None if no media path)."""
+    """Register a device media folder as an ES-DE media mount (filtered to the
+    manager's chosen media_kinds). Remote folders are rsync'd local first so the
+    media indexer can walk them; a local device's path is used in place. Returns
+    the mount path (or None if no media path)."""
     mpath = (lm.get("media_path") or "").strip()
     if not mpath:
         return None
-    dest = os.path.join(MEDIA_DIR, "dev%d" % lm["id"])
-    os.makedirs(dest, exist_ok=True)
-    argv = _wrap_pw(dev, ["rsync", "-a", "--delete", "-e", _rsync_ssh_e(dev),
-                    "%s:%s/" % (_target(dev), mpath), dest + "/"])
-    r = _run(argv, timeout=1800)
-    if r.returncode != 0:
-        raise RuntimeError("rsync media failed: " + (r.stderr or "")[:200])
-    config.media_mount_set("device-%d" % lm["id"], dest, "esde", 1)
+    kinds = lm.get("media_kinds")
+    if isinstance(kinds, str):
+        kinds = [k for k in kinds.split(",") if k]
+    if dev.get("transport") == "local":
+        dest = mpath                                   # walk the folder in place
+    else:
+        dest = os.path.join(MEDIA_DIR, "dev%d" % lm["id"])
+        os.makedirs(dest, exist_ok=True)
+        argv = _wrap_pw(dev, ["rsync", "-a", "--delete", "-e", _rsync_ssh_e(dev),
+                        "%s:%s/" % (_target(dev), mpath), dest + "/"])
+        r = _run(argv, timeout=1800)
+        if r.returncode != 0:
+            raise RuntimeError("rsync media failed: " + (r.stderr or "")[:200])
+    config.media_mount_set("device-%d" % lm["id"], dest, "esde", 1, kinds or None)
     return dest
 
 
@@ -287,6 +309,7 @@ def sync_device(dev_id):
     con.close()
     report = []
     rebuild = False       # did any manager pull ROMs (→ catalog needs a rebuild)?
+    reindex = False       # did any manager pull media (→ media index needs a refresh)?
     for lm in lms:
         prov = LM_KINDS.get(lm["kind"], ("", True, True))
         item = {"manager": lm["name"] or lm["kind"], "kind": lm["kind"]}
@@ -296,12 +319,22 @@ def sync_device(dev_id):
                 rebuild = True
             if prov[2] and lm.get("media_path"):
                 item["media"] = pull_media(dev, lm)
+                reindex = True
             item["ok"] = True
         except Exception as e:
             item["ok"] = False
             item["error"] = str(e)[:200]
         report.append(item)
     out = {"device": dev["name"], "results": report}
+    if reindex:      # refresh the media index so newly-mounted media is picked up
+        try:
+            r = _run([sys.executable, os.path.join(DIR, "media_index.py")], timeout=900)
+            out["reindexed"] = (r.returncode == 0)
+            if r.returncode != 0:
+                out["reindex_error"] = (r.stderr or "")[:200]
+        except (subprocess.TimeoutExpired, OSError) as e:
+            out["reindexed"] = False
+            out["reindex_error"] = str(e)[:200]
     if rebuild:      # rebuild the catalog so pulled ROM titles appear (build_library
         try:         # runs the consumer carry-over pass internally — the blessed rebuild path)
             r = _run([sys.executable, os.path.join(DIR, "build_library.py")], timeout=900)

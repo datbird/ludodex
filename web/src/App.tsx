@@ -1655,23 +1655,56 @@ function AddManager({ deviceId, kinds, onAdded }: {
   const [name, setName] = useState('')
   const [rom, setRom] = useState('')
   const [media, setMedia] = useState('')
+  const [mkinds, setMkinds] = useState<MediaKind[]>([])
+  const [pick, setPick] = useState<Set<string>>(new Set())   // empty = all types
   const [busy, setBusy] = useState(false)
+  useEffect(() => { api.mediaKinds().then((d) => setMkinds(d.kinds)).catch(() => {}) }, [])
+  const caps = kinds.find(([k]) => k === kind)?.[1]
+  const doesRoms = caps ? caps[1] : true
+  const doesMedia = caps ? caps[2] : false
+  const togglePick = (k: string) =>
+    setPick((p) => { const n = new Set(p); n.has(k) ? n.delete(k) : n.add(k); return n })
   const add = async () => {
     setBusy(true)
     try {
-      onAdded(await api.setManager({ device_id: deviceId, kind, name, rom_path: rom, media_path: media }))
-      setName(''); setRom(''); setMedia('')
+      onAdded(await api.setManager({
+        device_id: deviceId, kind, name,
+        rom_path: doesRoms ? rom : '', media_path: doesMedia ? media : '',
+        media_kinds: doesMedia ? Array.from(pick) : [],
+      }))
+      setName(''); setRom(''); setMedia(''); setPick(new Set())
     } finally { setBusy(false) }
   }
   return (
     <div className="dm-add">
-      <select value={kind} onChange={(e) => setKind(e.target.value)}>
-        {kinds.map(([k, v]) => <option key={k} value={k}>{v[0]}</option>)}
-      </select>
-      <input placeholder="label (optional)" value={name} onChange={(e) => setName(e.target.value)} />
-      <input placeholder="ROM path on device" value={rom} onChange={(e) => setRom(e.target.value)} />
-      <input placeholder="media path (optional)" value={media} onChange={(e) => setMedia(e.target.value)} />
-      <button className="ops-btn" disabled={busy} onClick={add}>＋ add</button>
+      <div className="dm-add-row">
+        <select value={kind} onChange={(e) => setKind(e.target.value)}>
+          {kinds.map(([k, v]) => <option key={k} value={k}>{v[0]}</option>)}
+        </select>
+        <input placeholder="label (optional)" value={name} onChange={(e) => setName(e.target.value)} />
+        {doesRoms && <input placeholder="ROM path on device" value={rom} onChange={(e) => setRom(e.target.value)} />}
+        {doesMedia && <input placeholder={doesRoms ? 'media path (optional)' : 'media folder path on device'}
+          value={media} onChange={(e) => setMedia(e.target.value)} />}
+        <button className="ops-btn" disabled={busy} onClick={add}>＋ add</button>
+      </div>
+      {doesMedia && (
+        <div className="emu-kinds">
+          <div className="emu-kinds-head">
+            Media types in this folder
+            <span className="emu-kinds-note">
+              {pick.size === 0 ? 'all types (nothing selected = everything)' : `${pick.size} selected`}</span>
+            {pick.size > 0 && <button className="emu-kinds-clear" onClick={() => setPick(new Set())}>Reset to all</button>}
+          </div>
+          <div className="emu-kinds-grid">
+            {mkinds.map((k) => (
+              <label key={k.kind} className={'emu-kchip' + (pick.has(k.kind) ? ' on' : '')} title={k.description}>
+                <input type="checkbox" checked={pick.has(k.kind)} onChange={() => togglePick(k.kind)} />
+                {k.kind.replace(/_/g, ' ')}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1775,6 +1808,7 @@ function DevicesPanel() {
                 <span className="dm-kind">{m.kind_label}</span>
                 <span className="dm-name">{m.name || m.kind}</span>
                 <code className="dm-path">{[m.rom_path && 'ROMs: ' + m.rom_path, m.media_path && 'Media: ' + m.media_path].filter(Boolean).join('   ·   ') || '(no paths set)'}</code>
+                {m.media_path && <span className="dm-mkinds">{m.media_kinds && m.media_kinds.length ? m.media_kinds.map((k) => k.replace(/_/g, ' ')).join(', ') : 'all media types'}</span>}
                 <button className="emu-rm" title="Remove" onClick={async () => apply(await api.removeManager(m.id))}>×</button>
               </div>
             ))}

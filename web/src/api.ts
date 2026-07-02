@@ -167,6 +167,7 @@ export interface RecognizedGame {
 export interface LibraryManager {
   id: number; device_id: number; kind: string; kind_label: string
   name: string; rom_path: string; media_path: string; enabled: number
+  media_kinds?: string[]
 }
 export interface Device {
   id: number; name: string; transport: string; host: string; port: number

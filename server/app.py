@@ -938,6 +938,9 @@ def set_manager(body: dict = Body(...)):
     body = body or {}
     if not body.get("device_id") or not body.get("kind"):
         raise HTTPException(400, "device_id and kind are required")
+    if "media_kinds" in body:      # keep only real media kinds; [] = all
+        body["media_kinds"] = [k for k in (body.get("media_kinds") or [])
+                               if k in media.KINDS]
     devices.manager_set(body)
     return {"devices": devices.devices_list()}
 
