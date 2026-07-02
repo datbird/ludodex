@@ -31,6 +31,7 @@ sys.path.insert(0, DIR)
 import config          # noqa: E402  pipeline config store (config.sqlite)
 import media           # noqa: E402  pipeline vocab/priority (pure data)
 import media_choose    # noqa: E402  reuse _materialize_row (non-destructive)
+import media_index      # noqa: E402  media-index schema (for the first-run seed)
 import titlenorm       # noqa: E402  shared title -> norm_key (matches build_library)
 import devices         # noqa: E402  device connections + library-manager pull
 import fileops         # noqa: E402  file-operations engine (profiles + runbooks)
@@ -166,6 +167,46 @@ _tags_con().close()     # ensure files + schema exist so lib() can ATTACH them r
 _umedia_con().close()
 _scores_con().close()
 _manual_con().close()
+
+
+def _ensure_catalog():
+    """First-run seed: the catalog is a build OUTPUT (build_library.py), absent
+    until the user runs a sync. Without it the read-only lib() open fails and the
+    whole library view 500s ('unable to open database file'). Seed an empty
+    catalog with the same schema so a fresh install shows a clean, empty library.
+    A real build drops+recreates this file, so there's no drift risk."""
+    if os.path.exists(LIBRARY_DB):
+        return
+    con = sqlite3.connect(LIBRARY_DB)
+    con.executescript("""
+    CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
+      n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
+      has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
+      has_archive INT, in_playnite INT, in_launchbox INT);
+    CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
+      source_id TEXT, title_raw TEXT, detail TEXT);
+    CREATE TABLE source_attrs (game_id INTEGER, source TEXT, source_id TEXT,
+      attrs_json TEXT);
+    CREATE TABLE game_attributes (game_id INTEGER, kind TEXT, value TEXT,
+      origin TEXT DEFAULT '');
+    CREATE TABLE metadata_links (game_id INTEGER, provider TEXT, provider_id TEXT,
+      slug TEXT, url TEXT);
+    CREATE TABLE game_tags (game_id INTEGER, tag TEXT, origin TEXT);
+    CREATE INDEX ix_norm ON games(norm_key);
+    CREATE INDEX ix_title ON games(canonical_title);
+    CREATE INDEX ix_src_game ON sources(game_id);
+    CREATE INDEX ix_src_plat ON sources(platform);
+    CREATE INDEX ix_sattr_game ON source_attrs(game_id);
+    CREATE INDEX ix_gattr_game ON game_attributes(game_id);
+    CREATE INDEX ix_gattr_kv ON game_attributes(kind, value);
+    CREATE INDEX ix_mlink_game ON metadata_links(game_id);
+    CREATE INDEX ix_gtag_game ON game_tags(game_id);
+    """)
+    con.close()
+
+
+_ensure_catalog()               # empty catalog so a fresh install doesn't 500
+media_index.index_con().close()  # empty media-index so lib()'s ATTACH ro works
 
 
 def lib():
