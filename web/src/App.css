@@ -530,7 +530,8 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
 }
 .svc-card .key-head { display: flex; align-items: baseline; gap: 10px; }
 .svc-field { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
-.svc-label { flex: 0 0 155px; font-size: 13px; color: var(--text); }
+.svc-label { flex: 0 0 120px; font-size: 13px; color: var(--text); text-align: right;
+  font-weight: 500; }
 .svc-field .masked {
   font-family: var(--mono, monospace);
   background: var(--panel); border: 1px solid var(--border);

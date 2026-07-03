@@ -2824,7 +2824,9 @@ SERVICES = [
                  "post": "/api/services/gog/code"},
      "limits": _limits("gog", cooldown="300")},
     {"id": "itch", "name": "itch.io", "role": "source",
-     "hint": "itch.io/user/settings/api-keys",
+     "hint": "Lists the games you own on itch.io. Sign in at itch.io, generate a "
+             "personal key at itch.io/user/settings/api-keys, and paste it below — "
+             "that key alone is all ludodex needs (no separate login).",
      "creds": [{"key": "itch_api_key", "label": "API key", "secret": True}],
      "limits": _limits("itch", cooldown="300")},
     {"id": "epic", "name": "Epic Games", "role": "source",
