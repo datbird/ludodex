@@ -2084,7 +2084,7 @@ function ApiKeys({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
           </div>
         </div>
       ))}
-      <div className="settings-actions">
+      <div className="settings-actions sticky-actions">
         <button className="go" disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save keys'}</button>
         {saved && <span className="saved">Saved ✓</span>}
       </div>
@@ -2376,7 +2376,7 @@ function Credentials() {
           </div>
         )
       })}
-      <div className="settings-actions">
+      <div className="settings-actions sticky-actions">
         <button className="go" disabled={saving} onClick={save}>
           {saving ? 'Saving…' : 'Save credentials'}</button>
         {saved && <span className="saved">Saved ✓</span>}

@@ -2216,3 +2216,15 @@ a.idchip:hover { background: var(--accent-bg); }
 .media-mode-hint { font-size: 12px; color: var(--text); line-height: 1.5; }
 .media-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
 .media-actions-hint { flex-basis: 100%; }
+
+/* Sticky save bar for long credential/key lists — always reachable */
+.sticky-actions {
+  position: sticky;
+  bottom: 0;
+  margin: 16px -24px -24px;      /* bleed into .settings-content padding, flush to bottom */
+  padding: 13px 24px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -6px 14px -8px rgba(0, 0, 0, 0.35);
+  z-index: 3;
+}
