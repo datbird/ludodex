@@ -455,6 +455,16 @@ export type CfAccessState = {
   enabled: boolean; team_domain: string; aud: string
   mappings: CfMapping[]; users: AuthUserRow[]
 }
+export type DbSyncJob = {
+  running?: boolean; finished?: boolean; target?: string
+  step?: string; ok?: boolean | null; error?: string
+}
+export type DbSyncState = {
+  sync_target: string; pb_enabled: boolean; fb_enabled: boolean
+  pocketbase: { url: string; email: string; password_set: boolean }
+  firebase: { project_id: string; database: string; prefix: string; sa_set: boolean }
+  job: DbSyncJob | null
+}
 
 export const api = {
   authStatus: () => get<AuthStatus>('/api/auth/status'),
@@ -478,6 +488,12 @@ export const api = {
     postJson<{ ok: boolean; mappings: CfMapping[] }>('/api/auth/cf-access/map', { email, user_id }),
   cfUnmapEmail: (email: string) =>
     postJson<{ ok: boolean; mappings: CfMapping[] }>('/api/auth/cf-access/unmap', { email }),
+  dbSync: () => get<DbSyncState>('/api/dbsync'),
+  dbSyncSet: (patch: Record<string, unknown>) => postJson<DbSyncState>('/api/dbsync', patch),
+  dbSyncTest: (target: 'pocketbase' | 'firebase') =>
+    postJson<{ ok: boolean; detail: string }>('/api/dbsync/test', { target }),
+  dbSyncRun: (target?: string) =>
+    postJson<DbSyncState>('/api/dbsync/run', target ? { target } : {}),
 
   stats: () => get<Stats>('/api/stats'),
   facets: () => get<Facets>('/api/facets'),

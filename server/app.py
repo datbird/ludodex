@@ -3467,6 +3467,152 @@ def ai_dedupe(body: dict = None):
     return {"suggestions": out}
 
 
+# --------------------------------------------------------------------------- #
+#  Database sync: push the catalog OUT to PocketBase / Firestore (sync.py).
+#  This is the *outbound* mirror (distinct from /api/sync = ownership pull).
+# --------------------------------------------------------------------------- #
+_DBSYNC = {"job": None}
+_DBSYNC_LOCK = threading.Lock()
+_FB_SA_PATH = os.path.join(DATA, "firebase-sa.json")
+
+
+def _dbsync_state():
+    tgt = config.get("sync_target") or ""
+    sa = config.get("firebase_sa_json") or ""
+    return {
+        "sync_target": tgt,
+        "pb_enabled": tgt in ("pocketbase", "both"),
+        "fb_enabled": tgt in ("firebase", "both"),
+        "pocketbase": {
+            "url": config.get("pocketbase_url") or "",
+            "email": config.get("pocketbase_admin_email") or "",
+            "password_set": bool(config.pocketbase_password()),
+        },
+        "firebase": {
+            "project_id": config.get("firebase_project_id") or "",
+            "database": config.get("firebase_database") or "(default)",
+            "prefix": config.get("firebase_collection_prefix") or "",
+            "sa_set": bool(sa and os.path.exists(sa)),
+        },
+        "job": _DBSYNC["job"],
+    }
+
+
+@app.get("/api/dbsync")
+def dbsync_get():
+    return _dbsync_state()
+
+
+@app.post("/api/dbsync")
+def dbsync_set(body: dict = Body(...)):
+    b = body or {}
+    pb, fb = b.get("pocketbase") or {}, b.get("firebase") or {}
+    if "url" in pb:
+        config.set_("pocketbase_url", (pb.get("url") or "").strip().rstrip("/"))
+    if "email" in pb:
+        config.set_("pocketbase_admin_email", (pb.get("email") or "").strip())
+    if pb.get("password"):
+        config.set_("pocketbase_admin_password", pb["password"])
+    if pb.get("clear_password"):
+        config.set_("pocketbase_admin_password", "")
+    if "project_id" in fb:
+        config.set_("firebase_project_id", (fb.get("project_id") or "").strip())
+    if "database" in fb:
+        config.set_("firebase_database", (fb.get("database") or "").strip() or "(default)")
+    if "prefix" in fb:
+        config.set_("firebase_collection_prefix", (fb.get("prefix") or "").strip())
+    if fb.get("sa_json"):
+        try:
+            json.loads(fb["sa_json"])
+        except Exception:
+            raise HTTPException(400, "the service-account key is not valid JSON")
+        with open(_FB_SA_PATH, "w", encoding="utf-8") as f:
+            f.write(fb["sa_json"])
+        os.chmod(_FB_SA_PATH, 0o600)
+        config.set_("firebase_sa_json", _FB_SA_PATH)
+    if fb.get("clear_sa"):
+        p = config.get("firebase_sa_json")
+        if p and os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        config.set_("firebase_sa_json", "")
+    if "pb_enabled" in b or "fb_enabled" in b:
+        cur = _dbsync_state()
+        pbo = bool(b.get("pb_enabled", cur["pb_enabled"]))
+        fbo = bool(b.get("fb_enabled", cur["fb_enabled"]))
+        config.set_("sync_target",
+                    "both" if pbo and fbo else "pocketbase" if pbo else "firebase" if fbo else "")
+    return _dbsync_state()
+
+
+@app.post("/api/dbsync/test")
+def dbsync_test(body: dict = Body(default={})):
+    target = (body or {}).get("target", "pocketbase")
+    if target == "pocketbase":
+        url = (config.get("pocketbase_url") or "").rstrip("/")
+        email = config.get("pocketbase_admin_email") or ""
+        pw = config.pocketbase_password() or ""
+        if not (url and email and pw):
+            return {"ok": False, "detail": "Set the URL, admin email, and password first."}
+        import urllib.request
+        import urllib.error
+        last = "no response"
+        for ep in ("/api/collections/_superusers/auth-with-password",
+                   "/api/admins/auth-with-password"):
+            try:
+                req = urllib.request.Request(
+                    url + ep,
+                    data=json.dumps({"identity": email, "password": pw}).encode(),
+                    headers={"content-type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    if r.status == 200:
+                        return {"ok": True, "detail": "Authenticated with PocketBase ✓"}
+            except urllib.error.HTTPError as e:
+                last = "HTTP %d" % e.code
+            except Exception as e:
+                last = str(e)[:120]
+        return {"ok": False, "detail": "PocketBase auth failed (%s)" % last}
+    # firebase
+    sa = config.get("firebase_sa_json") or ""
+    pid = config.get("firebase_project_id") or ""
+    if not (sa and os.path.exists(sa) and pid):
+        return {"ok": False, "detail": "Set the project id and paste the service-account key first."}
+    try:
+        from google.oauth2 import service_account
+        import google.auth.transport.requests as gar
+        creds = service_account.Credentials.from_service_account_file(
+            sa, scopes=["https://www.googleapis.com/auth/datastore"])
+        creds.refresh(gar.Request())
+        return {"ok": True, "detail": "Minted a Firestore access token ✓"}
+    except Exception as e:
+        return {"ok": False, "detail": "Firestore auth failed: %s" % str(e)[:140]}
+
+
+def _dbsync_worker(target):
+    ok, err = _run_script("sync.py", args=[target], timeout=1800)
+    if _DBSYNC["job"]:
+        _DBSYNC["job"].update({"running": False, "finished": True, "ok": ok,
+                               "error": "" if ok else err,
+                               "step": "Done" if ok else "Failed"})
+
+
+@app.post("/api/dbsync/run")
+def dbsync_run(body: dict = Body(default={})):
+    with _DBSYNC_LOCK:
+        cur = _DBSYNC["job"]
+        if cur and cur.get("running"):
+            raise HTTPException(409, "a database sync is already running")
+        target = (body or {}).get("target") or config.get("sync_target")
+        if not target:
+            raise HTTPException(400, "no sync target enabled — enable PocketBase and/or Firestore first")
+        _DBSYNC["job"] = {"running": True, "finished": False, "target": target,
+                          "step": "Syncing to %s…" % target, "ok": None, "error": ""}
+    threading.Thread(target=_dbsync_worker, args=(target,), daemon=True).start()
+    return _dbsync_state()
+
+
 # ---------------------------------------------------------------- static SPA (last)
 # Mounted at "/" AFTER all /api routes so the API takes precedence; serves the
 # built React app (web/dist) when present.

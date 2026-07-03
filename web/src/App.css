@@ -2158,3 +2158,17 @@ a.idchip:hover { background: var(--accent-bg); }
 .cf-email { font-weight: 600; color: var(--text-h); overflow-wrap: anywhere; }
 .cf-arrow { color: var(--text); opacity: 0.6; }
 .cf-target { display: flex; align-items: center; gap: 8px; color: var(--text-h); font-weight: 600; }
+
+/* --- Database sync panel --- */
+.dbsync-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px 18px; margin-bottom: 14px; }
+.dbsync-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.dbsync-name { font-weight: 700; color: var(--text-h); font-size: 15px; }
+.dbsync-actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.dbsync-msg { font-size: 12px; color: var(--text); }
+.dbsync-msg.err { color: #ef4444; }
+.dbsync-sa { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  resize: vertical; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 7px; color: var(--text-h); width: 100%; }
+.dbsync-sa:focus { outline: none; border-color: var(--accent); }
+.dbsync-run { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }

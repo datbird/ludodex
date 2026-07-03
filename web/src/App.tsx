@@ -12,7 +12,7 @@ import type {
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, ProviderMatch, ScopeValue,
-  AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping,
+  AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState,
 } from './api'
 import './App.css'
 
@@ -865,6 +865,7 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
        { id: 'report', name: 'Usage report' }],
   connections: [{ id: 'devices', name: 'Devices' },
                 { id: 'credentials', name: 'Stores & providers' },
+                { id: 'dbsync', name: 'Database sync' },
                 { id: 'limits', name: 'Rate limits' }],
   library: [{ id: 'preferences', name: 'Preferences' }],
   dashboard: [{ id: 'spotlight', name: 'Spotlight' }],
@@ -917,6 +918,7 @@ function Settings({ onClose, onPrefsChanged, user }: {
             {section === 'connections'
               ? (sub === 'devices' ? <DevicesPanel />
                 : sub === 'credentials' ? <Credentials />
+                : sub === 'dbsync' ? <DatabaseSync />
                 : sub === 'limits' ? <RateLimits /> : null)
               : section === 'library'
               ? <LibraryPrefs onChanged={onPrefsChanged} />
@@ -1023,6 +1025,131 @@ function UsersPanel({ currentUser }: { currentUser: AuthUser | null }) {
             disabled={busy || !nu.username.trim() || nu.password.length < 8}>Add user</button>
         </div>
       </form>
+    </>
+  )
+}
+
+function DatabaseSync() {
+  const [st, setSt] = useState<DbSyncState | null>(null)
+  const [pb, setPb] = useState({ url: '', email: '', password: '' })
+  const [fb, setFb] = useState({ project_id: '', database: '', prefix: '', sa_json: '' })
+  const [msg, setMsg] = useState<{ pb?: string; fb?: string; run?: string }>({})
+  const [busy, setBusy] = useState('')
+
+  const hydrate = (d: DbSyncState) => {
+    setSt(d)
+    setPb({ url: d.pocketbase.url, email: d.pocketbase.email, password: '' })
+    setFb({ project_id: d.firebase.project_id, database: d.firebase.database, prefix: d.firebase.prefix, sa_json: '' })
+  }
+  useEffect(() => { api.dbSync().then(hydrate).catch(() => {}) }, [])
+  // poll while a sync job is running so the result updates live
+  const running = st?.job?.running
+  useEffect(() => {
+    if (!running) return
+    const t = setInterval(() => api.dbSync().then(setSt).catch(() => {}), 2000)
+    return () => clearInterval(t)
+  }, [running])
+
+  if (!st) return <div className="loading">Loading…</div>
+  const job = st.job
+
+  const savePb = async () => {
+    setBusy('pb-save'); setMsg((m) => ({ ...m, pb: '' }))
+    try {
+      setSt(await api.dbSyncSet({ pocketbase: { url: pb.url, email: pb.email, ...(pb.password ? { password: pb.password } : {}) } }))
+      setPb((p) => ({ ...p, password: '' })); setMsg((m) => ({ ...m, pb: 'Saved ✓' }))
+    } catch (e) { setMsg((m) => ({ ...m, pb: (e as Error).message })) } finally { setBusy('') }
+  }
+  const saveFb = async () => {
+    setBusy('fb-save'); setMsg((m) => ({ ...m, fb: '' }))
+    try {
+      setSt(await api.dbSyncSet({ firebase: { project_id: fb.project_id, database: fb.database, prefix: fb.prefix, ...(fb.sa_json ? { sa_json: fb.sa_json } : {}) } }))
+      setFb((f) => ({ ...f, sa_json: '' })); setMsg((m) => ({ ...m, fb: 'Saved ✓' }))
+    } catch (e) { setMsg((m) => ({ ...m, fb: (e as Error).message })) } finally { setBusy('') }
+  }
+  const test = async (target: 'pocketbase' | 'firebase') => {
+    const k = target === 'pocketbase' ? 'pb' : 'fb'
+    setBusy(k + '-test'); setMsg((m) => ({ ...m, [k]: '' }))
+    try { const r = await api.dbSyncTest(target); setMsg((m) => ({ ...m, [k]: r.detail })) }
+    catch (e) { setMsg((m) => ({ ...m, [k]: (e as Error).message })) } finally { setBusy('') }
+  }
+  const toggle = async (patch: Record<string, unknown>) => { try { setSt(await api.dbSyncSet(patch)) } catch { /* ignore */ } }
+  const runNow = async () => {
+    setBusy('run'); setMsg((m) => ({ ...m, run: '' }))
+    try { setSt(await api.dbSyncRun()) } catch (e) { setMsg((m) => ({ ...m, run: (e as Error).message })) } finally { setBusy('') }
+  }
+
+  return (
+    <>
+      <h2>Database sync</h2>
+      <p className="dim">ludodex keeps its catalog in a fast local database. Turn on a target to
+        <b> mirror the finished catalog out</b> to PocketBase or Firestore so other apps and devices
+        can read it over an API. It’s a one-way publish (idempotent — only changed records are sent),
+        so your local library stays the source of truth.</p>
+
+      <div className="dbsync-card">
+        <div className="dbsync-head">
+          <span className="dbsync-name">PocketBase</span>
+          <label className="switch">
+            <input type="checkbox" checked={st.pb_enabled} onChange={(e) => toggle({ pb_enabled: e.target.checked })} />
+            <span className="track"><span className="knob" /></span>
+            <span className="switch-text">{st.pb_enabled ? 'On' : 'Off'}</span>
+          </label>
+        </div>
+        <div className="dm-form">
+          <label className="dm-field"><span>Server URL</span>
+            <input placeholder="https://pb.example.com" value={pb.url} onChange={(e) => setPb({ ...pb, url: e.target.value })} /></label>
+          <label className="dm-field"><span>Admin email</span>
+            <input value={pb.email} onChange={(e) => setPb({ ...pb, email: e.target.value })} /></label>
+          <label className="dm-field"><span>Admin password {st.pocketbase.password_set && <em>(saved — type to replace)</em>}</span>
+            <input type="password" autoComplete="new-password" placeholder={st.pocketbase.password_set ? '••••••••' : ''}
+              value={pb.password} onChange={(e) => setPb({ ...pb, password: e.target.value })} /></label>
+        </div>
+        <div className="dbsync-actions">
+          <button className="go primary" disabled={busy !== ''} onClick={savePb}>{busy === 'pb-save' ? 'Saving…' : 'Save'}</button>
+          <button className="ops-btn" disabled={busy !== ''} onClick={() => test('pocketbase')}>{busy === 'pb-test' ? 'Testing…' : 'Test connection'}</button>
+          {msg.pb && <span className="dbsync-msg">{msg.pb}</span>}
+        </div>
+      </div>
+
+      <div className="dbsync-card">
+        <div className="dbsync-head">
+          <span className="dbsync-name">Firebase Firestore</span>
+          <label className="switch">
+            <input type="checkbox" checked={st.fb_enabled} onChange={(e) => toggle({ fb_enabled: e.target.checked })} />
+            <span className="track"><span className="knob" /></span>
+            <span className="switch-text">{st.fb_enabled ? 'On' : 'Off'}</span>
+          </label>
+        </div>
+        <div className="dm-form">
+          <label className="dm-field"><span>Project ID</span>
+            <input value={fb.project_id} onChange={(e) => setFb({ ...fb, project_id: e.target.value })} /></label>
+          <label className="dm-field"><span>Database <em>(usually “(default)”)</em></span>
+            <input value={fb.database} onChange={(e) => setFb({ ...fb, database: e.target.value })} /></label>
+          <label className="dm-field"><span>Collection prefix <em>(optional)</em></span>
+            <input placeholder="ludodex_" value={fb.prefix} onChange={(e) => setFb({ ...fb, prefix: e.target.value })} /></label>
+          <label className="dm-field"><span>Service-account key (JSON) {st.firebase.sa_set && <em>(saved — paste to replace)</em>}</span>
+            <textarea className="dbsync-sa" rows={4} placeholder={'{ "type": "service_account", … }'}
+              value={fb.sa_json} onChange={(e) => setFb({ ...fb, sa_json: e.target.value })} /></label>
+        </div>
+        <div className="dbsync-actions">
+          <button className="go primary" disabled={busy !== ''} onClick={saveFb}>{busy === 'fb-save' ? 'Saving…' : 'Save'}</button>
+          <button className="ops-btn" disabled={busy !== ''} onClick={() => test('firebase')}>{busy === 'fb-test' ? 'Testing…' : 'Test connection'}</button>
+          {msg.fb && <span className="dbsync-msg">{msg.fb}</span>}
+        </div>
+      </div>
+
+      <div className="dbsync-run">
+        <button className="go" onClick={runNow}
+          disabled={busy !== '' || (!st.pb_enabled && !st.fb_enabled) || !!job?.running}>
+          {job?.running ? 'Syncing…' : 'Sync now'}</button>
+        {job && <span className={'dbsync-msg' + (job.ok === false ? ' err' : '')}>
+          {job.running ? (job.step || 'Syncing…')
+            : job.ok ? `Synced to ${job.target} ✓`
+            : job.finished ? `Failed: ${job.error || 'see server log'}` : ''}</span>}
+        {msg.run && <span className="dbsync-msg err">{msg.run}</span>}
+        {(!st.pb_enabled && !st.fb_enabled) && <span className="dim">Enable a target above to sync.</span>}
+      </div>
     </>
   )
 }
