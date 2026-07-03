@@ -8,14 +8,10 @@ services:
       - "8001:8001"
     env_file:
       - .env                       # copy .env.example → .env and fill in
-    # environment:
-      # Split the bulk media repo onto its own (larger) volume — see below:
-      # - LUDODEX_MEDIA=/media
     volumes:
       - ludodex-data:/data         # SQLite DBs + config + tokens (small, critical)
-      # Optional: put downloaded media on separate/larger storage. Uncomment the
-      # LUDODEX_MEDIA env above and one of these (a named volume, or a host path
-      # such as an array/NAS share):
+      # Optional: put downloaded media on separate/larger storage — just mount a
+      # volume at /media and ludodex uses it automatically (no env var needed):
       # - ludodex-media:/media
       # - <media-share>:/media
       #
