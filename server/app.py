@@ -3547,47 +3547,144 @@ def dbsync_set(body: dict = Body(...)):
     return _dbsync_state()
 
 
-@app.post("/api/dbsync/test")
-def dbsync_test(body: dict = Body(default={})):
-    target = (body or {}).get("target", "pocketbase")
-    if target == "pocketbase":
-        url = (config.get("pocketbase_url") or "").rstrip("/")
-        email = config.get("pocketbase_admin_email") or ""
-        pw = config.pocketbase_password() or ""
-        if not (url and email and pw):
-            return {"ok": False, "detail": "Set the URL, admin email, and password first."}
-        import urllib.request
-        import urllib.error
-        last = "no response"
+def _result(checks):
+    ok = all(c["ok"] for c in checks)
+    return {"ok": ok, "checks": checks,
+            "summary": "Good to go — ludodex can publish the catalog here."
+            if ok else "Not ready yet — see the failed check above."}
+
+
+def _pb_test():
+    import urllib.request
+    import urllib.error
+    url = (config.get("pocketbase_url") or "").rstrip("/")
+    email = config.get("pocketbase_admin_email") or ""
+    pw = config.pocketbase_password() or ""
+    if not (url and email and pw):
+        return {"ok": False, "checks": [{"label": "Configuration", "ok": False,
+                "detail": "Set the URL, admin email, and password first."}],
+                "summary": "Not configured yet."}
+
+    def http(method, path, tok=None, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        h = {"content-type": "application/json"}
+        if tok:
+            h["Authorization"] = tok
+        req = urllib.request.Request(url + path, data=data, method=method, headers=h)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else {})
+
+    checks = []
+    # 1 + 2: reach + superuser auth
+    tok, last = None, "no response"
+    try:
         for ep in ("/api/collections/_superusers/auth-with-password",
                    "/api/admins/auth-with-password"):
             try:
-                req = urllib.request.Request(
-                    url + ep,
-                    data=json.dumps({"identity": email, "password": pw}).encode(),
-                    headers={"content-type": "application/json"}, method="POST")
-                with urllib.request.urlopen(req, timeout=15) as r:
-                    if r.status == 200:
-                        return {"ok": True, "detail": "Authenticated with PocketBase ✓"}
+                st, resp = http("POST", ep, body={"identity": email, "password": pw})
+                if st == 200 and resp.get("token"):
+                    tok = resp["token"]
+                    break
             except urllib.error.HTTPError as e:
                 last = "HTTP %d" % e.code
-            except Exception as e:
-                last = str(e)[:120]
-        return {"ok": False, "detail": "PocketBase auth failed (%s)" % last}
-    # firebase
+    except Exception as e:
+        return _result([{"label": "Reach the server", "ok": False,
+                         "detail": "%s (%s)" % (str(e)[:90], url)}])
+    checks.append({"label": "Reached the server", "ok": True, "detail": url})
+    if not tok:
+        checks.append({"label": "Authenticated as superuser", "ok": False,
+                       "detail": "sign-in failed (%s) — check the email/password" % last})
+        return _result(checks)
+    checks.append({"label": "Authenticated as superuser", "ok": True,
+                   "detail": "full admin access"})
+    # 3: catalog collections present?
+    try:
+        _, cols = http("GET", "/api/collections?perPage=200", tok=tok)
+        names = {c["name"] for c in cols.get("items", [])}
+        present = {}
+        for n in ("games", "sources"):
+            if n in names:
+                _, cr = http("GET", "/api/collections/%s/records?perPage=1" % n, tok=tok)
+                present[n] = cr.get("totalItems", 0)
+        if present:
+            checks.append({"label": "Catalog collections", "ok": True,
+                           "detail": ", ".join("%s (%s records)" % (k, v) for k, v in present.items())})
+        else:
+            checks.append({"label": "Catalog collections", "ok": True,
+                           "detail": "none yet — games & sources will be created on first sync"})
+    except Exception as e:
+        checks.append({"label": "Catalog collections", "ok": False, "detail": str(e)[:100]})
+    # 4: prove it can create collections (create + delete a probe)
+    probe = "ludodex_conntest"
+    try:
+        st, resp = http("POST", "/api/collections", tok=tok,
+                        body={"name": probe, "type": "base",
+                              "fields": [{"name": "t", "type": "text"}]})
+        if st in (200, 201):
+            try:
+                http("DELETE", "/api/collections/%s" % resp.get("id", probe), tok=tok)
+            except Exception:
+                pass
+            checks.append({"label": "Can create collections", "ok": True,
+                           "detail": "verified — made and removed a test collection"})
+        else:
+            checks.append({"label": "Can create collections", "ok": False,
+                           "detail": "HTTP %d" % st})
+    except Exception as e:
+        try:
+            http("DELETE", "/api/collections/%s" % probe, tok=tok)
+        except Exception:
+            pass
+        checks.append({"label": "Can create collections", "ok": False, "detail": str(e)[:100]})
+    return _result(checks)
+
+
+def _fb_test():
+    import urllib.request
+    import urllib.error
+    import urllib.parse
     sa = config.get("firebase_sa_json") or ""
     pid = config.get("firebase_project_id") or ""
+    db = config.get("firebase_database") or "(default)"
     if not (sa and os.path.exists(sa) and pid):
-        return {"ok": False, "detail": "Set the project id and paste the service-account key first."}
+        return {"ok": False, "checks": [{"label": "Configuration", "ok": False,
+                "detail": "Set the project id and paste the service-account key first."}],
+                "summary": "Not configured yet."}
+    checks = []
     try:
         from google.oauth2 import service_account
         import google.auth.transport.requests as gar
         creds = service_account.Credentials.from_service_account_file(
             sa, scopes=["https://www.googleapis.com/auth/datastore"])
         creds.refresh(gar.Request())
-        return {"ok": True, "detail": "Minted a Firestore access token ✓"}
+        token = creds.token
+        checks.append({"label": "Service-account key", "ok": True,
+                       "detail": "valid — minted an access token"})
     except Exception as e:
-        return {"ok": False, "detail": "Firestore auth failed: %s" % str(e)[:140]}
+        return _result([{"label": "Service-account key", "ok": False, "detail": str(e)[:130]}])
+    # reach the Firestore database
+    dbid = urllib.parse.quote(db, safe="")
+    u = ("https://firestore.googleapis.com/v1/projects/%s/databases/%s/documents"
+         "?pageSize=1" % (pid, dbid))
+    try:
+        req = urllib.request.Request(u, headers={"Authorization": "Bearer %s" % token})
+        urllib.request.urlopen(req, timeout=15).read()
+        checks.append({"label": "Firestore database", "ok": True,
+                       "detail": "reachable & writable (project %s, %s)" % (pid, db)})
+    except urllib.error.HTTPError as e:
+        detail = {403: "the service account lacks Firestore/Datastore access",
+                  404: "project or database not found — check the ids",
+                  400: "bad request — check the database id"}.get(e.code, "HTTP %d" % e.code)
+        checks.append({"label": "Firestore database", "ok": False, "detail": detail})
+    except Exception as e:
+        checks.append({"label": "Firestore database", "ok": False, "detail": str(e)[:100]})
+    return _result(checks)
+
+
+@app.post("/api/dbsync/test")
+def dbsync_test(body: dict = Body(default={})):
+    return _pb_test() if (body or {}).get("target", "pocketbase") == "pocketbase" else _fb_test()
 
 
 def _dbsync_worker(target):

@@ -12,7 +12,7 @@ import type {
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, ProviderMatch, ScopeValue,
-  AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState,
+  AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState, DbSyncTest,
 } from './api'
 import './App.css'
 
@@ -1034,6 +1034,7 @@ function DatabaseSync() {
   const [pb, setPb] = useState({ url: '', email: '', password: '' })
   const [fb, setFb] = useState({ project_id: '', database: '', prefix: '', sa_json: '' })
   const [msg, setMsg] = useState<{ pb?: string; fb?: string; run?: string }>({})
+  const [checks, setChecks] = useState<{ pb?: DbSyncTest; fb?: DbSyncTest }>({})
   const [busy, setBusy] = useState('')
 
   const hydrate = (d: DbSyncState) => {
@@ -1069,10 +1070,23 @@ function DatabaseSync() {
   }
   const test = async (target: 'pocketbase' | 'firebase') => {
     const k = target === 'pocketbase' ? 'pb' : 'fb'
-    setBusy(k + '-test'); setMsg((m) => ({ ...m, [k]: '' }))
-    try { const r = await api.dbSyncTest(target); setMsg((m) => ({ ...m, [k]: r.detail })) }
-    catch (e) { setMsg((m) => ({ ...m, [k]: (e as Error).message })) } finally { setBusy('') }
+    setBusy(k + '-test'); setChecks((c) => ({ ...c, [k]: undefined }))
+    try { const r = await api.dbSyncTest(target); setChecks((c) => ({ ...c, [k]: r })) }
+    catch (e) { setChecks((c) => ({ ...c, [k]: { ok: false, checks: [], summary: (e as Error).message } })) }
+    finally { setBusy('') }
   }
+  const checklist = (r?: DbSyncTest) => r && (
+    <div className={'dbsync-check' + (r.ok ? ' ok' : ' bad')}>
+      {r.checks.map((ch, i) => (
+        <div key={i} className="dbsync-check-row">
+          <span className={'dbsync-tick' + (ch.ok ? ' ok' : ' bad')}>{ch.ok ? '✓' : '✗'}</span>
+          <span className="dbsync-check-label">{ch.label}</span>
+          <span className="dbsync-check-detail">{ch.detail}</span>
+        </div>
+      ))}
+      <div className="dbsync-check-summary">{r.summary}</div>
+    </div>
+  )
   const toggle = async (patch: Record<string, unknown>) => { try { setSt(await api.dbSyncSet(patch)) } catch { /* ignore */ } }
   const runNow = async () => {
     setBusy('run'); setMsg((m) => ({ ...m, run: '' }))
@@ -1125,6 +1139,7 @@ function DatabaseSync() {
           <button className="ops-btn" disabled={busy !== ''} onClick={() => test('pocketbase')}>{busy === 'pb-test' ? 'Testing…' : 'Test connection'}</button>
           {msg.pb && <span className="dbsync-msg">{msg.pb}</span>}
         </div>
+        {checklist(checks.pb)}
       </div>
 
       <div className="dbsync-card">
@@ -1152,6 +1167,7 @@ function DatabaseSync() {
           <button className="ops-btn" disabled={busy !== ''} onClick={() => test('firebase')}>{busy === 'fb-test' ? 'Testing…' : 'Test connection'}</button>
           {msg.fb && <span className="dbsync-msg">{msg.fb}</span>}
         </div>
+        {checklist(checks.fb)}
       </div>
 
       <div className="dbsync-run">

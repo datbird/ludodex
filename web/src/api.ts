@@ -465,6 +465,8 @@ export type DbSyncState = {
   firebase: { project_id: string; database: string; prefix: string; sa_set: boolean }
   job: DbSyncJob | null
 }
+export type DbSyncCheck = { label: string; ok: boolean; detail: string }
+export type DbSyncTest = { ok: boolean; checks: DbSyncCheck[]; summary: string }
 
 export const api = {
   authStatus: () => get<AuthStatus>('/api/auth/status'),
@@ -491,7 +493,7 @@ export const api = {
   dbSync: () => get<DbSyncState>('/api/dbsync'),
   dbSyncSet: (patch: Record<string, unknown>) => postJson<DbSyncState>('/api/dbsync', patch),
   dbSyncTest: (target: 'pocketbase' | 'firebase') =>
-    postJson<{ ok: boolean; detail: string }>('/api/dbsync/test', { target }),
+    postJson<DbSyncTest>('/api/dbsync/test', { target }),
   dbSyncRun: (target?: string) =>
     postJson<DbSyncState>('/api/dbsync/run', target ? { target } : {}),
 
