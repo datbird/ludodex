@@ -282,6 +282,7 @@ export interface SyncService {
   needs_auth: boolean
   connect: ServiceConnect | null
   count: number | null
+  can_media: boolean
 }
 export interface SyncJobService {
   state: 'pending' | 'running' | 'ok' | 'failed' | 'skipped'
@@ -744,10 +745,10 @@ export const api = {
   },
   // Ownership sync (pull owned games per store, then rebuild the catalog)
   syncStatus: () => get<{ services: SyncService[]; job: SyncJob | null }>('/api/sync/status'),
-  syncRun: async (services: string[]) => {
+  syncRun: async (services: string[], media: string[] = []) => {
     const r = await fetch('/api/sync/run', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ services }),
+      body: JSON.stringify({ services, media }),
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<SyncJob>

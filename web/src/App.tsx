@@ -2583,6 +2583,9 @@ function SyncMenu() {
   const [svcs, setSvcs] = useState<SyncService[]>([])
   const [job, setJob] = useState<SyncJob | null>(null)
   const [msg, setMsg] = useState('')
+  const [listOpen, setListOpen] = useState(true)          // main collapse
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())  // per-service
+  const [media, setMedia] = useState<Set<string>>(new Set())        // "sync media" checks
 
   const load = useCallback(async () => {
     try { const s = await api.syncStatus(); setSvcs(s.services); setJob(s.job) }
@@ -2599,16 +2602,23 @@ function SyncMenu() {
   }, [running, load])
 
   const enabled = svcs.filter((s) => s.enabled)
-  const anyReady = enabled.some((s) => s.ready)
+  const readyCount = enabled.filter((s) => s.ready).length
+  const anyReady = readyCount > 0
+  const toggleExpand = (id: string) =>
+    setExpanded((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const toggleMedia = (id: string) =>
+    setMedia((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n })
 
   const runAll = async () => {
     setMsg('')
-    try { setJob(await api.syncRun(['all'])) } catch (e) { setMsg((e as Error).message) }
+    const readyIds = enabled.filter((s) => s.ready).map((s) => s.id)
+    const mediaIds = readyIds.filter((id) => media.has(id))
+    try { setJob(await api.syncRun(['all'], mediaIds)) } catch (e) { setMsg((e as Error).message) }
     load()
   }
   const runOne = async (id: string) => {
     setMsg('')
-    try { setJob(await api.syncRun([id])) } catch (e) { setMsg((e as Error).message) }
+    try { setJob(await api.syncRun([id], media.has(id) ? [id] : [])) } catch (e) { setMsg((e as Error).message) }
     load()
   }
   // After a browser connect (Epic/EA) succeeds, sync that store — but only once any
@@ -2649,41 +2659,66 @@ function SyncMenu() {
             <div className="sync-note dim">Nothing ready yet — connect a store below.</div>
           )}
 
-          <div className="sync-list">
-            {enabled.map((s) => {
-              const js = rowState(s.id)
-              return (
-                <div key={s.id} className="sync-row">
-                  <div className="sync-row-head">
-                    <span className="sync-name">{s.name}</span>
-                    <span className="sync-meta">
-                      {js === 'running' ? <span className="sync-run">syncing…</span>
-                        : js === 'ok' ? <span className="conn-ok">✓ {(s.count ?? 0).toLocaleString()}</span>
-                        : js === 'failed' ? <span className="conn-off">✗ failed</span>
-                        : s.count != null ? `${s.count.toLocaleString()} owned`
-                        : s.ready ? 'ready' : ''}
-                    </span>
-                    {s.ready && js !== 'running' && (
-                      <button className="ops-btn" disabled={running}
-                        onClick={() => runOne(s.id)}>Sync</button>
+          <button className="sync-section" onClick={() => setListOpen((v) => !v)}>
+            <span className={'sync-chev' + (listOpen ? ' open' : '')}>▸</span>
+            <span className="sync-section-name">Sources</span>
+            <span className="sync-section-meta">{readyCount}/{enabled.length} ready</span>
+          </button>
+
+          {listOpen && (
+            <div className="sync-list">
+              {enabled.map((s) => {
+                const js = rowState(s.id)
+                const isOpen = expanded.has(s.id)
+                return (
+                  <div key={s.id} className={'sync-row' + (isOpen ? ' open' : '')}>
+                    <div className="sync-row-head" onClick={() => toggleExpand(s.id)}>
+                      <span className={'sync-chev' + (isOpen ? ' open' : '')}>▸</span>
+                      <span className="sync-name">{s.name}
+                        {media.has(s.id) && s.can_media && <span className="sync-media-tag">+media</span>}</span>
+                      <span className="sync-meta">
+                        {js === 'running' ? <span className="sync-run">syncing…</span>
+                          : js === 'ok' ? <span className="conn-ok">✓ {(s.count ?? 0).toLocaleString()}</span>
+                          : js === 'failed' ? <span className="conn-off">✗ failed</span>
+                          : s.count != null ? `${s.count.toLocaleString()} owned`
+                          : s.ready ? 'ready' : s.needs_auth ? 'sign in' : 'not set'}
+                      </span>
+                      {s.ready && js !== 'running' && (
+                        <button className="ops-btn" disabled={running}
+                          onClick={(e) => { e.stopPropagation(); runOne(s.id) }}>Sync</button>
+                      )}
+                    </div>
+                    {isOpen && (
+                      <div className="sync-row-body">
+                        {s.can_media && (
+                          <label className="sync-media-opt">
+                            <input type="checkbox" checked={media.has(s.id)}
+                              onChange={() => toggleMedia(s.id)} />
+                            <span>Also sync <b>media</b> (cover art & screenshots), not just titles &amp; metadata</span>
+                          </label>
+                        )}
+                        {js === 'failed' && job?.services?.[s.id]?.error && (
+                          <div className="sync-err">{job.services[s.id].error}</div>
+                        )}
+                        {s.needs_auth && s.connect && js !== 'running' && (
+                          <div className="sync-auth">
+                            <div className="sync-auth-label">Sign in to sync</div>
+                            <ConnectFlow connect={s.connect} onDone={connectThenSync(s.id)} />
+                          </div>
+                        )}
+                        {!s.ready && !s.needs_auth && (
+                          <div className="sync-note dim">Add credentials in Settings → Stores &amp; providers.</div>
+                        )}
+                        {s.ready && !s.needs_auth && !s.can_media && (
+                          <div className="sync-note dim">Syncs which games you own on {s.name}.</div>
+                        )}
+                      </div>
                     )}
                   </div>
-                  {js === 'failed' && job?.services?.[s.id]?.error && (
-                    <div className="sync-err">{job.services[s.id].error}</div>
-                  )}
-                  {s.needs_auth && s.connect && js !== 'running' && (
-                    <div className="sync-auth">
-                      <div className="sync-auth-label">Sign in to sync</div>
-                      <ConnectFlow connect={s.connect} onDone={connectThenSync(s.id)} />
-                    </div>
-                  )}
-                  {!s.ready && !s.needs_auth && (
-                    <div className="sync-note dim">Add credentials in Settings</div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
+                )
+              })}
+            </div>
+          )}
 
           {!running && job?.added != null && (
             <div className="sync-done">Added {job.added} new game{job.added === 1 ? '' : 's'}.</div>

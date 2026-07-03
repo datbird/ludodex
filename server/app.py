@@ -3172,6 +3172,10 @@ SYNC_SPECS = {
     "psn":   ("psn_owned.py",   "psn_games.tsv",   True),
     "xbox":  ("xbox_owned.py",  "xbox_games.tsv",  True),
 }
+
+# Sources that are also art providers (role='both') → the media_fetch provider to
+# run when "also sync media" is checked. Only Steam qualifies today.
+MEDIA_SYNC_PROVIDER = {"steam": "steam"}
 _SVC_NAME = {s["id"]: s["name"] for s in SERVICES}
 
 
@@ -3223,6 +3227,7 @@ def _sync_services():
             "needs_auth": bool(conn) and not ready,
             "connect": dict(conn, connected=ready) if conn else None,
             "count": _tsv_count(tsv),
+            "can_media": sid in MEDIA_SYNC_PROVIDER,
         })
     return out
 
@@ -3262,7 +3267,7 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None):
     return True, ""
 
 
-def _sync_worker(job, services):
+def _sync_worker(job, services, media_ids=()):
     prev = _lib_keys()
     any_ok = False
     for sid in services:
@@ -3282,6 +3287,21 @@ def _sync_worker(job, services):
             job["added"] = len(_lib_keys() - prev)
         else:
             job["error"] = "catalog rebuild failed: " + err
+    # optional media pass: fetch art for the requested sources (catalog must exist
+    # first), then download it into the repo per the media_mode preference.
+    media_targets = [sid for sid in media_ids if sid in MEDIA_SYNC_PROVIDER
+                     and job["services"].get(sid, {}).get("state") == "ok"]
+    if media_targets and not job.get("error"):
+        for sid in media_targets:
+            job["step"] = "Fetching %s media…" % _SVC_NAME.get(sid, sid)
+            _run_script("media_fetch.py",
+                        args=["--provider", MEDIA_SYNC_PROVIDER[sid]], timeout=1800)
+        mode = config.get("media_mode") or "chosen"
+        if mode != "ondemand":
+            job["step"] = "Downloading media…"
+            _run_script("media_choose.py",
+                        args=["--materialize"] + (["--all"] if mode == "all" else []),
+                        timeout=1800)
     job["step"] = "Done"
     job["running"] = False
     job["finished"] = True
@@ -3309,12 +3329,14 @@ def sync_run(body: dict = Body(default={})):
                        and config.source_enabled(sid) and _sync_ready(sid)]
         if not targets:
             raise HTTPException(400, "nothing ready to sync")
+        media = [sid for sid in ((body or {}).get("media") or [])
+                 if sid in MEDIA_SYNC_PROVIDER and sid in targets]
         job = {"running": True, "finished": False, "step": "Starting…",
                "error": None, "added": None,
                "services": {sid: {"state": "pending", "count": None, "error": None}
                             for sid in targets}}
         _SYNC["job"] = job
-    threading.Thread(target=_sync_worker, args=(job, targets), daemon=True).start()
+    threading.Thread(target=_sync_worker, args=(job, targets, media), daemon=True).start()
     return job
 
 
