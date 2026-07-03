@@ -2259,3 +2259,16 @@ a.idchip:hover { background: var(--accent-bg); }
 @keyframes rp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 .run-progress.indet .rp-done { width: 32%; animation: rp-indet 1.15s ease-in-out infinite; }
 @keyframes rp-indet { 0% { left: -34%; } 100% { left: 100%; } }
+
+/* Single-game magic wand (game Detail) */
+.detail-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 14px 24px 0; }
+.detail-wand-btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 16px;
+  font-size: 13px; font-weight: 600; color: #fff; cursor: pointer;
+  background: linear-gradient(120deg, var(--accent), #a855f7); border: none; border-radius: 9px;
+  box-shadow: 0 3px 12px -3px var(--accent); transition: filter .12s, transform .06s; }
+.detail-wand-btn:hover:not(:disabled) { filter: brightness(1.08); }
+.detail-wand-btn:active:not(:disabled) { transform: translateY(1px); }
+.detail-wand-btn:disabled { opacity: .6; cursor: default; }
+.detail-wand-note { font-size: 12.5px; color: var(--text); }
+.detail-wand-note b { color: var(--accent); }

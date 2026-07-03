@@ -3103,6 +3103,9 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
   const [media, setMedia] = useState<MediaLibrary | null>(null)
   const [kinds, setKinds] = useState<MediaKind[]>([])
   const [tab, setTab] = useState<'attributes' | 'media'>('attributes')
+  const [wandBusy, setWandBusy] = useState(false)
+  const [wandDone, setWandDone] = useState<number | null>(null)
+  const [wandErr, setWandErr] = useState('')
 
   const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
   useEffect(() => { reloadDetail() }, [reloadDetail])
@@ -3113,6 +3116,30 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
       r.kinds.forEach((k, i) => { KIND_ORDER[k.kind] = i })
     }).catch(() => {})
   }, [])
+
+  // Single-game magic wand: scan just this game (AI + provider match + web),
+  // then reload so suggestions surface in the AI-metadata callout below.
+  const runWand = async () => {
+    if (!d) return
+    setWandBusy(true); setWandErr(''); setWandDone(null)
+    try {
+      const r = await api.aimetaScan({ norm_keys: [nk], label: d.title, media: true, metadata: true, web: true })
+      const runId = r.run_id
+      const poll = async () => {
+        try {
+          const { scans } = await api.aimetaScans()
+          const run = scans.find((s) => s.id === runId)
+          if (run && (run.finished !== null || (run.total > 0 && run.done >= run.total))) {
+            reloadDetail()
+            api.mediaLibrary(nk).then(setMedia).catch(() => {})
+            setWandBusy(false); setWandDone(run.findings); return
+          }
+        } catch { /* keep polling */ }
+        setTimeout(poll, 2000)
+      }
+      setTimeout(poll, 1500)
+    } catch (e) { setWandBusy(false); setWandErr((e as Error).message) }
+  }
 
   const assets = media?.assets ?? []
   const pickKind = (kind: string) => {
@@ -3142,6 +3169,20 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
 
             <ArtStrip nk={nk} assets={assets} loading={!media} kinds={kinds}
                       onChange={setMedia} />
+
+            <div className="detail-actions">
+              <button className="wand-btn detail-wand-btn" disabled={wandBusy} onClick={runWand}
+                title="Let AI enrich and supplement this game's metadata and media">
+                <span className="wand-spark">✨</span> {wandBusy ? 'Enriching…' : 'Magic wand'}
+              </button>
+              {wandBusy && <span className="dim detail-wand-note">Searching providers & the web for “{d.title}”…</span>}
+              {wandDone != null && !wandBusy && (
+                <span className="detail-wand-note">{wandDone > 0
+                  ? <><b>✨ {wandDone} suggestion{wandDone === 1 ? '' : 's'}</b> — review below</>
+                  : '✨ Nothing new to add — already well-matched'}</span>
+              )}
+              {wandErr && <span className="connect-msg err detail-wand-note">{wandErr}</span>}
+            </div>
 
             <ParticleTabs className="panel-tabs2" active={tab}
               onSelect={(id) => setTab(id as 'attributes' | 'media')}
