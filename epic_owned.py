@@ -3,11 +3,12 @@
 (auto-refreshes; no interactive auth after the first time)."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 
 OWN = os.path.dirname(os.path.abspath(__file__))
-leg = os.path.expanduser("~/.local/bin/legendary")
+leg = shutil.which("legendary") or os.path.expanduser("~/.local/bin/legendary")
 try:
     out = subprocess.run([leg, "list", "--json"], capture_output=True, text=True,
                          timeout=120)

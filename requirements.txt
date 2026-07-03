@@ -17,4 +17,7 @@ google-auth>=2.0     # only for the Firebase/Firestore sync target (sync.py)
 # --- Cloudflare Access SSO (verify the Access JWT) ---
 pyjwt[crypto]>=2.8   # cryptography is already present transitively
 
+# --- Epic Games ownership (the `legendary` CLI ludodex shells out to) ---
+legendary-gl>=0.20   # provides the `legendary` binary on PATH
+
 # HTTP to providers uses the standard library (urllib) — no `requests` needed.

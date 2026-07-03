@@ -51,7 +51,8 @@ UMEDIA_DB = os.path.join(DATA, "user-media.sqlite")  # durable user uploads (sur
 SCORES_DB = os.path.join(DATA, "scores.sqlite")  # multi-source ratings + unified score
 MANUAL_DB = os.path.join(DATA, "manual-games.sqlite")  # durable hand-added games (survives rebuild)
 
-LEGENDARY = os.path.expanduser("~/.local/bin/legendary")  # Epic OAuth CLI
+import shutil  # noqa: E402
+LEGENDARY = shutil.which("legendary") or os.path.expanduser("~/.local/bin/legendary")  # Epic OAuth CLI
 EPIC_LOGIN_URL = ("https://www.epicgames.com/id/api/redirect"
                   "?clientId=34a02cf8f4414e29b15921876da36f9a&responseType=code")
 # GOG Galaxy's public OAuth client (same one gog_owned.py exchanges against). After
