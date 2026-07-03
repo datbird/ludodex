@@ -31,7 +31,11 @@ INDEX = os.path.join(DATA, "media-index.sqlite")
 
 
 def repo_dir():
-    p = config.get("media_repo") or os.path.join(DATA, "media")
+    # Bulk, regenerable media (content-addressed <sha1>.<ext>). Its own knob so it
+    # can live on separate/larger storage than the small critical DBs in DATA:
+    #   env LUDODEX_MEDIA  >  config media_repo  >  <DATA>/media (default)
+    p = (os.environ.get("LUDODEX_MEDIA", "").strip()
+         or config.get("media_repo") or os.path.join(DATA, "media"))
     os.makedirs(p, exist_ok=True)
     return p
 

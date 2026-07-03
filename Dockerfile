@@ -17,6 +17,9 @@ RUN pnpm build
 ##############################################################################
 FROM python:3.12-slim-bookworm AS runtime
 
+# LUDODEX_DATA = all durable state (SQLite DBs, config, tokens) — small, critical.
+# Bulk media (content-addressed art) defaults to $LUDODEX_DATA/media; to put it on
+# separate/larger storage, set LUDODEX_MEDIA=/media and mount a volume there.
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \

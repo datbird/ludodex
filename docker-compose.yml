@@ -8,11 +8,20 @@ services:
       - "8001:8001"
     env_file:
       - .env                       # copy .env.example → .env and fill in
+    # environment:
+      # Split the bulk media repo onto its own (larger) volume — see below:
+      # - LUDODEX_MEDIA=/media
     volumes:
-      - ludodex-data:/data         # all durable state (DBs, tokens, media)
-      # Optional: expose host-mounted shares as plain paths. Mount an NFS/SMB
-      # share on the host, then point a "Local" device at /media/<name> in the UI:
-      # - /mnt/media:/media:ro
+      - ludodex-data:/data         # SQLite DBs + config + tokens (small, critical)
+      # Optional: put downloaded media on separate/larger storage. Uncomment the
+      # LUDODEX_MEDIA env above and one of these (a named volume, or a host path
+      # such as an array/NAS share):
+      # - ludodex-media:/media
+      # - <media-share>:/media
+      #
+      # Optional: expose an NFS/SMB share already mounted on the host, then point
+      # a "Local" device at it in the UI:
+      # - /mnt/media:/library:ro
 
     # --- Mounting SMB/NFS *from inside* the container (instead of on the host)
     # needs elevated privileges. Leave commented unless you use the in-container
@@ -27,3 +36,4 @@ services:
 
 volumes:
   ludodex-data:
+  # ludodex-media:   # uncomment if you split media onto a named volume above

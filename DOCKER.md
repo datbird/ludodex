@@ -26,9 +26,22 @@ docker run -d --name ludodex -p 8001:8001 \
 ## Data & configuration
 
 - **All durable state lives in `/data`** (mount a named volume or host dir there):
-  the config, device connections, tokens, the catalog, caches, and the
-  content-addressed media repo. Nothing durable is written into the image, so
-  upgrades are just a re-pull.
+  the config, device connections, tokens, the catalog, and caches. These are
+  small and critical (not regenerable) — this is the volume to back up. Nothing
+  durable is written into the image, so upgrades are just a re-pull.
+- **Media (downloaded art) defaults to `/data/media`.** It's bulk and
+  regenerable (re-fetchable from providers), so you can keep it on separate,
+  larger storage: set `LUDODEX_MEDIA=/media` and mount a second volume at
+  `/media`. On Unraid, put `/data` on the SSD cache (appdata) and `/media` on the
+  array. Leave it unset to keep everything in one volume.
+
+  ```yaml
+  environment:
+    - LUDODEX_MEDIA=/media
+  volumes:
+    - ludodex-data:/data
+    - <media-share>:/media
+  ```
 - **Secrets** come from `.env` (see `.env.example`) *or* the in-app Settings
   page (persisted to `/data/config.sqlite`). ludodex never reads an external
   secret store at runtime. `.env` is gitignored.
