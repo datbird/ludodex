@@ -26,8 +26,7 @@ import config
 
 # GOG Galaxy's public OAuth client (same values shipped in every GOG client/tool);
 # overridable via config, but the defaults work for everyone.
-CLIENT_ID = config.get("gog_client_id")
-CLIENT_SECRET = config.get("gog_client_secret")
+CLIENT_ID, CLIENT_SECRET = config.gog_creds()
 REDIRECT = "https://embed.gog.com/on_login_success?origin=client"
 TOKDIR = os.path.join(DATA, ".gog")
 TOKFILE = os.path.join(TOKDIR, "tokens.json")

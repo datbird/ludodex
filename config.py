@@ -60,11 +60,6 @@ SCHEMA = [
      "(only needed for `update.sh --roms`)."),
     ("roms_path", "",
      "Absolute path to the ROM archive on that host (only needed for --roms)."),
-    ("gog_client_id", "46899977096215655",
-     "GOG Galaxy public OAuth client id (the shipped default works for everyone)."),
-    ("gog_client_secret",
-     "9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9",
-     "GOG Galaxy public OAuth client secret (the shipped default works for everyone)."),
     # --- preferences: behavior toggles (1 = on, 0 = off) ---
     ("steam_include_free", "1",
      "[pref] Count played free-to-play games (TF2, Dota, …) as owned in the Steam "
@@ -320,6 +315,21 @@ def metadata_enabled(name):
     return get_bool("metadata_%s_enabled" % name, True)
 
 
+def gog_creds():
+    """GOG Galaxy public OAuth client (client_id, client_secret) — see _gogauth.py.
+    Shared by every install (GOG has no per-app registration), so it ships embedded
+    rather than living in the user-config DB. Resolves env > config override >
+    embedded default; override only if GOG ever rotates the client."""
+    try:
+        import _gogauth
+        cid_def, sec_def = _gogauth.client()
+    except Exception:
+        cid_def, sec_def = "", ""
+    cid = os.environ.get("GOG_CLIENT_ID", "").strip() or get("gog_client_id") or cid_def
+    sec = os.environ.get("GOG_CLIENT_SECRET", "").strip() or get("gog_client_secret") or sec_def
+    return cid, sec
+
+
 def _ss_dev_embedded():
     """The app's built-in ScreenScraper devid/devpassword (see _ssauth.py). Ships
     with ludodex so any deployment authenticates as this one app. Obfuscated, not
@@ -544,7 +554,7 @@ INTEGRATIONS = [
          "Run: python3 gog_owned.py   (prints a GOG login URL on first run).",
          "Log in, then copy the 'code=...' value from the redirected URL.",
          "Run: python3 gog_owned.py --code <code>   (caches .gog/tokens.json)."],
-     "config_keys": ["gog_client_id", "gog_client_secret"], "env": [],
+     "config_keys": [], "env": [],   # GOG's shared public client ships embedded (_gogauth.py)
      "verify": "python3 gog_owned.py | head"},
 
     {"id": "itch", "name": "itch.io", "kind": "source",

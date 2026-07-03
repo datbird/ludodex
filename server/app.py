@@ -57,9 +57,9 @@ EPIC_LOGIN_URL = ("https://www.epicgames.com/id/api/redirect"
 # GOG Galaxy's public OAuth client (same one gog_owned.py exchanges against). After
 # login the browser lands on embed.gog.com/on_login_success?...&code=<code>; the user
 # copies that code (or the whole address) into the connect field.
-GOG_LOGIN_URL = ("https://auth.gog.com/auth?client_id=46899977096215655"
-                 "&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient"
-                 "&response_type=code&layout=client2")
+GOG_LOGIN_URL = ("https://auth.gog.com/auth?client_id=%s"
+                 "&redirect_uri=https%%3A%%2F%%2Fembed.gog.com%%2Fon_login_success%%3Forigin%%3Dclient"
+                 "&response_type=code&layout=client2" % config.gog_creds()[0])
 
 _STARTED = time.time()
 
@@ -2812,11 +2812,8 @@ SERVICES = [
      "hint": "Connect your GOG account: click Get GOG code (opens GOG — sign in if "
              "asked). It lands on a blank/‘success’ page — the code is in the browser "
              "ADDRESS BAR, not on the page. Copy that whole address (or just the code "
-             "after code=) and paste it below, then Connect. One-time login. "
-             "The Client ID/Secret above are shared defaults — leave them as-is.",
-     "creds": [
-         {"key": "gog_client_id", "label": "Client ID", "secret": False},
-         {"key": "gog_client_secret", "label": "Client secret", "secret": True}],
+             "after code=) and paste it below, then Connect. One-time login.",
+     "creds": [],
      "connect": {"url": GOG_LOGIN_URL,
                  "action_label": "Get GOG code",
                  "field_label": "Paste the GOG address bar URL (or code)",
