@@ -1865,6 +1865,9 @@ function AreaPromptEditor({ area, onSave }: { area: AiArea; onSave: (prompt: str
 function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
   const [dedupeOpen, setDedupeOpen] = useState(false)
   const [promptOpen, setPromptOpen] = useState<string | null>(null)
+  const [areaOpen, setAreaOpen] = useState<Set<string>>(new Set())
+  const toggleArea = (id: string) =>
+    setAreaOpen((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n })
   const [areaQuery, setAreaQuery] = useState('')
   const [liveModels, setLiveModels] = useState<Record<string, string[]>>({})
   const [visionModels, setVisionModels] = useState<Record<string, string[]>>({})
@@ -1975,63 +1978,64 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
           onChange={(e) => setAreaQuery(e.target.value)} />
         {q && <span className="area-search-count">{shown.length} of {cfg.areas.length}</span>}
       </div>
-      <table className="usage-table">
-        <thead><tr><th>Interface area</th><th>Provider</th><th>Model</th></tr></thead>
-        <tbody>
-          {shown.length === 0 && (
-            <tr><td colSpan={3} className="area-none">No AI functions match “{areaQuery}”.</td></tr>
-          )}
-          {shown.map((a) => {
-            const dfltProv = a.vision ? cfg.vision_default.provider : cfg.default.provider
-            const effProv = a.assigned ?? dfltProv
-            const open = promptOpen === a.id
-            return (
-              <Fragment key={a.id}>
-              <tr>
-                <td>
-                  <div className="area-name">{a.name}
-                    {a.vision && <span className="tag vision">vision</span>}
-                    {a.prompt && <span className="tag soon">custom prompt</span>}
-                    {a.status !== 'live' && <span className="tag soon">{a.status}</span>}</div>
+      <div className="usage-areas">
+        {shown.length === 0 && (
+          <div className="area-none">No AI functions match “{areaQuery}”.</div>
+        )}
+        {shown.map((a) => {
+          const dfltProv = a.vision ? cfg.vision_default.provider : cfg.default.provider
+          const effProv = a.assigned ?? dfltProv
+          const rowOpen = areaOpen.has(a.id)
+          const pOpen = promptOpen === a.id
+          const provLabel = a.assigned ? providerName(a.assigned) : `Default · ${providerName(dfltProv)}`
+          const modelLabel = a.assigned_model || a.effective_model || 'model'
+          return (
+            <div key={a.id} className={'area-row' + (rowOpen ? ' open' : '')}>
+              <div className="area-head" onClick={() => toggleArea(a.id)}>
+                <span className={'sync-chev' + (rowOpen ? ' open' : '')}>▸</span>
+                <span className="area-name">{a.name}
+                  {a.vision && <span className="tag vision">vision</span>}
+                  {a.prompt && <span className="tag soon">custom prompt</span>}
+                  {a.status !== 'live' && <span className="tag soon">{a.status}</span>}</span>
+                <span className="area-summary dim">{provLabel} · {modelLabel}</span>
+              </div>
+              {rowOpen && (
+                <div className="area-body">
                   <div className="area-desc">{a.description}</div>
+                  <div className="area-selects">
+                    <label className="area-sel"><span>Provider</span>
+                      <select value={a.assigned ?? ''} onChange={(e) => setArea(a.id, e.target.value, '')}>
+                        <option value="">
+                          {a.vision ? `Image default (${providerName(dfltProv)})` : `Default (${providerName(dfltProv)})`}
+                        </option>
+                        {cfg.providers.map((p) => (
+                          <option key={p.id} value={p.id} disabled={!p.configured}>
+                            {providerName(p.id)}{p.configured ? '' : ' (no key)'}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="area-sel"><span>Model</span>
+                      <ModelInput models={a.vision ? visionFor(effProv) : modelsFor(effProv)}
+                        value={a.assigned_model ?? ''}
+                        placeholder={a.effective_model ?? 'model'}
+                        onSave={(m) => setArea(a.id, a.assigned ?? '', m)} />
+                    </label>
+                  </div>
                   <div className="area-btns">
-                    <button className="link-btn" onClick={() => setPromptOpen(open ? null : a.id)}>
-                      {open ? '▾ Hide prompt' : '✎ Edit prompt'}</button>
+                    <button className="link-btn" onClick={() => setPromptOpen(pOpen ? null : a.id)}>
+                      {pOpen ? '▾ Hide prompt' : '✎ Edit prompt'}</button>
                     {a.id === 'dedupe' && (
                       <button className="run-btn" onClick={() => setDedupeOpen(true)}>▶ Run dedupe assist</button>
                     )}
                   </div>
-                </td>
-                <td>
-                  <select value={a.assigned ?? ''} onChange={(e) => setArea(a.id, e.target.value, '')}>
-                    <option value="">
-                      {a.vision ? `Image default (${providerName(dfltProv)})` : `Default (${providerName(dfltProv)})`}
-                    </option>
-                    {cfg.providers.map((p) => (
-                      <option key={p.id} value={p.id} disabled={!p.configured}>
-                        {providerName(p.id)}{p.configured ? '' : ' (no key)'}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-                <td>
-                  <ModelInput models={a.vision ? visionFor(effProv) : modelsFor(effProv)}
-                    value={a.assigned_model ?? ''}
-                    placeholder={a.effective_model ?? 'model'}
-                    onSave={(m) => setArea(a.id, a.assigned ?? '', m)} />
-                </td>
-              </tr>
-              {open && (
-                <tr className="prompt-row">
-                  <td colSpan={3}><AreaPromptEditor area={a}
-                    onSave={(p) => savePrompt(a.id, p)} /></td>
-                </tr>
+                  {pOpen && <AreaPromptEditor area={a} onSave={(p) => savePrompt(a.id, p)} />}
+                </div>
               )}
-              </Fragment>
-            )
-          })}
-        </tbody>
-      </table>
+            </div>
+          )
+        })}
+      </div>
       </>
       )
       })()}
@@ -2319,6 +2323,18 @@ function Credentials() {
     } finally { setSaving(false) }
   }
   const clearField = async (key: string) => { await api.setServices({ [key]: '' }); reload() }
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const toggle = (id: string) =>
+    setExpanded((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const svcStatus = (s: Service): { ok: boolean; text: string } => {
+    if (s.connect) return s.connect.connected ? { ok: true, text: '✓ connected' } : { ok: false, text: 'not connected' }
+    const fs = s.fields || []
+    if (!fs.length) return { ok: true, text: '' }
+    const set = fs.filter((f) => f.configured).length
+    if (set === fs.length) return { ok: true, text: '✓ set' }
+    if (set > 0) return { ok: false, text: `${set}/${fs.length} set` }
+    return { ok: false, text: 'not set' }
+  }
 
   if (!data) return <div className="loading">Loading…</div>
 
@@ -2342,37 +2358,46 @@ function Credentials() {
         return (
           <div key={g.title} className="svc-group">
             <div className="svc-group-title">{g.title}</div>
-            {svcs.map((s) => (
-              <div key={s.id} className={'svc-card' + (s.enabled === false ? ' off' : '')}>
-                <div className="key-head">
+            {svcs.map((s) => {
+              const open = expanded.has(s.id)
+              const st = svcStatus(s)
+              return (
+              <div key={s.id} className={'svc-card' + (s.enabled === false ? ' off' : '') + (open ? ' open' : '')}>
+                <div className="key-head svc-head" onClick={() => toggle(s.id)}>
+                  <span className={'sync-chev' + (open ? ' open' : '')}>▸</span>
                   <span className="prov-name">{s.name}</span>
                   {s.role !== 'provider' && (
-                    <label className="switch svc-enable" title="Include this source when syncing">
+                    <label className="switch svc-enable" title="Include this source when syncing"
+                      onClick={(e) => e.stopPropagation()}>
                       <input type="checkbox" checked={s.enabled !== false}
                         onChange={async (e) => { await api.setSourceEnabled(s.id, e.target.checked); reload() }} />
                       <span className="track"><span className="knob" /></span>
-                      <span className="switch-text">{s.enabled === false ? 'Off' : 'On'}</span>
                     </label>
                   )}
-                  <span className="prov-hint">{s.hint}</span>
+                  <span className={'svc-stat' + (st.ok ? ' ok' : '')}>{st.text}</span>
                 </div>
-                {s.fields.map((f) => (
-                  <div key={f.key} className="svc-field">
-                    <span className="svc-label">{f.label}</span>
-                    <code className={'masked' + (f.configured ? '' : ' empty')}>
-                      {f.configured ? f.value : 'not set'}
-                    </code>
-                    <input type={f.secret ? 'password' : 'text'} autoComplete="off"
-                      placeholder={f.configured ? 'type to replace' : 'enter value'}
-                      value={vals[f.key] ?? ''}
-                      onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })} />
-                    {f.configured &&
-                      <button className="clear-btn" onClick={() => clearField(f.key)}>Clear</button>}
+                {open && (
+                  <div className="svc-body">
+                    {s.hint && <span className="prov-hint">{s.hint}</span>}
+                    {s.fields.map((f) => (
+                      <div key={f.key} className="svc-field">
+                        <span className="svc-label">{f.label}</span>
+                        <code className={'masked' + (f.configured ? '' : ' empty')}>
+                          {f.configured ? f.value : 'not set'}
+                        </code>
+                        <input type={f.secret ? 'password' : 'text'} autoComplete="off"
+                          placeholder={f.configured ? 'type to replace' : 'enter value'}
+                          value={vals[f.key] ?? ''}
+                          onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })} />
+                        {f.configured &&
+                          <button className="clear-btn" onClick={() => clearField(f.key)}>Clear</button>}
+                      </div>
+                    ))}
+                    {s.connect && <ConnectFlow connect={s.connect} onDone={reload} />}
                   </div>
-                ))}
-                {s.connect && <ConnectFlow connect={s.connect} onDone={reload} />}
+                )}
               </div>
-            ))}
+            )})}
           </div>
         )
       })}

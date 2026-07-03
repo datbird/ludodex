@@ -3024,7 +3024,13 @@ def ea_connect(body: dict = Body(...)):
     """Accept whatever the user copies from EA's auth URL — the full JSON, an
     `access_token=…` pair, or the bare token — cache it (.ea/token.json, ~4h),
     and verify by fetching the EA display name."""
-    tok = _extract_token((body or {}).get("value", ""), ["access_token"])
+    raw = (body or {}).get("value", "")
+    if "login_required" in raw or "102100" in raw:
+        return {"ok": False, "account": None,
+                "error": "You're not signed in to EA in that browser — EA returned a "
+                         "'login_required' error instead of a token. Sign in at ea.com "
+                         "first, then click Get EA token and paste the result."}
+    tok = _extract_token(raw, ["access_token"])
     if not tok:
         raise HTTPException(400, "no access token found in what you pasted")
     import ea_owned
@@ -3032,10 +3038,10 @@ def ea_connect(body: dict = Body(...)):
     try:
         player, _ = ea_owned.whoami({}, tok)          # verify against EA
         return {"ok": True, "account": player.get("displayName")}
-    except Exception:
+    except Exception as e:
         return {"ok": False, "account": None,
-                "error": "That token didn't work — make sure you're signed into EA "
-                         "in the browser, then Get a fresh token and paste it."}
+                "error": "That token didn't work — sign into EA in the browser, get a "
+                         "fresh token, and paste it. (%s)" % str(e)[:100]}
 
 
 def _epic_connected():
