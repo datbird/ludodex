@@ -2221,8 +2221,8 @@ a.idchip:hover { background: var(--accent-bg); }
 .sticky-actions {
   position: sticky;
   bottom: 0;
-  margin: 16px -24px -24px;      /* bleed into .settings-content padding, flush to bottom */
-  padding: 13px 24px;
+  margin: 32px -24px -24px;      /* bleed into .settings-content padding, flush to bottom */
+  padding: 14px 24px;
   background: var(--panel);
   border-top: 1px solid var(--border);
   box-shadow: 0 -6px 14px -8px rgba(0, 0, 0, 0.35);
