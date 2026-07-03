@@ -121,10 +121,12 @@ def _materialize_row(repo, r):
         return None
 
 
-def materialize(con, kind=None, limit=None, all_refs=False):
+def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
     """Download/copy assets lacking sha1 into the repo; demote dead refs and
     re-pick. Default = only the chosen asset per (game, kind); all_refs=True
-    pulls EVERY candidate (a full local archive)."""
+    pulls EVERY candidate (a full local archive). progress=True emits a
+    machine-readable `PROG\\t<i>\\t<n>\\t<norm_key>\\t<kind>` line per item so a
+    caller can show what's being pulled live."""
     repo = repo_dir()
     base = "(sha1 IS NULL OR sha1='')" if all_refs else "chosen=1 AND (sha1 IS NULL OR sha1='')"
     q = "SELECT * FROM media WHERE " + base
@@ -134,8 +136,9 @@ def materialize(con, kind=None, limit=None, all_refs=False):
     if limit:
         q += " LIMIT %d" % int(limit)
     rows = con.execute(q).fetchall()
+    n = len(rows)
     ok = dead = 0
-    for r in rows:
+    for i, r in enumerate(rows, 1):
         sha = _materialize_row(repo, r)
         if sha:
             con.execute("UPDATE media SET sha1=? WHERE id=?", (sha, r["id"]))
@@ -145,10 +148,13 @@ def materialize(con, kind=None, limit=None, all_refs=False):
             con.execute("DELETE FROM media WHERE id=?", (r["id"],))
             _repick(con, r["norm_key"], r["kind"])
             dead += 1
+        if progress:
+            sys.stdout.write("PROG\t%d\t%d\t%s\t%s\n" % (i, n, r["norm_key"], r["kind"]))
+            sys.stdout.flush()
         if (ok + dead) % 200 == 0:
             con.commit()
             print("media_choose: materialized %d (%d dead) of %d"
-                  % (ok, dead, len(rows)), file=sys.stderr)
+                  % (ok, dead, n), file=sys.stderr)
     con.commit()
     return ok, dead
 
@@ -176,7 +182,8 @@ def main(argv):
     n = select(con, kinds=kinds)
     print("media_choose: selected %d chosen assets" % n, file=sys.stderr)
     if "--materialize" in argv:
-        ok, dead = materialize(con, kind, limit, all_refs="--all" in argv)
+        ok, dead = materialize(con, kind, limit, all_refs="--all" in argv,
+                               progress="--progress" in argv)
         repo = repo_dir()
         sz = sum(os.path.getsize(os.path.join(repo, f)) for f in os.listdir(repo)
                  if not f.endswith(".tmp"))

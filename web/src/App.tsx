@@ -4773,7 +4773,8 @@ function JobMonitor() {
           </button>
         ) : shown.map((j) => (
           <div key={j.id} className="jobmon-row">
-            <span className="jm-label" title={j.label}>{j.label}</span>
+            <span className="jm-label" title={j.detail ? `${j.label} — ${j.detail}` : j.label}>
+              {j.label}{j.detail ? <span className="dim"> — {j.detail}</span> : null}</span>
             <ProgressBar done={j.progress.done} total={j.progress.total} failed={j.progress.failed} running={j.status === 'running'} />
             <span className={'jm-status s-' + j.status}>{j.status}</span>
             {j.cancelable && <button className="jm-btn" title="Pause" onClick={() => pause(j.id)}>⏸</button>}

@@ -3268,6 +3268,35 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None):
     return True, ""
 
 
+def _run_streaming(script, args, on_prog, timeout=3600):
+    """Run a pipeline script and stream its stdout, calling on_prog(i, n, key, kind)
+    for each `PROG\\t...` line so a live job can show what's being pulled. Returns
+    (ok, error_tail)."""
+    argv = [sys.executable, os.path.join(DIR, script)] + list(args)
+    try:
+        p = subprocess.Popen(argv, cwd=DIR, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, bufsize=1)
+    except OSError as e:
+        return False, str(e)
+    deadline = time.time() + timeout
+    tail = ""
+    for line in p.stdout:
+        if line.startswith("PROG\t"):
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 5:
+                try:
+                    on_prog(int(parts[1]), int(parts[2]), parts[3], parts[4])
+                except Exception:
+                    pass
+        elif line.strip():
+            tail = line.strip()
+        if time.time() > deadline:
+            p.kill()
+            return False, "timed out"
+    p.wait()
+    return (p.returncode == 0), ("" if p.returncode == 0 else (tail[-300:] or "exit %d" % p.returncode))
+
+
 def _sync_worker(job, services, media_ids=()):
     prev = _lib_keys()
     any_ok = False
@@ -3312,10 +3341,16 @@ def _sync_worker(job, services, media_ids=()):
             step()
         if mode != "ondemand":
             job["step"] = "Downloading media…"
-            _run_script("media_choose.py",
-                        args=["--materialize"] + (["--all"] if mode == "all" else []),
-                        timeout=1800)
-            step()
+            base = job["prog"]["done"]   # phases finished before the download
+
+            def _mat_prog(i, n, nk, kind):
+                job["step"] = ("Downloading media %d/%d — %s (%s)"
+                               % (i, n, nk, kind.replace("_", " ")))
+                if n:
+                    job["prog"]["done"] = base + i / n   # climb through this phase live
+            _run_streaming("media_choose.py",
+                           ["--materialize", "--progress"] + (["--all"] if mode == "all" else []),
+                           _mat_prog, timeout=3600)
     job["prog"]["done"] = job["prog"]["total"]   # snap to complete
     job["step"] = "Done"
     job["running"] = False
