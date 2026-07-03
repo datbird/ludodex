@@ -1499,14 +1499,15 @@ def _jobs_list():
     out = []
     sj = _SYNC.get("job")
     if sj:
-        done = sum(1 for s in sj.get("services", {}).values() if s["state"] == "ok")
-        tot = len(sj.get("services", {})) or 1
+        prog = sj.get("prog") or {
+            "done": sum(1 for s in sj.get("services", {}).values() if s["state"] == "ok"),
+            "total": len(sj.get("services", {})) or 1}
         out.append({
             "id": "sync", "kind": "sync", "label": "Library sync",
             "status": ("running" if sj.get("running") else
                        "error" if sj.get("error") else "done"),
             "detail": sj.get("step", ""), "error": sj.get("error"),
-            "progress": {"done": done, "total": tot, "failed": 0},
+            "progress": {"done": prog["done"], "total": prog["total"] or 1, "failed": 0},
             "when": None, "cancelable": False, "restartable": False,
             "deletable": not sj.get("running")})
     for r in fileops.history(limit=40):
@@ -3270,6 +3271,16 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None):
 def _sync_worker(job, services, media_ids=()):
     prev = _lib_keys()
     any_ok = False
+    # progress across ALL phases, not just the ownership pulls: each source, the
+    # catalog rebuild, each media fetch, and the one materialize pass.
+    planned_media = [sid for sid in media_ids if sid in MEDIA_SYNC_PROVIDER]
+    mode = config.get("media_mode") or "chosen"
+    total = len(services) + 1 + len(planned_media) + (1 if planned_media and mode != "ondemand" else 0)
+    job["prog"] = {"done": 0, "total": max(total, 1)}
+
+    def step():
+        job["prog"]["done"] = min(job["prog"]["done"] + 1, job["prog"]["total"])
+
     for sid in services:
         st = job["services"][sid]
         st["state"] = "running"
@@ -3280,6 +3291,7 @@ def _sync_worker(job, services, media_ids=()):
             st["state"], st["count"], any_ok = "ok", _tsv_count(tsv), True
         else:
             st["state"], st["error"] = "failed", err
+        step()
     if any_ok:
         job["step"] = "Rebuilding catalog…"
         ok, err = _run_script("build_library.py", timeout=900)
@@ -3287,21 +3299,24 @@ def _sync_worker(job, services, media_ids=()):
             job["added"] = len(_lib_keys() - prev)
         else:
             job["error"] = "catalog rebuild failed: " + err
+    step()
     # optional media pass: fetch art for the requested sources (catalog must exist
     # first), then download it into the repo per the media_mode preference.
-    media_targets = [sid for sid in media_ids if sid in MEDIA_SYNC_PROVIDER
-                     and job["services"].get(sid, {}).get("state") == "ok"]
+    media_targets = [sid for sid in planned_media
+                     if job["services"].get(sid, {}).get("state") == "ok"]
     if media_targets and not job.get("error"):
         for sid in media_targets:
             job["step"] = "Fetching %s media…" % _SVC_NAME.get(sid, sid)
             _run_script("media_fetch.py",
                         args=["--provider", MEDIA_SYNC_PROVIDER[sid]], timeout=1800)
-        mode = config.get("media_mode") or "chosen"
+            step()
         if mode != "ondemand":
             job["step"] = "Downloading media…"
             _run_script("media_choose.py",
                         args=["--materialize"] + (["--all"] if mode == "all" else []),
                         timeout=1800)
+            step()
+    job["prog"]["done"] = job["prog"]["total"]   # snap to complete
     job["step"] = "Done"
     job["running"] = False
     job["finished"] = True

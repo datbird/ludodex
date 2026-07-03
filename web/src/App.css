@@ -2252,3 +2252,10 @@ a.idchip:hover { background: var(--accent-bg); }
 .sync-media-opt b { color: var(--text-h); }
 .sync-media-tag { margin-left: 7px; font-size: 10px; font-weight: 700; color: var(--accent);
   background: var(--accent-bg); border-radius: 4px; padding: 1px 5px; vertical-align: middle; }
+
+/* Progress bar: smooth phase jumps + a live pulse / indeterminate sweep while running */
+.run-progress .rp-done { transition: width .4s ease; }
+.run-progress.running .rp-done { animation: rp-pulse 1.4s ease-in-out infinite; }
+@keyframes rp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+.run-progress.indet .rp-done { width: 32%; animation: rp-indet 1.15s ease-in-out infinite; }
+@keyframes rp-indet { 0% { left: -34%; } 100% { left: 100%; } }

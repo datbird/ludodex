@@ -3641,13 +3641,17 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={'run-badge s-' + status}>{status || '—'}</span>
 }
 
-function ProgressBar({ done, total, failed }: { done: number; total: number; failed: number }) {
+function ProgressBar({ done, total, failed, running }:
+  { done: number; total: number; failed: number; running?: boolean }) {
   const pct = total ? Math.round((done / total) * 100) : 0
   const fpct = total ? Math.round((failed / total) * 100) : 0
+  // a running job with no measurable progress yet shows an indeterminate sweep;
+  // otherwise the real % (nudged to a visible sliver so it never looks empty).
+  const indeterminate = !!running && pct === 0
   return (
-    <div className="run-progress"
+    <div className={'run-progress' + (running ? ' running' : '') + (indeterminate ? ' indet' : '')}
       title={`${done}/${total} done${failed ? `, ${failed} failed` : ''}`}>
-      <span className="rp-done" style={{ width: pct + '%' }} />
+      <span className="rp-done" style={indeterminate ? undefined : { width: Math.max(pct, running ? 4 : 0) + '%' }} />
       {failed > 0 && <span className="rp-fail" style={{ width: fpct + '%' }} />}
     </div>
   )
@@ -4770,7 +4774,7 @@ function JobMonitor() {
         ) : shown.map((j) => (
           <div key={j.id} className="jobmon-row">
             <span className="jm-label" title={j.label}>{j.label}</span>
-            <ProgressBar done={j.progress.done} total={j.progress.total} failed={j.progress.failed} />
+            <ProgressBar done={j.progress.done} total={j.progress.total} failed={j.progress.failed} running={j.status === 'running'} />
             <span className={'jm-status s-' + j.status}>{j.status}</span>
             {j.cancelable && <button className="jm-btn" title="Pause" onClick={() => pause(j.id)}>⏸</button>}
             {j.deletable && <button className="jm-btn" title="Remove" onClick={() => del(j.id)}>×</button>}
@@ -4804,7 +4808,7 @@ function JobOverlay({ onClose }: { onClose: () => void }) {
               onClick={() => { if (j.kind === 'fileops' && j.run_id) setOpenRun(j.run_id) }}>
               <span className="job-label">{j.label}{j.detail ? <span className="dim"> — {j.detail}</span> : null}</span>
               <span className={'jm-status s-' + j.status}>{j.status}</span>
-              <ProgressBar done={j.progress.done} total={j.progress.total} failed={j.progress.failed} />
+              <ProgressBar done={j.progress.done} total={j.progress.total} failed={j.progress.failed} running={j.status === 'running'} />
               <span className="dim job-when">{relTime(j.when)}</span>
               <span className="job-acts" onClick={(e) => e.stopPropagation()}>
                 {j.cancelable && <button className="jm-btn" title="Pause" onClick={() => act(api.pauseJob(j.id))}>⏸</button>}
