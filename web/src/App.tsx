@@ -1082,10 +1082,25 @@ function DatabaseSync() {
   return (
     <>
       <h2>Database sync</h2>
-      <p className="dim">ludodex keeps its catalog in a fast local database. Turn on a target to
-        <b> mirror the finished catalog out</b> to PocketBase or Firestore so other apps and devices
-        can read it over an API. It’s a one-way publish (idempotent — only changed records are sent),
-        so your local library stays the source of truth.</p>
+      <p className="dim">Mirror your library out to a database that other apps and devices can read.</p>
+      <div className="dbsync-explain">
+        <div><b>What this does.</b> After each catalog rebuild, ludodex publishes the finished
+          catalog — your <code>games</code> and <code>sources</code> — into the target(s) you enable
+          below. That copy is for <em>other</em> clients to read; it isn’t where ludodex itself
+          stores data.</div>
+        <div><b>Why it’s one-way.</b> ludodex’s own database is a local SQLite file it reads
+          in-process — that’s what makes it fast (microsecond queries, no network). The sync only
+          <em> pushes out</em>, so PocketBase/Firestore become read replicas while your local library
+          stays the single source of truth. Nothing is pulled back, and enabling this never slows the
+          app down.</div>
+        <div><b>Why not just run on PocketBase?</b> PocketBase is itself SQLite behind a web API —
+          making it the primary store would put a network hop on every query for no real gain. Keeping
+          SQLite local and treating PocketBase as a mirror is strictly faster.</div>
+        <div><b>How the push works.</b> Each record gets a stable id (a hash of its natural key) and an
+          idempotent upsert, tracked by a content-hash cache — so only new/changed/removed records are
+          sent, and a re-sync with nothing changed does almost no work. Safe to run repeatedly; it
+          creates the collections on first run.</div>
+      </div>
 
       <div className="dbsync-card">
         <div className="dbsync-head">
