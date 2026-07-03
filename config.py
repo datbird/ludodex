@@ -212,6 +212,11 @@ SCHEMA = [
      "created a named (non-default) Firestore database."),
     ("firebase_collection_prefix", "",
      "Optional prefix for the Firestore collection names (e.g. 'ludodex_')."),
+    # --- media storage policy ---
+    ("media_mode", "chosen",
+     "How much media to download into the local repo: 'ondemand' (keep refs, "
+     "fetch-on-serve), 'chosen' (download the shown asset per game/kind on sync), "
+     "or 'all' (every candidate — a full archive)."),
 ]
 DEFAULTS = {k: d for k, d, _ in SCHEMA}
 DESCS = {k: c for k, _, c in SCHEMA}

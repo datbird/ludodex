@@ -121,10 +121,13 @@ def _materialize_row(repo, r):
         return None
 
 
-def materialize(con, kind=None, limit=None):
-    """Download/copy chosen assets lacking sha1; demote dead refs and re-pick."""
+def materialize(con, kind=None, limit=None, all_refs=False):
+    """Download/copy assets lacking sha1 into the repo; demote dead refs and
+    re-pick. Default = only the chosen asset per (game, kind); all_refs=True
+    pulls EVERY candidate (a full local archive)."""
     repo = repo_dir()
-    q = "SELECT * FROM media WHERE chosen=1 AND (sha1 IS NULL OR sha1='')"
+    base = "(sha1 IS NULL OR sha1='')" if all_refs else "chosen=1 AND (sha1 IS NULL OR sha1='')"
+    q = "SELECT * FROM media WHERE " + base
     if kind:
         q += " AND kind='%s'" % kind
     q += " ORDER BY ref_type"        # local files first (cheap), then URLs
@@ -173,7 +176,7 @@ def main(argv):
     n = select(con, kinds=kinds)
     print("media_choose: selected %d chosen assets" % n, file=sys.stderr)
     if "--materialize" in argv:
-        ok, dead = materialize(con, kind, limit)
+        ok, dead = materialize(con, kind, limit, all_refs="--all" in argv)
         repo = repo_dir()
         sz = sum(os.path.getsize(os.path.join(repo, f)) for f in os.listdir(repo)
                  if not f.endswith(".tmp"))

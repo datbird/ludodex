@@ -2197,3 +2197,22 @@ a.idchip:hover { background: var(--accent-bg); }
   font-weight: 700; font-size: 13px; }
 .dbsync-check.ok .dbsync-check-summary { color: #22c55e; }
 .dbsync-check.bad .dbsync-check-summary { color: #ef4444; }
+
+/* Media storage preference */
+.pref-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 6px; }
+.media-modes { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.media-mode { display: flex; gap: 10px; align-items: flex-start; padding: 11px 13px;
+  border: 1px solid var(--border); border-radius: 10px; cursor: pointer; background: var(--panel);
+  transition: border-color .12s, background .12s; }
+.media-mode:hover { border-color: var(--accent); }
+.media-mode.on { border-color: var(--accent); background: var(--accent-bg); }
+.media-mode input { margin-top: 3px; accent-color: var(--accent); }
+.media-mode-body { display: flex; flex-direction: column; gap: 3px; }
+.media-mode-name { font-weight: 600; color: var(--text-h); font-size: 13px;
+  display: flex; align-items: center; gap: 8px; }
+.media-mode-tag { font-size: 10px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+  color: var(--accent); background: var(--accent-bg); border-radius: 5px; padding: 1px 6px; }
+.media-mode-hint { font-size: 12px; color: var(--text); line-height: 1.5; }
+.media-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+.media-actions-hint { flex-basis: 100%; }

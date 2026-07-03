@@ -213,9 +213,16 @@ export interface LimitField {
   default: string
   value: string
 }
+export type MediaMode = 'ondemand' | 'chosen' | 'all'
+export type MediaJob = {
+  running?: boolean; finished?: boolean; mode?: string; step?: string
+  ok?: boolean | null; downloaded?: number; dead?: number; error?: string
+}
 export interface Prefs {
   hide_non_games: boolean
   spotlight_seconds: number
+  media_mode: MediaMode
+  media_job: MediaJob | null
 }
 export interface IdentifyCandidate {
   igdb_id: number | null
@@ -606,6 +613,9 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} prefs`)
     return r.json() as Promise<Prefs>
   },
+  mediaMaterialize: (mode?: MediaMode) =>
+    postJson<{ media_job: MediaJob }>('/api/media/materialize', mode ? { mode } : {}),
+  mediaMaterializeStatus: () => get<{ media_job: MediaJob }>('/api/media/materialize'),
   // Add a game manually: identify by name (IGDB) or recognize from images (AI)
   identify: (name: string) =>
     get<{ query: string; candidates: IdentifyCandidate[]; provider: string | null }>(

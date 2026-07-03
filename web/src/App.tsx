@@ -13,6 +13,7 @@ import type {
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, ProviderMatch, ScopeValue,
   AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState, DbSyncTest,
+  Prefs, MediaMode,
 } from './api'
 import './App.css'
 
@@ -1282,23 +1283,47 @@ function CfAccessPanel() {
   )
 }
 
-function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
-  const [hideNonGames, setHideNonGames] = useState<boolean | null>(null)
-  useEffect(() => { api.prefs().then((p) => setHideNonGames(p.hide_non_games)).catch(() => {}) }, [])
+const MEDIA_MODES: { id: MediaMode; name: string; hint: string }[] = [
+  { id: 'ondemand', name: 'On demand', hint: 'Keep references and fetch each image the first time it’s shown, then cache it. Lightest on storage; needs the source reachable.' },
+  { id: 'chosen', name: 'Download what’s shown', hint: 'On each sync, pull the chosen image per game (cover, logo, …) into ludodex’s own repo — instant, self-contained, works offline. Extra candidates stay on-demand.' },
+  { id: 'all', name: 'Download everything', hint: 'Also pull every alternate candidate — a full local archive. Uses the most storage.' },
+]
 
-  const toggle = async (v: boolean) => {
-    setHideNonGames(v)
-    try { await api.setPrefs({ hide_non_games: v }); onChanged() }
-    catch { setHideNonGames(!v) }
+function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
+  const [prefs, setPrefs] = useState<Prefs | null>(null)
+  const [busy, setBusy] = useState(false)
+  const load = () => api.prefs().then(setPrefs).catch(() => {})
+  useEffect(() => { load() }, [])
+  const running = prefs?.media_job?.running
+  useEffect(() => {
+    if (!running) return
+    const t = setInterval(() => api.prefs().then(setPrefs).catch(() => {}), 2000)
+    return () => clearInterval(t)
+  }, [running])
+
+  if (!prefs) return <div className="loading">Loading…</div>
+  const job = prefs.media_job
+
+  const setHide = async (v: boolean) => {
+    setPrefs({ ...prefs, hide_non_games: v })
+    try { await api.setPrefs({ hide_non_games: v }); onChanged() } catch { load() }
+  }
+  const setMode = async (m: MediaMode) => {
+    setPrefs({ ...prefs, media_mode: m })
+    try { await api.setPrefs({ media_mode: m }) } catch { load() }
+  }
+  const downloadNow = async () => {
+    setBusy(true)
+    try { const r = await api.mediaMaterialize(); setPrefs((p) => p ? { ...p, media_job: r.media_job } : p) }
+    finally { setBusy(false) }
   }
 
-  if (hideNonGames === null) return <div className="loading">Loading…</div>
   return (
     <div className="lib-prefs">
       <div className="pref-row">
         <label className="switch">
-          <input type="checkbox" checked={hideNonGames}
-            onChange={(e) => toggle(e.target.checked)} />
+          <input type="checkbox" checked={prefs.hide_non_games}
+            onChange={(e) => setHide(e.target.checked)} />
           <span className="track"><span className="knob" /></span>
         </label>
         <div className="pref-text">
@@ -1307,6 +1332,34 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
             Exclude Steam apps flagged as applications, tools, soundtracks, videos or
             hardware (from the <code>steam_type</code> signal) everywhere in the library.
           </span>
+        </div>
+      </div>
+
+      <div className="pref-section">
+        <div className="pref-name">Media storage</div>
+        <span className="pref-hint">When you add a media source, how much art should ludodex pull
+          into its own repository? (The repo lives on the media volume you configured.)</span>
+        <div className="media-modes">
+          {MEDIA_MODES.map((m) => (
+            <label key={m.id} className={'media-mode' + (prefs.media_mode === m.id ? ' on' : '')}>
+              <input type="radio" name="media_mode" checked={prefs.media_mode === m.id}
+                onChange={() => setMode(m.id)} />
+              <div className="media-mode-body">
+                <div className="media-mode-name">{m.name}
+                  {m.id === 'chosen' && <span className="media-mode-tag">recommended</span>}</div>
+                <div className="media-mode-hint">{m.hint}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+        <div className="media-actions">
+          <button className="go" disabled={busy || !!job?.running} onClick={downloadNow}>
+            {job?.running ? 'Downloading…' : 'Download now'}</button>
+          {job && <span className={'dbsync-msg' + (job.ok === false ? ' err' : '')}>
+            {job.running ? (job.step || 'Downloading…')
+              : job.ok ? `Downloaded ${job.downloaded} asset${job.downloaded === 1 ? '' : 's'}${job.dead ? `, dropped ${job.dead} dead ref${job.dead === 1 ? '' : 's'}` : ''} ✓`
+              : job.finished ? `Failed: ${job.error || 'see server log'}` : ''}</span>}
+          <span className="pref-hint media-actions-hint">Applies the setting above to your existing library right now.</span>
         </div>
       </div>
     </div>

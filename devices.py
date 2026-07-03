@@ -405,6 +405,20 @@ def sync_device(dev_id):
         except (subprocess.TimeoutExpired, OSError) as e:
             out["reindexed"] = False
             out["reindex_error"] = str(e)[:200]
+        # download the newly-indexed media into the repo per the media_mode pref
+        mode = config.get("media_mode") or "chosen"
+        if mode != "ondemand":
+            try:
+                args = [sys.executable, os.path.join(DIR, "media_choose.py"), "--materialize"]
+                if mode == "all":
+                    args.append("--all")
+                r = _run(args, timeout=1800)
+                out["materialized"] = (r.returncode == 0)
+                if r.returncode != 0:
+                    out["materialize_error"] = (r.stderr or "")[:200]
+            except (subprocess.TimeoutExpired, OSError) as e:
+                out["materialized"] = False
+                out["materialize_error"] = str(e)[:200]
     if rebuild:      # rebuild the catalog so pulled ROM titles appear (build_library
         try:         # runs the consumer carry-over pass internally — the blessed rebuild path)
             r = _run([sys.executable, os.path.join(DIR, "build_library.py")], timeout=900)

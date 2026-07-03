@@ -797,6 +797,51 @@ def _spotlight_seconds():
     return max(SPOTLIGHT_SECONDS_MIN, min(SPOTLIGHT_SECONDS_MAX, v))
 
 
+# --------------------------------------------------------------------------- #
+#  Media storage: download chosen (or all) art into the local content-addressed
+#  repo, per the media_mode preference. Complements materialize-on-serve (lazy).
+# --------------------------------------------------------------------------- #
+_MEDIA_JOB = {"job": None}
+_MEDIA_LOCK = threading.Lock()
+
+
+def _media_worker(mode):
+    j = _MEDIA_JOB["job"]
+    try:
+        con = media_choose.con_index()
+        j["step"] = "Choosing best assets…"
+        media_choose.select(con)
+        j["step"] = "Downloading media into the repo…"
+        ok, dead = media_choose.materialize(con, all_refs=(mode == "all"))
+        con.close()
+        j.update({"ok": True, "downloaded": ok, "dead": dead, "step": "Done"})
+    except Exception as e:
+        j.update({"ok": False, "error": str(e)[:200], "step": "Failed"})
+    finally:
+        j["running"] = False
+        j["finished"] = True
+
+
+@app.post("/api/media/materialize")
+def media_materialize(body: dict = Body(default={})):
+    """Hydrate the local media repo now. mode defaults to the media_mode pref;
+    'all' pulls every candidate, otherwise just the chosen asset per game/kind."""
+    with _MEDIA_LOCK:
+        cur = _MEDIA_JOB["job"]
+        if cur and cur.get("running"):
+            raise HTTPException(409, "a media download is already running")
+        mode = (body or {}).get("mode") or config.get("media_mode") or "chosen"
+        _MEDIA_JOB["job"] = {"running": True, "finished": False, "mode": mode,
+                             "step": "Starting…", "ok": None, "downloaded": 0, "dead": 0}
+    threading.Thread(target=_media_worker, args=(mode,), daemon=True).start()
+    return {"media_job": _MEDIA_JOB["job"]}
+
+
+@app.get("/api/media/materialize")
+def media_materialize_status():
+    return {"media_job": _MEDIA_JOB["job"]}
+
+
 @app.get("/api/prefs")
 def get_prefs():
     """Global app preferences (not per-service): hide non-game apps + how long each
@@ -804,12 +849,16 @@ def get_prefs():
     return {
         "hide_non_games": config.get_bool("hide_non_games", True),
         "spotlight_seconds": _spotlight_seconds(),
+        "media_mode": config.get("media_mode") or "chosen",
+        "media_job": _MEDIA_JOB["job"],
     }
 
 
 @app.post("/api/prefs")
 def set_prefs(body: dict = Body(...)):
     body = body or {}
+    if body.get("media_mode") in ("ondemand", "chosen", "all"):
+        config.set_("media_mode", body["media_mode"])
     if "hide_non_games" in body:
         config.set_("hide_non_games", "1" if body["hide_non_games"] else "0")
     if "spotlight_seconds" in body:
