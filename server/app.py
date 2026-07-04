@@ -1520,6 +1520,21 @@ def _jobs_list():
             "progress": {"done": prog["done"], "total": prog["total"] or 1, "failed": 0},
             "when": None, "cancelable": False, "restartable": False,
             "deletable": not sj.get("running")})
+    rj = _ROMSYNC.get("job")
+    if rj:
+        devs = rj.get("devices", {})
+        rprog = rj.get("prog") or {
+            "done": sum(1 for d in devs.values() if d["state"] == "ok"),
+            "total": len(devs) or 1}
+        out.append({
+            "id": "romsync", "kind": "romsync", "label": "ROM sync",
+            "status": ("running" if rj.get("running") else
+                       "error" if rj.get("error") else "done"),
+            "detail": rj.get("step", ""), "error": rj.get("error"),
+            "progress": {"done": rprog["done"], "total": rprog["total"] or 1,
+                         "failed": sum(1 for d in devs.values() if d["state"] == "failed")},
+            "when": None, "cancelable": False, "restartable": False,
+            "deletable": not rj.get("running")})
     for r in fileops.history(limit=40):
         jid = "run:%d" % r["id"]
         rec = _JOBS.get(jid)
@@ -1612,6 +1627,9 @@ def jobs_restart(jid: str):
 def jobs_delete(jid: str):
     if jid == "sync":
         _SYNC["job"] = None
+        return {"deleted": True}
+    if jid == "romsync":
+        _ROMSYNC["job"] = None
         return {"deleted": True}
     if jid.startswith("run:"):
         rid = int(jid.split(":", 1)[1])

@@ -451,7 +451,7 @@ export interface Troubleshoot {
 }
 export interface JobProgress { done: number; total: number; failed: number }
 export interface Job {
-  id: string; kind: 'sync' | 'fileops'; run_id?: number; label: string
+  id: string; kind: 'sync' | 'romsync' | 'fileops' | 'aimeta'; run_id?: number; label: string
   status: string; detail: string; error: string | null; progress: JobProgress
   when: number | null; cancelable: boolean; restartable: boolean; deletable: boolean
 }
