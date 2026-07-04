@@ -303,6 +303,41 @@ def _ssh(dev, remote_cmd, timeout=180):
                 timeout=timeout)
 
 
+def browse_dirs(dev_id, path):
+    """Immediate child directories of `path` on a device — powers path autocomplete
+    in the add-library-manager form. `path` is treated as a directory to list; the
+    caller filters the returned names by whatever partial name the user is typing.
+    Local devices list the ludodex host/container filesystem; SSH devices list the
+    remote box. Returns {ok, path, dirs:[names], error?}."""
+    path = (path or "/").rstrip() or "/"
+    dev = _device(dev_id) if dev_id else None
+    transport = (dev or {}).get("transport", "local")
+    if transport == "local" or not dev:
+        try:
+            with os.scandir(path) as it:
+                dirs = sorted((e.name for e in it if e.is_dir()), key=str.lower)
+            return {"ok": True, "path": path, "dirs": dirs}
+        except OSError as e:
+            return {"ok": False, "path": path, "dirs": [],
+                    "error": (e.strerror or str(e))[:150]}
+    if transport == "smb":
+        return {"ok": False, "path": path, "dirs": [],
+                "error": "browsing SMB shares isn't supported yet — type the path"}
+    if not dev.get("host"):
+        return {"ok": False, "path": path, "dirs": [], "error": "device has no host"}
+    q = "'" + path.replace("'", "'\\''") + "'"          # single-quote for the remote shell
+    try:                                                # -p appends '/' to directory names
+        r = _ssh(dev, "ls -1Ap -- %s" % q, timeout=15)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"ok": False, "path": path, "dirs": [], "error": str(e)[:150]}
+    if r.returncode != 0:
+        return {"ok": False, "path": path, "dirs": [],
+                "error": (r.stderr or "can't list that path").strip().splitlines()[-1:][0][:150]
+                if r.stderr else "can't list that path"}
+    dirs = sorted((ln[:-1] for ln in r.stdout.splitlines() if ln.endswith("/")), key=str.lower)
+    return {"ok": True, "path": path, "dirs": dirs}
+
+
 def test_connection(dev):
     """Live reachability check. Returns {ok, detail}."""
     if dev.get("transport") == "local":

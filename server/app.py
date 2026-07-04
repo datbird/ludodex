@@ -1240,6 +1240,15 @@ def test_device(dev_id: int):
     return devices.test_connection(d)
 
 
+@app.post("/api/devices/browse")
+def browse_device(body: dict = Body(default={})):
+    """List child directories of a path on a device — for ROM/media path
+    autocomplete. device_id 0/absent = the local ludodex host/container."""
+    raw = (body or {}).get("device_id")
+    dev_id = int(raw) if str(raw).isdigit() else 0
+    return devices.browse_dirs(dev_id, (body or {}).get("path") or "/")
+
+
 @app.post("/api/devices/{dev_id}/sync")
 def sync_device_ep(dev_id: int):
     if not devices._device(dev_id):

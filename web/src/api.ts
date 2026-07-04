@@ -681,6 +681,15 @@ export const api = {
     const r = await fetch('/api/devices/' + id + '/test', { method: 'POST' })
     if (!r.ok) throw new Error(`${r.status} test`); return r.json() as Promise<{ ok: boolean; detail: string }>
   },
+  // Directory autocomplete for ROM/media paths. id 0 = local ludodex host/container.
+  browseDevice: async (id: number, path: string) => {
+    const r = await fetch('/api/devices/browse', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_id: id, path }),
+    })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{ ok: boolean; path: string; dirs: string[]; error?: string }>
+  },
   syncDevice: async (id: number) => {
     const r = await fetch('/api/devices/' + id + '/sync', { method: 'POST' })
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)

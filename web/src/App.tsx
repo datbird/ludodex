@@ -2098,6 +2098,62 @@ function ApiKeys({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
 
 type LmKinds = Record<string, [string, boolean, boolean]>
 
+// Path field with directory autocomplete. Lists the child folders of whatever
+// directory the text is currently in (on the device — local container FS or SSH)
+// and filters them by the trailing partial name; click one to descend.
+function PathInput({ deviceId, value, onChange, placeholder }: {
+  deviceId: number; value: string; onChange: (v: string) => void; placeholder?: string
+}) {
+  const [dirs, setDirs] = useState<string[]>([])
+  const [openList, setOpenList] = useState(false)
+  const [err, setErr] = useState('')
+  const seq = useRef(0)
+
+  const slash = value.lastIndexOf('/')
+  const dir = slash >= 0 ? value.slice(0, slash + 1) : ''       // directory to list
+  const frag = slash >= 0 ? value.slice(slash + 1) : value      // partial name to match
+
+  const listDir = useCallback(async (d: string) => {
+    const id = ++seq.current
+    try {
+      const r = await api.browseDevice(deviceId, d || '/')
+      if (id !== seq.current) return
+      if (r.ok) { setDirs(r.dirs); setErr('') } else { setDirs([]); setErr(r.error || 'cannot list') }
+    } catch (e) { if (id === seq.current) { setDirs([]); setErr((e as Error).message) } }
+  }, [deviceId])
+
+  useEffect(() => {
+    if (!openList) return
+    const t = setTimeout(() => listDir(dir || '/'), 180)
+    return () => clearTimeout(t)
+  }, [dir, openList, listDir])
+
+  const shown = dirs.filter((d) => d.toLowerCase().startsWith(frag.toLowerCase()))
+  const choose = (name: string) => {
+    const next = (dir || '/') + name + '/'
+    onChange(next); listDir(next)
+  }
+
+  return (
+    <div className="pathinput">
+      <input placeholder={placeholder} value={value} autoComplete="off" spellCheck={false}
+        onChange={(e) => { onChange(e.target.value); setOpenList(true) }}
+        onFocus={() => { setOpenList(true); listDir(dir || '/') }}
+        onBlur={() => setTimeout(() => setOpenList(false), 150)} />
+      {openList && (shown.length > 0 || err) && (
+        <div className="pathinput-list">
+          {err
+            ? <div className="pathinput-err">{err}</div>
+            : shown.slice(0, 50).map((d) => (
+              <button type="button" key={d} className="pathinput-item"
+                onMouseDown={(e) => { e.preventDefault(); choose(d) }}>{d}/</button>
+            ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AddManager({ deviceId, deviceName, kinds, onAdded }: {
   deviceId: number; deviceName: string; kinds: [string, [string, boolean, boolean]][]
   onAdded: (d: { devices: Device[] }) => void
@@ -2156,13 +2212,13 @@ function AddManager({ deviceId, deviceName, kinds, onAdded }: {
           {doesRoms && (
             <label className="dm-field">
               <span>ROM path {doesMedia && <em>on device</em>}</span>
-              <input placeholder="/path/to/roms" value={rom} onChange={(e) => setRom(e.target.value)} />
+              <PathInput deviceId={deviceId} value={rom} onChange={setRom} placeholder="/path/to/roms" />
             </label>
           )}
           {doesMedia && (
             <label className="dm-field">
               <span>Media path {doesRoms && <em>(optional)</em>}</span>
-              <input placeholder="/path/to/downloaded_media" value={media} onChange={(e) => setMedia(e.target.value)} />
+              <PathInput deviceId={deviceId} value={media} onChange={setMedia} placeholder="/path/to/downloaded_media" />
             </label>
           )}
         </div>
