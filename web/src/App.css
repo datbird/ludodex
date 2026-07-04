@@ -2299,6 +2299,16 @@ a.idchip:hover { background: var(--accent-bg); }
 .sync-media-tag { margin-left: 7px; font-size: 10px; font-weight: 700; color: var(--accent);
   background: var(--accent-bg); border-radius: 4px; padding: 1px 5px; vertical-align: middle; }
 
+/* ROM-repo section */
+.sync-rom-all { margin: 4px 0 8px; }
+.sync-xport { margin-left: 8px; font-size: 11px; font-weight: 400; color: var(--text);
+  opacity: 0.7; text-transform: none; }
+.sync-mgr { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.sync-mgr-kind { flex: 0 0 auto; color: var(--text-h); font-weight: 600; }
+.sync-mgr-path { flex: 1 1 auto; min-width: 0; font-family: var(--mono, monospace);
+  font-size: 11px; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  border-radius: 5px; padding: 2px 6px; overflow-x: auto; white-space: nowrap; }
+
 /* Progress bar: smooth phase jumps + a live pulse / indeterminate sweep while running */
 .run-progress .rp-done { transition: width .4s ease; }
 .run-progress.running .rp-done { animation: rp-pulse 1.4s ease-in-out infinite; }

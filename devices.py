@@ -133,6 +133,50 @@ def devices_list():
     return devs
 
 
+def _mgr_rom_count(mgr_id):
+    """ROM files indexed for one manager (None if it hasn't been scanned yet)."""
+    p = os.path.join(DATA, "roms-index-mgr%d.sqlite" % mgr_id)
+    if not os.path.exists(p):
+        return None
+    try:
+        con = sqlite3.connect(p)
+        n = con.execute("SELECT COUNT(*) FROM roms").fetchone()[0]
+        con.close()
+        return int(n)
+    except sqlite3.Error:
+        return None
+
+
+def rom_locations():
+    """ROM locations for the Sync menu's ROM-repo section: one entry per device
+    that hosts ≥1 enabled ROM-providing library manager, with its managers and a
+    live indexed-ROM count. These ARE the Connections devices — no new concept."""
+    out = []
+    for d in devices_list():
+        mgrs = []
+        count, scanned = 0, False
+        for m in d.get("managers", []):
+            if not m.get("enabled", 1):
+                continue
+            if not (LM_KINDS.get(m["kind"], ("", False, False))[1] and m.get("rom_path")):
+                continue
+            c = _mgr_rom_count(m["id"])
+            if c is not None:
+                scanned = True
+                count += c
+            mgrs.append({"id": m["id"], "kind": m["kind"],
+                         "kind_label": m.get("kind_label")
+                         or LM_KINDS.get(m["kind"], ("?",))[0],
+                         "name": m.get("name") or "", "rom_path": m.get("rom_path") or "",
+                         "count": c})
+        if not mgrs:
+            continue
+        out.append({"id": d["id"], "name": d["name"], "transport": d.get("transport") or "",
+                    "host": d.get("host") or "", "enabled": bool(d.get("enabled", 1)),
+                    "managers": mgrs, "count": count if scanned else None})
+    return out
+
+
 def _dev_password(dev_id):
     con = _con()
     r = con.execute("SELECT password FROM devices WHERE id=?", (dev_id,)).fetchone()

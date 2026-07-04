@@ -5,7 +5,7 @@ import type {
   AiUsageModel, AiUsageProvider, AiUsageDay,
   DedupeSuggestion, ArtPick, Service, ServiceConnect, Achievements as AchData,
   MediaLibrary, MediaAsset, MediaKind,
-  OpsStatus, OpsDatabase, SyncService, SyncJob, TagRef, Scores,
+  OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device,
   FileVariable, FileProfile, FileDetect, FilePlan, FileCommandResult,
@@ -2692,20 +2692,28 @@ function SyncMenu() {
   const [listOpen, setListOpen] = useState(true)          // main collapse
   const [expanded, setExpanded] = useState<Set<string>>(new Set())  // per-service
   const [media, setMedia] = useState<Set<string>>(new Set())        // "sync media" checks
+  const [romLocs, setRomLocs] = useState<RomLocation[]>([])
+  const [romJob, setRomJob] = useState<RomJob | null>(null)
+  const [romListOpen, setRomListOpen] = useState(true)              // ROM section collapse
+  const [romExpanded, setRomExpanded] = useState<Set<number>>(new Set())
 
   const load = useCallback(async () => {
     try { const s = await api.syncStatus(); setSvcs(s.services); setJob(s.job) }
     catch { /* offline */ }
+    try { const r = await api.romsStatus(); setRomLocs(r.locations); setRomJob(r.job) }
+    catch { /* offline */ }
   }, [])
   useEffect(() => { if (open) load() }, [open, load])
   const running = !!job?.running
+  const romRunning = !!romJob?.running
+  const anyRunning = running || romRunning
   // Stay open until an outside click; but don't let a click-away abort a run.
-  const wrapRef = useClickOutside<HTMLDivElement>(open, () => { if (!running) setOpen(false) })
+  const wrapRef = useClickOutside<HTMLDivElement>(open, () => { if (!anyRunning) setOpen(false) })
   useEffect(() => {
-    if (!running) return
+    if (!anyRunning) return
     const t = setInterval(load, 1500)
     return () => clearInterval(t)
-  }, [running, load])
+  }, [anyRunning, load])
 
   const enabled = svcs.filter((s) => s.enabled)
   const readyCount = enabled.filter((s) => s.ready).length
@@ -2742,9 +2750,24 @@ function SyncMenu() {
 
   const rowState = (id: string) => job?.services?.[id]?.state
 
+  const romEnabled = romLocs.filter((l) => l.enabled)
+  const toggleRomExpand = (id: number) =>
+    setRomExpanded((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const runRomAll = async () => {
+    setMsg('')
+    try { setRomJob(await api.romsRun('all')) } catch (e) { setMsg((e as Error).message) }
+    load()
+  }
+  const runRomOne = async (id: number) => {
+    setMsg('')
+    try { setRomJob(await api.romsRun([id])) } catch (e) { setMsg((e as Error).message) }
+    load()
+  }
+  const romRowState = (id: number) => romJob?.devices?.[String(id)]
+
   return (
     <div className="sync-wrap filter-wrap" ref={wrapRef}>
-      <button className={'icon-btn' + (running ? ' spin' : '')} title="Sync library"
+      <button className={'icon-btn' + (anyRunning ? ' spin' : '')} title="Sync library"
         onClick={() => setOpen((v) => !v)}>
         <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"
           strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -2757,8 +2780,9 @@ function SyncMenu() {
           <div className="filter-head">
             <span>Sync library</span>
             {running && job?.step && <span className="sync-step">{job.step}</span>}
+            {romRunning && romJob?.step && <span className="sync-step">{romJob.step}</span>}
           </div>
-          <button className="go sync-all" disabled={running || !anyReady} onClick={runAll}>
+          <button className="go sync-all" disabled={anyRunning || !anyReady} onClick={runAll}>
             {running ? 'Syncing…' : 'Sync all configured'}
           </button>
           {!anyReady && !running && (
@@ -2790,7 +2814,7 @@ function SyncMenu() {
                           : s.ready ? 'ready' : s.needs_auth ? 'sign in' : 'not set'}
                       </span>
                       {s.ready && js !== 'running' && (
-                        <button className="ops-btn" disabled={running}
+                        <button className="ops-btn" disabled={anyRunning}
                           onClick={(e) => { e.stopPropagation(); runOne(s.id) }}>Sync</button>
                       )}
                     </div>
@@ -2824,6 +2848,61 @@ function SyncMenu() {
                 )
               })}
             </div>
+          )}
+
+          {romLocs.length > 0 && (
+            <>
+              <button className="sync-section" onClick={() => setRomListOpen((v) => !v)}>
+                <span className={'sync-chev' + (romListOpen ? ' open' : '')}>▸</span>
+                <span className="sync-section-name">ROM repos</span>
+                <span className="sync-section-meta">{romEnabled.length} location{romEnabled.length === 1 ? '' : 's'}</span>
+              </button>
+              {romListOpen && (
+                <div className="sync-list">
+                  <button className="go sync-all sync-rom-all" disabled={anyRunning || !romEnabled.length}
+                    onClick={runRomAll}>
+                    {romRunning ? 'Scanning…' : 'Sync all ROM locations'}
+                  </button>
+                  {romEnabled.map((l) => {
+                    const rs = romRowState(l.id)
+                    const isOpen = romExpanded.has(l.id)
+                    return (
+                      <div key={l.id} className={'sync-row' + (isOpen ? ' open' : '')}>
+                        <div className="sync-row-head" onClick={() => toggleRomExpand(l.id)}>
+                          <span className={'sync-chev' + (isOpen ? ' open' : '')}>▸</span>
+                          <span className="sync-name">{l.name}
+                            <span className="sync-xport">{l.transport}{l.host ? ' · ' + l.host : ''}</span></span>
+                          <span className="sync-meta">
+                            {rs?.state === 'running' ? <span className="sync-run">scanning…</span>
+                              : rs?.state === 'ok' ? <span className="conn-ok">✓ {(rs.roms ?? 0).toLocaleString()}</span>
+                              : rs?.state === 'failed' ? <span className="conn-off">✗ failed</span>
+                              : l.count != null ? `${l.count.toLocaleString()} ROMs`
+                              : 'not scanned'}
+                          </span>
+                          {rs?.state !== 'running' && (
+                            <button className="ops-btn" disabled={anyRunning}
+                              onClick={(e) => { e.stopPropagation(); runRomOne(l.id) }}>Sync</button>
+                          )}
+                        </div>
+                        {isOpen && (
+                          <div className="sync-row-body">
+                            {l.managers.map((m) => (
+                              <div key={m.id} className="sync-mgr">
+                                <span className="sync-mgr-kind">{m.kind_label}</span>
+                                <code className="sync-mgr-path">{m.rom_path}</code>
+                                {m.count != null && <span className="dim">{m.count.toLocaleString()}</span>}
+                              </div>
+                            ))}
+                            {rs?.state === 'failed' && rs.error && <div className="sync-err">{rs.error}</div>}
+                            <div className="sync-note dim">Rescans this location for added/removed ROMs, then rebuilds the catalog.</div>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </>
           )}
 
           {!running && job?.added != null && (

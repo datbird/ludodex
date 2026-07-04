@@ -3284,6 +3284,8 @@ def _sync_services():
 
 _SYNC = {"job": None}
 _SYNC_LOCK = threading.Lock()
+_ROMSYNC = {"job": None}          # ROM-location scans (Connections devices)
+_ROMSYNC_LOCK = threading.Lock()
 
 
 def _lib_keys():
@@ -3420,6 +3422,9 @@ def sync_run(body: dict = Body(default={})):
         cur = _SYNC["job"]
         if cur and cur.get("running"):
             raise HTTPException(409, "a sync is already running")
+        if _ROMSYNC["job"] and _ROMSYNC["job"].get("running"):
+            raise HTTPException(409, "a ROM sync is running — wait for it to finish "
+                                     "(both rebuild the catalog)")
         req = (body or {}).get("services") or ["all"]
         if req in ("all", ["all"]):
             targets = [s["id"] for s in _sync_services() if s["enabled"] and s["ready"]]
@@ -3436,6 +3441,74 @@ def sync_run(body: dict = Body(default={})):
                             for sid in targets}}
         _SYNC["job"] = job
     threading.Thread(target=_sync_worker, args=(job, targets, media), daemon=True).start()
+    return job
+
+
+# --------------------------------------------------------------------------- #
+#  ROM-repo sync — rescan Connections devices' ROM locations, rebuild catalog.
+#  Backgrounded like the store sync (a device scan can outlast a proxy timeout).
+# --------------------------------------------------------------------------- #
+def _romsync_worker(job, targets):
+    """Rescan each target device (find→index→rebuild happens in sync_device)."""
+    done, any_ok = 0, False
+    for did, name in targets:
+        d = job["devices"][str(did)]
+        d["state"] = "running"
+        job["step"] = "Scanning %s…" % name
+        try:
+            rep = devices.sync_device(did)
+            results = rep.get("results", [])
+            roms = sum(r["roms"] for r in results if isinstance(r.get("roms"), int))
+            failed = [r for r in results if not r.get("ok")]
+            if failed:
+                d.update(state="failed", roms=roms or None,
+                         error="; ".join(f.get("error", "?") for f in failed)[:200])
+            else:
+                d.update(state="ok", roms=roms, error=None)
+                any_ok = True
+        except Exception as e:
+            d.update(state="failed", roms=None, error=str(e)[:200])
+        done += 1
+        job["prog"] = {"done": done, "total": len(targets)}
+    job["running"] = False
+    job["finished"] = True
+    any_failed = any(v["state"] == "failed" for v in job["devices"].values())
+    job["step"] = ("Finished with errors" if any_failed and not any_ok
+                   else "Done with some errors" if any_failed
+                   else "Done")
+
+
+@app.get("/api/roms/status")
+def roms_status():
+    """ROM locations (Connections devices with ROM managers) + current/last job."""
+    return {"locations": devices.rom_locations(), "job": _ROMSYNC["job"]}
+
+
+@app.post("/api/roms/run")
+def roms_run(body: dict = Body(default={})):
+    """Rescan the given ROM-location device ids, or 'all' = every enabled one."""
+    with _ROMSYNC_LOCK:
+        cur = _ROMSYNC["job"]
+        if cur and cur.get("running"):
+            raise HTTPException(409, "a ROM sync is already running")
+        if _SYNC["job"] and _SYNC["job"].get("running"):
+            raise HTTPException(409, "a library sync is running — wait for it to finish "
+                                     "(both rebuild the catalog)")
+        locs = {loc["id"]: loc for loc in devices.rom_locations()}
+        req = (body or {}).get("devices") or ["all"]
+        if req in ("all", ["all"]):
+            targets = [(loc["id"], loc["name"]) for loc in locs.values() if loc["enabled"]]
+        else:
+            targets = [(int(i), locs[int(i)]["name"]) for i in req
+                       if str(i).isdigit() and int(i) in locs and locs[int(i)]["enabled"]]
+        if not targets:
+            raise HTTPException(400, "no ROM locations to sync")
+        job = {"running": True, "finished": False, "step": "Starting…", "error": None,
+               "devices": {str(i): {"state": "pending", "roms": None, "error": None}
+                           for i, _ in targets},
+               "prog": {"done": 0, "total": len(targets)}}
+        _ROMSYNC["job"] = job
+    threading.Thread(target=_romsync_worker, args=(job, targets), daemon=True).start()
     return job
 
 

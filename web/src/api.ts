@@ -301,6 +301,24 @@ export interface SyncJob {
   services: Record<string, SyncJobService>
 }
 
+// ROM-repo sync (Connections devices with ROM library managers)
+export interface RomManager {
+  id: number; kind: string; kind_label: string; name: string
+  rom_path: string; count: number | null
+}
+export interface RomLocation {
+  id: number; name: string; transport: string; host: string
+  enabled: boolean; managers: RomManager[]; count: number | null
+}
+export interface RomJobDevice {
+  state: 'pending' | 'running' | 'ok' | 'failed'
+  roms: number | null; error: string | null
+}
+export interface RomJob {
+  running: boolean; finished: boolean; step: string; error: string | null
+  devices: Record<string, RomJobDevice>; prog?: { done: number; total: number }
+}
+
 export interface Achievement {
   id: number
   title: string
@@ -776,6 +794,16 @@ export const api = {
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<SyncJob>
+  },
+  // ROM-repo sync: rescan Connections devices' ROM locations, then rebuild.
+  romsStatus: () => get<{ locations: RomLocation[]; job: RomJob | null }>('/api/roms/status'),
+  romsRun: async (devices: number[] | 'all') => {
+    const r = await fetch('/api/roms/run', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ devices: devices === 'all' ? 'all' : devices }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<RomJob>
   },
   setServices: async (values: Record<string, string>) => {
     const r = await fetch('/api/services', {
