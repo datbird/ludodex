@@ -2250,21 +2250,29 @@ function AddManager({ deviceId, deviceName, kinds, onAdded }: {
   )
 }
 
-function AddDevice({ onAdded }: { onAdded: (d: { devices: Device[] }) => void }) {
-  const blank = { name: '', transport: 'ssh', host: '', port: 22, username: '', auth: 'alias', key_path: '', password: '', share: '' }
-  const [f, setF] = useState(blank)
+type DevForm = {
+  id?: number; name: string; transport: string; host: string; port: number
+  username: string; auth: string; key_path: string; password: string; share: string
+}
+
+// Shared add/edit form for a device. On update (initial.id set) a blank password
+// keeps the stored one, and unspecified fields are merged server-side.
+function DeviceForm({ initial, submitLabel, hasPassword, onSaved, onCancel }: {
+  initial: DevForm; submitLabel: string; hasPassword?: boolean
+  onSaved: (d: { devices: Device[] }) => void; onCancel?: () => void
+}) {
+  const [f, setF] = useState<DevForm>(initial)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const up = (k: string, v: string | number) => setF((p) => ({ ...p, [k]: v }))
-  const add = async () => {
+  const up = (k: keyof DevForm, v: string | number) => setF((p) => ({ ...p, [k]: v }))
+  const save = async () => {
     if (!f.name.trim()) return
     setBusy(true); setErr('')
-    try { onAdded(await api.setDevice(f)); setF(blank) }
+    try { onSaved(await api.setDevice(f)); if (!initial.id) setF(initial) }
     catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
   return (
-    <div className="dev-add">
-      <div className="dev-add-title">＋ Add a device</div>
+    <>
       <div className="dev-add-grid">
         <input placeholder="Name (e.g. Steam Deck)" value={f.name} onChange={(e) => up('name', e.target.value)} />
         <select value={f.transport} onChange={(e) => up('transport', e.target.value)}>
@@ -2279,12 +2287,25 @@ function AddDevice({ onAdded }: { onAdded: (d: { devices: Device[] }) => void })
           </select>
           {f.auth !== 'alias' && <input placeholder="username" value={f.username} onChange={(e) => up('username', e.target.value)} />}
           {f.auth === 'key' && <input placeholder="key path (~/.ssh/id_ed25519)" value={f.key_path} onChange={(e) => up('key_path', e.target.value)} />}
-          {f.auth === 'password' && <input type="password" placeholder="password" value={f.password} onChange={(e) => up('password', e.target.value)} />}
+          {f.auth === 'password' && <input type="password" autoComplete="off"
+            placeholder={hasPassword ? 'password (blank = keep current)' : 'password'}
+            value={f.password} onChange={(e) => up('password', e.target.value)} />}
           <input className="dev-port" type="number" placeholder="port" value={f.port} onChange={(e) => up('port', Number(e.target.value) || 22)} />
         </>}
-        <button className="go primary" disabled={busy || !f.name.trim()} onClick={add}>Add device</button>
+        <button className="go primary" disabled={busy || !f.name.trim()} onClick={save}>{busy ? 'Saving…' : submitLabel}</button>
+        {onCancel && <button className="ops-btn dev-cancel" onClick={onCancel}>Cancel</button>}
       </div>
       {err && <div className="connect-msg err">{err}</div>}
+    </>
+  )
+}
+
+function AddDevice({ onAdded }: { onAdded: (d: { devices: Device[] }) => void }) {
+  const blank: DevForm = { name: '', transport: 'ssh', host: '', port: 22, username: '', auth: 'alias', key_path: '', password: '', share: '' }
+  return (
+    <div className="dev-add">
+      <div className="dev-add-title">＋ Add a device</div>
+      <DeviceForm initial={blank} submitLabel="Add device" onSaved={onAdded} />
     </div>
   )
 }
@@ -2294,6 +2315,7 @@ function DevicesPanel() {
   const [test, setTest] = useState<Record<number, { ok: boolean; detail: string }>>({})
   const [sync, setSync] = useState<Record<number, { device?: string; results?: { manager: string; ok: boolean; roms?: number; media?: string; error?: string }[]; error?: string }>>({})
   const [busy, setBusy] = useState<number | null>(null)
+  const [editing, setEditing] = useState<number | null>(null)
 
   const load = () => api.devices().then(setData).catch(() => setData({ devices: [], lm_kinds: {} }))
   useEffect(() => { load() }, [])
@@ -2335,9 +2357,20 @@ function DevicesPanel() {
             <div className="dev-actions">
               <button className="ops-btn" disabled={busy === d.id} onClick={() => testDev(d.id)}>Test</button>
               <button className="ops-btn" disabled={busy === d.id} onClick={() => syncDev(d.id)}>{busy === d.id ? 'Syncing…' : 'Sync'}</button>
+              <button className="ops-btn" onClick={() => setEditing(editing === d.id ? null : d.id)}>{editing === d.id ? 'Close' : 'Edit'}</button>
               <button className="emu-rm" title="Remove device" onClick={async () => apply(await api.removeDevice(d.id))}>×</button>
             </div>
           </div>
+          {editing === d.id && (
+            <div className="dev-edit">
+              <DeviceForm submitLabel="Save changes" hasPassword={d.has_password}
+                initial={{ id: d.id, name: d.name, transport: d.transport, host: d.host,
+                  port: d.port || 22, username: d.username, auth: d.auth,
+                  key_path: d.key_path, password: '', share: d.share }}
+                onSaved={(x) => { apply(x); setEditing(null) }}
+                onCancel={() => setEditing(null)} />
+            </div>
+          )}
           {test[d.id] && <div className={'connect-msg ' + (test[d.id].ok ? 'ok' : 'err')}>{test[d.id].ok ? '✓ ' : '✗ '}{test[d.id].detail}</div>}
           {sync[d.id] && (sync[d.id].error
             ? <div className="connect-msg err">{sync[d.id].error}</div>
