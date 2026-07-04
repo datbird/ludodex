@@ -3052,6 +3052,7 @@ function SyncMenu() {
                     onClick={runRomAll}>
                     {romRunning ? 'Scanning…' : 'Sync all ROM locations'}
                   </button>
+                  <div className="rom-children">
                   {romEnabled.map((l) => {
                     const rs = romRowState(l.id)
                     const isOpen = romExpanded.has(l.id)
@@ -3089,6 +3090,7 @@ function SyncMenu() {
                       </div>
                     )
                   })}
+                  </div>
                 </div>
               )}
             </>

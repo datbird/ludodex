@@ -2371,6 +2371,12 @@ a.idchip:hover { background: var(--accent-bg); }
 
 /* ROM-repo section */
 .sync-rom-all { margin: 4px 0 8px; }
+/* nest the individual repos so they read as children of "ROM REPOS" */
+.rom-children {
+  margin: 2px 0 2px 9px; padding-left: 12px;
+  border-left: 2px solid var(--border);
+  display: flex; flex-direction: column; gap: 8px;
+}
 .sync-xport { margin-left: 8px; font-size: 11px; font-weight: 400; color: var(--text);
   opacity: 0.7; text-transform: none; }
 .sync-mgr { display: flex; align-items: center; gap: 8px; font-size: 12px; }
