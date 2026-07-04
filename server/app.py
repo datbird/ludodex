@@ -556,6 +556,12 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         if tok.startswith("system:"):
             return ("EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
                     "AND s.platform=?)", [tok[7:]])
+        if tok.startswith("wanted:"):
+            # device wishlist lives in connections.sqlite; resolve its norm_keys here
+            keys = devices.wants_keys(tok[7:]) if tok[7:].isdigit() else []
+            if not keys:
+                return "0", []
+            return "g.norm_key IN (%s)" % ",".join("?" * len(keys)), list(keys)
         return None, None
     for f in (include or []):
         e, a = _fexpr(f)
@@ -588,7 +594,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     score = "(SELECT gs.universal FROM sco.game_scores gs WHERE gs.norm_key=g.norm_key)"
     base = (
         "SELECT g.norm_key, g.canonical_title, g.n_sources, g.n_kinds, "
-        "g.sources_summary, "
+        "g.sources_summary, g.has_emulation AS is_emulation, "
         "(SELECT group_concat(DISTINCT s.platform) FROM sources s "
         "   WHERE s.game_id=g.id AND s.platform IS NOT NULL AND s.platform!='') AS platforms, "
         "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
@@ -630,6 +636,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "n_kinds": r["n_kinds"],
         "sources_summary": r["sources_summary"],
         "platforms": r["platforms"] or "",
+        "emulation": bool(r["is_emulation"]),
         "matched": bool(r["matched"]),
         "has_cover": bool(r["has_cover"]),
         "ludodex_score": round(r["ludodex_score"]) if r["ludodex_score"] is not None else None,
@@ -1247,6 +1254,52 @@ def browse_device(body: dict = Body(default={})):
     raw = (body or {}).get("device_id")
     dev_id = int(raw) if str(raw).isdigit() else 0
     return devices.browse_dirs(dev_id, (body or {}).get("path") or "/")
+
+
+# --- Device wishlist: "I want these games on that device" (intent only) ------ #
+@app.get("/api/wants")
+def wants_summary():
+    """Wanted-game counts per device id (for badges + the library filter list)."""
+    return {"counts": {str(k): v for k, v in devices.wants_counts().items()}}
+
+
+@app.get("/api/devices/{dev_id}/wants")
+def device_wants_list(dev_id: int):
+    """Games on a device's wishlist, as full catalog rows (title, cover, tags…)."""
+    con = lib()
+    try:
+        res = _query_games(con, include=["wanted:%d" % dev_id], limit=1000)
+    finally:
+        con.close()
+    return {"wants": res["items"], "total": res["total"]}
+
+
+@app.post("/api/devices/{dev_id}/wants")
+def device_wants_add(dev_id: int, body: dict = Body(...)):
+    """Add games to a device's wishlist. Emulation games only for now — any
+    non-emulation keys are skipped. Returns {added, skipped}."""
+    if not devices._device(dev_id):
+        raise HTTPException(404, "no such device")
+    keys = [k for k in ((body or {}).get("norm_keys") or []) if k]
+    if not keys:
+        return {"added": 0, "skipped": 0}
+    con = lib()
+    try:
+        ph = ",".join("?" * len(keys))
+        emu = {r[0] for r in con.execute(
+            "SELECT norm_key FROM games WHERE has_emulation=1 AND norm_key IN (%s)"
+            % ph, keys)}
+    finally:
+        con.close()
+    eligible = [k for k in keys if k in emu]
+    added = devices.wants_add(dev_id, eligible) if eligible else 0
+    return {"added": added, "skipped": len(keys) - len(eligible)}
+
+
+@app.delete("/api/devices/{dev_id}/wants/{norm_key:path}")
+def device_wants_remove(dev_id: int, norm_key: str):
+    devices.wants_remove(dev_id, norm_key)
+    return {"ok": True}
 
 
 @app.post("/api/devices/{dev_id}/sync")

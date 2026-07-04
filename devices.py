@@ -56,6 +56,10 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS library_managers(
         id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER, kind TEXT,
         name TEXT, rom_path TEXT, media_path TEXT, enabled INTEGER DEFAULT 1)""")
+    # device wishlist: "I want this game on that device" (intent only — no transfer).
+    con.execute("""CREATE TABLE IF NOT EXISTS device_wants(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER, norm_key TEXT,
+        added REAL, UNIQUE(device_id, norm_key))""")
     # which media kinds a "media" folder should ingest (comma-joined; '' = all)
     if "media_kinds" not in {r[1] for r in
                              con.execute("PRAGMA table_info(library_managers)")}:
@@ -221,8 +225,62 @@ def device_rm(dev_id):
     con = _con()
     con.execute("DELETE FROM devices WHERE id=?", (dev_id,))
     con.execute("DELETE FROM library_managers WHERE device_id=?", (dev_id,))
+    con.execute("DELETE FROM device_wants WHERE device_id=?", (dev_id,))
     con.commit()
     con.close()
+
+
+# --------------------------------------------------------------------------- #
+#  Device wishlist — games the user wants ON a device (intent only, no transfer)
+# --------------------------------------------------------------------------- #
+def wants_add(device_id, norm_keys):
+    """Add games to a device's wishlist. Returns how many new rows landed."""
+    con = _con()
+    now = time.time()
+    before = con.total_changes
+    con.executemany(
+        "INSERT OR IGNORE INTO device_wants(device_id, norm_key, added) VALUES(?,?,?)",
+        [(int(device_id), k, now) for k in norm_keys])
+    added = con.total_changes - before
+    con.commit()
+    con.close()
+    return added
+
+
+def wants_remove(device_id, norm_key):
+    con = _con()
+    con.execute("DELETE FROM device_wants WHERE device_id=? AND norm_key=?",
+                (int(device_id), norm_key))
+    con.commit()
+    con.close()
+
+
+def wants_keys(device_id):
+    """norm_keys wanted on a device, newest first."""
+    con = _con()
+    keys = [r["norm_key"] for r in con.execute(
+        "SELECT norm_key FROM device_wants WHERE device_id=? ORDER BY added DESC",
+        (int(device_id),))]
+    con.close()
+    return keys
+
+
+def wants_counts():
+    """device_id -> number of wanted games (for badges)."""
+    con = _con()
+    out = {r["device_id"]: r["n"] for r in con.execute(
+        "SELECT device_id, COUNT(*) AS n FROM device_wants GROUP BY device_id")}
+    con.close()
+    return out
+
+
+def wants_for_key(norm_key):
+    """device ids that want this game (to show on the game itself)."""
+    con = _con()
+    ids = [r["device_id"] for r in con.execute(
+        "SELECT device_id FROM device_wants WHERE norm_key=?", (norm_key,))]
+    con.close()
+    return ids
 
 
 def manager_set(m):

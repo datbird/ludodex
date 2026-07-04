@@ -12,6 +12,7 @@ export interface GameRow {
   n_kinds: number
   sources_summary: string
   platforms: string
+  emulation: boolean       // has an emulation/ROM source (selectable for device wishlist)
   matched: boolean
   has_cover: boolean
   ludodex_score: number | null
@@ -680,6 +681,22 @@ export const api = {
   testDevice: async (id: number) => {
     const r = await fetch('/api/devices/' + id + '/test', { method: 'POST' })
     if (!r.ok) throw new Error(`${r.status} test`); return r.json() as Promise<{ ok: boolean; detail: string }>
+  },
+  // Device wishlist: "I want these games on that device" (emulation only for now).
+  wantsSummary: () => get<{ counts: Record<string, number> }>('/api/wants'),
+  deviceWants: (id: number) => get<{ wants: GameRow[]; total: number }>('/api/devices/' + id + '/wants'),
+  addWants: async (id: number, norm_keys: string[]) => {
+    const r = await fetch('/api/devices/' + id + '/wants', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ norm_keys }),
+    })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{ added: number; skipped: number }>
+  },
+  removeWant: async (id: number, norm_key: string) => {
+    const r = await fetch('/api/devices/' + id + '/wants/' + encodeURIComponent(norm_key), { method: 'DELETE' })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{ ok: boolean }>
   },
   // Directory autocomplete for ROM/media paths. id 0 = local ludodex host/container.
   browseDevice: async (id: number, path: string) => {

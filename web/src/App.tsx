@@ -373,6 +373,12 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
+  // multi-select → device wishlist ("I want these games on that device")
+  const [selectMode, setSelectMode] = useState(false)
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [wishDevs, setWishDevs] = useState<Device[]>([])
+  const [addMenuOpen, setAddMenuOpen] = useState(false)
+  const [wantMsg, setWantMsg] = useState('')
   const [showSettings, setShowSettings] = useState(false)
   const [showProfile, setShowProfile] = useState(false)
   const [showAddGame, setShowAddGame] = useState(false)
@@ -452,6 +458,25 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       return next
     })
   }
+  // load the device list the first time select mode is entered (for the add menu)
+  useEffect(() => {
+    if (selectMode && !wishDevs.length) api.devices().then((d) => setWishDevs(d.devices)).catch(() => {})
+  }, [selectMode, wishDevs.length])
+  const togglePick = (nk: string) =>
+    setPicked((p) => { const n = new Set(p); n.has(nk) ? n.delete(nk) : n.add(nk); return n })
+  const onCard = (g: GameRow) => {
+    if (!selectMode) { setSelected(g.norm_key); return }
+    if (g.emulation) togglePick(g.norm_key)   // emulation-only for the wishlist (for now)
+  }
+  const addPickedTo = async (deviceId: number, deviceName: string) => {
+    try {
+      const r = await api.addWants(deviceId, [...picked])
+      setWantMsg(`Added ${r.added} to ${deviceName}${r.skipped ? ` · ${r.skipped} skipped (not emulation)` : ''} ✓`)
+      setPicked(new Set()); setAddMenuOpen(false)
+    } catch (e) { setWantMsg((e as Error).message) }
+    setTimeout(() => setWantMsg(''), 4500)
+  }
+
   const activeFilters = Object.keys(filters).length
   const filterSections = buildFilterSections(facets)
   const fq = filterQ.trim().toLowerCase()
@@ -742,6 +767,11 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
               )}
             </div>
           )}
+          <button className={'filter-btn' + (selectMode ? ' active' : '')}
+            title="Select multiple games to add to a device's wishlist (emulation only)"
+            onClick={() => { setSelectMode((v) => !v); setPicked(new Set()); setAddMenuOpen(false) }}>
+            {selectMode ? '✕ Cancel select' : '☑ Select'}
+          </button>
           <button className="filter-btn wand-btn"
             title="Let AI enrich and supplement metadata and media for your library"
             onClick={() => setShowWand(true)}>
@@ -759,9 +789,15 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       </div>
 
       {view === 'poster' ? (
-        <div className="grid">
+        <div className={'grid' + (selectMode ? ' selecting' : '')}>
           {items.map((g) => (
-            <button key={g.norm_key} className="card" onClick={() => setSelected(g.norm_key)}>
+            <button key={g.norm_key} onClick={() => onCard(g)}
+              className={'card'
+                + (selectMode && picked.has(g.norm_key) ? ' picked' : '')
+                + (selectMode && !g.emulation ? ' unselectable' : '')}>
+              {selectMode && g.emulation && (
+                <span className="card-check">{picked.has(g.norm_key) ? '✓' : ''}</span>
+              )}
               <div className="cover">
                 <Cover g={g} />
               </div>
@@ -788,7 +824,9 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           </thead>
           <tbody>
             {items.map((g) => (
-              <tr key={g.norm_key} onClick={() => setSelected(g.norm_key)}>
+              <tr key={g.norm_key} onClick={() => onCard(g)}
+                className={(selectMode && picked.has(g.norm_key) ? 'picked ' : '')
+                  + (selectMode && !g.emulation ? 'unselectable' : '')}>
                 {showCol('art') && <td className="gt-art"><Cover g={g} compact /></td>}
                 {showCol('score') && <td className="gt-num">
                   {g.ludodex_score != null
@@ -820,6 +858,29 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
         <button className="more" disabled={loading} onClick={() => load(false)}>
           {loading ? 'Loading…' : `Load more (${items.length}/${total})`}
         </button>
+      )}
+
+      {selectMode && (
+        <div className="select-bar">
+          <span className="sel-count">{picked.size} selected</span>
+          <span className="sel-hint dim">emulation games · adds a “want on device” — no transfer</span>
+          <div className="sel-add">
+            <button className="go" disabled={!picked.size} onClick={() => setAddMenuOpen((v) => !v)}>
+              Add to device ▾</button>
+            {addMenuOpen && picked.size > 0 && (
+              <div className="sel-dev-menu">
+                {wishDevs.length === 0
+                  ? <div className="dim sel-dev-none">No devices — add one in Connections.</div>
+                  : wishDevs.map((d) => (
+                    <button key={d.id} onClick={() => addPickedTo(d.id, d.name)}>
+                      {d.name} <span className="dim">{d.transport}</span></button>
+                  ))}
+              </div>
+            )}
+          </div>
+          {picked.size > 0 && <button className="ops-btn" onClick={() => setPicked(new Set())}>Clear</button>}
+          {wantMsg && <span className="connect-msg ok sel-msg">{wantMsg}</span>}
+        </div>
       )}
       </>)}
 
@@ -2316,6 +2377,22 @@ function DevicesPanel() {
   const [sync, setSync] = useState<Record<number, { device?: string; results?: { manager: string; ok: boolean; roms?: number; media?: string; error?: string }[]; error?: string }>>({})
   const [busy, setBusy] = useState<number | null>(null)
   const [editing, setEditing] = useState<number | null>(null)
+  const [wantCounts, setWantCounts] = useState<Record<string, number>>({})
+  const [wants, setWants] = useState<Record<number, GameRow[]>>({})
+  const [wantsOpen, setWantsOpen] = useState<number | null>(null)
+  useEffect(() => { api.wantsSummary().then((w) => setWantCounts(w.counts)).catch(() => {}) }, [])
+  const toggleWants = async (id: number) => {
+    if (wantsOpen === id) { setWantsOpen(null); return }
+    setWantsOpen(id)
+    if (!wants[id]) {
+      try { const r = await api.deviceWants(id); setWants((w) => ({ ...w, [id]: r.wants })) } catch { /* */ }
+    }
+  }
+  const removeWant = async (id: number, nk: string) => {
+    await api.removeWant(id, nk).catch(() => {})
+    setWants((w) => ({ ...w, [id]: (w[id] || []).filter((g) => g.norm_key !== nk) }))
+    setWantCounts((c) => ({ ...c, [id]: Math.max(0, (c[id] || 1) - 1) }))
+  }
 
   const load = () => api.devices().then(setData).catch(() => setData({ devices: [], lm_kinds: {} }))
   useEffect(() => { load() }, [])
@@ -2388,6 +2465,29 @@ function DevicesPanel() {
             ))}
             <AddManager deviceId={d.id} deviceName={d.name} kinds={kinds} onAdded={apply} />
           </div>
+          {(wantCounts[d.id] > 0 || wants[d.id]) && (
+            <div className="dev-wants">
+              <button className="dev-wants-head" onClick={() => toggleWants(d.id)}>
+                <span className={'sync-chev' + (wantsOpen === d.id ? ' open' : '')}>▸</span>
+                Wishlist
+                <span className="dim">{wantCounts[d.id] ?? (wants[d.id]?.length || 0)} game{(wantCounts[d.id] ?? 0) === 1 ? '' : 's'} wanted here</span>
+              </button>
+              {wantsOpen === d.id && (
+                <div className="dev-wants-list">
+                  {(wants[d.id] || []).length === 0
+                    ? <div className="sync-note dim">Nothing yet — pick games in the library (Select → Add to device).</div>
+                    : (wants[d.id] || []).map((g) => (
+                      <div key={g.norm_key} className="dev-want">
+                        <span className="dw-title">{g.title}</span>
+                        <span className="dw-plat dim">{g.platforms}</span>
+                        <button className="emu-rm" title="Remove from wishlist"
+                          onClick={() => removeWant(d.id, g.norm_key)}>×</button>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       ))}
       <AddDevice onAdded={apply} />

@@ -719,6 +719,58 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
   transition: transform 0.08s, border-color 0.08s;
 }
 .card:hover { transform: translateY(-2px); border-color: var(--accent); }
+
+/* multi-select mode (→ device wishlist) */
+.card { position: relative; }
+.grid.selecting .card { cursor: copy; }
+.card.picked { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; }
+.card.unselectable { opacity: 0.4; cursor: not-allowed; }
+.card.unselectable:hover { transform: none; border-color: var(--border); }
+.card-check {
+  position: absolute; z-index: 2; top: 7px; left: 7px; width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 6px; border: 2px solid var(--accent); background: rgba(0,0,0,0.55);
+  color: var(--accent); font-size: 14px; font-weight: 800;
+}
+.card.picked .card-check { background: var(--accent); color: #fff; }
+.game-table tr.picked > td { background: var(--accent-bg); }
+.game-table tr.unselectable { opacity: 0.45; }
+.filter-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+
+/* floating select action bar */
+.select-bar {
+  position: sticky; bottom: 12px; z-index: 15; margin-top: 16px;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: var(--panel); border: 1px solid var(--accent); border-radius: 12px;
+  padding: 10px 14px; box-shadow: 0 10px 28px rgba(0,0,0,0.4);
+}
+.sel-count { font-weight: 700; color: var(--text-h); }
+.sel-hint { font-size: 12px; }
+.sel-add { position: relative; }
+.sel-dev-menu {
+  position: absolute; bottom: calc(100% + 6px); left: 0; min-width: 200px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
+  padding: 5px; box-shadow: 0 10px 28px rgba(0,0,0,0.45); display: flex; flex-direction: column;
+}
+.sel-dev-menu button {
+  text-align: left; background: none; border: 0; border-radius: 6px; cursor: pointer;
+  padding: 8px 10px; color: var(--text-h); font-size: 13px;
+}
+.sel-dev-menu button:hover { background: var(--accent-bg); }
+.sel-dev-none { padding: 8px 10px; font-size: 12px; }
+.sel-msg { margin-left: auto; }
+
+/* per-device wishlist (Connections) */
+.dev-wants { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.dev-wants-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; cursor: pointer;
+  background: none; border: 0; color: var(--text-h); font-weight: 600; font-size: 13px; padding: 0;
+}
+.dev-wants-head .dim { font-weight: 400; }
+.dev-wants-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.dev-want { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 3px 0; }
+.dw-title { color: var(--text-h); flex: 0 1 auto; }
+.dw-plat { flex: 1 1 auto; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cover { aspect-ratio: 3 / 4; background: var(--art-bg); display: flex; }
 .cover img { width: 100%; height: 100%; object-fit: cover; }
 .noart {
