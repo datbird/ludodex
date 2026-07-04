@@ -52,6 +52,10 @@ AUTHORIZE = ("https://login.live.com/oauth20_authorize.srf?client_id=%s"
              "&scope=%s&redirect_uri=%s"
              % (MS_CLIENT, urllib.parse.quote(MS_SCOPE), urllib.parse.quote(MS_REDIRECT)))
 MS_TOKEN = "https://login.live.com/oauth20_token.srf"
+# Device-code flow endpoint — the reliable alternative to the address-bar code:
+# Microsoft hands back a short user_code the person types at microsoft.com/link,
+# and we poll MS_TOKEN until they approve. No self-erasing URL to race.
+MS_DEVICE = "https://login.live.com/oauth20_connect.srf"
 XASU = "https://user.auth.xboxlive.com/user/authenticate"
 XSTS = "https://xsts.auth.xboxlive.com/xsts/authorize"
 # xboxlive.com RelyingParty: its XSTS grants the uhs/xuid/gamertag titlehub needs.
@@ -207,6 +211,41 @@ def connect(code):
     return claims.get("gtg", "")
 
 
+# --- Device-code flow (no address-bar code to copy) ------------------------ #
+def device_start():
+    """Begin the device-code flow. Returns Microsoft's response dict:
+    {user_code, device_code, verification_uri, interval, expires_in}."""
+    return _post_form(MS_DEVICE, {
+        "client_id": MS_CLIENT, "scope": MS_SCOPE, "response_type": "device_code"})
+
+
+def device_poll(device_code):
+    """Poll once for the device-code result. Returns (status, gamertag):
+      ("connected", gtg) — approved; tokens saved + full chain verified
+      ("pending",  "")   — not finished yet; keep polling
+      ("expired",  "")   — code expired / invalid; start over
+      ("declined", "")   — user declined
+    """
+    try:
+        tok = _post_form(MS_TOKEN, {
+            "client_id": MS_CLIENT, "device_code": device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.load(e).get("error", "")
+        except Exception:
+            err = ""
+        if err in ("authorization_pending", "slow_down"):
+            return "pending", ""
+        if err == "authorization_declined":
+            return "declined", ""
+        return "expired", ""      # expired_token / bad_verification_code / invalid_grant
+    _save(tok)
+    # prove the whole chain works while the token is fresh (same as connect())
+    _xsts, claims = xsts_token(xbl_user_token(tok["access_token"]), RP_XBOXLIVE)
+    return "connected", claims.get("gtg", "")
+
+
 def main(argv):
     if len(argv) > 1 and argv[1] == "--code":
         code = _extract_code(argv[2] if len(argv) > 2 else "")
@@ -214,6 +253,13 @@ def main(argv):
             raise SystemExit("Xbox: no auth code provided")
         gtg = connect(code)
         print("# Xbox connected%s" % (" (%s)" % gtg if gtg else ""), file=sys.stderr)
+        return
+    if len(argv) > 1 and argv[1] == "--device-start":
+        print(json.dumps(device_start()))
+        return
+    if len(argv) > 1 and argv[1] == "--device-poll":
+        status, gtg = device_poll(argv[2] if len(argv) > 2 else "")
+        print(json.dumps({"status": status, "account": gtg}))
         return
     if len(argv) > 1 and argv[1] == "--whoami":
         tok = ms_access_token()

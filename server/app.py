@@ -2873,26 +2873,20 @@ SERVICES = [
                  "post": "/api/services/psn/npsso"},
      "limits": _limits("psn", cooldown="500")},
     {"id": "xbox", "name": "Xbox / Microsoft Store", "role": "source",
-     "hint": "Connect your Microsoft account: click Get Xbox code (opens Microsoft "
-             "sign-in) and approve access. The FIRST time you may land on a page "
-             "that says ‘you have reached a page that is not normally shown’ with no "
-             "code — that's the consent step; approve it and it redirects again with "
-             "the code. The code is in the browser ADDRESS BAR (?code=…). Copy that "
-             "whole address (or just the code) and paste it, then Connect. One-time "
+     "hint": "Connect your Microsoft account with a short code — no address-bar "
+             "copying. Click Connect Xbox, then at microsoft.com/link enter the code "
+             "ludodex shows and approve. ludodex finishes on its own. One-time "
              "login — it refreshes automatically. Pulls games from your Xbox library.",
      "creds": [],
-     "connect": {"url": ("https://login.live.com/oauth20_authorize.srf"
-                         "?client_id=000000004c12ae6f&response_type=code"
-                         "&approval_prompt=auto"
-                         "&scope=Xboxlive.signin+Xboxlive.offline_access"
-                         "&redirect_uri=https://login.live.com/oauth20_desktop.srf"),
-                 "action_label": "Get Xbox code",
-                 "field_label": "Paste the Microsoft address bar URL (or code)",
-                 "note": "First time: if the page says ‘…not normally shown’ with no "
-                         "code, approve access and it redirects again. The code is in "
-                         "the address bar (?code=…) — paste that whole URL. If it "
-                         "won't connect, paste JUST the code value (between code= and "
-                         "the next & in the address bar).",
+     "connect": {"mode": "device",
+                 "url": "https://www.microsoft.com/link",
+                 "action_label": "Connect Xbox",
+                 "start": "/api/services/xbox/device/start",
+                 "poll": "/api/services/xbox/device/poll",
+                 "note": "Click Connect Xbox — ludodex shows a short code. Enter it at "
+                         "microsoft.com/link (opens automatically), sign in, and "
+                         "approve. Nothing to copy from the address bar; ludodex picks "
+                         "it up the moment you approve. The code is good for 15 minutes.",
                  "post": "/api/services/xbox/code"},
      "limits": _limits("xbox", cooldown="500")},
     {"id": "igdb", "name": "IGDB", "role": "provider",
@@ -3164,6 +3158,54 @@ def xbox_connect(body: dict = Body(...)):
                          "Xbox code again for a fresh one and paste it. (%s)"
                          % detail[0]}
     return {"ok": True, "account": None}
+
+
+# Device-code flow — the reliable Xbox connect: no address-bar code to race. We
+# hold the (secret) device_code server-side; the UI only ever sees the short
+# user_code and polls /poll until Microsoft reports the sign-in is complete.
+_XBOX_DEVICE = {}   # single pending auth: {"code": <device_code>, "expires_at": ts}
+
+
+@app.post("/api/services/xbox/device/start")
+def xbox_device_start():
+    """Begin the Xbox device-code flow. Returns the short code + microsoft.com/link
+    URL for the UI to display; the device_code stays here and is consumed by /poll."""
+    try:
+        r = subprocess.run([sys.executable, os.path.join(DIR, "xbox_owned.py"),
+                            "--device-start"],
+                           capture_output=True, text=True, timeout=30, cwd=DIR)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "error": "Couldn't reach Microsoft: %s" % e}
+    try:
+        d = json.loads(r.stdout)
+    except ValueError:
+        return {"ok": False,
+                "error": (r.stderr or "").strip().splitlines()[-1:] or ["start failed"]}
+    _XBOX_DEVICE["code"] = d.get("device_code", "")
+    _XBOX_DEVICE["expires_at"] = time.time() + int(d.get("expires_in", 900))
+    return {"ok": True, "user_code": d.get("user_code", ""),
+            "verification_uri": d.get("verification_uri",
+                                      "https://www.microsoft.com/link"),
+            "interval": int(d.get("interval", 5)),
+            "expires_in": int(d.get("expires_in", 900))}
+
+
+@app.post("/api/services/xbox/device/poll")
+def xbox_device_poll():
+    """Poll once for the device-code result (the UI calls this on a timer)."""
+    code = _XBOX_DEVICE.get("code")
+    if not code or time.time() > _XBOX_DEVICE.get("expires_at", 0):
+        return {"status": "expired", "account": None}
+    try:
+        r = subprocess.run([sys.executable, os.path.join(DIR, "xbox_owned.py"),
+                            "--device-poll", code],
+                           capture_output=True, text=True, timeout=30, cwd=DIR)
+        d = json.loads(r.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return {"status": "pending", "account": None}   # transient — keep polling
+    if d.get("status") == "connected":
+        _XBOX_DEVICE.clear()
+    return {"status": d.get("status", "pending"), "account": d.get("account") or None}
 
 
 # --------------------------------------------------------------------------- #

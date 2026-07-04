@@ -258,10 +258,13 @@ export interface EmuLocation {
 export interface ServiceConnect {
   url: string
   action_label: string
-  field_label: string
-  post: string
+  field_label?: string
+  post?: string
   connected: boolean
   note?: string
+  mode?: 'device' | 'paste'   // 'device' = code-at-microsoft.com/link (Xbox); default paste
+  start?: string              // device-flow: POST to begin, returns user_code
+  poll?: string               // device-flow: POST to poll for completion
 }
 export interface Service {
   id: string
@@ -734,6 +737,27 @@ export const api = {
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ ok: boolean; account: string | null; error?: string }>
+  },
+  // Device-code flow (Xbox): start returns the short user code + link; poll is
+  // called on a timer until Microsoft reports the sign-in finished.
+  deviceStart: async (startPath: string) => {
+    const r = await fetch(startPath, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{
+      ok: boolean; user_code: string; verification_uri: string
+      interval: number; expires_in: number; error?: string
+    }>
+  },
+  devicePoll: async (pollPath: string) => {
+    const r = await fetch(pollPath, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{
+      status: 'pending' | 'connected' | 'expired' | 'declined'; account: string | null
+    }>
   },
   setSourceEnabled: async (id: string, enabled: boolean) => {
     const r = await fetch(`/api/services/${encodeURIComponent(id)}/enabled`, {

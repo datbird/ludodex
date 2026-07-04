@@ -2410,9 +2410,90 @@ function Credentials() {
   )
 }
 
-// In-UI connect flow for services that authenticate by pasting a browser token
-// (EA): a link to open the auth URL, a paste box, and a Connect button — no CLI.
+// In-UI connect flow. Two shapes: device-code (Xbox — a short code you enter at
+// microsoft.com/link, we poll for completion) and paste-token (EA/Epic/GOG/PSN —
+// open an auth URL, paste what it shows). Dispatch on connect.mode.
 function ConnectFlow({ connect, onDone }: { connect: ServiceConnect; onDone: () => void }) {
+  if (connect.mode === 'device') return <DeviceConnectFlow connect={connect} onDone={onDone} />
+  return <PasteConnectFlow connect={connect} onDone={onDone} />
+}
+
+// Device-code flow: click once, enter the shown code at microsoft.com/link, and
+// ludodex polls until Microsoft confirms — no address-bar code to race.
+function DeviceConnectFlow({ connect, onDone }: { connect: ServiceConnect; onDone: () => void }) {
+  const [phase, setPhase] = useState<'idle' | 'starting' | 'waiting' | 'done' | 'error'>('idle')
+  const [code, setCode] = useState('')
+  const [uri, setUri] = useState('https://www.microsoft.com/link')
+  const [copied, setCopied] = useState(false)
+  const [msg, setMsg] = useState('')
+  const pollRef = useRef<number | null>(null)
+  const stop = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null } }
+  useEffect(() => stop, [])   // clear the timer if the panel unmounts mid-wait
+
+  const start = async () => {
+    setPhase('starting'); setMsg(''); setCopied(false)
+    try {
+      const r = await api.deviceStart(connect.start!)
+      if (!r.ok) { setPhase('error'); setMsg(r.error || 'Couldn’t start — try again.'); return }
+      setCode(r.user_code); setUri(r.verification_uri); setPhase('waiting')
+      window.open(r.verification_uri, '_blank', 'noreferrer')
+      const ivMs = Math.max(3, r.interval || 5) * 1000
+      stop()
+      pollRef.current = window.setInterval(async () => {
+        try {
+          const p = await api.devicePoll(connect.poll!)
+          if (p.status === 'connected') {
+            stop(); setPhase('done')
+            setMsg(`Connected${p.account ? ' as ' + p.account : ''} ✓`); onDone()
+          } else if (p.status === 'expired' || p.status === 'declined') {
+            stop(); setPhase('error')
+            setMsg(p.status === 'declined'
+              ? 'Sign-in was declined. Click to try again.'
+              : 'The code expired. Click to get a fresh one.')
+          }
+          // 'pending' → keep waiting
+        } catch { /* transient network blip — keep polling */ }
+      }, ivMs)
+    } catch (e) { setPhase('error'); setMsg((e as Error).message) }
+  }
+
+  const copy = () => { navigator.clipboard?.writeText(code); setCopied(true) }
+
+  return (
+    <div className="connect-flow">
+      <div className="connect-status">
+        {connect.connected
+          ? <span className="conn-ok">● Connected</span>
+          : <span className="conn-off">○ Not connected</span>}
+      </div>
+      {phase === 'waiting' ? (
+        <div className="device-wait">
+          <div className="device-step">1. Enter this code:</div>
+          <div className="device-code-row">
+            <code className="device-code">{code}</code>
+            <button className="clear-btn" onClick={copy}>{copied ? 'Copied ✓' : 'Copy'}</button>
+          </div>
+          <div className="device-step">2. at <a className="connect-link" href={uri}
+            target="_blank" rel="noreferrer">{uri.replace('https://www.', '')} ↗</a>, sign in &amp; approve.</div>
+          <div className="device-spin">Waiting for you to approve…</div>
+        </div>
+      ) : (
+        <div className="connect-row">
+          <button className="go" disabled={phase === 'starting'} onClick={start}>
+            {phase === 'starting' ? 'Starting…'
+              : phase === 'error' ? 'Try again'
+              : connect.connected ? 'Reconnect Xbox' : connect.action_label}</button>
+        </div>
+      )}
+      {connect.note && phase !== 'waiting' && <div className="connect-note">{connect.note}</div>}
+      {msg && <div className={'connect-msg' + (phase === 'done' ? ' ok' : phase === 'error' ? ' err' : '')}>{msg}</div>}
+    </div>
+  )
+}
+
+// Paste-token flow (EA/Epic/GOG/PSN): a link to open the auth URL, a paste box,
+// and a Connect button — no CLI.
+function PasteConnectFlow({ connect, onDone }: { connect: ServiceConnect; onDone: () => void }) {
   const [val, setVal] = useState('')
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
@@ -2421,7 +2502,7 @@ function ConnectFlow({ connect, onDone }: { connect: ServiceConnect; onDone: () 
     if (!val.trim()) return
     setBusy(true); setMsg(null)
     try {
-      const r = await api.connectService(connect.post, val.trim())
+      const r = await api.connectService(connect.post!, val.trim())
       if (r.ok) { setMsg({ ok: true, text: `Connected${r.account ? ' as ' + r.account : ''} ✓` }); setVal(''); onDone() }
       else setMsg({ ok: false, text: r.error || 'That token didn’t work.' })
     } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
