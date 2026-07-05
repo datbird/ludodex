@@ -4338,46 +4338,51 @@ function FileOpsOperations() {
       {err && <div className="connect-msg err">{err}</div>}
 
       <div className="fo-split">
-        <div className="fo-side">
-          <div className="fo-side-head">Before — what is it now?</div>
-          <div className="fo-side-controls">
-            <button className="ops-btn" disabled={!root.trim() || busy !== ''} onClick={modelIt}>
-              {busy === 'model' ? 'Modeling…' : '✨ Model this folder'}</button>
-          </div>
-          {srcModel && (
-            <div className="fo-srcmodel">
-              {srcModel.summary && <div>{srcModel.summary}</div>}
-              {srcModel.media?.present && <div className="dim">media: {srcModel.media.where}{srcModel.media.naming ? ` (${srcModel.media.naming})` : ''}</div>}
+        <div className="fo-split-arrow" aria-hidden="true">→</div>
+        <section className="fo-side before">
+          <div className="fo-side-head"><span className="fo-side-tag">Before</span> what is it now?</div>
+          <div className="fo-side-body">
+            <div className="fo-side-controls">
+              <button className="ops-btn" disabled={!root.trim() || busy !== ''} onClick={modelIt}>
+                {busy === 'model' ? 'Modeling…' : '✨ Model this folder'}</button>
             </div>
-          )}
-          <div className="fo-tree">
-            {loading ? <div className="dim">Reading…</div>
-              : plan && plan.sample.length ? <TreeRows node={beforeTree} />
-              : <div className="dim">Set a path to preview.</div>}
-          </div>
-        </div>
-
-        <div className="fo-side">
-          <div className="fo-side-head">After — {op === 'extract' ? 'media extracted' : 'target layout'}</div>
-          <div className="fo-side-controls">
-            {op === 'restructure' ? (
-              <select value={profileId} onChange={(e) => setProfileId(e.target.value)}>
-                <optgroup label="Built-in">{builtins.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>
-                {customs.length > 0 && <optgroup label="Custom">{customs.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>}
-              </select>
-            ) : (
-              <label className="fo-field fo-grow"><span>Media folder (under the path)</span>
-                <input value={dest} onChange={(e) => setDest(e.target.value)} placeholder="downloaded_media" /></label>
+            {srcModel && (
+              <div className="fo-srcmodel">
+                {srcModel.summary && <div>{srcModel.summary}</div>}
+                {srcModel.media?.present && <div className="dim">media: {srcModel.media.where}{srcModel.media.naming ? ` (${srcModel.media.naming})` : ''}</div>}
+              </div>
             )}
+            <div className="fo-tree">
+              {loading ? <div className="fo-tree-empty">Reading…</div>
+                : plan && plan.sample.length ? <TreeRows node={beforeTree} />
+                : <div className="fo-tree-empty">Set a path to preview.</div>}
+            </div>
           </div>
-          {op === 'restructure' && sel && <div className="fo-profile-hint"><code>{sel.target}</code><span className="dim"> — {sel.description}</span></div>}
-          {op === 'extract' && <div className="dim fo-hint">→ {dest || 'downloaded_media'}/&lt;system&gt;/covers·screenshots·marquees/&lt;game&gt; — ES-DE layout the library also indexes. ROM files aren't touched.</div>}
-          <div className="fo-tree">
-            {loading ? <div className="dim">Planning…</div>
-              : plan && plan.sample.length ? <TreeRows node={afterTree} />
-              : <div className="dim">—</div>}
+        </section>
+
+        <section className="fo-side after">
+          <div className="fo-side-head"><span className="fo-side-tag">After</span> {op === 'extract' ? 'media extracted' : 'target layout'}</div>
+          <div className="fo-side-body">
+            <div className="fo-side-controls">
+              {op === 'restructure' ? (
+                <select value={profileId} onChange={(e) => setProfileId(e.target.value)}>
+                  <optgroup label="Built-in">{builtins.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>
+                  {customs.length > 0 && <optgroup label="Custom">{customs.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>}
+                </select>
+              ) : (
+                <label className="fo-field fo-grow"><span>Media folder (under the path)</span>
+                  <input value={dest} onChange={(e) => setDest(e.target.value)} placeholder="downloaded_media" /></label>
+              )}
+            </div>
+            {op === 'restructure' && sel && <div className="fo-profile-hint"><code>{sel.target}</code><span className="dim"> — {sel.description}</span></div>}
+            {op === 'extract' && <div className="dim fo-hint">→ {dest || 'downloaded_media'}/&lt;system&gt;/covers·screenshots·marquees/&lt;game&gt; — ES-DE layout the library also indexes. ROM files aren't touched.</div>}
+            <div className="fo-tree">
+              {loading ? <div className="fo-tree-empty">Planning…</div>
+                : plan && plan.sample.length ? <TreeRows node={afterTree} />
+                : <div className="fo-tree-empty">Pick a target to see the result.</div>}
+            </div>
           </div>
-        </div>
+        </section>
       </div>
 
       {s && (
