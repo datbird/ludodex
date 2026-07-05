@@ -1967,9 +1967,15 @@ a.idchip:hover { background: var(--accent-bg); }
 /* form rows */
 .fo-form { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
 
-/* operation-type picker */
-.fo-optype { display: inline-flex; gap: 0; margin: 8px 0 14px; border: 1px solid var(--border);
-  border-radius: 10px; overflow: hidden; }
+/* one enclosing box: operation-type picker (centered) at the top, wrapping the
+   device/path form and the whole Before/After split. */
+.fo-workbench { border: 1px solid var(--border); border-radius: 16px; overflow: hidden;
+  background: var(--bg); box-shadow: 0 2px 16px rgba(0, 0, 0, 0.22); margin: 14px 0; }
+.fo-wb-top { padding: 16px 18px 14px; }
+
+/* operation-type picker — centered over the split */
+.fo-optype { display: flex; width: fit-content; gap: 0; margin: 0 auto 16px;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .fo-optype-btn { background: var(--bg); border: 0; color: var(--text); cursor: pointer;
   padding: 9px 18px; font-size: 13px; font-weight: 600; transition: background .12s, color .12s; }
 .fo-optype-btn:hover { color: var(--text-h); }
@@ -1979,9 +1985,7 @@ a.idchip:hover { background: var(--accent-bg); }
    arrow. Before = amber (the current state), After = green (the result). */
 .fo-split {
   position: relative; display: grid; grid-template-columns: 1fr 1fr;
-  border: 1px solid var(--border); border-radius: 16px; overflow: hidden;
-  margin: 16px 0; background: var(--bg);
-  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.22);
+  border-top: 1px solid var(--border); background: var(--bg);
 }
 @media (max-width: 820px) { .fo-split { grid-template-columns: 1fr; } }
 .fo-side { display: flex; flex-direction: column; min-width: 0; }

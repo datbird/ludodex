@@ -4309,6 +4309,8 @@ function FileOpsOperations() {
       <p className="dim">Preview a change as <b>Before → After</b>, then apply it as a
         reversible <b>runbook</b>. Only the files the operation targets are moved.</p>
 
+      <div className="fo-workbench">
+      <div className="fo-wb-top">
       <div className="fo-optype">
         <button className={'fo-optype-btn' + (op === 'restructure' ? ' on' : '')} onClick={() => setOp('restructure')}>Restructure ROMs</button>
         <button className={'fo-optype-btn' + (op === 'extract' ? ' on' : '')} onClick={() => setOp('extract')}>Extract media</button>
@@ -4336,6 +4338,7 @@ function FileOpsOperations() {
         )}
       </div>
       {err && <div className="connect-msg err">{err}</div>}
+      </div>
 
       <div className="fo-split">
         <div className="fo-split-arrow" aria-hidden="true">→</div>
@@ -4383,6 +4386,7 @@ function FileOpsOperations() {
             </div>
           </div>
         </section>
+      </div>
       </div>
 
       {s && (
