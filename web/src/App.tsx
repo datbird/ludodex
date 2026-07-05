@@ -8,7 +8,7 @@ import type {
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device,
-  FileVariable, FileProfile, FilePlan, SourceModel,
+  FileVariable, FileProfile, FilePlan, FileDetect, SourceModel,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, ProviderMatch, ScopeValue,
@@ -4252,14 +4252,34 @@ function FileOpsOperations() {
   const [profileId, setProfileId] = useState('builtin:flat')
   const [dest, setDest] = useState('downloaded_media')
   const [plan, setPlan] = useState<FilePlan | null>(null)
+  const [current, setCurrent] = useState<FileDetect | null>(null)   // the actual current folder (Before)
+  const [detecting, setDetecting] = useState(false)
   const [srcModel, setSrcModel] = useState<SourceModel | null>(null)
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
   const [openRun, setOpenRun] = useState<number | null>(null)
   const seq = useRef(0)
+  const dseq = useRef(0)
 
   useEffect(() => { api.fileProfiles().then((p) => setProfiles(p.profiles)).catch(() => {}) }, [])
   const base = () => ({ device_id: deviceId, root: root.trim(), scope, system: system.trim() || undefined })
+
+  // Before = the ACTUAL current folder. Refetch (fast, sampled) whenever the
+  // folder/device/scope changes, independent of the plan, so it always reflects
+  // what you're pointing at and updates the moment you switch folders.
+  useEffect(() => {
+    if (!root.trim()) { setCurrent(null); setSrcModel(null); return }
+    const id = ++dseq.current
+    setSrcModel(null)
+    const t = setTimeout(async () => {
+      setDetecting(true)
+      try { const d = await api.fileDetect(base()); if (id === dseq.current) setCurrent(d) }
+      catch { if (id === dseq.current) setCurrent(null) }
+      finally { if (id === dseq.current) setDetecting(false) }
+    }, 400)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceId, root, scope, system])
 
   // Auto-preview (debounced) whenever the operation inputs change.
   useEffect(() => {
@@ -4299,9 +4319,9 @@ function FileOpsOperations() {
   const builtins = profiles.filter((p) => p.builtin)
   const customs = profiles.filter((p) => !p.builtin)
   const s = plan?.summary
-  const beforeTree = pathsToTree((plan?.sample || []).map((m) => m.src))
+  const beforeTree = pathsToTree(current?.sample || [])
   const afterTree = pathsToTree((plan?.sample || []).map((m) => m.dst))
-  const loading = busy === 'plan' && !plan
+  const planning = busy === 'plan'
 
   return (
     <>
@@ -4348,6 +4368,7 @@ function FileOpsOperations() {
             <div className="fo-side-controls">
               <button className="ops-btn" disabled={!root.trim() || busy !== ''} onClick={modelIt}>
                 {busy === 'model' ? 'Modeling…' : '✨ Model this folder'}</button>
+              {current && <span className="dim fo-cur-note">{current.counts.files.toLocaleString()} files · {current.systems.length} systems · {current.current === 'folder' ? 'folder-per-game' : 'flat'}</span>}
             </div>
             {srcModel && (
               <div className="fo-srcmodel">
@@ -4356,8 +4377,8 @@ function FileOpsOperations() {
               </div>
             )}
             <div className="fo-tree">
-              {loading ? <div className="fo-tree-empty">Reading…</div>
-                : plan && plan.sample.length ? <TreeRows node={beforeTree} />
+              {detecting ? <div className="fo-tree-empty">Reading…</div>
+                : current && current.sample.length ? <TreeRows node={beforeTree} />
                 : <div className="fo-tree-empty">Set a path to preview.</div>}
             </div>
           </div>
@@ -4380,9 +4401,10 @@ function FileOpsOperations() {
             {op === 'restructure' && sel && <div className="fo-profile-hint"><code>{sel.target}</code><span className="dim"> — {sel.description}</span></div>}
             {op === 'extract' && <div className="dim fo-hint">→ {dest || 'downloaded_media'}/&lt;system&gt;/covers·screenshots·marquees/&lt;game&gt; — ES-DE layout the library also indexes. ROM files aren't touched.</div>}
             <div className="fo-tree">
-              {loading ? <div className="fo-tree-empty">Planning…</div>
+              {planning ? <div className="fo-tree-empty">Planning…</div>
                 : plan && plan.sample.length ? <TreeRows node={afterTree} />
-                : <div className="fo-tree-empty">Pick a target to see the result.</div>}
+                : plan ? <div className="fo-tree-empty">Nothing to change — already in this layout.</div>
+                : <div className="fo-tree-empty">Set a path to see the result.</div>}
             </div>
           </div>
         </section>

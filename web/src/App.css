@@ -2010,7 +2010,8 @@ a.idchip:hover { background: var(--accent-bg); }
 .fo-side.after .fo-side-head { background: rgba(74,222,128,0.08); border-bottom-color: rgba(74,222,128,0.28); }
 .fo-side.after .fo-side-tag { color: #0c1a10; background: #52d888; }
 .fo-side-body { padding: 12px 16px 16px; display: flex; flex-direction: column; flex: 1 1 auto; }
-.fo-side-controls { margin-bottom: 10px; }
+.fo-side-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.fo-cur-note { font-size: 11px; }
 .fo-side-controls select, .fo-side-controls input { width: 100%; padding: 8px 10px; font-size: 13px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px; color: var(--text-h); }
 .fo-srcmodel { font-size: 12px; margin-bottom: 10px; padding: 9px 11px; border-radius: 9px;
