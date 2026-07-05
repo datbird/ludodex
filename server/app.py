@@ -1256,6 +1256,15 @@ def browse_device(body: dict = Body(default={})):
     return devices.browse_dirs(dev_id, (body or {}).get("path") or "/")
 
 
+@app.post("/api/devices/browse-entries")
+def browse_entries_ep(body: dict = Body(default={})):
+    """Immediate dirs (with child counts) + files (with sizes) of a path on a
+    device — powers the read-only Files › Browse tree. Lazy, one level per expand."""
+    raw = (body or {}).get("device_id")
+    dev_id = int(raw) if str(raw).isdigit() else 0
+    return devices.browse_entries(dev_id, (body or {}).get("path") or "/")
+
+
 # --- Device wishlist: "I want these games on that device" (intent only) ------ #
 @app.get("/api/wants")
 def wants_summary():

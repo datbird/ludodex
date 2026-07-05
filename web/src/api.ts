@@ -707,6 +707,21 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status}`)
     return r.json() as Promise<{ ok: boolean; path: string; dirs: string[]; error?: string }>
   },
+  // Read-only folder browser (Files › Browse): immediate dirs (with child counts)
+  // + files (with sizes) of a path on a device. Lazy, one level per expand.
+  browseEntries: async (id: number, path: string) => {
+    const r = await fetch('/api/devices/browse-entries', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_id: id, path }),
+    })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{
+      ok: boolean; path: string
+      dirs: { name: string; nfiles: number }[]
+      files: { name: string; size: number }[]
+      error?: string
+    }>
+  },
   syncDevice: async (id: number) => {
     const r = await fetch('/api/devices/' + id + '/sync', { method: 'POST' })
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)

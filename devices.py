@@ -396,6 +396,74 @@ def browse_dirs(dev_id, path):
     return {"ok": True, "path": path, "dirs": dirs}
 
 
+def browse_entries(dev_id, path):
+    """Immediate children of `path` on a device, split into dirs + files, each dir
+    annotated with `nfiles` (its direct-child count) so the read-only Files › Browse
+    tree can show what's inside. ONE round trip; recurses ONE level only (to count
+    each subdir) — never a deep tree walk. Returns
+    {ok, path, dirs:[{name,nfiles}], files:[{name,size}], error?}."""
+    path = (path or "/").rstrip() or "/"
+    dev = _device(dev_id) if dev_id else None
+    transport = (dev or {}).get("transport", "local")
+    if transport == "local" or not dev:
+        try:
+            dirs, files = [], []
+            with os.scandir(path) as it:
+                for e in it:
+                    if e.is_dir(follow_symlinks=False):
+                        try:
+                            with os.scandir(e.path) as sub:
+                                n = sum(1 for _ in sub)
+                        except OSError:
+                            n = 0
+                        dirs.append({"name": e.name, "nfiles": n})
+                    elif e.is_file(follow_symlinks=False):
+                        try:
+                            sz = e.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            sz = 0
+                        files.append({"name": e.name, "size": sz})
+            dirs.sort(key=lambda d: d["name"].lower())
+            files.sort(key=lambda f: f["name"].lower())
+            return {"ok": True, "path": path, "dirs": dirs, "files": files}
+        except OSError as e:
+            return {"ok": False, "path": path, "dirs": [], "files": [],
+                    "error": (e.strerror or str(e))[:150]}
+    if transport == "smb":
+        return {"ok": False, "path": path, "dirs": [], "files": [],
+                "error": "browsing SMB shares isn't supported yet — type the path"}
+    if not dev.get("host"):
+        return {"ok": False, "path": path, "dirs": [], "files": [], "error": "device has no host"}
+    q = "'" + path.replace("'", "'\\''") + "'"
+    # depth 1 = entries to show; depth 2 lines only bump the parent's file count.
+    cmd = "find %s -mindepth 1 -maxdepth 2 -printf '%%d\\t%%y\\t%%s\\t%%P\\n'" % q
+    try:
+        r = _ssh(dev, cmd, timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"ok": False, "path": path, "dirs": [], "files": [], "error": str(e)[:150]}
+    if r.returncode != 0:
+        msg = (r.stderr or "can't list that path").strip().splitlines()[-1:] or ["can't list that path"]
+        return {"ok": False, "path": path, "dirs": [], "files": [], "error": msg[0][:150]}
+    dmeta, counts, files = set(), {}, []
+    for ln in r.stdout.splitlines():
+        parts = ln.split("\t", 3)
+        if len(parts) != 4:
+            continue
+        depth, typ, size, rel = parts
+        if depth == "1":
+            if typ == "d":
+                dmeta.add(rel)
+            elif typ == "f":
+                files.append({"name": rel, "size": int(size) if size.isdigit() else 0})
+        elif depth == "2":
+            top = rel.split("/", 1)[0]
+            counts[top] = counts.get(top, 0) + 1
+    dirs = sorted(({"name": n, "nfiles": counts.get(n, 0)} for n in dmeta),
+                  key=lambda d: d["name"].lower())
+    files.sort(key=lambda f: f["name"].lower())
+    return {"ok": True, "path": path, "dirs": dirs, "files": files}
+
+
 def test_connection(dev):
     """Live reachability check. Returns {ok, detail}."""
     if dev.get("transport") == "local":

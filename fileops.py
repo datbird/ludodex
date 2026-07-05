@@ -113,6 +113,26 @@ BUILTIN_PROFILES = [
                     "'Game (Region).ext'. Sidecar sets keep their names to stay valid.",
      "target": "{system}/{game}{tags}.{ext}", "m3u": False, "prune_empty": True,
      "archive_policy": "keep", "rename": True},
+    {"id": "builtin:esde-m3u", "name": "ES-DE / RetroDECK (flat + .m3u)", "builtin": True,
+     "description": "Flat per system, but auto-build/repair an .m3u playlist for "
+                    "multi-disc games (psx, ps2, segacd, dreamcast) so the frontend "
+                    "shows one entry. Best for ES-DE / RetroDECK.",
+     "target": "{system}/{filename}", "m3u": True, "prune_empty": True,
+     "archive_policy": "keep"},
+    {"id": "builtin:folder-clean", "name": "Folder per game, clean names + .m3u",
+     "builtin": True,
+     "description": "Each game in its own subfolder with a clean 'Game (Region).ext' "
+                    "name, plus an .m3u for multi-disc sets. Tidiest layout for large "
+                    "snes/psx/ps2/dreamcast collections.",
+     "target": "{system}/{game}/{game}{tags}.{ext}", "m3u": True, "prune_empty": True,
+     "archive_policy": "keep", "rename": True},
+    {"id": "builtin:arcade", "name": "Arcade / MAME safe (flat, never rename)",
+     "builtin": True,
+     "description": "Flat per system, filenames kept verbatim and archives left "
+                    "packed — mame/fbneo/neogeo zip sets must not be renamed or "
+                    "unpacked. Use for arcade romsets.",
+     "target": "{system}/{filename}", "m3u": False, "prune_empty": True,
+     "archive_policy": "keep"},
 ]
 BUILTIN_BY_ID = {p["id"]: p for p in BUILTIN_PROFILES}
 

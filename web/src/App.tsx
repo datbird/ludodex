@@ -385,7 +385,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [showWand, setShowWand] = useState(false)
   const [prefsTick, setPrefsTick] = useState(0)   // bump to push prefs changes live
   // Dashboard is always the landing page (not persisted), per product decision.
-  const [tab, setTab] = useState<'library' | 'dashboard'>('dashboard')
+  const [tab, setTab] = useState<'library' | 'dashboard' | 'files'>('dashboard')
   const [theme, setTheme] = useState<'dark' | 'light'>(
     () => (readPref('theme', 'dark') as 'dark' | 'light'))
   const [view, setView] = useState<'poster' | 'table'>(
@@ -591,8 +591,9 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       </header>
 
       <ParticleTabs className="main-tabs" fill active={tab}
-        onSelect={(id) => setTab(id as 'library' | 'dashboard')}
-        tabs={[{ id: 'dashboard', label: 'Dashboard' }, { id: 'library', label: 'Library' }]} />
+        onSelect={(id) => setTab(id as 'library' | 'dashboard' | 'files')}
+        tabs={[{ id: 'dashboard', label: 'Dashboard' }, { id: 'library', label: 'Library' },
+               { id: 'files', label: 'Files' }]} />
 
       {tab === 'dashboard' && <Dashboard stats={stats} onBrowse={() => setTab('library')}
         onFilter={(f) => { setFilters(f); setTab('library') }} onOpen={setSelected}
@@ -884,6 +885,8 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       )}
       </>)}
 
+      {tab === 'files' && <FilesTab />}
+
       {selected && <Detail nk={selected} onClose={() => setSelected(null)} />}
       {showSettings && <Settings onClose={() => setShowSettings(false)}
         onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} user={user} />}
@@ -918,7 +921,6 @@ const SECTIONS = [
   { id: 'connections', name: 'Connections', icon: '🔌' },
   { id: 'library', name: 'Library', icon: '📚' },
   { id: 'dashboard', name: 'Dashboard', icon: '🎛️' },
-  { id: 'files', name: 'File ops', icon: '🗂️' },
   { id: 'metadata', name: 'AI Metadata', icon: '🔎' },
   { id: 'account', name: 'Account & Users', icon: '👤' },
 ]
@@ -931,9 +933,6 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
                 { id: 'limits', name: 'Rate limits' }],
   library: [{ id: 'preferences', name: 'Preferences' }],
   dashboard: [{ id: 'spotlight', name: 'Spotlight' }],
-  files: [{ id: 'operations', name: 'Operations' },
-          { id: 'profiles', name: 'Profiles' },
-          { id: 'history', name: 'History' }],
   metadata: [{ id: 'scan', name: 'Scan' },
              { id: 'review', name: 'Review' }],
   account: [{ id: 'users', name: 'Users' },
@@ -986,10 +985,6 @@ function Settings({ onClose, onPrefsChanged, user }: {
               ? <LibraryPrefs onChanged={onPrefsChanged} />
               : section === 'dashboard'
               ? <DashboardPrefs onChanged={onPrefsChanged} />
-              : section === 'files'
-              ? (sub === 'operations' ? <FileOpsOperations />
-                : sub === 'profiles' ? <FileProfiles />
-                : sub === 'history' ? <FileHistory /> : null)
               : section === 'metadata'
               ? (sub === 'scan' ? <MetadataScan /> : <MetadataReview />)
               : section === 'account'
@@ -4078,6 +4073,126 @@ function useDevices() {
   const [devices, setDevices] = useState<Device[]>([])
   useEffect(() => { api.devices().then((d) => setDevices(d.devices)).catch(() => {}) }, [])
   return devices
+}
+
+// ---- Files tab: a dedicated top-level home for file-structure work ----------
+type BrowseNode = {
+  dirs: { name: string; nfiles: number }[]
+  files: { name: string; size: number }[]
+  loading?: boolean
+  error?: string
+}
+const joinPath = (base: string, name: string) =>
+  (base === '/' ? '' : base.replace(/\/$/, '')) + '/' + name
+
+// One row of the read-only browse tree: a folder that lazy-loads its children.
+function DirNode({ abs, name, nfiles, tree, open, onToggle, depth }: {
+  abs: string; name: string; nfiles: number
+  tree: Record<string, BrowseNode>; open: Set<string>
+  onToggle: (abs: string) => void; depth: number
+}) {
+  const node = tree[abs]
+  const isOpen = open.has(abs)
+  const pad = (d: number) => ({ paddingLeft: d * 16 + 8 })
+  return (
+    <div className="fb-node">
+      <button className="fb-dir" style={pad(depth)} onClick={() => onToggle(abs)}>
+        <span className="fb-caret">{isOpen ? '▾' : '▸'}</span> 📁 <span className="fb-name">{name}</span>
+        <span className="dim fb-count">{nfiles.toLocaleString()} item{nfiles === 1 ? '' : 's'}</span>
+      </button>
+      {isOpen && node && (
+        <>
+          {node.loading && <div className="dim fb-note" style={pad(depth + 1)}>Loading…</div>}
+          {node.error && <div className="fo-warn fb-note" style={pad(depth + 1)}>⚠ {node.error}</div>}
+          {node.dirs.map((d) => (
+            <DirNode key={d.name} abs={joinPath(abs, d.name)} name={d.name} nfiles={d.nfiles}
+              tree={tree} open={open} onToggle={onToggle} depth={depth + 1} />
+          ))}
+          {node.files.map((f) => (
+            <div key={f.name} className="fb-file" style={pad(depth + 1)}>
+              📄 <span className="fb-name">{f.name}</span> <span className="dim fb-size">{fmtBytes(f.size)}</span>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  )
+}
+
+// Read-only folder explorer: pick device + folder, then lazily expand the tree.
+function FileBrowse() {
+  const devices = useDevices()
+  const [deviceId, setDeviceId] = useState(0)
+  const [root, setRoot] = useState('')
+  const [openedRoot, setOpenedRoot] = useState('')
+  const [tree, setTree] = useState<Record<string, BrowseNode>>({})
+  const [open, setOpen] = useState<Set<string>>(new Set())
+
+  useEffect(() => { setTree({}); setOpen(new Set()); setOpenedRoot('') }, [deviceId])
+
+  const load = useCallback(async (abs: string) => {
+    setTree((t) => ({ ...t, [abs]: { dirs: t[abs]?.dirs || [], files: t[abs]?.files || [], loading: true } }))
+    try {
+      const r = await api.browseEntries(deviceId, abs)
+      setTree((t) => ({ ...t, [abs]: { dirs: r.dirs, files: r.files, loading: false, error: r.ok ? '' : r.error } }))
+    } catch (e) {
+      setTree((t) => ({ ...t, [abs]: { dirs: [], files: [], loading: false, error: (e as Error).message } }))
+    }
+  }, [deviceId])
+
+  const toggle = (abs: string) => {
+    setOpen((s) => { const n = new Set(s); n.has(abs) ? n.delete(abs) : n.add(abs); return n })
+    if (!tree[abs]) load(abs)
+  }
+  const openRoot = () => {
+    const p = root.trim().replace(/\/+$/, '') || '/'
+    setTree({}); setOpen(new Set([p])); setOpenedRoot(p); load(p)
+  }
+  const rootNode = tree[openedRoot]
+  const rootCount = rootNode ? rootNode.dirs.length + rootNode.files.length : 0
+
+  return (
+    <div className="fo-panel fb-panel">
+      <div className="fo-form">
+        <label className="fo-field">
+          <span>Device</span>
+          <select value={deviceId} onChange={(e) => setDeviceId(Number(e.target.value))}>
+            <option value={0}>This server (local)</option>
+            {devices.map((d) => <option key={d.id} value={d.id}>{d.name}{d.host ? ` (${d.host})` : ''}</option>)}
+          </select>
+        </label>
+        <label className="fo-field fo-grow">
+          <span>Folder</span>
+          <PathInput deviceId={deviceId} value={root} onChange={setRoot} placeholder="/path/to/roms" />
+        </label>
+        <button className="go" disabled={!root.trim()} onClick={openRoot}>Open</button>
+      </div>
+      {openedRoot
+        ? <div className="fb-tree">
+            <DirNode abs={openedRoot} name={openedRoot} nfiles={rootCount}
+              tree={tree} open={open} onToggle={toggle} depth={0} />
+          </div>
+        : <div className="dim fb-empty">Pick a device and folder, then Open to browse it (read-only).</div>}
+    </div>
+  )
+}
+
+function FilesTab() {
+  const [sub, setSub] = useState<'browse' | 'operations' | 'profiles' | 'history'>('browse')
+  return (
+    <div className="files-tab">
+      <ParticleTabs className="sub-tabs" active={sub}
+        onSelect={(id) => setSub(id as 'browse' | 'operations' | 'profiles' | 'history')}
+        tabs={[{ id: 'browse', label: 'Browse' }, { id: 'operations', label: 'Operations' },
+               { id: 'profiles', label: 'Profiles' }, { id: 'history', label: 'History' }]} />
+      <div className="files-body">
+        {sub === 'browse' ? <FileBrowse />
+          : sub === 'operations' ? <FileOpsOperations />
+          : sub === 'profiles' ? <FileProfiles />
+          : <FileHistory />}
+      </div>
+    </div>
+  )
 }
 
 function PlanPreview({ plan }: { plan: FilePlan }) {

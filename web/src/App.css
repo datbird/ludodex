@@ -1523,6 +1523,27 @@ a.idchip:hover { background: var(--accent-bg); }
   border-bottom: 1px solid var(--border);
 }
 .pt-nav.main-tabs { width: 100%; margin: 16px 0 20px; }
+
+/* Files tab (top-level file-structure work) */
+.files-tab { margin-top: 8px; }
+.files-tab .pt-nav.sub-tabs { margin: 0 0 14px; max-width: 520px; }
+.files-body { max-width: 960px; }
+/* read-only browse tree */
+.fb-panel { padding-bottom: 8px; }
+.fb-tree { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px;
+  max-height: 62vh; overflow: auto; font-size: 13px; }
+.fb-empty { padding: 18px 4px; font-size: 13px; }
+.fb-node { display: block; }
+.fb-dir { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  background: none; border: 0; cursor: pointer; color: var(--text-h);
+  padding: 4px 8px; border-radius: 6px; font: inherit; }
+.fb-dir:hover { background: var(--accent-bg); }
+.fb-caret { width: 12px; flex: 0 0 auto; color: var(--text); font-size: 11px; }
+.fb-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-count { margin-left: auto; flex: 0 0 auto; font-size: 11px; padding-left: 10px; }
+.fb-file { display: flex; align-items: center; gap: 6px; padding: 3px 8px; color: var(--text); }
+.fb-size { margin-left: auto; flex: 0 0 auto; font-size: 11px; padding-left: 10px; }
+.fb-note { padding: 4px 8px; font-size: 12px; }
 .pt-line {
   position: absolute;
   bottom: -1px; left: 0;
