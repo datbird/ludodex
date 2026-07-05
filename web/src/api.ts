@@ -426,6 +426,11 @@ export interface FileCommandResult {
   summary: FilePlanSummary; warnings: string[]; sample: FilePlanMove[]
 }
 export interface FileInferResult { profile: FileProfile; detected: FileDetect }
+export interface SourceModel {
+  system_at?: string; groups?: string[]
+  media?: { present: boolean; where?: string; naming?: string }; summary?: string
+}
+export interface SourceModelResult { model: SourceModel; detected: FileDetect }
 export interface RunStep {
   seq: number; op: string; src: string | null; dst: string | null
   status: string; error: string
@@ -926,6 +931,20 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<FilePlan>
   },
+  planExtract: async (body: { device_id: number; root: string; dest?: string; scope: string; system?: string }) => {
+    const r = await fetch('/api/fileops/plan-extract', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<FilePlan>
+  },
+  modelSource: async (body: { device_id: number; root: string; scope: string; system?: string }) => {
+    const r = await fetch('/api/fileops/model-source', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<SourceModelResult>
+  },
   fileInfer: async (body: { device_id: number; root: string; scope: string; system?: string }) => {
     const r = await fetch('/api/fileops/infer', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
@@ -940,7 +959,7 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<FileCommandResult>
   },
-  createRunbook: async (body: { device_id: number; root: string; profile: string | FileProfile; scope: string; system?: string; note?: string }) => {
+  createRunbook: async (body: { device_id: number; root: string; profile?: string | FileProfile; operation?: string; dest?: string; scope: string; system?: string; note?: string }) => {
     const r = await fetch('/api/fileops/runbook', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     })

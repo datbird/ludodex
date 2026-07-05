@@ -70,6 +70,82 @@ GAME_EXTS = (set(_ROM_EXTS) | DISC_EXTS | ARCHIVE_EXTS | CONTAINER_EXTS | {
 def _is_game(rel):
     return _ext(rel) in GAME_EXTS
 
+
+# --- media extraction ------------------------------------------------------- #
+# Pull art tangled INSIDE a ROM tree out into a clean media tree. A file counts as
+# extractable media only if it's an image/video AND either sits in a media dir
+# (images/…) or carries a known role suffix (…-thumb.png). This deliberately
+# excludes the internal art of extracted/ported games (no role suffix, not in an
+# images/ dir), so game guts are never moved.
+MEDIA_IMG_EXTS = {"png", "jpg", "jpeg", "webp", "gif", "bmp"}
+MEDIA_VID_EXTS = {"mp4", "webm", "mkv", "avi"}
+MEDIA_DIRS = {"images", "media", "downloaded_media", "boxart", "snap", "snaps",
+              "titles", "wheel", "wheels", "marquees", "covers", "screenshots"}
+# gamelist role suffix -> ES-DE downloaded_media folder. Verified by aspect ratio
+# against real files: -thumb is the box cover, -image an in-game screenshot,
+# -marquee the wheel/clear-logo.
+ROLE_ESDE_FOLDER = {
+    "thumb": "covers", "boxart": "covers", "box2dfront": "covers", "box": "covers",
+    "cover": "covers", "2dbox": "covers",
+    "image": "screenshots", "screenshot": "screenshots", "snap": "screenshots",
+    "ss": "screenshots",
+    "marquee": "marquees", "wheel": "marquees", "logo": "marquees",
+    "title": "titlescreens", "titlescreen": "titlescreens",
+    "fanart": "fanart", "background": "fanart",
+    "video": "videos",
+}
+
+
+def _media_extract_target(rel):
+    """If `rel` is extractable gamelist media, return (esde_folder, game_stem, ext);
+    else None. game_stem = the filename minus its -role suffix (the game title)."""
+    name = posixpath.basename(rel)
+    ext = _ext(name)
+    if ext not in MEDIA_IMG_EXTS and ext not in MEDIA_VID_EXTS:
+        return None
+    base = name[:-(len(ext) + 1)] if ext else name
+    parent = posixpath.basename(posixpath.dirname(rel)).lower()
+    folder, stem = None, base
+    if "-" in base:
+        stem2, role = base.rsplit("-", 1)
+        f = ROLE_ESDE_FOLDER.get(role.lower())
+        if f:
+            folder, stem = f, stem2
+    if folder is None:
+        if parent in MEDIA_DIRS:            # in a media dir but no role suffix
+            folder = "videos" if ext in MEDIA_VID_EXTS else "screenshots"
+        else:
+            return None                     # not media (e.g. a game's internal art)
+    return folder, stem.strip(), ext
+
+
+def _sample_ops(ops, cap=48):
+    """A representative spread of move ops for the preview — cover multiple systems
+    and behaviors (plain move vs rename vs extract) and top/middle/bottom positions,
+    instead of just the first N alphabetical."""
+    moves = [o for o in ops if o["op"] == "move"]
+    if len(moves) <= cap:
+        return moves
+
+    def _bucket(o):
+        sysname = o["src"].split("/", 1)[0]
+        beh = ("rename" if posixpath.basename(o["src"]) != posixpath.basename(o["dst"])
+               else "move")
+        return (sysname, beh)
+    buckets = {}
+    for o in moves:
+        buckets.setdefault(_bucket(o), []).append(o)
+    keys = sorted(buckets)
+    out, k = [], 0
+    # round-robin across buckets; within a bucket alternate front/back so the
+    # sample spans top/middle/bottom rather than clustering at the head.
+    while len(out) < cap and any(buckets[kk] for kk in keys):
+        lst = buckets[keys[k % len(keys)]]
+        if lst:
+            out.append(lst.pop(0 if len(out) % 2 == 0 else -1))
+        k += 1
+    return out[:cap]
+
 # The draggable variable vocabulary surfaced in the profile-builder UI. Each entry
 # is (token, label, description, example). {system} comes from the folder scope;
 # the rest come from romtags.parse_name(); {filename}/{ext} are literal.
@@ -540,7 +616,69 @@ def plan(device_id, root, profile, scope="multi_system", system=None, max_files=
                     "m3u": sum(1 for o in ops if o["op"] == "write"),
                     "prune": sum(1 for o in ops if o["op"] == "rmdir")},
         "warnings": warnings,
-        "sample": [o for o in ops if o["op"] == "move"][:40],
+        "sample": _sample_ops(ops),
+    }
+
+
+def plan_extract(device_id, root, dest="downloaded_media", scope="multi_system",
+                 system=None, prune_empty=True, max_files=400000):
+    """Plan moving media tangled inside a ROM tree at `root` OUT into a clean ES-DE
+    media tree at `<dest>/<system>/<esde_folder>/<game>.<ext>` (dest is relative to
+    root, default 'downloaded_media/'). No ROM/game files are touched — only files
+    `_media_extract_target` recognizes as art. Same {ops,summary,warnings,sample}
+    shape as plan(), so the preview/runbook/undo path is identical."""
+    dest = (dest or "downloaded_media").strip("/")
+    fs = _Fs(device_id)
+    files = fs.listing(root)
+    warnings = []
+    if len(files) > max_files:
+        warnings.append("listing capped at %d files (found %d) — narrow the path"
+                        % (max_files, len(files)))
+        files = files[:max_files]
+    ops, src_dirs, extracted = [], set(), 0
+    for f in files:
+        rel = f["rel"]
+        if rel.split("/", 1)[0] == dest:       # already in the media tree
+            continue
+        t = _media_extract_target(rel)
+        if not t:
+            continue
+        folder, stem, ext = t
+        parts = rel.split("/")
+        if scope == "single_system":
+            sysname = system or ""
+        else:                                  # first segment (skip a roms/ wrapper)
+            segs = parts[1:] if parts and parts[0] == "roms" else parts
+            sysname = segs[0] if len(segs) > 1 else (system or "")
+        sysname = _sanitize(sysname) or "Unsorted"
+        game = _sanitize(stem) or stem
+        dst = "/".join(p for p in (dest, sysname, folder, game + "." + ext) if p)
+        if dst != rel:
+            ops.append({"op": "move", "src": rel, "dst": dst})
+            src_dirs.add(posixpath.dirname(rel))
+            extracted += 1
+    if prune_empty and ops:
+        moved_srcs = {o["src"] for o in ops}
+        moved_into = {posixpath.dirname(o["dst"]) for o in ops}
+        kept = {posixpath.dirname(f["rel"]) for f in files if f["rel"] not in moved_srcs}
+
+        def _surv(d):
+            pfx = d + "/"
+            return any(x == d or x.startswith(pfx) for x in moved_into | kept)
+        for d in sorted(src_dirs - {""}, key=lambda x: -x.count("/")):
+            if not _surv(d):
+                ops.append({"op": "rmdir", "path": d})
+    if not ops:
+        warnings.append("no extractable media found — looked for images/ folders and "
+                        "-image/-thumb/-marquee style art (game-internal art is left "
+                        "alone)")
+    return {
+        "ops": ops,
+        "summary": {"files": len(files), "units": len(files), "moves": extracted,
+                    "renames": 0, "skipped": 0, "extracted": extracted, "m3u": 0,
+                    "prune": sum(1 for o in ops if o["op"] == "rmdir")},
+        "warnings": warnings,
+        "sample": _sample_ops(ops),
     }
 
 

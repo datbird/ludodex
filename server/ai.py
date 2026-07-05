@@ -225,6 +225,10 @@ AREAS = [
     {"id": "filecmd", "name": "File-ops natural language", "status": "live",
      "description": "Turns a plain-English request ('put every game in its own "
                     "folder and build m3u playlists') into a file-operations plan."},
+    {"id": "filesource", "name": "File-layout source model", "status": "live",
+     "description": "Describes the CURRENT on-disk layout (system/group folders, "
+                    "and whether media is intermixed) so the Before panel understands "
+                    "what it's reading."},
     {"id": "metadata", "name": "Metadata search & supplement", "status": "live",
      "description": "Audits provider matches (catches wrong ones like a remake "
                     "matched to the original), identifies games no provider matched, "
@@ -306,6 +310,22 @@ DEFAULT_PROMPTS = {
         '  "explanation" : one short sentence on what will happen\n'
         "Choose a saved profile when one matches; otherwise craft a minimal target."
     ),
+    "filesource": (
+        "You examine a sample of file paths from a ROM/game library and DESCRIBE its "
+        "CURRENT on-disk layout — you are NOT proposing a new layout. Report where "
+        "the system/console folder sits, any intermediate 'group' folders "
+        "(Favorites, Archive, All, …), whether cover art / screenshots / other MEDIA "
+        "are intermixed with the ROMs and how they're named, and how confident you "
+        "are.\n"
+        "Systems present: <<systems>>\n"
+        "Current coarse shape: <<current>>\n\n"
+        "Respond with ONLY a JSON object (no prose, no code fence):\n"
+        '  "system_at"   : where the system name is, e.g. "first folder"\n'
+        '  "groups"      : array of intermediate group-folder names seen (may be [])\n'
+        '  "media"       : { "present": true|false, "where": "e.g. images/ '
+        'subfolders", "naming": "e.g. <game>-thumb.png / -image / -marquee" }\n'
+        '  "summary"     : one short human sentence describing the layout\n'
+    ),
     "metadata": (
         "You are a video-game metadata expert auditing and enriching ONE game's "
         "catalog entry. You get the game's title, the systems/stores it appears on, "
@@ -342,6 +362,7 @@ PROMPT_VARS = {
     "identify": [], "dedupe": [],
     "fileprofile": ["variables", "systems", "current"],
     "filecmd": ["profiles", "variables", "systems", "current"],
+    "filesource": ["systems", "current"],
     "metadata": [],
 }
 
@@ -923,6 +944,20 @@ def file_command(command, profiles_text, systems_text, variables_text, current,
     obj = _json(_complete_text(provider, key, model, system, command))
     if not isinstance(obj, dict):
         raise RuntimeError("model did not return a plan object")
+    return obj
+
+
+def model_source_layout(sample_text, systems_text, current, provider=None, model=None):
+    """Describe the CURRENT on-disk layout (system/group folders, intermixed media)
+    — for the Before panel. Returns a small dict {system_at, groups, media, summary}.
+    Reuses the fileprofile area's provider/model config with the filesource prompt."""
+    provider, key, model = _resolve(provider or provider_for_area("filesource"),
+                                    model or model_for_area("filesource"))
+    system = area_prompt("filesource", systems=systems_text, current=current)
+    obj = _json(_complete_text(provider, key, model, system,
+                               "Current file paths (sample):\n" + sample_text))
+    if not isinstance(obj, dict):
+        raise RuntimeError("model did not return a layout description")
     return obj
 
 

@@ -8,7 +8,7 @@ import type {
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device,
-  FileVariable, FileProfile, FileDetect, FilePlan, FileCommandResult,
+  FileVariable, FileProfile, FilePlan, SourceModel,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, ProviderMatch, ScopeValue,
@@ -4207,190 +4207,194 @@ function FilesTab() {
   )
 }
 
-function PlanPreview({ plan }: { plan: FilePlan }) {
-  const s = plan.summary
+// Build a nested tree from a flat list of POSIX paths (for the Before/After panels).
+type TNode = { name: string; children: Record<string, TNode>; isFile: boolean }
+function pathsToTree(paths: string[]): TNode {
+  const root: TNode = { name: '', children: {}, isFile: false }
+  for (const p of paths) {
+    let cur = root
+    const parts = p.split('/').filter(Boolean)
+    parts.forEach((seg, i) => {
+      if (!cur.children[seg]) cur.children[seg] = { name: seg, children: {}, isFile: false }
+      cur = cur.children[seg]
+      if (i === parts.length - 1) cur.isFile = true
+    })
+  }
+  return root
+}
+function TreeRows({ node, depth = 0 }: { node: TNode; depth?: number }) {
+  const entries = Object.values(node.children).sort((a, b) =>
+    a.isFile === b.isFile ? a.name.localeCompare(b.name) : a.isFile ? 1 : -1)
   return (
-    <div className="fo-panel">
-      <div className="fo-chips">
-        <span className="fo-stat">{s.moves.toLocaleString()} moves</span>
-        {s.renames > 0 && <span className="fo-stat">{s.renames} renames</span>}
-        {s.m3u > 0 && <span className="fo-stat">{s.m3u} .m3u</span>}
-        {s.prune > 0 && <span className="fo-stat">{s.prune} prune</span>}
-        {s.skipped > 0 && <span className="fo-stat dim">{s.skipped.toLocaleString()} skipped</span>}
-      </div>
-      {plan.warnings.map((w, i) => <div key={i} className="fo-warn">⚠ {w}</div>)}
-      {plan.sample.length > 0 && (
-        <div className="fo-sample">
-          {plan.sample.slice(0, 12).map((m, i) => (
-            <div key={i} className="fo-move">
-              <span className="fo-from">{m.src}</span>
-              <span className="fo-arrow">→</span>
-              <span className="fo-to">{m.dst}</span>
-            </div>
-          ))}
-          {s.moves > 12 && <div className="dim">…and {(s.moves - 12).toLocaleString()} more</div>}
-        </div>
-      )}
-      {s.moves === 0 && <div className="sync-note dim">Nothing to change — already in this layout.</div>}
-    </div>
+    <>
+      {entries.map((c) => (
+        <Fragment key={c.name}>
+          <div className={c.isFile ? 'ft-file' : 'ft-dir'} style={{ paddingLeft: depth * 14 + 6 }}>
+            {c.isFile ? '📄' : '📁'} <span className="fb-name">{c.name}</span>
+          </div>
+          {!c.isFile && <TreeRows node={c} depth={depth + 1} />}
+        </Fragment>
+      ))}
+    </>
   )
 }
 
+// File operations as a Before → After split: pick an operation type, then see the
+// current layout transform into the target, and Apply it as a reversible runbook.
 function FileOpsOperations() {
   const devices = useDevices()
+  const [op, setOp] = useState<'restructure' | 'extract'>('restructure')
   const [deviceId, setDeviceId] = useState(0)
   const [root, setRoot] = useState('')
   const [scope, setScope] = useState('multi_system')
   const [system, setSystem] = useState('')
   const [profiles, setProfiles] = useState<FileProfile[]>([])
   const [profileId, setProfileId] = useState('builtin:flat')
-  const [detected, setDetected] = useState<FileDetect | null>(null)
+  const [dest, setDest] = useState('downloaded_media')
   const [plan, setPlan] = useState<FilePlan | null>(null)
+  const [srcModel, setSrcModel] = useState<SourceModel | null>(null)
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
   const [openRun, setOpenRun] = useState<number | null>(null)
-  const [cmd, setCmd] = useState('')
-  const [cmdRes, setCmdRes] = useState<FileCommandResult | null>(null)
-  const [infer, setInfer] = useState<FileProfile | null>(null)
+  const seq = useRef(0)
 
-  const reloadProfiles = () => api.fileProfiles().then((p) => setProfiles(p.profiles)).catch(() => {})
-  useEffect(() => { reloadProfiles() }, [])
+  useEffect(() => { api.fileProfiles().then((p) => setProfiles(p.profiles)).catch(() => {}) }, [])
+  const base = () => ({ device_id: deviceId, root: root.trim(), scope, system: system.trim() || undefined })
 
-  const body = () => ({ device_id: deviceId, root: root.trim(), scope, system: system.trim() || undefined })
-  const canRun = root.trim().length > 0
+  // Auto-preview (debounced) whenever the operation inputs change.
+  useEffect(() => {
+    if (!root.trim()) { setPlan(null); return }
+    const id = ++seq.current
+    setErr('')
+    const t = setTimeout(async () => {
+      setBusy('plan')
+      try {
+        const pl = op === 'extract'
+          ? await api.planExtract({ ...base(), dest: dest.trim() || 'downloaded_media' })
+          : await api.filePlan({ ...base(), profile: profileId })
+        if (id === seq.current) setPlan(pl)
+      } catch (e) { if (id === seq.current) { setErr((e as Error).message); setPlan(null) } }
+      finally { if (id === seq.current) setBusy('') }
+    }, 600)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [op, deviceId, root, scope, system, profileId, dest])
 
-  const scan = async () => {
-    setErr(''); setBusy('scan'); setDetected(null); setPlan(null)
-    try { setDetected(await api.fileDetect(body())) }
+  const modelIt = async () => {
+    setBusy('model'); setErr('')
+    try { setSrcModel((await api.modelSource(base())).model) }
     catch (e) { setErr((e as Error).message) } finally { setBusy('') }
   }
-  const preview = async () => {
-    setErr(''); setBusy('plan'); setPlan(null)
-    try { setPlan(await api.filePlan({ ...body(), profile: profileId })) }
-    catch (e) { setErr((e as Error).message) } finally { setBusy('') }
-  }
-  const makeRunbook = async (profile: string | FileProfile) => {
-    setErr(''); setBusy('runbook')
-    try { const r = await api.createRunbook({ ...body(), profile }); setOpenRun(r.run_id) }
-    catch (e) { setErr((e as Error).message) } finally { setBusy('') }
-  }
-  const askAi = async () => {
-    if (!cmd.trim()) return
-    setErr(''); setBusy('cmd'); setCmdRes(null)
-    try { setCmdRes(await api.fileCommand({ ...body(), text: cmd.trim() })) }
-    catch (e) { setErr((e as Error).message) } finally { setBusy('') }
-  }
-  const designProfile = async () => {
-    setErr(''); setBusy('infer'); setInfer(null)
-    try { setInfer((await api.fileInfer(body())).profile) }
-    catch (e) { setErr((e as Error).message) } finally { setBusy('') }
-  }
-  const saveInferred = async () => {
-    if (!infer) return
-    try { await api.saveFileProfile(infer); setInfer(null); reloadProfiles() }
-    catch (e) { setErr((e as Error).message) }
+  const apply = async () => {
+    setBusy('apply'); setErr('')
+    try {
+      const b = op === 'extract'
+        ? { ...base(), operation: 'extract', dest: dest.trim() || 'downloaded_media' }
+        : { ...base(), profile: profileId }
+      setOpenRun((await api.createRunbook(b)).run_id)
+    } catch (e) { setErr((e as Error).message) } finally { setBusy('') }
   }
 
   const sel = profiles.find((p) => p.id === profileId)
   const builtins = profiles.filter((p) => p.builtin)
   const customs = profiles.filter((p) => !p.builtin)
+  const s = plan?.summary
+  const beforeTree = pathsToTree((plan?.sample || []).map((m) => m.src))
+  const afterTree = pathsToTree((plan?.sample || []).map((m) => m.dst))
+  const loading = busy === 'plan' && !plan
 
   return (
     <>
       <h2>File operations</h2>
-      <p className="dim">Reorganize, rename and repair ROM sets on any device — safely.
-        Pick a location and a layout profile, preview the plan, then run it as a
-        reversible <b>runbook</b>. Only recognized game files are touched.</p>
+      <p className="dim">Preview a change as <b>Before → After</b>, then apply it as a
+        reversible <b>runbook</b>. Only the files the operation targets are moved.</p>
+
+      <div className="fo-optype">
+        <button className={'fo-optype-btn' + (op === 'restructure' ? ' on' : '')} onClick={() => setOp('restructure')}>Restructure ROMs</button>
+        <button className={'fo-optype-btn' + (op === 'extract' ? ' on' : '')} onClick={() => setOp('extract')}>Extract media</button>
+      </div>
 
       <div className="fo-form">
-        <label className="fo-field">
-          <span>Device</span>
+        <label className="fo-field"><span>Device</span>
           <select value={deviceId} onChange={(e) => setDeviceId(Number(e.target.value))}>
             <option value={0}>This server (local)</option>
             {devices.map((d) => <option key={d.id} value={d.id}>{d.name}{d.host ? ` (${d.host})` : ''}</option>)}
           </select>
         </label>
-        <label className="fo-field fo-grow">
-          <span>Path</span>
-          <input value={root} placeholder="/path/to/roms" onChange={(e) => setRoot(e.target.value)} />
+        <label className="fo-field fo-grow"><span>Path</span>
+          <PathInput deviceId={deviceId} value={root} onChange={setRoot} placeholder="/path/to/roms" />
         </label>
-        <label className="fo-field">
-          <span>Layout of this path</span>
+        <label className="fo-field"><span>Layout</span>
           <select value={scope} onChange={(e) => setScope(e.target.value)}>
-            <option value="multi_system">Holds many system folders</option>
-            <option value="single_system">Is a single system</option>
+            <option value="multi_system">Holds many systems</option>
+            <option value="single_system">Is one system</option>
           </select>
         </label>
         {scope === 'single_system' && (
-          <label className="fo-field">
-            <span>System name</span>
-            <input value={system} placeholder="snes" onChange={(e) => setSystem(e.target.value)} />
-          </label>
+          <label className="fo-field"><span>System</span>
+            <input value={system} placeholder="snes" onChange={(e) => setSystem(e.target.value)} /></label>
         )}
-      </div>
-
-      <div className="fo-form">
-        <label className="fo-field fo-grow">
-          <span>Target profile</span>
-          <select value={profileId} onChange={(e) => setProfileId(e.target.value)}>
-            <optgroup label="Built-in">
-              {builtins.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </optgroup>
-            {customs.length > 0 && (
-              <optgroup label="Custom">
-                {customs.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </optgroup>
-            )}
-          </select>
-        </label>
-      </div>
-      {sel && <div className="fo-profile-hint"><code>{sel.target}</code><span className="dim"> — {sel.description}</span></div>}
-
-      <div className="fo-actions">
-        <button className="ops-btn" disabled={!canRun || busy !== ''} onClick={scan}>{busy === 'scan' ? 'Scanning…' : 'Scan'}</button>
-        <button className="ops-btn" disabled={!canRun || busy !== ''} onClick={preview}>{busy === 'plan' ? 'Planning…' : 'Preview plan'}</button>
-        <button className="go" disabled={!canRun || busy !== ''} onClick={() => makeRunbook(profileId)}>{busy === 'runbook' ? 'Building…' : 'Create runbook →'}</button>
       </div>
       {err && <div className="connect-msg err">{err}</div>}
 
-      {detected && (
-        <div className="fo-panel">
-          <div className="fo-panel-head">Current layout: <b>{detected.current === 'folder' ? 'folder-per-game' : 'flat'}</b> · {detected.counts.files.toLocaleString()} files · {detected.systems.length} systems</div>
-          <div className="fo-systems">{detected.systems.slice(0, 40).map((s) => <span key={s} className="fo-chip">{s}</span>)}</div>
-          <div className="fo-exts dim">Top types: {detected.counts.top_exts.slice(0, 10).map(([e, n]) => `${e} (${n})`).join(', ')}</div>
+      <div className="fo-split">
+        <div className="fo-side">
+          <div className="fo-side-head">Before — what is it now?</div>
+          <div className="fo-side-controls">
+            <button className="ops-btn" disabled={!root.trim() || busy !== ''} onClick={modelIt}>
+              {busy === 'model' ? 'Modeling…' : '✨ Model this folder'}</button>
+          </div>
+          {srcModel && (
+            <div className="fo-srcmodel">
+              {srcModel.summary && <div>{srcModel.summary}</div>}
+              {srcModel.media?.present && <div className="dim">media: {srcModel.media.where}{srcModel.media.naming ? ` (${srcModel.media.naming})` : ''}</div>}
+            </div>
+          )}
+          <div className="fo-tree">
+            {loading ? <div className="dim">Reading…</div>
+              : plan && plan.sample.length ? <TreeRows node={beforeTree} />
+              : <div className="dim">Set a path to preview.</div>}
+          </div>
+        </div>
+
+        <div className="fo-side">
+          <div className="fo-side-head">After — {op === 'extract' ? 'media extracted' : 'target layout'}</div>
+          <div className="fo-side-controls">
+            {op === 'restructure' ? (
+              <select value={profileId} onChange={(e) => setProfileId(e.target.value)}>
+                <optgroup label="Built-in">{builtins.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>
+                {customs.length > 0 && <optgroup label="Custom">{customs.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>}
+              </select>
+            ) : (
+              <label className="fo-field fo-grow"><span>Media folder (under the path)</span>
+                <input value={dest} onChange={(e) => setDest(e.target.value)} placeholder="downloaded_media" /></label>
+            )}
+          </div>
+          {op === 'restructure' && sel && <div className="fo-profile-hint"><code>{sel.target}</code><span className="dim"> — {sel.description}</span></div>}
+          {op === 'extract' && <div className="dim fo-hint">→ {dest || 'downloaded_media'}/&lt;system&gt;/covers·screenshots·marquees/&lt;game&gt; — ES-DE layout the library also indexes. ROM files aren't touched.</div>}
+          <div className="fo-tree">
+            {loading ? <div className="dim">Planning…</div>
+              : plan && plan.sample.length ? <TreeRows node={afterTree} />
+              : <div className="dim">—</div>}
+          </div>
+        </div>
+      </div>
+
+      {s && (
+        <div className="fo-footer">
+          <div className="fo-chips">
+            <span className="fo-stat">{(s.moves || 0).toLocaleString()} {op === 'extract' ? 'files extracted' : 'moves'}</span>
+            {s.renames > 0 && <span className="fo-stat">{s.renames} renames</span>}
+            {s.m3u > 0 && <span className="fo-stat">{s.m3u} .m3u</span>}
+            {s.prune > 0 && <span className="fo-stat">{s.prune} empty dirs</span>}
+            {s.skipped > 0 && <span className="fo-stat dim">{s.skipped.toLocaleString()} untouched</span>}
+            <span className="dim fo-sample-note">(showing a representative sample)</span>
+          </div>
+          {(plan?.warnings || []).map((w, i) => <div key={i} className="fo-warn">⚠ {w}</div>)}
+          <button className="go" disabled={busy !== '' || !s.moves} onClick={apply}>
+            {busy === 'apply' ? 'Building…' : 'Apply → runbook'}</button>
         </div>
       )}
-
-      {plan && <PlanPreview plan={plan} />}
-
-      <div className="fo-ai">
-        <h3>✨ AI assist</h3>
-        <div className="fo-ai-row">
-          <input value={cmd} placeholder="Describe what to do… e.g. put each game in its own folder and build m3u playlists"
-            onChange={(e) => setCmd(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') askAi() }} />
-          <button className="ops-btn" disabled={!canRun || !cmd.trim() || busy !== ''} onClick={askAi}>{busy === 'cmd' ? 'Thinking…' : 'Ask AI'}</button>
-          <button className="ops-btn" disabled={!canRun || busy !== ''} onClick={designProfile}>{busy === 'infer' ? 'Analyzing…' : 'Design a profile'}</button>
-        </div>
-        {cmdRes && (
-          <div className="fo-panel">
-            <div className="fo-ai-expl">{cmdRes.explanation}</div>
-            <div className="fo-profile-hint"><code>{cmdRes.profile.target}</code></div>
-            <PlanPreview plan={{ summary: cmdRes.summary, warnings: cmdRes.warnings, sample: cmdRes.sample }} />
-            <button className="go" disabled={busy !== ''} onClick={() => makeRunbook(cmdRes.profile)}>Create runbook from this →</button>
-          </div>
-        )}
-        {infer && (
-          <div className="fo-panel">
-            <div className="fo-panel-head">Proposed profile: <b>{infer.name}</b></div>
-            <div className="dim">{infer.description}</div>
-            <div className="fo-profile-hint"><code>{infer.target}</code></div>
-            <div className="fo-actions">
-              <button className="ops-btn" onClick={saveInferred}>Save profile</button>
-              <button className="go" disabled={busy !== ''} onClick={() => makeRunbook(infer)}>Use once →</button>
-            </div>
-          </div>
-        )}
-      </div>
 
       {openRun != null && <RunbookModal runId={openRun} onClose={() => setOpenRun(null)} />}
     </>

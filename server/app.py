@@ -1443,6 +1443,40 @@ def fileops_plan_ep(body: dict = Body(...)):
             "sample": pl["sample"]}
 
 
+@app.post("/api/fileops/plan-extract")
+def fileops_plan_extract_ep(body: dict = Body(...)):
+    """Preview the 'extract media' operation: media tangled in a ROM tree → a clean
+    ES-DE downloaded_media/ tree (dest relative to root). No ROM files touched."""
+    root = (body or {}).get("root")
+    if not root:
+        raise HTTPException(400, "a root path is required")
+    try:
+        pl = fileops.plan_extract(_dev_id(body), root,
+                                  (body or {}).get("dest") or "downloaded_media",
+                                  body.get("scope", "multi_system"), body.get("system"))
+    except Exception as e:
+        raise HTTPException(502, "planning failed: %s" % e)
+    return {"summary": pl["summary"], "warnings": pl["warnings"],
+            "sample": pl["sample"]}
+
+
+@app.post("/api/fileops/model-source")
+def fileops_model_source_ep(body: dict = Body(...)):
+    """AI-describe the CURRENT layout (system/group folders + intermixed media) for
+    the Before panel."""
+    root = (body or {}).get("root")
+    if not root:
+        raise HTTPException(400, "a root path is required")
+    did = _dev_id(body)
+    det, _vars_t, sys_t, sample_t = _fileops_ctx(
+        did, root, body.get("scope", "multi_system"), body.get("system"))
+    try:
+        model = ai.model_source_layout(sample_t, sys_t, det["current"])
+    except Exception as e:
+        raise HTTPException(502, "AI modeling failed: %s" % e)
+    return {"model": model, "detected": det}
+
+
 @app.post("/api/fileops/infer")
 def fileops_infer_ep(body: dict = Body(...)):
     root = (body or {}).get("root")
@@ -1496,18 +1530,30 @@ def fileops_command_ep(body: dict = Body(...)):
 
 @app.post("/api/fileops/runbook")
 def fileops_make_runbook(body: dict = Body(...)):
-    root, profile = (body or {}).get("root"), (body or {}).get("profile")
-    if not root or not profile:
-        raise HTTPException(400, "root and profile are required")
+    root = (body or {}).get("root")
+    if not root:
+        raise HTTPException(400, "a root path is required")
     did = _dev_id(body)
     scope, system = body.get("scope", "multi_system"), body.get("system")
+    operation = (body or {}).get("operation") or "restructure"
     try:
-        pl = fileops.plan(did, root, profile, scope, system)
+        if operation == "extract":
+            dest = (body or {}).get("dest") or "downloaded_media"
+            pl = fileops.plan_extract(did, root, dest, scope, system)
+            label = "Extract media → %s/" % dest
+        else:
+            profile = (body or {}).get("profile")
+            if not profile:
+                raise HTTPException(400, "a profile is required")
+            pl = fileops.plan(did, root, profile, scope, system)
+            label = profile
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, "planning failed: %s" % e)
     if not pl["ops"]:
         raise HTTPException(400, "nothing to do — files already match this layout")
-    rid = fileops.create_runbook(did, root, profile, pl["ops"], scope, system,
+    rid = fileops.create_runbook(did, root, label, pl["ops"], scope, system,
                                  body.get("note", ""))
     return {"run_id": rid, "runbook": fileops.runbook(rid), "warnings": pl["warnings"]}
 
