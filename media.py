@@ -154,12 +154,13 @@ MEDIA_PROVIDERS = LOCAL_PROVIDERS + REMOTE_PROVIDERS
 # beats official store art, which beats IGDB, which beats SteamGridDB community
 # art. ES-DE has no real backgrounds, so it sinks for that kind.
 PRIORITY = {
-    "cover":        ["steamgrid", "esde", "screenscraper", "steam", "igdb", "steamgriddb", "playnite", "launchbox"],
-    "background":   ["steamgrid", "steam", "screenscraper", "igdb", "steamgriddb", "esde", "playnite", "launchbox"],
+    "cover":        ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb", "steamgriddb", "playnite", "launchbox"],
+    "background":   ["steamgrid", "steam", "screenscraper", "igdb", "steamgriddb", "esde", "gamelist", "playnite", "launchbox"],
     "hero":         ["steamgrid", "steam", "steamgriddb", "igdb", "screenscraper", "launchbox"],
     "header":       ["steamgrid", "steam", "steamgriddb", "launchbox", "screenscraper"],
-    "logo":         ["steamgrid", "esde", "screenscraper", "steam", "igdb", "steamgriddb", "launchbox"],
+    "logo":         ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb", "steamgriddb", "launchbox"],
     "icon":         ["steamgrid", "steamgriddb", "igdb", "screenscraper", "playnite"],
+    "screenshot":   ["gamelist", "esde", "screenscraper", "launchbox"],
     "title_screen": ["esde", "screenscraper", "launchbox"],
     "box_3d":       ["esde", "screenscraper", "steamgriddb", "launchbox"],
     "box_back":     ["esde", "screenscraper", "launchbox"],
@@ -174,7 +175,7 @@ PRIORITY = {
     "map":          ["screenscraper"],
     "mix":          ["esde", "screenscraper"],
 }
-DEFAULT_PRIORITY = ["steamgrid", "esde", "screenscraper", "steam", "igdb",
+DEFAULT_PRIORITY = ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb",
                     "steamgriddb", "playnite", "launchbox"]
 
 

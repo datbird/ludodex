@@ -233,6 +233,16 @@ def device_rm(dev_id):
 # --------------------------------------------------------------------------- #
 #  Device wishlist — games the user wants ON a device (intent only, no transfer)
 # --------------------------------------------------------------------------- #
+def rom_paths(dev_id):
+    """Enabled ROM-manager paths on a device (for in-place art indexing)."""
+    con = _con()
+    paths = [r["rom_path"] for r in con.execute(
+        "SELECT rom_path FROM library_managers WHERE device_id=? AND enabled=1 "
+        "AND rom_path IS NOT NULL AND rom_path!=''", (int(dev_id),))]
+    con.close()
+    return paths
+
+
 def wants_add(device_id, norm_keys):
     """Add games to a device's wishlist. Returns how many new rows landed."""
     con = _con()

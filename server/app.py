@@ -1311,6 +1311,37 @@ def device_wants_remove(dev_id: int, norm_key: str):
     return {"ok": True}
 
 
+@app.post("/api/media/scan-local")
+def media_scan_local(body: dict = Body(default={})):
+    """Index EmulationStation/RetroArch art that lives INSIDE a device's ROM tree,
+    in place — no move — so existing local covers show up. Local paths only (the
+    server must be able to read the files). Runs in the background as a job."""
+    dev_id = _dev_id(body)                       # 0 = local host/container
+    dev = devices._device(dev_id) if dev_id else None
+    if dev and (dev.get("transport") or "local") != "local":
+        raise HTTPException(400, "index-in-place needs a locally-mounted path; for a "
+                                 "remote device, pull its media via ROM sync first")
+    root = ((body or {}).get("root") or "").strip()
+    roots = [root] if root else devices.rom_paths(dev_id)
+    roots = [r for r in roots if r]
+    if not roots:
+        raise HTTPException(400, "no ROM path to scan for art")
+
+    def run(should_stop):
+        for r in roots:
+            subprocess.run([sys.executable, os.path.join(DIR, "media_index.py"),
+                            "--gamelist", r], timeout=1800, cwd=DIR)
+            if should_stop():
+                return
+        # pick the winning asset per (game, kind) for the kinds gamelist supplies,
+        # so the newly-indexed covers become the chosen art the UI shows.
+        subprocess.run([sys.executable, os.path.join(DIR, "media_choose.py"),
+                        "--kinds", "cover,screenshot,logo"], timeout=1800, cwd=DIR)
+
+    _start_job("artscan:%d" % dev_id, "artscan", "Indexing local art", run)
+    return {"started": True, "roots": roots}
+
+
 @app.post("/api/devices/{dev_id}/sync")
 def sync_device_ep(dev_id: int):
     if not devices._device(dev_id):

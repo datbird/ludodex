@@ -836,6 +836,16 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<SyncJob>
   },
+  // Index EmulationStation/RetroArch art living inside a device's ROM tree, in
+  // place (no move) — so existing local covers show up. Local devices only.
+  scanLocalArt: async (deviceId: number) => {
+    const r = await fetch('/api/media/scan-local', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_id: deviceId }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ started: boolean; roots: string[] }>
+  },
   // ROM-repo sync: rescan Connections devices' ROM locations, then rebuild.
   romsStatus: () => get<{ locations: RomLocation[]; job: RomJob | null }>('/api/roms/status'),
   romsRun: async (devices: number[] | 'all') => {

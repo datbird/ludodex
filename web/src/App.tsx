@@ -2942,6 +2942,14 @@ function SyncMenu() {
     try { setRomJob(await api.romsRun('all')) } catch (e) { setMsg((e as Error).message) }
     load()
   }
+  const runArtScan = async (id: number) => {
+    setMsg('')
+    try {
+      await api.scanLocalArt(id)
+      setMsg('Indexing local art — track it in the Jobs monitor (top-right).')
+    } catch (e) { setMsg((e as Error).message) }
+    setTimeout(() => setMsg(''), 5000)
+  }
   const runRomOne = async (id: number) => {
     setMsg('')
     try { setRomJob(await api.romsRun([id])) } catch (e) { setMsg((e as Error).message) }
@@ -3067,6 +3075,10 @@ function SyncMenu() {
                           {rs?.state !== 'running' && (
                             <button className="ops-btn" disabled={anyRunning}
                               onClick={(e) => { e.stopPropagation(); runRomOne(l.id) }}>Sync</button>
+                          )}
+                          {l.transport === 'local' && (
+                            <button className="ops-btn" title="Index art already sitting inside this ROM tree (no move) so your local covers show up"
+                              onClick={(e) => { e.stopPropagation(); runArtScan(l.id) }}>Index art</button>
                           )}
                         </div>
                         {isOpen && (

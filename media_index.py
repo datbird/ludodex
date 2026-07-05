@@ -98,6 +98,69 @@ def ext_kind_ok(ext, kind):
     return e in IMG_EXTS
 
 
+# EmulationStation / RetroArch "gamelist" media roles (the -<role> filename suffix)
+# -> canonical ludodex kind. Verified against real files: -image is an in-game
+# screenshot, -thumb is the box art (portrait/near-square), -marquee is the
+# wheel/clear-logo. Extra Skraper/ES roles mapped generously.
+GAMELIST_ROLE_KIND = {
+    "thumb": "cover", "boxart": "cover", "box2dfront": "cover", "box": "cover",
+    "cover": "cover",
+    "image": "screenshot", "screenshot": "screenshot", "snap": "screenshot",
+    "marquee": "logo", "wheel": "logo", "logo": "logo",
+    "title": "title_screen", "titlescreen": "title_screen",
+    "fanart": "background", "background": "background",
+    "video": "video",
+}
+
+
+def scan_gamelist(con, owned, now, root):
+    """Index EmulationStation/RetroArch 'gamelist' art that lives INSIDE a ROM tree,
+    in place (no move): <root>/<system>/.../images/<game>-<role>.<ext>. Matched to
+    emulation games by the game portion -> norm_key. Returns (rows, matched)."""
+    import subprocess
+    root = (root or "").rstrip("/")
+    if not root or not os.path.isdir(root):
+        return 0, 0
+    # re-scannable: drop this root's prior gamelist rows first
+    con.execute("DELETE FROM media WHERE provider='gamelist' AND ref LIKE ?", (root + "/%",))
+    # find just the 'images' dirs — don't walk the whole (huge) ROM tree
+    try:
+        out = subprocess.run(["find", root, "-type", "d", "-name", "images"],
+                             capture_output=True, text=True, timeout=600).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    rows = matched = 0
+    for imgdir in out.splitlines():
+        rel = os.path.relpath(imgdir, root)
+        system = rel.split(os.sep, 1)[0] if rel not in (".", "") else ""
+        platform = media.norm_system(system) if system else None
+        try:
+            files = os.listdir(imgdir)
+        except OSError:
+            continue
+        for fn in files:
+            base, ext = os.path.splitext(fn)
+            if ext.lower() not in IMG_EXTS or "-" not in base:
+                continue
+            stem, role = base.rsplit("-", 1)        # role suffix has no surrounding spaces
+            kind = GAMELIST_ROLE_KIND.get(role.lower())
+            if not kind:
+                continue
+            nk = norm(stem)
+            if not nk:
+                continue
+            is_match = nk in owned
+            con.execute(
+                "INSERT OR REPLACE INTO media(norm_key,system,kind,provider,mount,"
+                "ref_type,ref,ext,matched,indexed_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (nk, platform, kind, "gamelist", "gamelist", "file",
+                 os.path.join(imgdir, fn), ext.lower().lstrip("."), int(is_match), now))
+            rows += 1
+            matched += int(is_match)
+    con.commit()
+    return rows, matched
+
+
 def scan_esde(con, owned, now):
     """Walk every enabled ES-DE media mount; return (#rows, #matched)."""
     rows = matched = 0
@@ -188,9 +251,19 @@ def scan_steamgrid(con, steam, now):
 
 def main(argv):
     only = argv[argv.index("--provider") + 1] if "--provider" in argv else None
+    gl_root = argv[argv.index("--gamelist") + 1] if "--gamelist" in argv else None
     owned, steam = catalog()
     con = index_con()
     now = int(time.time())
+
+    # --gamelist <root>: index in-place ES/RetroArch art under a ROM tree, only.
+    if gl_root:
+        r, m = scan_gamelist(con, owned, now, gl_root)
+        print("media_index: gamelist — %d assets (%d matched) under %s"
+              % (r, m, gl_root), file=sys.stderr)
+        con.commit()
+        con.close()
+        return
 
     if only in (None, "esde") and config.media_enabled("esde"):
         con.execute("DELETE FROM media WHERE provider='esde'")
