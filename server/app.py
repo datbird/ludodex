@@ -4518,7 +4518,9 @@ def _sync_worker(job, services, media_ids=()):
     # catalog rebuild, each media fetch, and the one materialize pass.
     planned_media = [sid for sid in media_ids if sid in MEDIA_SYNC_PROVIDER]
     mode = config.get("media_mode") or "chosen"
-    total = len(services) + 2 + len(planned_media) + 1 + (1 if mode != "ondemand" else 0)
+    # + 4 fixed pipeline steps: Steam tags, catalog rebuild, IGDB enrich (with
+    # its merge rebuild), and the multi-source scores pass.
+    total = len(services) + 4 + len(planned_media) + 1 + (1 if mode != "ondemand" else 0)
     job["prog"] = {"done": 0, "total": max(total, 1)}
 
     # Post-source pipeline phases, shown as their own checkmark rows in the sync
@@ -4526,6 +4528,8 @@ def _sync_worker(job, services, media_ids=()):
     phases = [
         {"id": "tags", "label": "Steam tags", "state": "pending", "detail": ""},
         {"id": "catalog", "label": "Catalog rebuilt", "state": "pending", "detail": ""},
+        {"id": "meta", "label": "Descriptions & attributes", "state": "pending", "detail": ""},
+        {"id": "scores", "label": "Scores & ratings", "state": "pending", "detail": ""},
         {"id": "art", "label": "Missing art", "state": "pending", "detail": ""},
         {"id": "media", "label": "Media downloaded" if mode != "ondemand" else "Media chosen",
          "state": "pending", "detail": ""},
@@ -4579,6 +4583,40 @@ def _sync_worker(job, services, media_ids=()):
         else:
             job["error"] = "catalog rebuild failed: " + err
             _phase("catalog", "failed")
+
+        # ---- metadata enrichment + scores for the freshly-imported games ----
+        # The catalog now knows every new game's identity (store id + title), so
+        # enrich WITHOUT AI: resolve each identified game against IGDB (by Steam
+        # appid, else name search) and pull descriptions/genres/attributes, then
+        # rebuild so build_library merges the cache into game_attributes — same
+        # order as update.sh (igdb_enrich && build_library). Non-fatal: a failure
+        # here never aborts the media pass. Runs for ALL stores, not just Steam.
+        if not job.get("error") and config.metadata_enabled("igdb"):
+            job["step"] = "Enriching metadata (IGDB)…"
+            _phase("meta", "running")
+            ok_e, err_e = _run_script("igdb_enrich.py", timeout=1800)
+            if ok_e:
+                ok_m, err_m = _run_script("build_library.py", timeout=900)
+                _phase("meta", "ok" if ok_m else "failed",
+                       None if ok_m else "merge failed: " + err_m)
+            else:
+                _phase("meta", "failed", err_e)
+        else:
+            _phase("meta", "skipped")
+        step()
+
+        # Ratings from every source ludodex knows (IGDB critic+user, Steam
+        # reviews, GOG user score, and the local ScreenScraper cache) rolled into
+        # the unified Ludodex score. Self-limiting (7-day per-source freshness
+        # skip); also non-fatal so the media pass always runs.
+        if not job.get("error"):
+            job["step"] = "Fetching scores & ratings…"
+            _phase("scores", "running")
+            ok_sc, err_sc = _run_script("scores_fetch.py", args=["all"], timeout=1800)
+            _phase("scores", "ok" if ok_sc else "failed", None if ok_sc else err_sc)
+        else:
+            _phase("scores", "skipped")
+        step()
     else:
         for p in phases:
             _phase(p["id"], "skipped")
