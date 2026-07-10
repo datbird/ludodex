@@ -257,7 +257,7 @@ def apply_selection(selections):
     con.close()
 
 
-def findings_list(status=None, kind=None, limit=300):
+def findings_list(status=None, kind=None, limit=300, run_id=None):
     con = _con()
     q = "SELECT * FROM findings"
     cond, args = [], []
@@ -267,6 +267,9 @@ def findings_list(status=None, kind=None, limit=300):
     if kind:
         cond.append("kind=?")
         args.append(kind)
+    if run_id:
+        cond.append("run_id=?")
+        args.append(int(run_id))
     if cond:
         q += " WHERE " + " AND ".join(cond)
     q += " ORDER BY confidence DESC, created DESC LIMIT ?"
@@ -287,10 +290,57 @@ def findings_counts():
 
 
 def set_status(finding_id, status):
-    if status not in ("proposed", "accepted", "rejected"):
+    if status not in ("proposed", "accepted", "rejected", "applied"):
         raise ValueError("bad status")
     con = _con()
     con.execute("UPDATE findings SET status=? WHERE id=?", (status, finding_id))
+    con.commit()
+    con.close()
+
+
+def pending_count():
+    """Findings accepted but not yet applied to the catalog (drives the Library
+    'pending changes' banner)."""
+    con = _con()
+    n = con.execute("SELECT COUNT(*) FROM findings WHERE status='accepted'").fetchone()[0]
+    con.close()
+    return int(n)
+
+
+def proposed_counts():
+    """{run_id: number of still-proposed findings} — drives the job monitor's
+    'review & accept' badge, so it clears once a run's changes are accepted."""
+    con = _con()
+    out = {r[0]: r[1] for r in con.execute(
+        "SELECT run_id, COUNT(*) FROM findings WHERE status='proposed' "
+        "GROUP BY run_id")}
+    con.close()
+    return out
+
+
+def accepted_ids():
+    """Finding IDs currently 'accepted' (awaiting apply) — captured at the start of
+    an apply so a coalesced run marks only what it actually processed."""
+    con = _con()
+    ids = [r[0] for r in con.execute(
+        "SELECT id FROM findings WHERE status='accepted'")]
+    con.close()
+    return ids
+
+
+def mark_applied(ids=None):
+    """After a successful apply, move 'accepted' -> 'applied' so they stop showing
+    as pending. The readers below still include 'applied' so a later plain rebuild
+    keeps their supplements/matches; applying again is idempotent. If `ids` is
+    given, mark ONLY those (a coalesced apply must not mark findings that were
+    accepted mid-run but not part of this pass)."""
+    con = _con()
+    if ids:
+        con.executemany(
+            "UPDATE findings SET status='applied' WHERE id=? AND status='accepted'",
+            [(int(i),) for i in ids])
+    else:
+        con.execute("UPDATE findings SET status='applied' WHERE status='accepted'")
     con.commit()
     con.close()
 
@@ -311,7 +361,7 @@ def accepted_supplements():
     con = _con()
     out = {}
     for r in con.execute("SELECT norm_key, payload_json, selection_json FROM "
-                         "findings WHERE status='accepted'"):
+                         "findings WHERE status IN ('accepted','applied')"):
         attrs = (json.loads(r["payload_json"] or "{}").get("attributes") or {})
         sel = json.loads(r["selection_json"] or "null")
         if sel and sel.get("attributes") is not None:   # only the ticked kinds
@@ -329,7 +379,7 @@ def _accepted_matches_raw():
     con = _con()
     out = []
     for r in con.execute("SELECT norm_key, payload_json, selection_json FROM "
-                         "findings WHERE status='accepted'"):
+                         "findings WHERE status IN ('accepted','applied')"):
         pl = json.loads(r["payload_json"] or "{}")
         sel = json.loads(r["selection_json"] or "null")
         if sel and not sel.get("match", True):

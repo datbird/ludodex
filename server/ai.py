@@ -845,13 +845,17 @@ def nl_to_query(question, sources, platforms, provider=None, model=None):
 
 
 # ----------------------------------------------------------------- art pick (vision)
-def pick_art(title, kind, images, provider=None, model=None):
+def pick_art(title, kind, images, provider=None, model=None, language=None):
     """Pick the best of N candidate images. `images`=[(mime,bytes)].
-    Returns {"index": <0-based>, "reason": str}. Raises on error."""
+    Returns {"index": <0-based>, "reason": str}. Raises on error. When `language`
+    is set, ties break toward media in that language (logos/titles/box art)."""
     provider, key, model = _resolve(provider, model)
     system = area_prompt("art", kind=kind, title=title, count=len(images))
-    text = _complete_vision(provider, key, model, system,
-                            "Pick the best image.", images)
+    instr = "Pick the best image."
+    if language:
+        instr += (" Prefer an image whose visible text, logo, or box-art language "
+                  "is %s when overall quality is comparable." % language)
+    text = _complete_vision(provider, key, model, system, instr, images)
     obj = _json(text)
     idx = int(obj.get("index", 1)) - 1
     idx = max(0, min(idx, len(images) - 1))
@@ -885,6 +889,28 @@ def identify_games(images, provider=None, model=None):
                     "source": str(it.get("source") or "").strip(),
                     "confidence": conf})
     return out
+
+
+# ---------------------------------------------------- provider attribute adjudication
+def adjudicate_attributes(title, conflicts, provider=None, model=None):
+    """Two providers disagree on some fields — pick the better source per field.
+    `conflicts` = {kind: {"igdb": value, "screenscraper": value}}. Returns
+    {kind: "igdb"|"screenscraper"} naming the winning provider for each field."""
+    provider, key, model = _resolve(provider or provider_for_area("metadata"),
+                                    model or model_for_area("metadata"))
+    system = (
+        "You reconcile video-game metadata for the game \"%s\". For each field you "
+        "are given two providers' values (IGDB and ScreenScraper). Choose the ONE "
+        "provider whose value is more accurate, complete, and canonical for THAT "
+        "field (a well-formed genre list, correct developer/publisher, a sensible "
+        "release date, a better-written description, etc.). Respond ONLY with a JSON "
+        "object mapping each field name to the chosen provider, exactly "
+        '"igdb" or "screenscraper", e.g. '
+        '{"genres":"igdb","developers":"screenscraper"}.' % title)
+    text = _complete_text(provider, key, model, system,
+                          json.dumps(conflicts, ensure_ascii=False))
+    obj = _json(text)
+    return obj if isinstance(obj, dict) else {}
 
 
 # ------------------------------------------------------------------- dedupe assist
