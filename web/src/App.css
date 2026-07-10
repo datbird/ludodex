@@ -1611,14 +1611,22 @@ a.idchip:hover { background: var(--accent-bg); }
 .sync-step { font-size: 12px; color: var(--accent); font-weight: 500; }
 .sync-all { width: 100%; justify-content: center; text-align: center; padding: 9px 12px; cursor: pointer; }
 .sync-all:disabled { opacity: 0.5; cursor: not-allowed; }
-.sync-mode { display: flex; gap: 6px; margin-bottom: 8px; }
-.sync-mode-opt { flex: 1 1 0; display: flex; flex-direction: column; gap: 2px; text-align: left;
-  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
-  color: var(--text); cursor: pointer; }
-.sync-mode-opt.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
-.sync-mode-opt:disabled { opacity: 0.5; cursor: not-allowed; }
-.sync-mode-name { font-size: 13px; font-weight: 600; color: var(--text-h); }
-.sync-mode-hint { font-size: 11px; line-height: 1.3; opacity: 0.8; }
+.sync-choice { display: flex; flex-direction: column; gap: 6px; padding: 10px; margin-bottom: 4px;
+  border: 1px solid var(--accent); border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+.sync-choice-q { font-size: 12px; font-weight: 600; color: var(--text-h); margin-bottom: 2px; }
+.sync-choice-opt { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text);
+  cursor: pointer; }
+.sync-choice-opt:hover:not(:disabled) { border-color: var(--accent); }
+.sync-choice-opt:disabled { opacity: 0.5; cursor: not-allowed; }
+.sync-choice-name { font-size: 13px; font-weight: 600; color: var(--text-h); }
+.sync-choice-hint { font-size: 11px; line-height: 1.3; opacity: 0.8; }
+.sync-choice-cancel { align-self: flex-end; font-size: 12px; background: none; border: none;
+  color: var(--text); opacity: 0.75; cursor: pointer; padding: 2px 4px; }
+.sync-choice-inline { display: inline-flex; gap: 4px; align-items: center; }
+.sync-choice-x { background: none; border: none; color: var(--text); opacity: 0.7; cursor: pointer;
+  font-size: 15px; line-height: 1; padding: 0 2px; }
 .sync-note { font-size: 12px; margin-top: 8px; }
 .sync-note.dim { color: var(--text); opacity: 0.75; }
 .sync-list { margin-top: 12px; display: flex; flex-direction: column; gap: 4px; }
