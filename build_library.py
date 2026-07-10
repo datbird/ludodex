@@ -62,27 +62,53 @@ games_attrs = {}     # norm_key -> {"src": [(source, source_id, record)], }
 playnite_keys = set()  # norm_keys present in the Playnite library (provenance)
 launchbox_keys = set()  # norm_keys present in the LaunchBox library (provenance)
 
+# OS vs. device split: the store PLATFORM is the store/console identity (xbox,
+# steam, snes…), kept separate from what a title RUNS ON. The Xbox importer emits
+# a device per row (windows / xbox one / xbox series); add() folds those into one
+# 'xbox' source (device list durably in `detail`) and they're split into `os`
+# (PC operating systems) and `device` (consoles) attributes at write time.
+OS_VALUES = {"windows", "win", "linux", "mac", "macos", "osx"}
 
-def add(title, source, platform, sid, detail=""):
+
+def add(title, source, platform, sid, detail="", state="have"):
     key = norm(title)
     if not key:
         return key
+    # Xbox: keep the store identity ('xbox') on the platform and carry the actual
+    # device(s) a title runs on (windows / xbox one / xbox series) as a comma-list
+    # in `detail` — durable across carry-over rebuilds, later split into os/device
+    # attributes. The device arrives as the platform (fresh per-device TSV row) or
+    # already in detail (a carried-over, already-normalised source).
+    xbox_devs = set()
+    if source == "xbox":
+        raw = detail if platform in ("", "xbox") else platform
+        xbox_devs = {d.strip() for d in str(raw).split(",")
+                     if d.strip() and d.strip() != "xbox"}
+        platform, detail = "xbox", ",".join(sorted(xbox_devs))
     g = games.get(key)
     if g is None:
         g = {"title": title, "store_title": None, "sources": []}
         games[key] = g
-    # prefer a store title as the canonical (cleaner than tagged ROM names)
-    if source not in ("emulation", "archive") and not g["store_title"]:
+    # prefer a store title as the canonical (cleaner than tagged ROM names). Only
+    # a *have* store source names the game — a want shouldn't rename an owned one.
+    if source not in ("emulation", "archive") and state == "have" and not g["store_title"]:
         g["store_title"] = title
-    row = (source, platform, str(sid), title, detail)
-    # dedup PROVIDER rows by (source, id, platform) so a Playnite Steam entry
-    # enriches the Steam pull instead of duplicating it — but keep every
-    # emulation/archive variant (source_id = system/archive name, not unique) AND
-    # every console a console title is owned on (same id, different platform:
-    # e.g. an Xbox title on both xbox one + xbox series).
-    if source in ("emulation", "archive") or \
-       (source, str(sid), platform) not in {(s[0], s[2], s[1]) for s in g["sources"]}:
-        g["sources"].append(row)
+    # dedup source rows by (source, id, platform): a Playnite Steam entry enriches
+    # the Steam pull instead of duplicating it, and — crucially for emulation —
+    # carry-over + ROM-index re-read on every rebuild would otherwise append an
+    # identical (emulation, <system>, <system>) row each time. Distinct consoles
+    # still survive (different platform), so "every console a title is on" is kept
+    # (e.g. Xbox on xbox one + xbox series; a ROM on gamecube + n64).
+    dk = (source, str(sid), platform)
+    for i, s in enumerate(g["sources"]):
+        if (s[0], s[2], s[1]) == dk:
+            if xbox_devs:                            # union devices into detail
+                have = {d.strip() for d in (s[4] or "").split(",") if d.strip()}
+                g["sources"][i] = s = s[:4] + (",".join(sorted(have | xbox_devs)),) + s[5:]
+            if state == "have" and s[5] != "have":   # have wins over want
+                g["sources"][i] = s[:5] + ("have",)
+            return key
+    g["sources"].append((source, platform, str(sid), title, detail, state))
     return key
 
 
@@ -104,7 +130,7 @@ def add_attrs(key, source, sid, record, origin=None):
 # On the producer (all inputs present) every category is regenerated, so this is a
 # no-op there.
 _REGEN = set()
-for _s in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox"):
+for _s in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox", "nintendo"):
     if config.source_enabled(_s) and os.path.exists(OWN + "/%s_games.tsv" % _s):
         _REGEN.add(_s)
 # Emulation is ADDITIVE by default: prior emulation games are carried over AND the
@@ -121,6 +147,7 @@ _lb_json = config.get("launchbox_import_json")
 _regen_pn = bool(config.source_enabled("playnite") and _pn_json and os.path.exists(_pn_json))
 _regen_lb = bool(config.source_enabled("launchbox") and _lb_json and os.path.exists(_lb_json))
 
+_prev_wanted = {}          # store -> [(norm_key, title, store_id)] carried from the old DB
 if os.path.exists(OUT):
     _prev = sqlite3.connect(OUT)
     try:
@@ -137,6 +164,13 @@ if os.path.exists(OUT):
             add(title, src, plat, sid, detail or "")
     except sqlite3.OperationalError:
         pass                                   # no prior library / schema mismatch
+    try:                                       # wishlist-wanted games (may be absent in older DBs)
+        for nk, title, store, sid in _prev.execute(
+                "SELECT g.norm_key, g.canonical_title, w.store, w.store_id "
+                "FROM games g JOIN wanted w ON w.game_id=g.id WHERE g.wanted=1"):
+            _prev_wanted.setdefault(store, []).append((nk, title, sid))
+    except sqlite3.OperationalError:
+        pass
     _prev.close()
 
 
@@ -172,12 +206,15 @@ def load_tsv(path, source):
         title = parts[1] if len(parts) > 1 else ""
         # optional 3rd column = specific console/platform (psn/xbox emit it);
         # otherwise the platform is just the source label
+        # optional 3rd column = specific console/platform (psn/xbox emit it);
+        # otherwise the platform is just the source label. Xbox's device value is
+        # normalised into the store identity + os/device attributes inside add().
         platform = parts[2] if len(parts) > 2 and parts[2] else source
         if title:
             add(title, source, platform, sid)
 
 
-for _src in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox"):
+for _src in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox", "nintendo"):
     if config.source_enabled(_src):
         load_tsv(OWN + "/%s_games.tsv" % _src, _src)
 
@@ -195,6 +232,17 @@ if os.path.exists(MANUAL_DB):
     except sqlite3.OperationalError:
         pass
     mgc.close()
+
+
+# ---- durable per-format ownership facts (ownership.sqlite): manual physical
+#      ownership + per-platform wants that coexist with what you already own ----
+try:
+    import ownership as _ownership
+    for _nk, _t, _src, _plat, _state, _note in _ownership.all_facts(DATA):
+        if _t:
+            add(_t, _src, _plat or _src, "own:%s:%s" % (_src, _plat), _note, _state)
+except Exception:
+    pass
 
 
 # ---- crawled local archives (crawl.py -> process.py -> extracted) ----
@@ -269,6 +317,55 @@ if config.source_enabled("launchbox") and LB_JSON and os.path.exists(LB_JSON):
             add_attrs(key, provider, sid, rec, "launchbox")
 
 
+# ---- wishlists (Discover "Wanted"): games you want but don't own ----
+# Loaded LAST, after every owned source, so we can drop anything already owned
+# (its norm_key is already in `games`). A wanted game becomes a catalog entry with
+# NO owned source (wanted=1); the moment you own it, the match here removes it.
+wanted = {}          # norm_key -> {"title": str, "stores": [(store, store_id, title_raw)]}
+
+
+def load_wishlist(path, store):
+    if not os.path.exists(path):
+        return
+    for line in open(path, encoding="utf-8"):
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        parts = line.split("\t")
+        sid = parts[0]
+        title = parts[1] if len(parts) > 1 else ""
+        if not title:
+            continue
+        key = norm(title)
+        if not key or key in games:          # already owned -> not "wanted"
+            continue
+        w = wanted.setdefault(key, {"title": title, "stores": []})
+        if (store, str(sid)) not in {(s[0], s[1]) for s in w["stores"]}:
+            w["stores"].append((store, str(sid), title))
+
+
+def carry_wishlist(store):
+    # re-seed a store's wanted games from the old DB when its fresh TSV is absent,
+    # so a rebuild (e.g. after a container recreate wipes the ephemeral TSVs) doesn't
+    # silently drop them — the same durability owned sources get via carry-over.
+    for nk, title, sid in _prev_wanted.get(store, []):
+        if not nk or nk in games:              # now owned -> no longer "wanted"
+            continue
+        w = wanted.setdefault(nk, {"title": title, "stores": []})
+        if (store, str(sid)) not in {(s[0], s[1]) for s in w["stores"]}:
+            w["stores"].append((store, str(sid), title))
+
+
+for _ws in ("steam", "gog"):
+    if not config.source_enabled(_ws):
+        continue
+    path = OWN + "/%s_wishlist.tsv" % _ws
+    if os.path.exists(path):
+        load_wishlist(path, _ws)               # fresh pull this run
+    else:
+        carry_wishlist(_ws)                    # keep prior wanted alive
+
+
 # ---- write ----
 if os.path.exists(OUT):
     os.remove(OUT)
@@ -278,9 +375,13 @@ cur.executescript("""
 CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
   n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
   has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
-  has_archive INT, in_playnite INT, in_launchbox INT);  -- *_in flags = provenance, NOT sources
+  has_archive INT, in_playnite INT, in_launchbox INT,
+  wanted INT DEFAULT 0);  -- wanted=1: a wishlist-only entry (no owned source)
 CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
-  source_id TEXT, title_raw TEXT, detail TEXT);
+  source_id TEXT, title_raw TEXT, detail TEXT, state TEXT DEFAULT 'have');
+  -- state: 'have' (owned via this source) | 'want' (per-format wish)
+-- store-wishlist provenance for wanted games (which store(s) they're wanted from)
+CREATE TABLE wanted (game_id INTEGER, store TEXT, store_id TEXT, title_raw TEXT);
 -- Playnite-parity attributes:
 CREATE TABLE source_attrs (game_id INTEGER, source TEXT, source_id TEXT,
   attrs_json TEXT);                       -- lossless per-provider record (export)
@@ -308,20 +409,36 @@ for key, g in games.items():
     for st in sorted(k for k in kinds if k not in ("emulation", "archive")):
         parts.append(st)
     summary = "; ".join(parts)
+    # a game is owned if ANY source is 'have'; a pure want-only game (e.g. only a
+    # manual "want the ROM" fact) is wanted=1 so it lands in the Wanted view.
+    owned = any(s[5] == "have" for s in srcs)
     cur.execute(
         "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,sources_summary,"
         "has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive,in_playnite,"
-        "in_launchbox) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "in_launchbox,wanted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (canonical, key, len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
          int("archive" in kinds), int(key in playnite_keys),
-         int(key in launchbox_keys)))
+         int(key in launchbox_keys), 0 if owned else 1))
     gid = cur.lastrowid
     key_to_gid[key] = gid
     cur.executemany(
-        "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail)"
-        " VALUES(?,?,?,?,?,?)", [(gid,) + s for s in srcs])
+        "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,state)"
+        " VALUES(?,?,?,?,?,?,?)", [(gid,) + s for s in srcs])
+
+# ---- wanted (wishlist-only) games: catalog rows with no owned source, wanted=1 ----
+for key, w in wanted.items():
+    stores = sorted({s[0] for s in w["stores"]})
+    cur.execute(
+        "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,sources_summary,"
+        "has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive,in_playnite,"
+        "in_launchbox,wanted) VALUES(?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
+        (w["title"], key, "wishlist:" + ",".join(stores)))
+    gid = cur.lastrowid
+    key_to_gid[key] = gid
+    cur.executemany("INSERT INTO wanted(game_id,store,store_id,title_raw) "
+                    "VALUES(?,?,?,?)", [(gid,) + s for s in w["stores"]])
 
 # ---- attribute tables (Playnite parity) ----
 # Tags are handled apart from other attribute kinds: we keep each tag's ORIGIN
@@ -354,6 +471,22 @@ for key, data in games_attrs.items():
             for v, o in sorted(vmap.items())]
     cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
                     "VALUES(?,?,?,?)", rows)
+
+# ---- os / device attributes (split out of the Xbox store platform column) ----
+# Read back the just-written Xbox sources (detail = comma-joined devices) and
+# classify each value as an OS (windows/mac/linux) or a device (xbox one/series).
+_od_rows = []
+for _gid, _detail in cur.execute(
+        "SELECT game_id, detail FROM sources WHERE source='xbox' "
+        "AND detail IS NOT NULL AND detail!=''").fetchall():
+    for _dv in (_detail or "").split(","):
+        _dv = _dv.strip()
+        if not _dv:
+            continue
+        _kind = "os" if _dv.lower() in OS_VALUES else "device"
+        _od_rows.append((_gid, _kind, _dv, "xbox"))
+cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                "VALUES(?,?,?,?)", _od_rows)
 
 # ---- user-defined tags (origin 'ludodex', durable in tags.sqlite) ----
 TAGS_DB = os.path.join(DATA, "tags.sqlite")
@@ -392,15 +525,35 @@ cur.executemany("INSERT INTO game_tags(game_id,tag,origin) VALUES(?,?,?)", _gt_r
 cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
                 "VALUES(?,?,?,?)", _ga_rows)
 
-# ---- IGDB enrichment (metadata provider, fill-gaps only) ----
-# IGDB is NOT a source: it only fills attribute KINDS a game still lacks. If a
-# game already has any value for a kind (from a store / Playnite), IGDB leaves
-# that kind untouched, so owned-source data is always authoritative.
-# kinds each game already has (owned-source/Playnite) — shared by every metadata
-# provider so they only fill gaps, in registry order (IGDB then ScreenScraper).
-have = {}                           # game_id -> set(kinds already populated)
+# ---- IGDB + ScreenScraper enrichment (metadata providers) ----
+# Providers are NOT sources: they only fill attribute KINDS a game lacks from an
+# owned source (owned data stays authoritative). BETWEEN providers, list-valued
+# kinds (genres, themes, developers, …) are UNIONED per value — each value keeps
+# EVERY provider that supplied it (origin = comma-joined), so a genre from IGDB and
+# a genre only ScreenScraper has both survive, and a shared genre is credited to
+# both. Scalar kinds (release date, description, …) take the first provider (IGDB);
+# the AI adjudication overlay re-points a scalar where providers disagree.
+have = {}                           # game_id -> set(kinds already populated (owned))
 for gid, kind in cur.execute("SELECT game_id, kind FROM game_attributes"):
     have.setdefault(gid, set()).add(kind)
+
+p_multi = {}    # gid -> kind -> {value: set(origins)}   list-valued (unioned)
+p_scalar = {}   # gid -> kind -> [value, set(origins)]   single-valued (first wins)
+
+
+def _accum(gid, kind, val, origin):
+    if isinstance(val, list):
+        d = p_multi.setdefault(gid, {}).setdefault(kind, {})
+        for v in val:
+            if v not in (None, ""):
+                d.setdefault(str(v), set()).add(origin)
+    elif val not in (None, ""):
+        cur_s = p_scalar.setdefault(gid, {}).get(kind)
+        if cur_s is None:
+            p_scalar[gid][kind] = [str(val), {origin}]
+        elif cur_s[0] == str(val):           # same value from another provider
+            cur_s[1].add(origin)
+
 
 CACHE_DB = os.path.join(DATA, "metadata-cache.sqlite")
 n_link = n_attr = 0
@@ -427,24 +580,21 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
             rec = json.loads(payload)
         except ValueError:
             continue
-        existing = have.setdefault(gid, set())
-        new_rows = []
+        # rename-on-match: adopt the provider's official title for ROM/archive-only
+        # games (their title is just the filename, e.g. "0001 - F-Zero"). Store-owned
+        # games already have clean titles, so leave those alone. norm_key is unchanged
+        # (stays the dedupe key), and the ROM filename stays in the source's title_raw.
+        name = (rec.get("name") or "").strip()
+        if name:
+            cur.execute(
+                "UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
+                "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
+                "('emulation','archive'))", (name, gid, gid))
         for kind, val in igdb_map(rec).items():
-            if kind in existing:                 # fill-gaps: don't touch it
-                continue
-            for v in (val if isinstance(val, list) else [val]):
-                if v not in (None, ""):
-                    new_rows.append((gid, kind, str(v), "igdb"))
-            existing.add(kind)
-        if new_rows:
-            cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
-                            "VALUES(?,?,?,?)", new_rows)
-            n_attr += len(new_rows)
+            _accum(gid, kind, val, "igdb")
 
-# ---- ScreenScraper enrichment (metadata provider, fill-gaps; emulation) ----
-# One scrape per game yields metadata + media; here we merge the metadata (media
-# is ingested into the media index separately). Fill-gaps after IGDB, so owned
-# and IGDB data still win.
+# ScreenScraper (emulation metadata; one scrape yields metadata + media, media is
+# indexed separately). Unioned with IGDB per the merge above.
 SS_CACHE = os.path.join(DATA, "screenscraper-cache.sqlite")
 ss_link = ss_attr = 0
 if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
@@ -473,19 +623,29 @@ if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
             jeu = json.loads(payload)
         except ValueError:
             continue
-        existing = have.setdefault(gid, set())
-        new_rows = []
         for kind, val in ss_map(jeu).items():
-            if kind == "name" or kind in existing:      # fill-gaps; name isn't an attr
-                continue
-            for v in (val if isinstance(val, list) else [val]):
-                if v not in (None, ""):
-                    new_rows.append((gid, kind, str(v), "screenscraper"))
-            existing.add(kind)
-        if new_rows:
-            cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
-                            "VALUES(?,?,?,?)", new_rows)
-            ss_attr += len(new_rows)
+            if kind != "name":                      # 'name' isn't an attribute
+                _accum(gid, kind, val, "screenscraper")
+
+# insert unioned provider attributes — skip any kind an owned source already filled
+_prov_rows = []
+for gid in set(p_multi) | set(p_scalar):
+    filled = have.setdefault(gid, set())
+    for kind, vmap in p_multi.get(gid, {}).items():
+        if kind in filled:
+            continue
+        for v, origins in vmap.items():
+            _prov_rows.append((gid, kind, v, ",".join(sorted(origins))))
+        filled.add(kind)
+    for kind, (v, origins) in p_scalar.get(gid, {}).items():
+        if kind in filled:
+            continue
+        _prov_rows.append((gid, kind, v, ",".join(sorted(origins))))
+        filled.add(kind)
+if _prov_rows:
+    cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                    "VALUES(?,?,?,?)", _prov_rows)
+n_attr = len(_prov_rows)
 
 # ---- AI metadata supplement (accepted findings, fill-gaps, LOWEST precedence) ----
 # Only attributes the user accepted in the metadata review, and only for kinds no
@@ -540,11 +700,12 @@ _pn = cur.execute("SELECT COUNT(*) FROM games WHERE in_playnite=1").fetchone()[0
 if _pn:
     print("# games also in Playnite (provenance): %d" % _pn, file=sys.stderr)
 if n_link:
-    print("# IGDB: linked %d games, +%d attribute rows (fill-gaps)"
-          % (n_link, n_attr), file=sys.stderr)
+    print("# IGDB: linked %d games" % n_link, file=sys.stderr)
 if ss_link:
-    print("# ScreenScraper: linked %d games, +%d attribute rows (fill-gaps)"
-          % (ss_link, ss_attr), file=sys.stderr)
+    print("# ScreenScraper: linked %d games" % ss_link, file=sys.stderr)
+if n_attr:
+    print("# provider attributes: +%d rows (IGDB+SS unioned per value, origins kept)"
+          % n_attr, file=sys.stderr)
 print("# total unique games: %d (%d available from >1 source KIND)" % (tot, multi),
       file=sys.stderr)
 con.close()

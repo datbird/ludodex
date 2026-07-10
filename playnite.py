@@ -60,7 +60,8 @@ SOURCE_GUIDS = {v: k for k, v in PLUGIN_GUIDS.items()}
 # Multi-valued attribute kinds (Playnite reference collections) -> stored as
 # distinct (kind, value) rows aggregated per game; round-trip as JSON arrays.
 LIST_KINDS = ["platforms", "genres", "tags", "features", "categories",
-              "developers", "publishers", "series", "age_ratings", "regions"]
+              "developers", "publishers", "series", "age_ratings", "regions",
+              "os", "device"]
 # Scalar attribute kinds carried per source / aggregated per game.
 SCALAR_KINDS = ["release_date", "release_year", "playtime", "play_count",
                 "completion_status", "user_score", "critic_score",
