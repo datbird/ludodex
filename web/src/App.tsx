@@ -13,7 +13,7 @@ import type {
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, ProviderMatch, ScopeValue,
   AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState, DbSyncTest,
-  Prefs, MediaMode, FileopsApplyMode, FsStat, OwnershipFact, Frame,
+  Prefs, MediaMode, FileopsApplyMode, MediaLangMode, MediaLangResult, FsStat, OwnershipFact, Frame,
   GameRelease, SystemEntry,
 } from './api'
 import { providerColor, providerLabel } from './providers'
@@ -1593,9 +1593,21 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
     setPrefs({ ...prefs, media_mode: m })
     try { await api.setPrefs({ media_mode: m }) } catch { load() }
   }
-  const setLang = async (v: string) => {
-    setPrefs({ ...prefs, media_language: v })
-    try { await api.setPrefs({ media_language: v }) } catch { load() }
+  const setLangAt = async (i: number, v: string) => {
+    const slots = [0, 1, 2].map((j) => (prefs.media_languages || [])[j] || '')
+    slots[i] = v
+    const next = slots.filter(Boolean).filter((x, j, a) => a.indexOf(x) === j)
+    setPrefs({ ...prefs, media_languages: next })
+    try { await api.setPrefs({ media_languages: next }) } catch { load() }
+  }
+  const setLangMode = async (m: MediaLangMode) => {
+    setPrefs({ ...prefs, media_lang_mode: m })
+    try { await api.setPrefs({ media_lang_mode: m }) } catch { load() }
+  }
+  const [langResult, setLangResult] = useState<MediaLangResult | null>(null)
+  const applyLangFilter = async () => {
+    setBusy(true)
+    try { setLangResult(await api.mediaLanguageFilter()) } finally { setBusy(false) }
   }
   const downloadNow = async () => {
     setBusy(true)
@@ -1658,14 +1670,41 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
 
       <div className="pref-section">
         <div className="pref-name">Media language</div>
-        <span className="pref-hint">Preferred language for artwork &amp; media (logos, box art, manuals).
-          When set, the ✨ smart art picker prefers media in this language where quality is
-          comparable — otherwise it uses whatever's best.</span>
-        <select className="pref-select" value={prefs.media_language || ''}
-          onChange={(e) => setLang(e.target.value)}>
-          <option value="">Any (no preference)</option>
-          {MEDIA_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+        <span className="pref-hint">Your preferred languages for artwork &amp; media (box art, logos,
+          manuals), most preferred first. The ✨ smart art picker prefers your 1st language where
+          quality is comparable.</span>
+        <div className="lang-slots">
+          {[0, 1, 2].map((i) => (
+            <select key={i} className="pref-select"
+              value={(prefs.media_languages || [])[i] || ''}
+              onChange={(e) => setLangAt(i, e.target.value)}>
+              <option value="">{i === 0 ? 'Any (no preference)' : '— none —'}</option>
+              {MEDIA_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+            </select>
+          ))}
+        </div>
+        <span className="pref-hint" style={{ marginTop: 10 }}>When a media asset is in a language that
+          is <em>none</em> of the above:</span>
+        <select className="pref-select" value={prefs.media_lang_mode || 'off'}
+          onChange={(e) => setLangMode(e.target.value as MediaLangMode)}>
+          <option value="off">Keep it (off)</option>
+          <option value="hide">Hide it — keep the file, never auto-choose</option>
+          <option value="ban">Ban it — delete &amp; never re-download</option>
         </select>
+        <span className="pref-hint">Only art we can confidently tie to a single language is affected
+          (mostly ScreenScraper box art by region); language-neutral, multi-region and store art is
+          always kept. Runs automatically on every sync.</span>
+        {prefs.media_lang_mode && prefs.media_lang_mode !== 'off' && (
+          <div className="media-actions">
+            <button className="go" disabled={busy} onClick={applyLangFilter}>
+              {busy ? 'Applying…' : 'Apply to library now'}</button>
+            {langResult && (
+              <span className="pref-hint media-actions-hint">Scanned {langResult.scanned} ·
+                kept {langResult.kept}{langResult.hidden ? ` · hidden ${langResult.hidden}` : ''}
+                {langResult.banned ? ` · banned ${langResult.banned}` : ''}</span>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="pref-section">

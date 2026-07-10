@@ -43,6 +43,9 @@ def repo_dir():
 def con_index():
     con = sqlite3.connect(INDEX)
     con.row_factory = sqlite3.Row
+    if "hidden" not in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
+        con.execute("ALTER TABLE media ADD COLUMN hidden INTEGER DEFAULT 0")
+        con.commit()
     return con
 
 
@@ -70,7 +73,8 @@ def select(con, kinds=None):
         rank[kind] = {p: i for i, p in enumerate(order)}
     rows = con.execute(
         "SELECT id, norm_key, kind, provider, matched, ref_type FROM media "
-        "WHERE kind IN (%s)" % ",".join("'%s'" % k for k in scalar)
+        "WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
+        % ",".join("'%s'" % k for k in scalar)
     ).fetchall()
     best = {}                       # (norm_key, kind) -> (sortkey, id)
     for r in rows:
@@ -163,7 +167,8 @@ def _repick(con, norm_key, kind):
     """After a dead asset is removed, choose the next-best for this game+kind."""
     rank = {p: i for i, p in enumerate(media.priority(kind))}
     cands = con.execute("SELECT id, provider, matched, ref_type FROM media "
-                        "WHERE norm_key=? AND kind=?", (norm_key, kind)).fetchall()
+                        "WHERE norm_key=? AND kind=? AND COALESCE(hidden,0)=0",
+                        (norm_key, kind)).fetchall()
     if not cands:
         return
     best = min(cands, key=lambda r: (rank.get(r["provider"], 99),

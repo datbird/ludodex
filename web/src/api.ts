@@ -273,11 +273,17 @@ export interface FsStat {
   dirs?: number | null; files?: number | null; total?: number | null
 }
 export type FileopsApplyMode = 'preview' | 'immediate'
+export type MediaLangMode = 'off' | 'hide' | 'ban'
+export interface MediaLangResult {
+  mode: MediaLangMode; scanned: number; hidden: number; banned: number; kept: number
+}
 export interface Prefs {
   hide_non_games: boolean
   spotlight_seconds: number
   media_mode: MediaMode
-  media_language: string       // '' = any; else the preferred media language
+  media_language: string       // '' = any; else the preferred media language (legacy single)
+  media_languages: string[]    // ordered 1st,2nd,3rd preferred media languages
+  media_lang_mode: MediaLangMode
   fileops_apply_mode: FileopsApplyMode
   manifests_enabled: boolean
   media_job: MediaJob | null
@@ -790,6 +796,8 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} prefs`)
     return r.json() as Promise<Prefs>
   },
+  mediaLanguageFilter: (mode?: MediaLangMode) =>
+    postJson<MediaLangResult>('/api/media/language-filter', mode ? { mode } : {}),
   mediaMaterialize: (mode?: MediaMode) =>
     postJson<{ media_job: MediaJob }>('/api/media/materialize', mode ? { mode } : {}),
   mediaMaterializeStatus: () => get<{ media_job: MediaJob }>('/api/media/materialize'),

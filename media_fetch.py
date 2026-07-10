@@ -68,7 +68,10 @@ def con_index():
       ref_type TEXT NOT NULL, ref TEXT NOT NULL, ext TEXT, sha1 TEXT,
       width INTEGER, height INTEGER, chosen INTEGER DEFAULT 0,
       matched INTEGER DEFAULT 0, meta TEXT, indexed_at INTEGER,
+      hidden INTEGER DEFAULT 0,
       UNIQUE(provider, kind, ref))""")
+    if "hidden" not in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
+        con.execute("ALTER TABLE media ADD COLUMN hidden INTEGER DEFAULT 0")
     con.execute("CREATE INDEX IF NOT EXISTS ix_media_nk ON media(norm_key)")
     return con
 
@@ -114,9 +117,13 @@ def _banned():
     return _BANNED
 
 
-def put(con, nk, kind, provider, url, now, ext="jpg", system=None, meta=None):
+def put(con, nk, kind, provider, url, now, ext="jpg", system=None, meta=None,
+        attrs=None):
     if (nk, kind, provider, url) in _banned():
         return                              # user banned this asset — don't re-add
+    if attrs:                               # structured per-asset metadata -> JSON meta
+        meta = json.dumps({k: v for k, v in attrs.items() if v not in (None, "")},
+                          separators=(",", ":"))
     con.execute("INSERT OR REPLACE INTO media(norm_key,system,kind,provider,"
                 "ref_type,ref,ext,matched,meta,indexed_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -344,7 +351,9 @@ def fetch_screenscraper(con, now):
             continue
         for m in ss.extract_media(jeu):
             put(con, nk, m["kind"], "screenscraper", m["url"], now,
-                ext=(m.get("format") or "jpg"), system=system, meta=m.get("type"))
+                ext=(m.get("format") or "jpg"), system=system,
+                attrs={"type": m.get("type"), "region": m.get("region"),
+                       "format": m.get("format")})
             n += 1
     con.commit()
     print("media_fetch: screenscraper — %d media refs from %d scraped games"

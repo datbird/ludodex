@@ -59,10 +59,13 @@ def index_con():
       matched INTEGER DEFAULT 0,
       meta TEXT,
       indexed_at INTEGER,
+      hidden INTEGER DEFAULT 0,
       UNIQUE(provider, kind, ref));
     CREATE INDEX IF NOT EXISTS ix_media_nk ON media(norm_key);
     CREATE INDEX IF NOT EXISTS ix_media_nk_kind ON media(norm_key, kind);
     """)
+    if "hidden" not in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
+        con.execute("ALTER TABLE media ADD COLUMN hidden INTEGER DEFAULT 0")
     return con
 
 

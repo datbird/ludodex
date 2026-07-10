@@ -39,6 +39,7 @@ import aimeta          # noqa: E402  AI metadata audit/supplement store + contex
 import overrides       # noqa: E402  per-attribute provenance overrides (re-pointing)
 import ownership       # noqa: E402  durable per-format ownership (physical + per-platform wants)
 import igdb_enrich      # noqa: E402  IGDB cache resolvers (cross-platform releases + systems)
+import medialang        # noqa: E402  per-asset media language classification + filter
 import framing         # noqa: E402  per-game/per-kind image framing (position + zoom)
 import mediaflags      # noqa: E402  durable per-asset ban / not-redistributable flags
 import auth            # noqa: E402  local username/password accounts + sessions
@@ -1004,6 +1005,8 @@ def get_prefs():
         "spotlight_seconds": _spotlight_seconds(),
         "media_mode": config.get("media_mode") or "chosen",
         "media_language": config.get("media_language") or "",
+        "media_languages": medialang.preferred(),
+        "media_lang_mode": medialang.mode(),
         "fileops_apply_mode": config.get("fileops_apply_mode") or "preview",
         "manifests_enabled": config.get_bool("manifests_enabled", True),
         "media_job": _MEDIA_JOB["job"],
@@ -1017,6 +1020,15 @@ def set_prefs(body: dict = Body(...)):
         config.set_("media_mode", body["media_mode"])
     if "media_language" in body:                # "" = no preference (any language)
         config.set_("media_language", str(body["media_language"] or "")[:40])
+    if "media_languages" in body:               # ordered 1st,2nd,3rd preference
+        langs = body["media_languages"] or []
+        if isinstance(langs, str):
+            langs = [langs]
+        clean = [x for x in (medialang._norm_lang(x) for x in langs[:3]) if x]
+        config.set_("media_languages", ",".join(clean))
+        config.set_("media_language", clean[0] if clean else "")   # AI picker follows 1st
+    if body.get("media_lang_mode") in ("off", "hide", "ban"):
+        config.set_("media_lang_mode", body["media_lang_mode"])
     if body.get("fileops_apply_mode") in ("preview", "immediate"):
         config.set_("fileops_apply_mode", body["fileops_apply_mode"])
     if "manifests_enabled" in body:
@@ -1038,6 +1050,22 @@ def set_prefs(body: dict = Body(...)):
         except (TypeError, ValueError):
             pass
     return get_prefs()
+
+
+@app.post("/api/media/language-filter")
+def media_language_filter(body: dict = Body(default={})):
+    """Apply the language preference to the existing media index now (without a
+    full sync). Optional body {mode: off|hide|ban} overrides the saved mode for
+    this run. Re-picks chosen art afterward. Returns the per-run counts."""
+    m = (body or {}).get("mode")
+    if m not in (None, "off", "hide", "ban"):
+        raise HTTPException(400, "mode must be off, hide or ban")
+    try:
+        res = medialang.apply_filter(m)
+    except Exception as e:
+        raise HTTPException(500, "language filter failed: %s" % e)
+    _run_script("media_choose.py", timeout=900)   # re-pick now survivors changed
+    return res
 
 
 # --------------------------------------------------------------------------- #
@@ -4531,6 +4559,7 @@ def _sync_worker(job, services, media_ids=()):
         {"id": "meta", "label": "Descriptions & attributes", "state": "pending", "detail": ""},
         {"id": "scores", "label": "Scores & ratings", "state": "pending", "detail": ""},
         {"id": "art", "label": "Missing art", "state": "pending", "detail": ""},
+        {"id": "language", "label": "Language filter", "state": "pending", "detail": ""},
         {"id": "media", "label": "Media downloaded" if mode != "ondemand" else "Media chosen",
          "state": "pending", "detail": ""},
     ]
@@ -4643,6 +4672,22 @@ def _sync_worker(job, services, media_ids=()):
         _run_script("media_fetch.py", args=["--backfill-art"], timeout=3600)
         _phase("art", "ok")
         step()
+        # Language filter: hide or ban art whose confident single language isn't
+        # among the user's preferred languages. Off by default (no-op); runs
+        # BEFORE materialize so hidden/banned assets are never chosen/downloaded.
+        lm = medialang.mode()
+        if lm != "off":
+            job["step"] = "Filtering media by language…"
+            _phase("language", "running")
+            try:
+                r = medialang.apply_filter()
+                _phase("language", "ok",
+                       ("%d hidden" % r["hidden"]) if lm == "hide"
+                       else ("%d banned" % r["banned"]))
+            except Exception as e:
+                _phase("language", "failed", str(e)[:120])
+        else:
+            _phase("language", "skipped")
         _phase("media", "running")
         if mode != "ondemand":
             job["step"] = "Downloading media…"
