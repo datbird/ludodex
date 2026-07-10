@@ -37,6 +37,10 @@ import devices         # noqa: E402  device connections + library-manager pull
 import fileops         # noqa: E402  file-operations engine (profiles + runbooks)
 import aimeta          # noqa: E402  AI metadata audit/supplement store + context
 import overrides       # noqa: E402  per-attribute provenance overrides (re-pointing)
+import ownership       # noqa: E402  durable per-format ownership (physical + per-platform wants)
+import igdb_enrich      # noqa: E402  IGDB cache resolvers (cross-platform releases + systems)
+import framing         # noqa: E402  per-game/per-kind image framing (position + zoom)
+import mediaflags      # noqa: E402  durable per-asset ban / not-redistributable flags
 import auth            # noqa: E402  local username/password accounts + sessions
 import cf_access       # noqa: E402  Cloudflare Access SSO (verify the Access JWT)
 from . import ai       # noqa: E402  AI features (server package)
@@ -428,14 +432,20 @@ def lib():
 def stats():
     con = lib()
     try:
-        g = con.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+        wcol = _has_col(con, "games", "wanted")     # wishlist-only games: exclude from owned stats
+        gw = " WHERE g.wanted=0" if wcol else ""
+        and_w = " AND g.wanted=0" if wcol else ""
+        g = con.execute("SELECT COUNT(*) FROM games g" + gw).fetchone()[0]
+        ident = con.execute("SELECT COUNT(*) FROM games g" +
+                            (gw + " AND " if gw else " WHERE ") + IDENTIFIED_SQL).fetchone()[0]
+        wanted_ct = con.execute("SELECT COUNT(*) FROM games WHERE wanted=1").fetchone()[0] if wcol else 0
         cross = con.execute("SELECT COUNT(*) FROM games WHERE n_kinds>1").fetchone()[0]
         unmatched = con.execute(
             "SELECT COUNT(*) FROM games g WHERE NOT EXISTS("
-            "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)").fetchone()[0]
+            "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)" + and_w).fetchone()[0]
         no_media = con.execute(
             "SELECT COUNT(*) FROM games g WHERE NOT EXISTS("
-            "SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key)").fetchone()[0]
+            "SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key)" + and_w).fetchone()[0]
         by_source = {}
         for s in COLUMN_SOURCES:
             by_source[s] = con.execute(
@@ -452,11 +462,15 @@ def stats():
             coverage[row["kind"]] = row["c"]
         return {
             "games": g,
+            "identified": ident,               # real, known titles (in the library)
+            "unidentified": g - ident,         # bare ROMs awaiting identification
+            "wanted": wanted_ct,
             "cross_source": cross,
             "unmatched": unmatched,
             "no_media": no_media,
             "by_source": by_source,
             "media": {"games_with_art": total_with, "by_kind": coverage},
+            "pending_meta": aimeta.pending_count(),   # accepted-not-applied findings
         }
     finally:
         con.close()
@@ -536,13 +550,115 @@ def _order_by(sort, extra=None):
     return " ORDER BY " + ", ".join(parts)
 
 
+def _has_col(con, table, col):
+    try:
+        return any(r[1] == col for r in con.execute("PRAGMA table_info(%s)" % table))
+    except sqlite3.Error:
+        return False
+
+
+# A game is "identified" once it's a real, known title: a provider match (IGDB /
+# ScreenScraper) OR a store/manual source. A bare ROM (emulation/archive only, no
+# match) is just a file — "unidentified" — and is hidden from the library by
+# default until it's identified (manually or by the wand).
+IDENTIFIED_SQL = (
+    "(EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) "
+    "OR EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id AND s.source NOT IN "
+    "('emulation','archive','physical','rom','digital')))")
+
+
+# --- advanced "Query" search language -------------------------------------- #
+_QL_ATTR = {  # field alias -> game_attributes.kind
+    "genre": "genres", "genres": "genres", "theme": "themes", "themes": "themes",
+    "mode": "game_modes", "modes": "game_modes", "perspective": "player_perspectives",
+    "dev": "developers", "developer": "developers", "developers": "developers",
+    "pub": "publishers", "publisher": "publishers", "publishers": "publishers",
+    "series": "series", "os": "os", "device": "device", "region": "regions",
+}
+
+
+def _ql_num(field_sql, raw):
+    """'>1990' / '<=75' / '1995' -> (sql_fragment, int_arg), or None."""
+    m = re.match(r"^(>=|<=|>|<|=)?\s*(-?\d+)$", (raw or "").strip())
+    if not m:
+        return None
+    return ("%s %s ?" % (field_sql, m.group(1) or "="), int(m.group(2)))
+
+
+def _parse_query(qstr):
+    """Advanced search query -> (where_sql[], args). Bare words match the title;
+    field:value matches attributes/sources (platform, source, genre, tag, dev,
+    publisher, os, …); year:/score: take numeric comparators (>,<,>=,<=); a
+    leading '-' negates; "quoted phrases" are kept whole."""
+    where, args = [], []
+    for tok in re.findall(r'-?[\w]+:"[^"]*"|-?[\w]+:\S+|-?"[^"]*"|-?\S+', qstr or ""):
+        neg = tok.startswith("-")
+        tok = tok[1:] if neg else tok
+        if ":" in tok and not tok.startswith('"'):
+            field, _, val = tok.partition(":")
+            field, val = field.lower(), val.strip('"')
+        else:
+            field, val = "title", tok.strip('"')
+        if not val:
+            continue
+        clause, cargs = None, []
+        if field in ("title", "name"):
+            clause, cargs = "g.canonical_title LIKE ?", ["%%%s%%" % val]
+        elif field in ("platform", "system"):
+            clause, cargs = ("EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
+                             "AND s.platform LIKE ?)"), ["%%%s%%" % val]
+        elif field in ("source", "store"):
+            clause, cargs = ("EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
+                             "AND s.source LIKE ?)"), ["%%%s%%" % val]
+        elif field == "tag":
+            clause, cargs = ("EXISTS(SELECT 1 FROM game_tags gt WHERE gt.game_id=g.id "
+                             "AND gt.tag LIKE ?)"), ["%%%s%%" % val]
+        elif field == "year":
+            num = _ql_num("CAST(ga.value AS INT)", val)
+            if num:
+                clause, cargs = ("EXISTS(SELECT 1 FROM game_attributes ga WHERE "
+                                 "ga.game_id=g.id AND ga.kind='release_year' AND %s)"
+                                 % num[0]), [num[1]]
+        elif field == "score":
+            num = _ql_num("(SELECT gs.universal FROM sco.game_scores gs "
+                          "WHERE gs.norm_key=g.norm_key)", val)
+            if num:
+                clause, cargs = num[0], [num[1]]
+        elif field in _QL_ATTR:
+            clause, cargs = ("EXISTS(SELECT 1 FROM game_attributes ga WHERE "
+                             "ga.game_id=g.id AND ga.kind=? AND ga.value LIKE ?)"), \
+                            [_QL_ATTR[field], "%%%s%%" % val]
+        else:                                   # unknown field: match the raw token in title
+            clause, cargs = "g.canonical_title LIKE ?", ["%%%s:%s%%" % (field, val)]
+        if clause:
+            where.append("NOT (%s)" % clause if neg else clause)
+            args.extend(cargs)
+    return where, args
+
+
 def _query_games(con, q=None, source=None, platform=None, has_kind=None,
-                 include=None, exclude=None, sort=None, limit=60, offset=0):
+                 include=None, exclude=None, sort=None, limit=60, offset=0,
+                 status="owned", identified="only", query=None):
     """Core catalog query — shared by /api/games and AI /api/search.
     include/exclude are lists of FLAG_SQL keys (a flag can't be in both);
-    sort is an ordered list of SORT_SQL keys (1st, 2nd, 3rd priority)."""
+    sort is an ordered list of SORT_SQL keys (1st, 2nd, 3rd priority).
+    status: 'owned' (default, wanted=0) | 'wanted' (wanted=1) | 'all'.
+    identified: 'only' (default, hide bare unidentified ROMs) | 'all' | 'unidentified'."""
     where, args = [], []
-    if q:
+    has_w = _has_col(con, "games", "wanted")
+    if status == "wanted":
+        where.append("g.wanted=1" if has_w else "0")
+    elif status != "all" and has_w:            # 'owned' (default): hide wishlist-only
+        where.append("g.wanted=0")
+    if identified == "only":
+        where.append(IDENTIFIED_SQL)
+    elif identified == "unidentified":
+        where.append("NOT " + IDENTIFIED_SQL)
+    if query:                                  # advanced query-language mode
+        qw, qa = _parse_query(query)
+        where.extend(qw)
+        args.extend(qa)
+    elif q:
         where.append("g.canonical_title LIKE ?")
         args.append("%%%s%%" % q)
     def _fexpr(tok):
@@ -590,14 +706,23 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     clause = (" WHERE " + " AND ".join(where)) if where else ""
 
     total = con.execute("SELECT COUNT(*) FROM games g" + clause, args).fetchone()[0]
+    # how many unidentified games the SAME search would surface if the hide toggle
+    # were off — drives the "N matches hidden — show them" hint during a search.
+    hidden = 0
+    if identified == "only" and (q or query):
+        hw = [w for w in where if w != IDENTIFIED_SQL] + ["NOT " + IDENTIFIED_SQL]
+        hidden = con.execute("SELECT COUNT(*) FROM games g WHERE " + " AND ".join(hw),
+                             args).fetchone()[0]
     # unified Ludodex score is precomputed per game (scores_fetch.py -> sco.game_scores)
     score = "(SELECT gs.universal FROM sco.game_scores gs WHERE gs.norm_key=g.norm_key)"
+    wsel = "g.wanted AS wanted, " if has_w else ""
     base = (
         "SELECT g.norm_key, g.canonical_title, g.n_sources, g.n_kinds, "
-        "g.sources_summary, g.has_emulation AS is_emulation, "
+        "g.sources_summary, g.has_emulation AS is_emulation, " + wsel +
         "(SELECT group_concat(DISTINCT s.platform) FROM sources s "
         "   WHERE s.game_id=g.id AND s.platform IS NOT NULL AND s.platform!='') AS platforms, "
         "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
+        + IDENTIFIED_SQL + " AS identified, "
         "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
         "        AND md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM "
         "  u.user_media um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, "
@@ -638,22 +763,33 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "platforms": r["platforms"] or "",
         "emulation": bool(r["is_emulation"]),
         "matched": bool(r["matched"]),
+        "identified": bool(r["identified"]),
         "has_cover": bool(r["has_cover"]),
         "ludodex_score": round(r["ludodex_score"]) if r["ludodex_score"] is not None else None,
         "tags": _tags(r),
+        "wanted": bool(r["wanted"]) if "wanted" in r.keys() else False,
     } for r in rows]
-    return {"total": total, "limit": limit, "offset": offset, "items": items}
+    # attach any saved cover framing so the grid renders it (only where set)
+    covfr = framing.for_keys(DATA, [it["norm_key"] for it in items], "cover")
+    for it in items:
+        if it["norm_key"] in covfr:
+            it["framing_cover"] = covfr[it["norm_key"]]
+    return {"total": total, "hidden_unidentified": hidden,
+            "limit": limit, "offset": offset, "items": items}
 
 
 @app.get("/api/games")
 def games(
     q: str = Query(None, description="substring match on title"),
+    query: str = Query(None, description="advanced query-language search (field:value, -neg, year:>N)"),
     source: str = Query(None, description="filter to games available from this source"),
     platform: str = Query(None, description="filter by platform"),
     has_kind: str = Query(None, description="only games with a chosen asset of this kind"),
     include: str = Query(None, description="comma-list of source/status flags a game MUST have"),
     exclude: str = Query(None, description="comma-list of source/status flags a game must NOT have"),
     sort: str = Query(None, description="comma-list of sort keys in priority order (1st,2nd,3rd)"),
+    status: str = Query("owned", description="ownership: owned (default) | wanted | all"),
+    identified: str = Query("only", description="only (default, hide bare ROMs) | all | unidentified"),
     limit: int = Query(60, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
@@ -662,7 +798,10 @@ def games(
     srt = [f for f in (sort or "").split(",") if f]
     con = lib()
     try:
-        return _query_games(con, q, source, platform, has_kind, inc, exc, srt, limit, offset)
+        return _query_games(con, q, source, platform, has_kind, inc, exc, srt, limit, offset,
+                            status=status if status in ("owned", "wanted", "all") else "owned",
+                            identified=identified if identified in ("only", "all", "unidentified") else "only",
+                            query=query)
     finally:
         con.close()
 
@@ -697,7 +836,7 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
            "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 "
            "        AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media um "
            "        WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover "
-           "FROM games g JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
+           "FROM games g LEFT JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
            + clause
            + "ORDER BY " + order + ", g.canonical_title LIMIT ?")
     return [{"norm_key": r["norm_key"], "title": r["title"], "score": r["score"],
@@ -706,26 +845,29 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
 
 
 def _spotlight_pool(con):
-    """All concrete spotlight ids worth showing (enough scored games)."""
-    pool = ["overall", "emulation", "underrated", "hidden_gems", "acclaimed", "beloved"]
+    """All concrete spotlight ids worth showing. Platform/source/decade themes are
+    keyed off GAME count (not score count) so the pool stays varied even when few
+    games are scored — otherwise every theme collapses to 'overall' and repeats."""
+    pool = ["overall", "emulation"]
     try:
+        # score-only themes need a real sample of scored games, else they're thin
+        # and just fall back to 'overall' — which is what makes it feel repetitive.
+        if con.execute("SELECT COUNT(*) FROM sco.game_scores").fetchone()[0] >= 20:
+            pool += ["underrated", "hidden_gems", "acclaimed", "beloved"]
         for (plat,) in con.execute(
             "SELECT s.platform FROM sources s JOIN games g ON g.id=s.game_id "
-            "JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
             "WHERE s.platform!='' AND s.platform NOT IN (%s) "
             "GROUP BY s.platform HAVING COUNT(DISTINCT g.norm_key)>=8"
             % ",".join("?" * len(NON_SYSTEM_PLATFORMS)), NON_SYSTEM_PLATFORMS):
             pool.append("platform:" + plat)
         for (src,) in con.execute(
-            "SELECT DISTINCT s.source FROM sources s JOIN games g ON g.id=s.game_id "
-            "JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
-            "WHERE s.source IN ('steam','gog','epic')"):
+            "SELECT DISTINCT s.source FROM sources s "
+            "WHERE s.source IN ('steam','gog','epic','xbox','psn','ea','itch','nintendo')"):
             pool.append("source:" + src)
         for (dec,) in con.execute(
             "SELECT (CAST(ga.value AS INT)/10)*10 d FROM game_attributes ga "
-            "JOIN games g ON g.id=ga.game_id JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
             "WHERE ga.kind='release_year' AND CAST(ga.value AS INT) BETWEEN 1970 AND 2035 "
-            "GROUP BY d HAVING COUNT(DISTINCT g.norm_key)>=8"):
+            "GROUP BY d HAVING COUNT(DISTINCT ga.game_id)>=8"):
             pool.append("decade:%d" % dec)
     except sqlite3.OperationalError:
         pass
@@ -773,13 +915,16 @@ def _resolve_spotlight(kind):
 
 
 @app.get("/api/spotlight")
-def spotlight(kind: str = Query("random")):
+def spotlight(kind: str = Query("random"), exclude: str = Query(None)):
     """A themed top-N for the dashboard 'Spotlight'. `random` (default) rotates
-    through overall / per-platform / per-store / per-decade / underrated / etc."""
+    through overall / per-platform / per-store / per-decade / underrated / etc.
+    `exclude` = the currently-shown theme id, so a rotation never repeats it."""
     con = lib()
     try:
         if kind == "random":
             pool = _spotlight_pool(con)
+            if exclude and len(pool) > 1:      # don't show the same theme twice
+                pool = [p for p in pool if p != exclude] or pool
             kind = random.choice(pool) if pool else "overall"
         title, subtitle, where, args, order = _resolve_spotlight(kind)
         items = _spotlight_rows(con, where, args, order)
@@ -858,6 +1003,9 @@ def get_prefs():
         "hide_non_games": config.get_bool("hide_non_games", True),
         "spotlight_seconds": _spotlight_seconds(),
         "media_mode": config.get("media_mode") or "chosen",
+        "media_language": config.get("media_language") or "",
+        "fileops_apply_mode": config.get("fileops_apply_mode") or "preview",
+        "manifests_enabled": config.get_bool("manifests_enabled", True),
         "media_job": _MEDIA_JOB["job"],
     }
 
@@ -867,6 +1015,19 @@ def set_prefs(body: dict = Body(...)):
     body = body or {}
     if body.get("media_mode") in ("ondemand", "chosen", "all"):
         config.set_("media_mode", body["media_mode"])
+    if "media_language" in body:                # "" = no preference (any language)
+        config.set_("media_language", str(body["media_language"] or "")[:40])
+    if body.get("fileops_apply_mode") in ("preview", "immediate"):
+        config.set_("fileops_apply_mode", body["fileops_apply_mode"])
+    if "manifests_enabled" in body:
+        on = bool(body["manifests_enabled"])
+        config.set_("manifests_enabled", "1" if on else "0")
+        if not on:                              # honor the opt-out: sweep existing manifests
+            for did, p in devices.all_managed_paths():
+                try:
+                    fileops.manifest_delete(did, p)
+                except Exception:               # noqa: BLE001 — best-effort cleanup
+                    pass
     if "hide_non_games" in body:
         config.set_("hide_non_games", "1" if body["hide_non_games"] else "0")
     if "spotlight_seconds" in body:
@@ -1453,11 +1614,18 @@ def fileops_plan_extract_ep(body: dict = Body(...)):
     try:
         pl = fileops.plan_extract(_dev_id(body), root,
                                   (body or {}).get("dest") or "downloaded_media",
-                                  body.get("scope", "multi_system"), body.get("system"))
+                                  body.get("scope", "multi_system"), body.get("system"),
+                                  layout=(body or {}).get("layout") or "esde",
+                                  op=(body or {}).get("op") or "move")
     except Exception as e:
         raise HTTPException(502, "planning failed: %s" % e)
     return {"summary": pl["summary"], "warnings": pl["warnings"],
             "sample": pl["sample"]}
+
+
+@app.get("/api/fileops/media-layouts")
+def fileops_media_layouts():
+    return {"layouts": fileops.media_layouts()}
 
 
 @app.post("/api/fileops/model-source")
@@ -1539,8 +1707,11 @@ def fileops_make_runbook(body: dict = Body(...)):
     try:
         if operation == "extract":
             dest = (body or {}).get("dest") or "downloaded_media"
-            pl = fileops.plan_extract(did, root, dest, scope, system)
-            label = "Extract media → %s/" % dest
+            layout = (body or {}).get("layout") or "esde"
+            xop = (body or {}).get("op") or "move"
+            pl = fileops.plan_extract(did, root, dest, scope, system,
+                                      layout=layout, op=xop)
+            label = "%s media → %s/" % ("Copy" if xop == "copy" else "Extract", dest)
         else:
             profile = (body or {}).get("profile")
             if not profile:
@@ -1555,6 +1726,13 @@ def fileops_make_runbook(body: dict = Body(...)):
         raise HTTPException(400, "nothing to do — files already match this layout")
     rid = fileops.create_runbook(did, root, label, pl["ops"], scope, system,
                                  body.get("note", ""))
+    # remember what this run makes the folder conform to, so a successful apply can
+    # (re)write its .ludodex manifest (see _write_manifest_for_run).
+    _MANIFEST_CTX[rid] = {
+        "op": operation, "scope": scope, "system": system,
+        "profile": None if operation == "extract" else profile,
+        "dest": dest if operation == "extract" else None,
+    }
     return {"run_id": rid, "runbook": fileops.runbook(rid), "warnings": pl["warnings"]}
 
 
@@ -1604,6 +1782,124 @@ def fileops_history():
     return {"runs": fileops.history()}
 
 
+@app.post("/api/fileops/runbook-ops")
+def fileops_runbook_ops(body: dict = Body(...)):
+    """Build a reversible runbook from raw ops (the Commander's same-device drops).
+    All paths must be relative to `root` — create_runbook's guard enforces that."""
+    root = (body or {}).get("root")
+    ops = [o for o in ((body or {}).get("ops") or []) if o.get("op")]
+    if not root:
+        raise HTTPException(400, "a root path is required")
+    if not ops:
+        raise HTTPException(400, "no operations given")
+    did = _dev_id(body)
+    label = (body or {}).get("label") or "File operations"
+    try:
+        rid = fileops.create_runbook(did, root, label, ops, "commander", None,
+                                     body.get("note", ""))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))          # unsafe/absolute path in a drop
+    return {"run_id": rid, "runbook": fileops.runbook(rid)}
+
+
+# --------------------------------------------------------------------------- #
+#  Commander direct filesystem ops: cross-device transfer (backgrounded rsync),
+#  plus immediate mkdir / delete.
+# --------------------------------------------------------------------------- #
+_XFER = {}                          # jid -> {label,step,prog,error,when}
+
+
+@app.post("/api/fs/transfer")
+def fs_transfer_ep(body: dict = Body(...)):
+    b = body or {}
+    src_dev, dst_dev = int(b.get("src_device") or 0), int(b.get("dst_device") or 0)
+    src_dir, dst_dir = b.get("src_dir") or "", b.get("dst_dir") or ""
+    items = [i for i in (b.get("items") or []) if i and "/" not in i]
+    mode = b.get("mode") or "copy"
+    if mode not in ("copy", "move"):
+        raise HTTPException(400, "mode must be copy or move")
+    if src_dev == dst_dev:
+        raise HTTPException(400, "same-device operations use the runbook path")
+    if not (src_dir and dst_dir and items):
+        raise HTTPException(400, "src_dir, dst_dir and items are required")
+    jid = "xfer:%s" % os.urandom(4).hex()
+    label = "%s %d → %s" % (mode.title(), len(items), posixbase(dst_dir))
+    job = {"label": label, "error": None, "when": time.time(),
+           "step": "%s %d item(s) → %s" % (mode, len(items), dst_dir),
+           "prog": {"done": 0, "total": len(items)}}
+    _XFER[jid] = job
+    _start_job(jid, "transfer", label,
+               lambda stop: devices.transfer_run(job, src_dev, src_dir, items,
+                                                  dst_dev, dst_dir, mode, stop),
+               cancelable=True)
+    return {"started": True, "jid": jid}
+
+
+@app.post("/api/fs/mkdir")
+def fs_mkdir_ep(body: dict = Body(...)):
+    path = (body or {}).get("path")
+    if not path:
+        raise HTTPException(400, "a path is required")
+    try:
+        devices.fs_mkdir(_dev_id(body), path)
+    except Exception as e:
+        raise HTTPException(502, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/fs/delete")
+def fs_delete_ep(body: dict = Body(...)):
+    paths = [p for p in ((body or {}).get("paths") or []) if p]
+    if not paths:
+        raise HTTPException(400, "paths are required")
+    try:
+        devices.fs_delete(_dev_id(body), paths)
+    except Exception as e:
+        raise HTTPException(502, str(e))
+    return {"ok": True, "removed": len(paths)}
+
+
+@app.post("/api/fs/stat")
+def fs_stat_ep(body: dict = Body(...)):
+    path = (body or {}).get("path")
+    if not path:
+        raise HTTPException(400, "a path is required")
+    try:
+        return devices.fs_stat(_dev_id(body), path)
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.post("/api/fileops/manifest")
+def fileops_manifest_write(body: dict = Body(...)):
+    """Scan a folder now and (re)write its .ludodex manifest — a background job
+    (one full walk). Used for the manual 'Index this folder' action."""
+    root = (body or {}).get("root")
+    if not root:
+        raise HTTPException(400, "a root path is required")
+    did = _dev_id(body)
+    op = (body or {}).get("operation") or "restructure"
+    profile, dest = (body or {}).get("profile"), (body or {}).get("dest")
+    scope, system = (body or {}).get("scope", "multi_system"), (body or {}).get("system")
+    jid = "manifest:%s" % os.urandom(3).hex()
+    _start_job(jid, "manifest", "Index folder → .ludodex.json",
+               lambda stop: fileops.manifest_write(did, root, profile=profile,
+                   scope=scope, system=system, op=op, dest=dest,
+                   instance=_instance_name()), cancelable=False)
+    return {"started": True, "jid": jid}
+
+
+@app.post("/api/fileops/manifest/delete")
+def fileops_manifest_delete(body: dict = Body(...)):
+    root = (body or {}).get("root")
+    if not root:
+        raise HTTPException(400, "a root path is required")
+    try:
+        return fileops.manifest_delete(_dev_id(body), root)
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
 # --------------------------------------------------------------------------- #
 #  Unified job monitor: long-running work (library sync + file-op runbooks),
 #  with pause / restart / delete. Live worker threads live in _JOBS; runbook
@@ -1636,11 +1932,41 @@ def _start_job(jid, kind, label, fn, run_id=None, cancelable=False):
     return jid
 
 
+_MANIFEST_CTX = {}                 # run_id -> {op, scope, system, profile, dest}
+
+
+def _instance_name():
+    return config.get("instance_name") or "ludodex"
+
+
+def _write_manifest_for_run(run_id):
+    """After a successful Operations runbook, refresh the folder's .ludodex manifest
+    so future previews are instant. Best-effort + gated by the setting."""
+    if not config.get_bool("manifests_enabled", True):
+        return
+    ctx = _MANIFEST_CTX.get(run_id)
+    if not ctx:
+        return
+    did, root = fileops.run_target(run_id)
+    if not root:
+        return
+    try:
+        fileops.manifest_write(did, root, profile=ctx.get("profile"),
+                               scope=ctx.get("scope", "multi_system"),
+                               system=ctx.get("system"), op=ctx.get("op", "restructure"),
+                               dest=ctx.get("dest"), run_id=run_id,
+                               instance=_instance_name())
+    except Exception as e:                      # noqa: BLE001 — manifest is best-effort
+        print("manifest write failed for run %d: %s" % (run_id, e), file=sys.stderr)
+
+
 def _start_runbook_job(run_id):
+    def job(stop):
+        res = fileops.execute_runbook(run_id, should_stop=stop)
+        if res.get("status") in ("done", "partial"):
+            _write_manifest_for_run(run_id)
     return _start_job("run:%d" % run_id, "fileops-run",
-                      "Runbook #%d" % run_id,
-                      lambda stop: fileops.execute_runbook(run_id, should_stop=stop),
-                      run_id=run_id, cancelable=True)
+                      "Runbook #%d" % run_id, job, run_id=run_id, cancelable=True)
 
 
 def _jobs_list():
@@ -1674,6 +2000,18 @@ def _jobs_list():
                          "failed": sum(1 for d in devs.values() if d["state"] == "failed")},
             "when": None, "cancelable": False, "restartable": False,
             "deletable": not rj.get("running")})
+    for jid, xj in list(_XFER.items()):
+        rec = _JOBS.get(jid)
+        live = bool(rec and rec["thread"] and rec["thread"].is_alive())
+        prog = xj.get("prog") or {"done": 0, "total": 1}
+        out.append({
+            "id": jid, "kind": "transfer", "label": xj.get("label", "Transfer"),
+            "status": ("running" if live else "error" if xj.get("error") else "done"),
+            "detail": xj.get("step", ""), "error": xj.get("error"),
+            "progress": {"done": prog.get("done", 0),
+                         "total": prog.get("total", 1) or 1, "failed": 0},
+            "when": xj.get("when"), "cancelable": live, "restartable": False,
+            "deletable": not live})
     for r in fileops.history(limit=40):
         jid = "run:%d" % r["id"]
         rec = _JOBS.get(jid)
@@ -1690,15 +2028,19 @@ def _jobs_list():
             "cancelable": live, "restartable": r["status"] in
             ("paused", "partial", "planned") or r["pending"] > 0,
             "deletable": not live})
+    _proposed = aimeta.proposed_counts()
     for s in aimeta.scans_list(limit=20):
         jid = "aimeta:%d" % s["id"]
         rec = _JOBS.get(jid)
         live = bool(rec and rec["thread"] and rec["thread"].is_alive())
+        _prop = _proposed.get(s["id"], 0)
         out.append({
             "id": jid, "kind": "aimeta", "run_id": s["id"],
             "label": "Metadata scan — %s" % s["target"],
             "status": "running" if live else s["status"],
-            "detail": "%d findings" % s["findings"], "error": (rec or {}).get("error"),
+            "detail": ("%d to review" % _prop) if _prop else ("%d findings" % s["findings"]),
+            "error": (rec or {}).get("error"),
+            "findings": _prop,
             "progress": {"done": s["done"], "total": s["total"], "failed": 0},
             "when": s["finished"] or s["created"],
             "cancelable": live, "restartable": not live and s["done"] < s["total"],
@@ -1769,6 +2111,13 @@ def jobs_delete(jid: str):
         return {"deleted": True}
     if jid == "romsync":
         _ROMSYNC["job"] = None
+        return {"deleted": True}
+    if jid.startswith("xfer:"):
+        rec = _JOBS.get(jid)
+        if rec and rec["thread"] and rec["thread"].is_alive():
+            rec["cancel"].set()
+        _XFER.pop(jid, None)
+        _JOBS.pop(jid, None)
         return {"deleted": True}
     if jid.startswith("run:"):
         rid = int(jid.split(":", 1)[1])
@@ -1981,8 +2330,10 @@ def aimeta_targets():
 
 
 @app.get("/api/aimeta/findings")
-def aimeta_findings(status: str = Query(None), kind: str = Query(None)):
-    return {"findings": aimeta.findings_list(status, kind), "counts": aimeta.findings_counts()}
+def aimeta_findings(status: str = Query(None), kind: str = Query(None),
+                    run_id: int = Query(None)):
+    return {"findings": aimeta.findings_list(status, kind, run_id=run_id),
+            "counts": aimeta.findings_counts()}
 
 
 @app.get("/api/aimeta/scans")
@@ -2011,15 +2362,136 @@ def aimeta_accept_all(body: dict = Body(default={})):
     return {"accepted": n, "counts": aimeta.findings_counts()}
 
 
-def _aimeta_apply(should_stop, media=True):
+def _igdb_attrs_for(nk):
+    """Raw {kind: value} an accepted IGDB match supplies for a game."""
+    import igdb
+    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    if not os.path.exists(cache):
+        return {}
+    c = sqlite3.connect(cache)
+    try:
+        row = c.execute("SELECT m.payload_json FROM igdb_resolution r JOIN igdb_meta m "
+                        "ON m.igdb_id=r.igdb_id WHERE r.norm_key=?", (nk,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        c.close()
+    if not row:
+        return {}
+    try:
+        return {k: v for k, v in igdb.map_record(json.loads(row[0])).items()
+                if v not in (None, "", [])}
+    except Exception:
+        return {}
+
+
+def _ss_attrs_for(nk):
+    """Raw {kind: value} an accepted ScreenScraper match supplies for a game."""
+    import screenscraper as ss
+    cache = os.path.join(DATA, "screenscraper-cache.sqlite")
+    if not os.path.exists(cache):
+        return {}
+    c = sqlite3.connect(cache)
+    try:
+        row = c.execute("SELECT payload_json FROM ss_game WHERE norm_key=? "
+                        "AND status='ok'", (nk,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        c.close()
+    if not row or not row[0]:
+        return {}
+    try:
+        return {k: v for k, v in ss.extract_metadata(json.loads(row[0])).items()
+                if v not in (None, "", [])}
+    except Exception:
+        return {}
+
+
+def _attr_norm(v):
+    if isinstance(v, list):
+        return tuple(sorted(str(x).strip().lower() for x in v))
+    return str(v).strip().lower()
+
+
+def _ai_adjudicate_game(nk, title):
+    """With BOTH providers linked + art fetched, let AI pick the best image per kind
+    and the better provider per conflicting attribute. Best-effort; never raises."""
+    if ai.area_available("art"):                       # media — vision pick per kind
+        try:
+            rc = ro(INDEX_DB)
+            try:
+                kinds = [r["kind"] for r in rc.execute(
+                    "SELECT kind FROM media WHERE norm_key=? GROUP BY kind "
+                    "HAVING COUNT(DISTINCT provider) >= 2", (nk,))]
+                for kind in kinds:
+                    cands = []
+                    for r in rc.execute("SELECT id, ref_type, ref, ext, sha1 FROM media "
+                                        "WHERE norm_key=? AND kind=? ORDER BY id",
+                                        (nk, kind)).fetchall():
+                        t = _thumb_bytes(r)
+                        if t:
+                            cands.append((r["id"], t))
+                        if len(cands) >= 6:
+                            break
+                    if len(cands) < 2:
+                        continue
+                    res = ai.pick_art(title, kind, [c[1] for c in cands],
+                                      provider=ai.provider_for_area("art"),
+                                      model=ai.model_for_area("art"),
+                                      language=config.get("media_language") or None)
+                    best = cands[res["index"]][0]
+                    w = sqlite3.connect(INDEX_DB)
+                    try:
+                        w.execute("UPDATE media SET chosen=0 WHERE norm_key=? AND kind=?",
+                                  (nk, kind))
+                        w.execute("UPDATE media SET chosen=1 WHERE id=?", (best,))
+                        w.commit()
+                    finally:
+                        w.close()
+            finally:
+                rc.close()
+        except Exception as e:
+            print("adjudicate media %s: %s" % (nk, str(e)[:160]), file=sys.stderr)
+    try:                                                # attributes — pick per conflict
+        ig, sc = _igdb_attrs_for(nk), _ss_attrs_for(nk)
+        conflicts = {k: {"igdb": ig[k], "screenscraper": sc[k]}
+                     for k in set(ig) & set(sc)
+                     if _attr_norm(ig[k]) != _attr_norm(sc[k])}
+        if conflicts and ai.area_available("metadata"):
+            winners = ai.adjudicate_attributes(title, conflicts) or {}
+            for k, prov in winners.items():
+                if k in conflicts and prov in ("igdb", "screenscraper"):
+                    val = conflicts[k][prov]
+                    sval = ", ".join(str(x) for x in val) if isinstance(val, list) else str(val)
+                    if sval:
+                        overrides.set_override(nk, k, sval, origin=prov)
+    except Exception as e:
+        print("adjudicate attrs %s: %s" % (nk, str(e)[:160]), file=sys.stderr)
+
+
+def _aimeta_apply(should_stop, media=True, only_ids=None):
     """Make accepted findings real: write AI provider-matches into igdb_resolution
     (+ fetch their IGDB records), then rebuild the catalog so accepted supplements
     and new provider links + their trusted attributes/media flow in. `media` is
-    True (all art), False (skip art), or a list of media kinds to (re)choose."""
+    True (all art), False (skip art), or a list of media kinds to (re)choose.
+    `only_ids` scopes which findings get marked applied — captured at the start so a
+    coalesced drain never marks findings accepted mid-run but not processed here."""
     import igdb
     cache = os.path.join(DATA, "metadata-cache.sqlite")
     now = int(time.time())
+    if only_ids is None:                       # capture the set this pass applies
+        only_ids = aimeta.accepted_ids()
     pms = aimeta.accepted_provider_matches()
+    # every game this apply touches — new matches PLUS accepted supplements + SS
+    # matches. Media top-up + adjudication run for ALL of them, so re-wanding an
+    # already-identified game also fills its missing art (not just new matches).
+    touched = {pm["norm_key"] for pm in pms}
+    try:
+        touched |= set(aimeta.accepted_supplements().keys())
+        touched |= {m["norm_key"] for m in aimeta.accepted_ss_matches()}
+    except Exception:
+        pass
     mc = sqlite3.connect(cache)
     mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY "
                "KEY, igdb_id INTEGER, slug TEXT, matched_by TEXT, resolved_at INTEGER)")
@@ -2050,13 +2522,94 @@ def _aimeta_apply(should_stop, media=True):
                 pass
     mc.close()
     _apply_ss_matches(now)
-    _run_script("build_library.py", timeout=1800)
+    # Steam community tags (SteamSpy) for touched Steam games — fetched BEFORE the
+    # rebuild so build_library merges them into game_tags. This is what backfills
+    # tags for Steam games imported before SteamSpy was configured: re-wanding a
+    # game pulls its tags now, regardless of whether the initial import did.
+    try:
+        import steam_tags as _st
+        if touched and _st.config.metadata_enabled("steamspy"):
+            lc = ro(LIBRARY_DB)
+            try:
+                ph = ",".join("?" * len(touched))
+                pairs = [(str(r["source_id"]), r["norm_key"]) for r in lc.execute(
+                    "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
+                    "ON s.game_id=g.id WHERE s.source='steam' AND g.norm_key IN (%s)"
+                    % ph, list(touched)).fetchall()
+                    if r["source_id"] and str(r["source_id"]).isdigit()]
+            finally:
+                lc.close()
+            if pairs:
+                nt = _st.fetch_pairs(pairs)
+                print("aimeta apply: steam tags fetched for %d games" % nt,
+                      file=sys.stderr)
+    except Exception as e:
+        print("apply steam-tags: %s" % str(e)[:150], file=sys.stderr)
+    ok, err = _run_script("build_library.py", timeout=1800)
+    if not ok:
+        # build_library can exit non-zero under concurrency yet still produce the
+        # catalog; the provider matches are durable in igdb_resolution regardless.
+        # Mark applied anyway so the pending banner clears (a later rebuild reapplies).
+        print("aimeta apply: build_library reported error (continuing): %s"
+              % (err or "")[:200], file=sys.stderr)
+    aimeta.mark_applied(only_ids)  # accepted -> applied (only this pass's findings)
+    # recompute the combined Ludodex score from the IGDB ratings the wand just
+    # cached (reads the cache, no network), so a newly-matched game's score lands
+    # in the library immediately instead of waiting on a manual scores_fetch run.
+    ok_s, err_s = _run_script("scores_fetch.py", args=["igdb"], timeout=180)
+    if not ok_s:
+        print("apply scores: %s" % (err_s or "")[:150], file=sys.stderr)
     if media is not False:                 # media: False skips art entirely
         # pull provider media for newly-linked games (IGDB/Steam/ScreenScraper),
         # then pick the best per kind — restricted to `media` kinds if a list given
         _run_script("media_fetch.py", timeout=1800)
+        # SteamGridDB gap-fill (hero/logo/cover/icon) for the games we just
+        # identified — by title (or Steam appid). This is where SGDB's heroes/logos
+        # come from for non-Steam games; its candidates then join the wand's art
+        # adjudication below so the AI balances SGDB vs IGDB vs ScreenScraper.
+        try:
+            import media_fetch as _mf
+            if touched and _mf.config.steamgriddb_key():
+                lc = ro(LIBRARY_DB)
+                try:
+                    titles = {r["norm_key"]: r["canonical_title"] for r in lc.execute(
+                        "SELECT norm_key, canonical_title FROM games")}
+                    appids = {r["norm_key"]: r["source_id"] for r in lc.execute(
+                        "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
+                        "ON s.game_id=g.id WHERE s.source='steam'")}
+                finally:
+                    lc.close()
+                tgts = [(nk, titles.get(nk, ""), appids.get(nk)) for nk in touched]
+                mcon = sqlite3.connect(INDEX_DB)
+                try:
+                    _mf.fetch_steamgriddb_targets(mcon, now, tgts)
+                finally:
+                    mcon.close()
+        except Exception as e:
+            print("apply sgdb: %s" % str(e)[:150], file=sys.stderr)
+        # drop blank/placeholder candidates BEFORE choosing so a real image wins
+        try:
+            n = _prune_blank_media(list(touched))
+            if n:
+                print("apply: pruned %d blank/degenerate images" % n, file=sys.stderr)
+        except Exception as e:
+            print("apply prune-blank: %s" % str(e)[:150], file=sys.stderr)
         args = ["--kinds", ",".join(media)] if isinstance(media, list) and media else []
         _run_script("media_choose.py", args=args, timeout=900)
+    # AI adjudication (per game): now that providers are linked + art fetched, let
+    # the model vision-pick the best image per kind and choose the better provider
+    # per conflicting attribute — for EVERY touched game. Best-effort; never blocks.
+    if touched:
+        lcon = ro(LIBRARY_DB)
+        try:
+            titles = {r["norm_key"]: r["canonical_title"]
+                      for r in lcon.execute("SELECT norm_key, canonical_title FROM games")}
+        finally:
+            lcon.close()
+        for nk in touched:
+            if should_stop():
+                break
+            _ai_adjudicate_game(nk, titles.get(nk, nk))
 
 
 def _apply_ss_matches(now):
@@ -2090,18 +2643,35 @@ def _apply_ss_matches(now):
     sc.close()
 
 
+def _apply_drain(should_stop, media):
+    """Apply accepted findings, then loop while more are accepted — so accepting
+    several games in quick succession coalesces into one running rebuild instead of
+    N. Each pass captures + marks only the findings it processed."""
+    while not should_stop():
+        ids = aimeta.accepted_ids()
+        if not ids:
+            break
+        _aimeta_apply(should_stop, media=media, only_ids=ids)
+
+
 @app.post("/api/aimeta/apply")
 def aimeta_apply(body: dict = Body(default={})):
     """Apply the selected changes to the catalog (background: link provider
     matches, fetch their records, rebuild). Body may carry
     {selections:[{finding_id, attributes:[kinds]|null, match:bool}]} to apply an
-    exact per-change selection; without it, every already-accepted finding applies."""
+    exact per-change selection; without it, every already-accepted finding applies.
+    Coalesced: if an apply is already running, the just-accepted findings are picked
+    up by its drain loop instead of starting a second (conflicting) rebuild."""
     sels = (body or {}).get("selections")
     if sels:
         aimeta.apply_selection(sels)
     media = (body or {}).get("media", True)   # True | False | [media kinds]
+    cur = _JOBS.get("aimeta-apply")
+    if cur and cur.get("thread") and cur["thread"].is_alive():
+        return {"started": False, "coalesced": True,
+                "selected": len(sels) if sels else None}
     _start_job("aimeta-apply", "aimeta-apply", "Apply AI metadata + rebuild",
-               lambda stop: _aimeta_apply(stop, media=media))
+               lambda stop: _apply_drain(stop, media))
     return {"started": True, "selected": len(sels) if sels else None}
 
 
@@ -2113,9 +2683,10 @@ def game_detail(norm_key: str):
         if not g:
             raise HTTPException(404, "no such game")
         gid = g["id"]
+        _st = ", state" if _has_col(con, "sources", "state") else ""
         sources = [dict(r) for r in con.execute(
-            "SELECT source, platform, source_id, title_raw, detail "
-            "FROM sources WHERE game_id=?", (gid,))]
+            "SELECT source, platform, source_id, title_raw, detail" + _st +
+            " FROM sources WHERE game_id=?", (gid,))]
         osmap = _os_map()
         for s in sources:
             oss = osmap.get((s["source"], str(s["source_id"])))
@@ -2152,9 +2723,131 @@ def game_detail(norm_key: str):
             "metadata_links": links,
             "media_kinds": media_kinds,
             "ai_meta": aimeta.finding_for(norm_key),   # AI audit/supplement, if any
+            "ownership": ownership.list_for(DATA, norm_key),  # manual physical/want facts
+            "framing": framing.get_all(DATA, norm_key),       # per-kind image position+zoom
         }
     finally:
         con.close()
+
+
+def _apply_ownership_live(norm_key: str, title: str):
+    """Reflect ownership.sqlite into the live library right away (no full rebuild):
+    replace this game's manual `own:%` source rows and re-derive its wanted flag.
+    On the next full rebuild build_library re-merges the same facts idempotently."""
+    facts = ownership.list_for(DATA, norm_key)
+    con = sqlite3.connect(LIBRARY_DB)
+    try:
+        if not _has_col(con, "sources", "state"):
+            return                      # pre-migration schema; a rebuild will apply it
+        row = con.execute("SELECT id FROM games WHERE norm_key=?", (norm_key,)).fetchone()
+        if row is None:
+            if facts and not any(f["state"] == "have" for f in facts) and title:
+                con.execute(               # want-only for a not-yet-cataloged game
+                    "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,"
+                    "sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
+                    "has_archive,in_playnite,in_launchbox,wanted) "
+                    "VALUES(?,?,0,0,'',0,0,0,0,0,0,0,0,1)", (title, norm_key))
+                row = con.execute("SELECT id FROM games WHERE norm_key=?",
+                                  (norm_key,)).fetchone()
+            else:
+                return
+        gid = row[0]
+        con.execute("DELETE FROM sources WHERE game_id=? AND source_id LIKE 'own:%'", (gid,))
+        for f in facts:
+            src = ownership.FORM_TO_SOURCE.get(f["form"], f["form"])
+            con.execute(
+                "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,"
+                "state) VALUES(?,?,?,?,?,?,?)",
+                (gid, src, f["platform"] or src, "own:%s:%s" % (src, f["platform"]),
+                 title, f["note"], f["state"]))
+        have = con.execute("SELECT 1 FROM sources WHERE game_id=? AND state='have' "
+                           "LIMIT 1", (gid,)).fetchone()
+        con.execute("UPDATE games SET wanted=?, n_sources=(SELECT COUNT(*) FROM sources "
+                    "WHERE game_id=?) WHERE id=?", (0 if have else 1, gid, gid))
+        con.commit()
+    finally:
+        con.close()
+
+
+def _game_title(norm_key):
+    con = lib()
+    try:
+        r = con.execute("SELECT canonical_title FROM games WHERE norm_key=?",
+                        (norm_key,)).fetchone()
+        return r["canonical_title"] if r else ""
+    finally:
+        con.close()
+
+
+@app.post("/api/games/{norm_key}/framing")
+def set_framing(norm_key: str, body: dict = Body(...)):
+    """Position + zoom for one image kind inside its viewport (e.g. the hero
+    'background' or a 'cover'). Applied at render time, keyed by norm_key."""
+    body = body or {}
+    kind = (body.get("kind") or "").strip()
+    if not kind:
+        raise HTTPException(400, "kind is required")
+    fr = framing.set_frame(DATA, norm_key, kind,
+                           top=body.get("top", 0), right=body.get("right", 0),
+                           bottom=body.get("bottom", 0), left=body.get("left", 0),
+                           zoom=body.get("zoom", 1.0))
+    return {"kind": kind, "framing": fr}
+
+
+@app.delete("/api/games/{norm_key}/framing")
+def clear_framing(norm_key: str, kind: str):
+    framing.clear(DATA, norm_key, kind)
+    return {"ok": True}
+
+
+@app.get("/api/games/{norm_key}/ownership")
+def get_ownership(norm_key: str):
+    return {"ownership": ownership.list_for(DATA, norm_key)}
+
+
+@app.post("/api/games/{norm_key}/ownership")
+def set_ownership(norm_key: str, body: dict = Body(...)):
+    """Record a per-format ownership fact — physical disc, or a per-platform want
+    that coexists with what you already own (e.g. 'want the Switch ROM')."""
+    body = body or {}
+    title = (body.get("title") or _game_title(norm_key) or "").strip()
+    if not title:
+        raise HTTPException(400, "unknown game — pass a title to create it")
+    try:
+        ownership.set_fact(DATA, norm_key, title, body.get("form"),
+                           body.get("platform", ""), body.get("state"),
+                           body.get("note", ""))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _apply_ownership_live(norm_key, title)
+    return {"ownership": ownership.list_for(DATA, norm_key)}
+
+
+@app.delete("/api/games/{norm_key}/ownership")
+def clear_ownership(norm_key: str, form: str, platform: str = "", state: str = ""):
+    ownership.clear_fact(DATA, norm_key, form, platform, state)
+    _apply_ownership_live(norm_key, _game_title(norm_key))
+    return {"ownership": ownership.list_for(DATA, norm_key)}
+
+
+@app.get("/api/games/{norm_key}/releases")
+def game_releases(norm_key: str):
+    """IGDB's cross-platform release list for a game (cache-first, self-healing) —
+    powers the ownership overlay's 'this game also came out on…' section."""
+    try:
+        return igdb_enrich.releases_for(norm_key)
+    except Exception as e:                       # network/creds issue — degrade, don't 500
+        return {"resolved": False, "releases": [], "error": str(e)}
+
+
+@app.get("/api/systems")
+def known_systems():
+    """The searchable catalog of known gaming systems (IGDB platforms), for the
+    ownership overlay's 'add any system' search. Cached after the first call."""
+    try:
+        return {"systems": igdb_enrich.all_platforms()}
+    except Exception as e:
+        return {"systems": [], "error": str(e)}
 
 
 @app.post("/api/games/{norm_key}/attribute")
@@ -2386,6 +3079,7 @@ def game_media(norm_key: str):
     finally:
         con.close()
     pins = _pin_map(norm_key)
+    noredist = mediaflags.no_redist_for(norm_key)   # (kind,provider,ref) not-shareable
     assets = []
     for r in rows:
         # Don't surface assets that can't actually be served on THIS host, or they
@@ -2395,15 +3089,18 @@ def game_media(norm_key: str):
         if r["ref_type"] == "file" and not r["sha1"] and not os.path.exists(r["ref"]):
             continue
         rank = pins.get((r["kind"], r["provider"], r["ref"]))
-        is_img = (r["ext"] or "").lower() in ("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        ext = (r["ext"] or "").lower()
+        is_img = ext in ("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        has_preview = is_img or ext == "pdf"    # PDFs preview their first page
         assets.append({
             "id": r["id"], "kind": r["kind"], "provider": r["provider"],
             "ref_type": r["ref_type"], "ext": r["ext"],
             "width": r["width"], "height": r["height"],
             "is_image": is_img,
             "pinned": rank is not None, "rank": rank,
+            "redistributable": (r["kind"], r["provider"], r["ref"]) not in noredist,
             "url": "/api/media-asset/%d" % r["id"],
-            "thumb": "/api/media-asset/%d?size=thumb" % r["id"] if is_img else None,
+            "thumb": "/api/media-asset/%d?size=thumb" % r["id"] if has_preview else None,
             "user": False,
         })
     # durable user uploads (added via the All Media upload buttons) — always "active"
@@ -2415,14 +3112,16 @@ def game_media(norm_key: str):
     finally:
         uc.close()
     for r in urows:
-        is_img = (r["ext"] or "").lower() in ("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        ext = (r["ext"] or "").lower()
+        is_img = ext in ("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        has_preview = is_img or ext == "pdf"
         assets.append({
             "id": r["id"], "kind": r["kind"], "provider": "user",
             "ref_type": "user", "ext": r["ext"],
             "width": r["width"], "height": r["height"],
-            "is_image": is_img, "pinned": True, "rank": None,
+            "is_image": is_img, "pinned": True, "rank": None, "redistributable": True,
             "url": "/api/user-media-asset/%d" % r["id"],
-            "thumb": "/api/user-media-asset/%d?size=thumb" % r["id"] if is_img else None,
+            "thumb": "/api/user-media-asset/%d?size=thumb" % r["id"] if has_preview else None,
             "user": True,
         })
     return {"norm_key": norm_key, "scalar_kinds": list(media.SCALAR_KINDS),
@@ -2459,6 +3158,86 @@ def set_pins(norm_key: str, body: dict = Body(...)):
     finally:
         pc.close()
     return game_media(norm_key)
+
+
+def _asset_identity(norm_key, aid):
+    """(kind, provider, ref) for a provider media asset id, or None."""
+    con = lib()
+    try:
+        r = con.execute("SELECT kind, provider, ref FROM m.media "
+                        "WHERE id=? AND norm_key=?", (aid, norm_key)).fetchone()
+    finally:
+        con.close()
+    return (r["kind"], r["provider"], r["ref"]) if r else None
+
+
+@app.post("/api/games/{norm_key}/media/{aid}/ban")
+def ban_media(norm_key: str, aid: int):
+    """Ban a provider asset: delete it from the index AND remember never to
+    re-download it (media_fetch skips banned refs). Unban later in Settings."""
+    ident = _asset_identity(norm_key, aid)
+    if not ident:
+        raise HTTPException(404, "no such asset")
+    kind, provider, ref = ident
+    mediaflags.ban(norm_key, kind, provider, ref)
+    wc = sqlite3.connect(INDEX_DB, timeout=30)
+    try:
+        wc.execute("DELETE FROM media WHERE norm_key=? AND kind=? AND provider=? "
+                   "AND ref=?", (norm_key, kind, provider, ref))
+        wc.commit()
+    finally:
+        wc.close()
+    # drop any pin on it too, so it doesn't linger as a phantom pinned ref
+    pc = _pins()
+    try:
+        pc.execute("DELETE FROM pins WHERE norm_key=? AND kind=? AND provider=? "
+                   "AND ref=?", (norm_key, kind, provider, ref))
+        pc.commit()
+    finally:
+        pc.close()
+    return game_media(norm_key)
+
+
+@app.post("/api/games/{norm_key}/media/{aid}/redist")
+def set_media_redist(norm_key: str, aid: int, body: dict = Body(default={})):
+    """Toggle whether a provider asset is redistributable (copied to other machines
+    when games are sent to them). Default is redistributable; this stores the 'no'."""
+    ident = _asset_identity(norm_key, aid)
+    if not ident:
+        raise HTTPException(404, "no such asset")
+    kind, provider, ref = ident
+    mediaflags.set_redist(norm_key, kind, provider, ref,
+                          bool((body or {}).get("redistributable", True)))
+    return game_media(norm_key)
+
+
+@app.get("/api/media/banned")
+def banned_media():
+    """Banned assets, annotated with the game title, for the Settings unban list."""
+    out = []
+    con = lib()
+    try:
+        for b in mediaflags.list_banned():
+            g = con.execute("SELECT canonical_title FROM games WHERE norm_key=?",
+                            (b["norm_key"],)).fetchone()
+            b["title"] = g["canonical_title"] if g else b["norm_key"]
+            out.append(b)
+    finally:
+        con.close()
+    return {"banned": out}
+
+
+@app.post("/api/media/unban")
+def unban_media(body: dict = Body(...)):
+    """Lift a ban so the asset can be re-fetched from its provider again."""
+    nk = (body or {}).get("norm_key")
+    kind = (body or {}).get("kind")
+    provider = (body or {}).get("provider")
+    ref = (body or {}).get("ref")
+    if not all((nk, kind, provider, ref)):
+        raise HTTPException(400, "norm_key, kind, provider, ref required")
+    mediaflags.unban(nk, kind, provider, ref)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------- user media upload
@@ -2739,23 +3518,43 @@ def ops_db_fix(body: dict = Body(...)):
 
 
 # ------------------------------------------------------------------- media resolver
+def _render_pdf_thumb(src, dst, px=400):
+    """Render page 1 of a PDF to a JPEG thumbnail at `dst` (PyMuPDF, no system deps)
+    — so manuals preview their first page instead of showing a bare filename."""
+    import fitz  # PyMuPDF
+    from PIL import Image
+    doc = fitz.open(src)
+    try:
+        pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        im.thumbnail((px, px))
+        im.save(dst, "JPEG", quality=82)
+    finally:
+        doc.close()
+
+
 def _serve(path, ext, size):
-    """Return a FileResponse, optionally downscaled to a cached thumbnail."""
+    """Return a FileResponse, optionally downscaled to a cached thumbnail. PDFs get
+    a rendered first-page image so manuals preview instead of showing a bare name."""
     if size == "thumb":
         sha = os.path.splitext(os.path.basename(path))[0]
-        tpath = os.path.join(THUMBS, "%s_thumb.%s" % (sha, ext))
+        is_pdf = ext.lower() == "pdf"
+        tpath = os.path.join(THUMBS, "%s_thumb.%s" % (sha, "jpg" if is_pdf else ext))
         if not os.path.exists(tpath):
-            from PIL import Image
             try:
-                im = Image.open(path)
-                im.thumbnail((400, 400))
-                buf = io.BytesIO()
-                fmt = "PNG" if ext.lower() == "png" else "JPEG"
-                if fmt == "JPEG" and im.mode in ("RGBA", "P"):
-                    im = im.convert("RGB")
-                im.save(buf, fmt)
-                with open(tpath, "wb") as f:
-                    f.write(buf.getvalue())
+                if is_pdf:
+                    _render_pdf_thumb(path, tpath)
+                else:
+                    from PIL import Image
+                    im = Image.open(path)
+                    im.thumbnail((400, 400))
+                    buf = io.BytesIO()
+                    fmt = "PNG" if ext.lower() == "png" else "JPEG"
+                    if fmt == "JPEG" and im.mode in ("RGBA", "P"):
+                        im = im.convert("RGB")
+                    im.save(buf, fmt)
+                    with open(tpath, "wb") as f:
+                        f.write(buf.getvalue())
             except Exception:
                 return FileResponse(path)        # fall back to full size
         path = tpath
@@ -3055,8 +3854,33 @@ SERVICES = [
                          "it up the moment you approve. The code is good for 15 minutes.",
                  "post": "/api/services/xbox/code"},
      "limits": _limits("xbox", cooldown="500")},
+    {"id": "nintendo", "name": "Nintendo Account", "role": "source",
+     "hint": "How it works: Nintendo has no owned-games/purchases API that a server "
+             "can read (purchase history is locked to the console itself). So ludodex "
+             "reads the games you've PLAYED — via the Nintendo Switch Online play "
+             "activity — as your Nintendo library. That path needs a small third-party "
+             "helper (imink) to sign Nintendo's security token; when that helper is "
+             "down or Nintendo bumps its app version, Nintendo may show 0 games until "
+             "it recovers. Games you own but never played, and physical carts, won't "
+             "appear. To connect: click Get Nintendo code, sign in, then RIGHT-CLICK "
+             "the red 'Select this account' button, Copy Link Address, and paste it "
+             "below. One-time login — it refreshes automatically.",
+     "creds": [],
+     "connect": {"url": "", "action_label": "Get Nintendo code",
+                 "start": "/api/services/nintendo/authorize",
+                 "field_label": "Paste the copied link",
+                 "note": "Get Nintendo code opens the sign-in in a new tab. After you "
+                         "sign in, don't just click 'Select this account' — RIGHT-CLICK "
+                         "it and 'Copy Link Address', then paste that whole link here. "
+                         "(It points at an npf…:// link the browser can't open itself.) "
+                         "The code is short-lived, so paste it promptly.",
+                 "post": "/api/services/nintendo/login"},
+     "limits": _limits("nintendo", cooldown="500")},
     {"id": "igdb", "name": "IGDB", "role": "provider",
-     "hint": "dev.twitch.tv — IGDB authenticates via Twitch (≈4 req/sec)",
+     "hint": "IGDB authenticates via Twitch (≈4 req/sec). Create a free app to get a "
+             "Client ID + Secret (OAuth Redirect URL can be http://localhost).",
+     "doc": {"url": "https://dev.twitch.tv/console/apps",
+             "label": "Open Twitch dev console →"},
      "creds": [
          {"key": "igdb_client_id", "label": "Twitch Client ID", "secret": False},
          {"key": "igdb_client_secret", "label": "Twitch Client Secret", "secret": True}],
@@ -3102,10 +3926,14 @@ def _svc_state(s):
                        "default": f["default"], "value": config.get(f["key"]) or ""})
     out = {"id": s["id"], "name": s["name"], "role": s["role"], "hint": s["hint"],
            "fields": creds, "limits": limits}
+    if s.get("doc"):
+        out["doc"] = s["doc"]                    # {url, label} — a "how to get creds" link
     if s["role"] in ("source", "both"):
         out["enabled"] = config.source_enabled(s["id"])
     if s.get("connect"):
-        checker = {"ea": _ea_connected, "epic": _epic_connected}.get(s["id"])
+        checker = {"ea": _ea_connected, "epic": _epic_connected,
+                   "psn": _psn_connected, "xbox": _xbox_connected,
+                   "nintendo": _nintendo_connected}.get(s["id"])
         out["connect"] = dict(s["connect"], connected=bool(checker and checker()))
     return out
 
@@ -3326,6 +4154,62 @@ def xbox_connect(body: dict = Body(...)):
     return {"ok": True, "account": None}
 
 
+def _nintendo_connected():
+    """(bool) True if a Nintendo session_token has been cached (.nintendo/tokens.json)."""
+    tokf = os.path.join(DATA, ".nintendo", "tokens.json")
+    if not os.path.exists(tokf):
+        return False
+    try:
+        import json as _json
+        return bool(_json.load(open(tokf)).get("session_token"))
+    except Exception:                            # noqa: BLE001
+        return False
+
+
+@app.post("/api/services/nintendo/authorize")
+def nintendo_authorize():
+    """Start Nintendo's PKCE login: nintendo_owned.py --authorize mints the sign-in
+    URL and stashes the matching verifier server-side. The UI opens the returned URL."""
+    try:
+        r = subprocess.run([sys.executable, os.path.join(DIR, "nintendo_owned.py"),
+                            "--authorize"], capture_output=True, text=True,
+                           timeout=30, cwd=DIR)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "error": "Couldn't start Nintendo login: %s" % e}
+    url = (r.stdout or "").strip().splitlines()[-1:] or [""]
+    if not url[0].startswith("https://"):
+        return {"ok": False, "error": (r.stderr or "no URL produced").strip()[-200:]}
+    return {"ok": True, "url": url[0]}
+
+
+@app.post("/api/services/nintendo/login")
+def nintendo_connect(body: dict = Body(...)):
+    """Accept the copied 'Select this account' link (or the bare session_token_code)
+    and hand it to nintendo_owned.py --login, which exchanges it for a durable
+    session token that refreshes automatically from then on."""
+    pasted = ((body or {}).get("value") or "").strip()
+    if not pasted:
+        raise HTTPException(400, "paste the link you copied from the Nintendo page")
+    try:
+        r = subprocess.run([sys.executable, os.path.join(DIR, "nintendo_owned.py"),
+                            "--login", pasted],
+                           capture_output=True, text=True, timeout=60, cwd=DIR)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "account": None, "error": "Couldn't reach Nintendo: %s" % e}
+    if r.returncode != 0 or not _nintendo_connected():
+        detail = (r.stderr or "").strip().splitlines()[-1:] or [""]
+        return {"ok": False, "account": None,
+                "error": "That didn't work — the code is short-lived, so click Get "
+                         "Nintendo code again for a fresh sign-in and re-copy the link. "
+                         "(%s)" % detail[0]}
+    # pull the nickname out of "# nintendo: logged in as <name> ✓" if present
+    acct = None
+    for ln in (r.stderr or "").splitlines():
+        if "logged in as" in ln:
+            acct = ln.split("logged in as", 1)[1].replace("✓", "").strip()
+    return {"ok": True, "account": acct}
+
+
 # Device-code flow — the reliable Xbox connect: no address-bar code to race. We
 # hold the (secret) device_code server-side; the UI only ever sees the short
 # user_code and polls /poll until Microsoft reports the sign-in is complete.
@@ -3387,6 +4271,7 @@ SYNC_SPECS = {
     "ea":    ("ea_owned.py",    "ea_games.tsv",    True),
     "psn":   ("psn_owned.py",   "psn_games.tsv",   True),
     "xbox":  ("xbox_owned.py",  "xbox_games.tsv",  True),
+    "nintendo": ("nintendo_owned.py", "nintendo_games.tsv", True),
 }
 
 # Sources that are also art providers (role='both') → the media_fetch provider to
@@ -3411,6 +4296,8 @@ def _sync_ready(sid):
         return _psn_connected()
     if sid == "xbox":
         return _xbox_connected()
+    if sid == "nintendo":
+        return _nintendo_connected()
     return False
 
 
@@ -3467,6 +4354,22 @@ def _lib_keys():
         return set()
 
 
+def _n_identified_with_cover():
+    """Count identified games that have a chosen cover — feeds the sync 'media'
+    checkmark's detail (how many titles have art). None on error."""
+    try:
+        con = sqlite3.connect(LIBRARY_DB)
+        con.execute("ATTACH DATABASE ? AS m", (INDEX_DB,))
+        n = con.execute(
+            "SELECT COUNT(*) FROM games g WHERE " + IDENTIFIED_SQL +
+            " AND EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
+            "AND md.chosen=1 AND md.kind='cover')").fetchone()[0]
+        con.close()
+        return n
+    except sqlite3.Error:
+        return None
+
+
 def _run_script(script, out=None, capture=False, timeout=300, args=None):
     """Run a pipeline script with the server's interpreter; return (ok, error_tail)."""
     argv = [sys.executable, script] + list(args or [])
@@ -3521,8 +4424,27 @@ def _sync_worker(job, services, media_ids=()):
     # catalog rebuild, each media fetch, and the one materialize pass.
     planned_media = [sid for sid in media_ids if sid in MEDIA_SYNC_PROVIDER]
     mode = config.get("media_mode") or "chosen"
-    total = len(services) + 1 + len(planned_media) + (1 if planned_media and mode != "ondemand" else 0)
+    total = len(services) + 2 + len(planned_media) + 1 + (1 if mode != "ondemand" else 0)
     job["prog"] = {"done": 0, "total": max(total, 1)}
+
+    # Post-source pipeline phases, shown as their own checkmark rows in the sync
+    # panel so a full run confirms the WHOLE pipeline (not just ownership pulls).
+    phases = [
+        {"id": "tags", "label": "Steam tags", "state": "pending", "detail": ""},
+        {"id": "catalog", "label": "Catalog rebuilt", "state": "pending", "detail": ""},
+        {"id": "art", "label": "Missing art", "state": "pending", "detail": ""},
+        {"id": "media", "label": "Media downloaded" if mode != "ondemand" else "Media chosen",
+         "state": "pending", "detail": ""},
+    ]
+    job["phases"] = phases
+
+    def _phase(pid, state, detail=None):
+        for p in phases:
+            if p["id"] == pid:
+                p["state"] = state
+                if detail is not None:
+                    p["detail"] = detail
+                break
 
     def step():
         job["prog"]["done"] = min(job["prog"]["done"] + 1, job["prog"]["total"])
@@ -3539,23 +4461,57 @@ def _sync_worker(job, services, media_ids=()):
             st["state"], st["error"] = "failed", err
         step()
     if any_ok:
+        # Steam community tags (SteamSpy) at import time — read from the fresh
+        # steam TSV so newly-imported games are covered, fetched BEFORE the
+        # rebuild merges them into game_tags. Only when SteamSpy is enabled and
+        # Steam actually synced this run.
+        if (config.metadata_enabled("steamspy")
+                and job["services"].get("steam", {}).get("state") == "ok"):
+            job["step"] = "Fetching Steam tags…"
+            _phase("tags", "running")
+            ok_t, _ = _run_script(
+                "steam_tags.py",
+                args=["--tsv", os.path.join(DIR, "steam_games.tsv")], timeout=3600)
+            _phase("tags", "ok" if ok_t else "failed")
+        else:
+            _phase("tags", "skipped")
+        step()
         job["step"] = "Rebuilding catalog…"
+        _phase("catalog", "running")
         ok, err = _run_script("build_library.py", timeout=900)
         if ok:
             job["added"] = len(_lib_keys() - prev)
+            _phase("catalog", "ok", "+%d new" % job["added"] if job["added"] else "up to date")
         else:
             job["error"] = "catalog rebuild failed: " + err
+            _phase("catalog", "failed")
+    else:
+        for p in phases:
+            _phase(p["id"], "skipped")
     step()
     # optional media pass: fetch art for the requested sources (catalog must exist
     # first), then download it into the repo per the media_mode preference.
     media_targets = [sid for sid in planned_media
                      if job["services"].get(sid, {}).get("state") == "ok"]
-    if media_targets and not job.get("error"):
+    if any_ok and not job.get("error"):
+        cover_before = _n_identified_with_cover()
         for sid in media_targets:
             job["step"] = "Fetching %s media…" % _SVC_NAME.get(sid, sid)
             _run_script("media_fetch.py",
                         args=["--provider", MEDIA_SYNC_PROVIDER[sid]], timeout=1800)
             step()
+        # Built-in art gap-fill: any identified game whose source shipped no
+        # cover/backdrop/logo (non-Steam stores, unresolved matches) gets it from
+        # SteamGridDB by name/appid. Runs on EVERY successful sync — including
+        # stores with no media provider, whose media_targets list is empty — so
+        # "if the import doesn't have art, fetch it" holds. Self-limiting: SGDB
+        # skips games that already have the art.
+        job["step"] = "Fetching missing art…"
+        _phase("art", "running")
+        _run_script("media_fetch.py", args=["--backfill-art"], timeout=3600)
+        _phase("art", "ok")
+        step()
+        _phase("media", "running")
         if mode != "ondemand":
             job["step"] = "Downloading media…"
             base = job["prog"]["done"]   # phases finished before the download
@@ -3568,6 +4524,16 @@ def _sync_worker(job, services, media_ids=()):
             _run_streaming("media_choose.py",
                            ["--materialize", "--progress"] + (["--all"] if mode == "all" else []),
                            _mat_prog, timeout=3600)
+        else:
+            _run_script("media_choose.py", timeout=900)
+        # report how much art coverage the run produced
+        cover_after = _n_identified_with_cover()
+        if cover_after is not None:
+            _phase("media", "ok", "%s with art" % f"{cover_after:,}")
+            if cover_before is not None:
+                _phase("art", "ok", "+%d filled" % max(cover_after - cover_before, 0))
+        else:
+            _phase("media", "ok")
     job["prog"]["done"] = job["prog"]["total"]   # snap to complete
     job["step"] = "Done"
     job["running"] = False
@@ -3710,6 +4676,60 @@ def _asset_local_path(r):
     return None
 
 
+def _is_degenerate_image(data):
+    """True if image bytes are effectively BLANK — a solid/near-uniform color, far
+    too small, or (with alpha) almost fully transparent. Catches the placeholder
+    art providers sometimes return (esp. ScreenScraper) that passes a bare HTTP
+    check but is useless. Undecodable → not judged (keep it)."""
+    try:
+        from PIL import Image, ImageStat
+        im = Image.open(io.BytesIO(data))
+        w, h = im.size
+        if w < 24 or h < 24:
+            return True
+        im = im.convert("RGBA").resize((32, 32))
+        if sum(ImageStat.Stat(im.convert("RGB")).var) / 3.0 < 20:   # no color variance
+            return True
+        if sum(1 for p in im.getchannel("A").getdata() if p > 16) < 20:  # ~transparent
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _prune_blank_media(norm_keys, kinds=("cover", "hero", "background", "header",
+                                         "logo", "icon", "box_back", "box_3d")):
+    """Download + inspect each candidate image for the given games and DELETE the
+    blank/degenerate ones so media_choose then picks a real image instead. Returns
+    the number dropped. (Downloads are auth-aware and cached, so re-use is cheap.)"""
+    if not norm_keys:
+        return 0
+    ph = ",".join("?" * len(kinds))
+    rc = ro(INDEX_DB)                       # gather candidates, then close (no lock
+    rc.row_factory = sqlite3.Row           # held while _thumb_bytes writes sha1)
+    rows = []
+    try:
+        for nk in norm_keys:
+            rows += rc.execute(
+                "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
+                "WHERE norm_key=? AND kind IN (%s)" % ph, [nk] + list(kinds)).fetchall()
+    finally:
+        rc.close()
+    bad = []
+    for r in rows:
+        mb = _thumb_bytes(r)               # opens/closes its own connections
+        if mb and _is_degenerate_image(mb[1]):
+            bad.append(r["id"])
+    if bad:
+        wc = sqlite3.connect(INDEX_DB, timeout=30)
+        try:
+            wc.executemany("DELETE FROM media WHERE id=?", [(i,) for i in bad])
+            wc.commit()
+        finally:
+            wc.close()
+    return len(bad)
+
+
 def _thumb_bytes(r, px=256):
     """Downscaled JPEG bytes for a media row (for vision). (mime, bytes) or None."""
     p = _asset_local_path(r)
@@ -3781,7 +4801,8 @@ def art_pick(norm_key: str, kind: str = Query("cover")):
     try:
         res = ai.pick_art(title, kind, [c["thumb"] for c in cands],
                           provider=ai.provider_for_area("art"),
-                          model=ai.model_for_area("art"))
+                          model=ai.model_for_area("art"),
+                          language=config.get("media_language") or None)
     except Exception as e:
         raise HTTPException(502, "AI error: %s" % e)
     return {"kind": kind, "candidates": listed,
