@@ -11,13 +11,32 @@ import sqlite3
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from romtags import parse_name, GENERIC_DIRS
+from romtags import parse_name, GENERIC_DIRS, compute_game_keys
 
-TSV, DB, ROOT = sys.argv[1], sys.argv[2], sys.argv[3]
 
-con = sqlite3.connect(DB)
-cur = con.cursor()
-cur.executescript("""
+def finalize_games(con):
+    """(Re)derive the `game` grouping for every row with the collection-aware
+    counter, then rebuild the per-system summary. Shared by the indexer and the
+    in-place migration so a live index and a fresh scan group games identically."""
+    cur = con.cursor()
+    rows = cur.execute("SELECT id, system, relpath, ext FROM roms").fetchall()
+    keys = compute_game_keys(rows)
+    cur.executemany("UPDATE roms SET game=? WHERE id=?",
+                    [(keys.get(rid, ""), rid) for rid, *_ in rows])
+    cur.execute("DROP TABLE IF EXISTS systems")
+    cur.execute("""
+        CREATE TABLE systems AS
+          SELECT system, COUNT(*) AS files,
+                 COUNT(DISTINCT CASE WHEN game<>'' THEN game END) AS games,
+                 SUM(size_bytes) AS bytes
+          FROM roms GROUP BY system ORDER BY system""")
+    con.commit()
+
+
+def main(TSV, DB, ROOT):
+  con = sqlite3.connect(DB)
+  cur = con.cursor()
+  cur.executescript("""
 PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;
 DROP TABLE IF EXISTS roms;
 CREATE TABLE roms (
@@ -32,14 +51,14 @@ DROP TABLE IF EXISTS meta;
 CREATE TABLE meta (key TEXT, value TEXT);
 """)
 
-root = ROOT.rstrip("/")
-batch = []
-n = 0
-total_bytes = 0
-INSERT = ("INSERT INTO roms(system,subdir,game,filename,ext,name,region,languages,"
-          "version,revision,disc,flags,tags,relpath,fullpath,size_bytes,mtime)"
-          " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-with open(TSV, "r", encoding="utf-8", errors="replace") as f:
+  root = ROOT.rstrip("/")
+  batch = []
+  n = 0
+  total_bytes = 0
+  INSERT = ("INSERT INTO roms(system,subdir,game,filename,ext,name,region,languages,"
+            "version,revision,disc,flags,tags,relpath,fullpath,size_bytes,mtime)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+  with open(TSV, "r", encoding="utf-8", errors="replace") as f:
     for line in f:
         line = line.rstrip("\n")
         if not line:
@@ -60,22 +79,19 @@ with open(TSV, "r", encoding="utf-8", errors="replace") as f:
         subdir = "/".join(mid)
         ext = filename.rsplit(".", 1)[1].lower() if "." in filename else ""
         name, region, languages, version, revision, disc, flags, tags = parse_name(filename)
-        game = ""
+        # region/version enrichment from a game folder (game itself is set by
+        # finalize_games() below, which groups files into games accurately).
         for c in mid:
             if c.lower() not in GENERIC_DIRS:
-                game = c
+                gn, gr, gl, gv, grev, gd, gf, gt = parse_name(c)
+                region = region or gr
+                languages = languages or gl
+                version = version or gv
+                revision = revision or grev
+                disc = disc or gd
+                flags = flags or gf
                 break
-        if game:
-            gn, gr, gl, gv, grev, gd, gf, gt = parse_name(game)
-            region = region or gr
-            languages = languages or gl
-            version = version or gv
-            revision = revision or grev
-            disc = disc or gd
-            flags = flags or gf
-        else:
-            game = name
-        batch.append((system, subdir, game, filename, ext, name, region, languages,
+        batch.append((system, subdir, name, filename, ext, name, region, languages,
                       version, revision, disc, flags, tags, rel,
                       root + "/" + rel, size, mtime))
         n += 1
@@ -83,26 +99,27 @@ with open(TSV, "r", encoding="utf-8", errors="replace") as f:
         if len(batch) >= 5000:
             cur.executemany(INSERT, batch)
             batch = []
-if batch:
+  if batch:
     cur.executemany(INSERT, batch)
 
-cur.executescript("""
+  cur.executescript("""
 CREATE INDEX ix_system   ON roms(system);
 CREATE INDEX ix_ext      ON roms(ext);
 CREATE INDEX ix_name     ON roms(name);
-CREATE INDEX ix_game     ON roms(system, game);
 CREATE INDEX ix_region   ON roms(region);
-CREATE TABLE systems AS
-  SELECT system, COUNT(*) AS files, COUNT(DISTINCT game) AS games,
-         SUM(size_bytes) AS bytes
-  FROM roms GROUP BY system ORDER BY system;
 """)
-cur.execute("INSERT INTO meta(key,value) VALUES('root',?)", (root,))
-cur.execute("INSERT INTO meta(key,value) VALUES('files',?)", (str(n),))
-cur.execute("INSERT INTO meta(key,value) VALUES('total_bytes',?)", (str(total_bytes),))
-cur.execute("INSERT INTO meta(key,value) VALUES('built_epoch',?)", (str(int(time.time())),))
-con.commit()
-cur.execute("VACUUM")
-con.commit()
-con.close()
-print("rows=%d total_bytes=%d db=%s" % (n, total_bytes, DB))
+  finalize_games(con)                     # accurate `game` grouping + systems table
+  cur.execute("CREATE INDEX ix_game ON roms(system, game)")
+  cur.execute("INSERT INTO meta(key,value) VALUES('root',?)", (root,))
+  cur.execute("INSERT INTO meta(key,value) VALUES('files',?)", (str(n),))
+  cur.execute("INSERT INTO meta(key,value) VALUES('total_bytes',?)", (str(total_bytes),))
+  cur.execute("INSERT INTO meta(key,value) VALUES('built_epoch',?)", (str(int(time.time())),))
+  con.commit()
+  cur.execute("VACUUM")
+  con.commit()
+  con.close()
+  print("rows=%d total_bytes=%d db=%s" % (n, total_bytes, DB))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1], sys.argv[2], sys.argv[3])

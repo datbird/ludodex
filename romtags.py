@@ -39,8 +39,15 @@ GOOD_CODES = {
 _COMBO = re.compile(r"^[UEJWFGISKCABRDH]{2,6}$")
 
 # Generic container folders that aren't the game itself.
-GENERIC_DIRS = {"archive", "archives", "favorites", "favorite", "roms",
-                "games", "game", "iso", "isos", "complete", "_storage"}
+GENERIC_DIRS = {"archive", "archives", "archived", "favorites", "favorite",
+                "roms", "games", "game", "iso", "isos", "complete", "_storage"}
+
+# Media / support subfolders that hold art, manuals, saves — never a game.
+MEDIA_DIRS = {"images", "manuals", "videos", "media", "screenshots", "snaps",
+              "box", "boxart", "wheel", "marquee", "covers", "downloaded_media",
+              "support", "bezels", "logos", "fanart", "music", "gamelist",
+              "gamelists", "cheats", "saves", "states", "screenshot", "titles",
+              "3dboxes", "physicalmedia", "miximages"}
 
 # Extensions that indicate an actual ROM/disc image (skip box-art/manuals/etc).
 ROM_EXTS = {
@@ -117,3 +124,78 @@ def parse_name(filename):
           (" " + " ".join("[%s]" % g for g in bracks) if bracks else "")
     return (title, region, languages, version, revision, disc,
             ",".join(dict.fromkeys(flags)), raw.strip())
+
+
+_REGION_DIRS = {r.lower() for r in REGIONS}
+
+
+def _clean_title(fn):
+    """A game's display title from a filename or folder name (tags stripped)."""
+    t = parse_name(fn)[0].strip()
+    return t or fn
+
+
+def compute_game_keys(rows):
+    """Assign every ROM-index row a *game* string, grouping files into games the
+    way a human would — the hard part of counting a ROM archive accurately.
+
+    A ROM tree mixes three layouts, often within one system:
+      • loose files        system/Archive/Game (USA).zip          → 1 game / file
+      • collection folders  system/All Releases/Game A.gba, B.gba  → 1 game / file
+      • game folders        system/Favorite/Game/…/eboot.bin       → 1 game / folder
+    Plus wrapper dirs (Archive/Favorite), region subfolders (Japan/USA), and media
+    subfolders (images/manuals) that must never be mistaken for games.
+
+    `rows` is an iterable of (id, system, relpath, ext). Returns {id: game}, where
+    game='' marks a non-game file (media/junk) to be excluded. Region/version
+    variants of one title collapse to a single game (distinct *titles*, not files).
+    """
+    rows = list(rows)
+    # Pass 1 — resolve each file to (system, top-folder, kind, title) after
+    # stripping leading wrapper/region/media dirs; tally direct ROM children per
+    # folder so we can tell a collection (many distinct-titled ROMs) from a
+    # self-contained game folder (data files under one title).
+    direct = {}          # (system, top.lower()) -> set(titles)  [collection evidence]
+    resolved = {}        # id -> (system, top|None, kind, title)
+    for rid, system, relpath, ext in rows:
+        parts = relpath.split("/")
+        mid, fn = parts[1:-1], parts[-1]
+        ext = (ext or "").lower()
+        i = 0
+        while i < len(mid):
+            dl = mid[i].lower()
+            if dl in GENERIC_DIRS or dl in MEDIA_DIRS or dl in _REGION_DIRS:
+                i += 1
+                continue
+            break
+        rest = mid[i:]
+        if not rest:                                  # loose file under a wrapper
+            resolved[rid] = (system, None, "loose", _clean_title(fn)) \
+                if ext in ROM_EXTS else None
+            continue
+        top = rest[0]
+        if top.lower() in MEDIA_DIRS:                 # stray media, not a game
+            resolved[rid] = None
+            continue
+        if len(rest) == 1 and ext in ROM_EXTS:        # direct ROM child of `top`
+            t = _clean_title(fn)
+            direct.setdefault((system, top.lower()), set()).add(t.lower())
+            resolved[rid] = (system, top, "member", t)
+        else:                                         # deeper/non-ROM → folder game
+            resolved[rid] = (system, top, "folder", _clean_title(top))
+    # Pass 2 — emit the game string. A folder that has direct ROM children is a
+    # collection: its members are the games and its other files aren't distinct
+    # games (game=''). A folder with no direct ROM children is one game.
+    out = {}
+    for rid, v in resolved.items():
+        if v is None:
+            out[rid] = ""
+            continue
+        system, top, kind, title = v
+        if kind in ("loose", "member"):
+            out[rid] = title
+        elif (system, top.lower()) in direct:         # non-member file in a collection
+            out[rid] = ""
+        else:                                          # self-contained game folder
+            out[rid] = title
+    return out

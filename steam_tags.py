@@ -27,6 +27,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
+from titlenorm import norm      # same dedupe normalizer build_library keys on
 
 DB = os.path.join(DATA, "steam-tags.sqlite")
 API = "https://steamspy.com/api.php?request=appdetails&appid=%s"
@@ -65,6 +66,65 @@ def steam_games():
     return rows
 
 
+def owned_from_tsv(path):
+    """[(appid, norm_key)] from a steam ownership TSV (appid<TAB>name) — lets us
+    fetch tags for a fresh import BEFORE build_library exists, so new games are
+    covered in the same rebuild. norm() matches build_library's dedupe key."""
+    out = []
+    if not (path and os.path.exists(path)):
+        return out
+    for line in open(path, encoding="utf-8"):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) < 2 or not parts[0].isdigit() or not parts[1]:
+            continue
+        k = norm(parts[1])
+        if k:
+            out.append((parts[0], k))
+    return out
+
+
+def fetch_pairs(pairs, top=TOP_DEFAULT, refresh=False, limit=None, should_stop=None):
+    """Fetch + cache Steam community tags for [(appid, norm_key)] pairs. Skips
+    games fetched within the TTL unless refresh. Returns the number tagged. This
+    is the shared entry point for the CLI, the sync pipeline, and the wand."""
+    if not config.metadata_enabled("steamspy"):
+        return 0
+    con = _con()
+    fresh = set()
+    if not refresh:
+        fresh_cut = int(time.time()) - TTL_DAYS * 86400
+        fresh = {nk for (nk,) in con.execute(
+            "SELECT DISTINCT norm_key FROM steam_tags WHERE updated>=?", (fresh_cut,))}
+    todo = [(a, nk) for (a, nk) in pairs if nk not in fresh]
+    if limit:
+        todo = todo[:limit]
+    cooldown = _cooldown()
+    done = 0
+    for i, (appid, nk) in enumerate(todo):
+        if should_stop and should_stop():
+            break
+        try:
+            tags = fetch_tags(appid)
+        except (urllib.error.URLError, ValueError, TimeoutError) as e:
+            print("steam_tags: appid %s failed: %s" % (appid, e), file=sys.stderr)
+            time.sleep(cooldown)
+            continue
+        now = int(time.time())
+        chosen = sorted(tags.items(), key=lambda x: -x[1])[:top]
+        con.execute("DELETE FROM steam_tags WHERE norm_key=?", (nk,))
+        con.executemany(
+            "INSERT OR REPLACE INTO steam_tags(norm_key,tag,votes,updated) "
+            "VALUES(?,?,?,?)", [(nk, t, v, now) for t, v in chosen])
+        con.commit()
+        done += 1
+        if done % 50 == 0:
+            print("steam_tags: %d/%d…" % (done, len(todo)), file=sys.stderr)
+        if i < len(todo) - 1:
+            time.sleep(cooldown)
+    con.close()
+    return done
+
+
 def _cooldown():
     try:
         ms = config.rate_limits("steamspy").get("cooldown_ms") or DEFAULT_COOLDOWN_MS
@@ -95,46 +155,12 @@ def main(argv):
     limit = int(argv[argv.index("--limit") + 1]) if "--limit" in argv else None
     top = int(argv[argv.index("--top") + 1]) if "--top" in argv else TOP_DEFAULT
 
-    con = _con()
-    fresh_cut = int(time.time()) - TTL_DAYS * 86400
-    fresh = set()
-    if not refresh:
-        fresh = {nk for (nk,) in con.execute(
-            "SELECT DISTINCT norm_key FROM steam_tags WHERE updated>=?",
-            (fresh_cut,))}
-
-    games = steam_games()
-    todo_all = [(a, nk) for (a, nk) in games if nk not in fresh]
-    todo = todo_all[:limit] if limit else todo_all
-    print("steam_tags: %d owned steam games, %d already fresh, fetching %d%s"
-          % (len(games), len(games) - len(todo_all), len(todo),
-             " (limited)" if limit and len(todo_all) > len(todo) else ""),
-          file=sys.stderr)
-
-    cooldown = _cooldown()
-    done = errs = 0
-    for i, (appid, nk) in enumerate(todo):
-        try:
-            tags = fetch_tags(appid)
-        except (urllib.error.URLError, ValueError, TimeoutError) as e:
-            errs += 1
-            print("steam_tags: appid %s failed: %s" % (appid, e), file=sys.stderr)
-            time.sleep(cooldown)
-            continue
-        now = int(time.time())
-        chosen = sorted(tags.items(), key=lambda x: -x[1])[:top]
-        con.execute("DELETE FROM steam_tags WHERE norm_key=?", (nk,))
-        con.executemany(
-            "INSERT OR REPLACE INTO steam_tags(norm_key,tag,votes,updated) "
-            "VALUES(?,?,?,?)", [(nk, t, v, now) for t, v in chosen])
-        con.commit()
-        done += 1
-        if done % 50 == 0:
-            print("steam_tags: %d/%d…" % (done, len(todo)), file=sys.stderr)
-        if i < len(todo) - 1:
-            time.sleep(cooldown)
-    con.close()
-    print("steam_tags: tagged %d games (%d errors)" % (done, errs), file=sys.stderr)
+    tsv = argv[argv.index("--tsv") + 1] if "--tsv" in argv else None
+    pairs = owned_from_tsv(tsv) if tsv else steam_games()
+    print("steam_tags: %d owned steam games%s"
+          % (len(pairs), " (from tsv)" if tsv else ""), file=sys.stderr)
+    done = fetch_pairs(pairs, top=top, refresh=refresh, limit=limit)
+    print("steam_tags: tagged %d games" % done, file=sys.stderr)
 
 
 if __name__ == "__main__":
