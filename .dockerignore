@@ -33,6 +33,7 @@ device-media/
 .psn/
 .xbox/
 .steam/
+.nintendo/
 tokens.json
 *service-account*.json
 *serviceaccount*.json

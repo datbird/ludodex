@@ -17,6 +17,7 @@ ludodex_to_playnite.json
 .steam/
 .psn/
 .xbox/
+.nintendo/
 tokens.json
 *service-account*.json
 *serviceaccount*.json

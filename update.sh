@@ -26,6 +26,9 @@ if ! enabled steam; then echo "  steam: disabled"; else
     STEAM_API_KEY="$KEY" python3 steam_owned.py > steam_games.tsv 2>steam.err \
       && echo "  steam: $(wc -l < steam_games.tsv) games" \
       || echo "  steam FAILED: $(tail -1 steam.err)"
+    STEAM_API_KEY="$KEY" python3 steam_wishlist.py > steam_wishlist.tsv 2>steam_wl.err \
+      && echo "  steam wishlist: $(wc -l < steam_wishlist.tsv) wanted" \
+      || echo "  steam wishlist: $(tail -1 steam_wl.err 2>/dev/null)"
   else echo "  steam: no API key (run ./setup.sh, or set steam_api_key)"; fi
 fi
 
@@ -39,6 +42,8 @@ echo "== GOG =="
 if ! enabled gog; then echo "  gog: disabled"; else
   python3 gog_owned.py > gog_games.tsv 2>gog.err && echo "  gog: $(wc -l < gog_games.tsv) games" \
     || echo "  gog FAILED: $(tail -1 gog.err)"
+  python3 gog_wishlist.py > gog_wishlist.tsv 2>gog_wl.err && echo "  gog wishlist: $(wc -l < gog_wishlist.tsv) wanted" \
+    || echo "  gog wishlist: $(tail -1 gog_wl.err 2>/dev/null)"
 fi
 
 echo "== itch.io =="

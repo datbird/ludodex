@@ -5,6 +5,7 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pillow>=10.0
+pymupdf>=1.24        # render PDF manuals' first page to a preview thumbnail
 
 # --- AI providers (BYOAI — supply only the key(s) for the provider you use) ---
 anthropic>=0.114     # provider: anthropic
