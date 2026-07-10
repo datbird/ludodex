@@ -1,10 +1,10 @@
-import { useEffect, useState, useRef, useCallback, Fragment, type CSSProperties, type ChangeEvent, type DragEvent, type FormEvent } from 'react'
+import { useEffect, useState, useRef, useCallback, useMemo, Fragment, type CSSProperties, type ChangeEvent, type DragEvent, type FormEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { api } from './api'
 import type {
   GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
   AiUsageModel, AiUsageProvider, AiUsageDay,
   DedupeSuggestion, ArtPick, Service, ServiceConnect, Achievements as AchData,
-  MediaLibrary, MediaAsset, MediaKind,
+  MediaLibrary, MediaAsset, MediaKind, BannedMedia,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device,
@@ -13,8 +13,10 @@ import type {
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, ProviderMatch, ScopeValue,
   AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState, DbSyncTest,
-  Prefs, MediaMode,
+  Prefs, MediaMode, FileopsApplyMode, FsStat, OwnershipFact, Frame,
+  GameRelease, SystemEntry,
 } from './api'
+import { providerColor, providerLabel } from './providers'
 import './App.css'
 
 const PAGE_OPTIONS = [25, 50, 100, 500, 1000]
@@ -94,6 +96,54 @@ function useClickOutside<T extends HTMLElement>(active: boolean, onClose: () => 
     return () => document.removeEventListener('mousedown', onDown)
   }, [active])
   return ref
+}
+
+// A small colored dot for a provider origin — used on attribute values + source
+// rows so provider attribution is visible and consistent everywhere.
+function ProvDot({ origin }: { origin: string }) {
+  return <span className="prov-dot" title={providerLabel(origin)}
+    style={{ background: providerColor(origin) }} />
+}
+// A colored provider label pill (where the provider name is spelled out).
+function ProvTag({ origin }: { origin: string }) {
+  const c = providerColor(origin)
+  return <span className="prov-tag"
+    style={{ color: c, borderColor: c + '66', background: c + '18' }}>
+    {providerLabel(origin)}</span>
+}
+// Tint a value badge from its origin(s): faint fill + border of the first
+// provider's color (multi-origin values also carry a dot per provider).
+function attrBadgeStyle(origins: string[]): CSSProperties {
+  const c = providerColor(origins[0] || 'manual')
+  return { borderColor: c + '99', background: c + '20' }
+}
+
+// Lock background page scroll while a modal/overlay is mounted, so scrolling
+// inside the modal doesn't scroll the page behind it. Ref-counted so several
+// stacked overlays don't unlock the body until the last one closes.
+let _scrollLocks = 0
+function useScrollLock(active = true) {
+  useEffect(() => {
+    if (!active) return
+    _scrollLocks += 1
+    if (_scrollLocks === 1) {
+      // Reserve the (now-hidden) scrollbar's width so desktop content doesn't
+      // shift when the modal opens. On mobile this is 0 (no persistent bar).
+      const sbw = window.innerWidth - document.documentElement.clientWidth
+      document.body.style.overflow = 'hidden'
+      document.documentElement.style.overflow = 'hidden'
+      if (sbw > 0) document.body.style.paddingRight = sbw + 'px'
+    }
+    return () => {
+      _scrollLocks -= 1
+      if (_scrollLocks <= 0) {
+        _scrollLocks = 0
+        document.body.style.overflow = ''
+        document.documentElement.style.overflow = ''
+        document.body.style.paddingRight = ''
+      }
+    }
+  }, [active])
 }
 
 // Build the include/exclude filter sections from live facets. Status flags are
@@ -232,16 +282,31 @@ function NoArt({ title, compact, unmatched }: {
 // fails to load (e.g. a Deck-local file that 404s on this host), render the
 // generated name-placeholder instead.
 function Cover({ g, compact }: {
-  g: { norm_key: string; title: string; has_cover: boolean; matched: boolean }
+  g: { norm_key: string; title: string; has_cover: boolean; identified?: boolean; framing_cover?: Frame }
   compact?: boolean
 }) {
   const [failed, setFailed] = useState(false)
   if (!g.has_cover || failed)
-    return <NoArt title={g.title} unmatched={!g.matched} compact={compact} />
-  return (
-    <img loading="lazy" src={api.mediaUrl(g.norm_key, 'cover', true)} alt=""
-      onError={() => setFailed(true)} />
-  )
+    return <NoArt title={g.title} unmatched={g.identified === false} compact={compact} />
+  // Framing needs a positioned, sized container (the poster grid's .cover). The
+  // compact thumbnails (table cell, spotlight) aren't positioned, so a framed
+  // .frame-box would escape to the viewport — and framing a ~40px thumb is
+  // pointless anyway — so only apply framing in the full (non-compact) cover.
+  const fs = compact ? undefined : frameStyle(g.framing_cover)
+  const img = <img loading="lazy" src={api.mediaUrl(g.norm_key, 'cover', true)} alt=""
+    onError={() => setFailed(true)} />
+  return fs ? <div className="frame-box" style={fs}>{img}</div> : img
+}
+
+// Default frame + the inline style that positions/zooms an image inside its
+// viewport. Returns undefined for an unframed (identity) frame.
+const DEFAULT_FRAME: Frame = { top: 0, right: 0, bottom: 0, left: 0, zoom: 1 }
+function frameStyle(f?: Frame | null): CSSProperties | undefined {
+  if (!f || (!f.top && !f.right && !f.bottom && !f.left && f.zoom === 1)) return undefined
+  return {
+    top: f.top + '%', right: f.right + '%', bottom: f.bottom + '%', left: f.left + '%',
+    transform: `scale(${f.zoom})`,
+  }
 }
 
 function FilterRow({ name, state, onSet }: {
@@ -360,16 +425,23 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [stats, setStats] = useState<Stats | null>(null)
   const [facets, setFacets] = useState<Facets | null>(null)
   const [q, setQ] = useState('')
+  const [status, setStatus] = useState<'owned' | 'wanted' | 'all'>('owned')
+  // Bare unidentified ROMs (just a filename, no match) are hidden by default.
+  const [showUnidentified, setShowUnidentified] = useState(false)
+  // Mobile: collapse everything past the search into one "Options" disclosure.
+  const [optsOpen, setOptsOpen] = useState(false)
   const [filters, setFilters] = useState<FilterState>({})
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [filterQ, setFilterQ] = useState('')
   const [sort, setSort] = useState<SortState>({})
   const [sortOpen, setSortOpen] = useState(false)
-  const [aiMode, setAiMode] = useState(false)
+  const [searchMode, setSearchMode] = useState<'basic' | 'ai' | 'query'>('basic')
+  const aiMode = searchMode === 'ai'
   const [aiNote, setAiNote] = useState('')
 
   const [items, setItems] = useState<GameRow[]>([])
   const [total, setTotal] = useState(0)
+  const [hidden, setHidden] = useState(0)   // unidentified matches hidden by the toggle
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -409,33 +481,40 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
     writePref('theme', theme)
   }, [theme])
 
+  const refreshStats = useCallback(() => { api.stats().then(setStats).catch(() => {}) }, [])
   useEffect(() => {
-    api.stats().then(setStats).catch(() => {})
+    refreshStats()
     api.facets().then(setFacets).catch(() => {})
-  }, [])
+  }, [refreshStats])
 
   const load = useCallback(async (reset: boolean) => {
     setLoading(true)
     try {
       const off = reset ? 0 : offset
       const qy: GamesQuery = {
-        q: q || undefined,
+        q: searchMode === 'basic' ? (q || undefined) : undefined,
+        query: searchMode === 'query' ? (q || undefined) : undefined,
         include: Object.keys(filters).filter((k) => filters[k] === 'include'),
         exclude: Object.keys(filters).filter((k) => filters[k] === 'exclude'),
         sort: ([1, 2, 3] as const)
           .map((r) => Object.keys(sort).find((k) => sort[k] === r))
           .filter((k): k is string => !!k),
+        status,
+        // the show-unidentified toggle is the single control for ROM visibility —
+        // honored during search too (toggle it on to find unidentified titles).
+        identified: showUnidentified ? 'all' : 'only',
         limit: perPage,
         offset: off,
       }
       const page = await api.games(qy)
       setTotal(page.total)
+      setHidden(page.hidden_unidentified ?? 0)
       setOffset(off + page.items.length)
       setItems((prev) => (reset ? page.items : [...prev, ...page.items]))
     } finally {
       setLoading(false)
     }
-  }, [q, filters, sort, perPage, offset])
+  }, [q, status, showUnidentified, filters, sort, perPage, offset, searchMode])
 
   const filterKey = JSON.stringify(filters)
   const sortReloadKey = JSON.stringify(sort)
@@ -446,7 +525,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
     const t = setTimeout(() => { setOffset(0); load(true) }, 250)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, filterKey, sortReloadKey, perPage, aiMode])
+  }, [q, status, showUnidentified, filterKey, sortReloadKey, perPage, searchMode])
 
   // Set a flag to include/exclude; clicking the same cell toggles it off, and
   // include/exclude are mutually exclusive per row.
@@ -516,6 +595,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       const res = await api.aiSearch(q)
       setItems(res.result.items)
       setTotal(res.result.total)
+      setHidden(0)
       setOffset(res.result.items.length)
       setAiNote(res.explanation)
     } catch {
@@ -534,7 +614,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           <h1>ludo<span>dex</span></h1>
           {stats && (
             <div className="stats">
-              {stats.games.toLocaleString()} games · {stats.media.games_with_art.toLocaleString()} with art ·{' '}
+              {(stats.identified ?? stats.games).toLocaleString()} games · {stats.media.games_with_art.toLocaleString()} with art ·{' '}
               {stats.cross_source} cross-source
             </div>
           )}
@@ -600,22 +680,53 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
         prefsTick={prefsTick} />}
 
       {tab === 'library' && (<>
-      <div className="controls">
-        <label className="switch ai-switch has-tip"
-          data-tip="Natural-language search. Describe what you want — e.g. “co-op platformers I own” or “unplayed RPGs with a cover” — and AI turns it into a catalog filter. Hit Ask or press Enter.">
-          <input type="checkbox" checked={aiMode} onChange={(e) => setAiMode(e.target.checked)} />
-          <span className="track"><span className="knob" /></span>
-          <span className="switch-text">✨ AI</span>
-        </label>
+      {!!stats?.pending_meta && (
+        <PendingApplyBar count={stats.pending_meta}
+          onApplied={() => { refreshStats(); load(true) }} />
+      )}
+      <div className={'controls' + (optsOpen ? ' opts-open' : '')}>
+        <div className="search-mode has-tip"
+          data-tip="Basic = title contains, across your whole library. ✨ AI = natural-language (“co-op platformers I own”). ⌘ Query = advanced field:value search.">
+          {(['basic', 'ai', 'query'] as const).map((m) => (
+            <button key={m} type="button" className={'sm-seg' + (searchMode === m ? ' on' : '')}
+              onClick={() => { setSearchMode(m); setAiNote('') }}>
+              {m === 'basic' ? 'Basic' : m === 'ai' ? '✨ AI' : '⌘ Query'}
+            </button>
+          ))}
+        </div>
         <input
           className="search"
-          placeholder={aiMode ? 'Ask: "co-op platformers I own"…' : 'Search titles…'}
+          placeholder={aiMode ? 'Ask: "co-op platformers I own"…'
+            : searchMode === 'query' ? 'mario platform:snes genre:racing year:>1990 -tag:multiplayer'
+            : 'Search titles…'}
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => { if (aiMode && e.key === 'Enter') runAi() }}
         />
         {aiMode && <button className="go" onClick={runAi}>Ask</button>}
-        <div className={'filter-wrap' + (filtersOpen ? '' : ' has-tip')} ref={filtersRef}
+        {searchMode === 'query' && (
+          <span className="query-hint has-tip" data-tip="platform: system: source: genre: theme: dev: publisher: series: tag: os: device: · year:>1990 · score:>=75 · prefix - to exclude · quote &quot;multi word&quot;">?</span>
+        )}
+        <button type="button" className={'opts-toggle' + (optsOpen ? ' on' : '')}
+          aria-expanded={optsOpen} onClick={() => setOptsOpen((v) => !v)}>
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <line x1="4" y1="6" x2="20" y2="6" /><line x1="4" y1="12" x2="20" y2="12" />
+            <line x1="4" y1="18" x2="20" y2="18" />
+          </svg>
+          Options
+        </button>
+        <div className="own-seg has-tip lib-collapse" role="group" aria-label="Ownership"
+          data-tip="Owned = games you have. Wanted = your imported store wishlists (Steam/GOG) for titles you don't own yet. All = both.">
+          {(['owned', 'wanted', 'all'] as const).map((s) => (
+            <button key={s} type="button" className={'own-seg-btn' + (status === s ? ' on' : '')}
+              disabled={aiMode} onClick={() => setStatus(s)}>
+              {s === 'owned' ? 'Owned' : s === 'wanted' ? 'Wanted' : 'All'}
+              {s === 'wanted' && !!stats?.wanted && <span className="own-seg-n">{stats.wanted}</span>}
+            </button>
+          ))}
+        </div>
+        <div className={'filter-wrap lib-collapse' + (filtersOpen ? '' : ' has-tip')} ref={filtersRef}
           data-tip="Narrow the library. Each row has two boxes: check Include to keep only games that match, or Exclude to hide games that match — one box per row. Rules combine (e.g. Steam + Matched, but not Emulation). Type in the search box to find a row.">
           <button className={'filter-btn' + (activeFilters ? ' on' : '')}
             disabled={aiMode} onClick={() => setFiltersOpen((v) => !v)}>
@@ -676,7 +787,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             </div>
           )}
         </div>
-        <div className={'filter-wrap' + (sortOpen ? '' : ' has-tip')} ref={sortRef}
+        <div className={'filter-wrap lib-collapse' + (sortOpen ? '' : ' has-tip')} ref={sortRef}
           data-tip="Sort by up to three things at once. Put a 1 next to your main sort, a 2 for the tiebreaker, and a 3 for the next — so “1st: System, 2nd: Matched” groups by system, then matched first within each. One pick per column; click a pick again to clear it.">
           <button className={'filter-btn' + (activeSort ? ' on' : '')}
             disabled={aiMode} onClick={() => setSortOpen((v) => !v)}>
@@ -716,9 +827,22 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       </div>
 
       {aiNote && <div className="ai-note">{aiNote}</div>}
-      <div className="results-bar">
-        <div className="count">{total.toLocaleString()} results</div>
-        <div className="results-tools">
+      <div className={'results-bar' + (optsOpen ? ' opts-open' : '')}>
+        <div className="count">{total.toLocaleString()} results
+          {!showUnidentified && hidden > 0 && (
+            <button className="hidden-hint" onClick={() => setShowUnidentified(true)}
+              title="Show the unidentified ROMs that also match your search">
+              · 👁 {hidden.toLocaleString()} unidentified match{hidden === 1 ? '' : 'es'} hidden — show
+            </button>
+          )}</div>
+        <div className="results-tools lib-collapse">
+          {!!stats?.unidentified && (
+            <button className={'filter-btn' + (showUnidentified ? ' active' : '')}
+              title="Bare ROMs with no provider match yet — hidden until identified (manually or by the Magic wand)"
+              onClick={() => setShowUnidentified((v) => !v)}>
+              {showUnidentified ? '🙈 Hide' : '👁'} {stats.unidentified.toLocaleString()} unidentified
+            </button>
+          )}
           <label className="per-page">
             Per page
             <select value={perPage} onChange={(e) => setPerPage(Number(e.target.value))}>
@@ -801,13 +925,15 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
               )}
               <div className="cover">
                 <Cover g={g} />
+                {g.wanted && <span className="want-badge">WANTED</span>}
               </div>
               <div className="title">{g.title}</div>
-              <div className="srcs">{g.sources_summary}</div>
+              <div className="srcs">{g.wanted ? g.sources_summary.replace(/wishlist:/, 'Wishlist: ') : g.sources_summary}</div>
             </button>
           ))}
         </div>
       ) : (
+        <div className="table-scroll">
         <table className="game-table">
           <thead>
             <tr>
@@ -838,7 +964,11 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
                   ? g.platforms.split(',').map((p) => <span key={p} className="pill">{p}</span>)
                   : <span className="dim">—</span>}</td>}
                 {showCol('matched') &&
-                  <td className="gt-num">{g.matched ? '✓' : <span className="dim">—</span>}</td>}
+                  <td className="gt-num" title={g.identified && !g.matched
+                    ? 'Identified by its store/manual source (not cross-referenced to a metadata provider)'
+                    : g.matched ? 'Matched to a metadata provider (IGDB/ScreenScraper)'
+                    : 'Not identified — a bare file with no provider match'}>
+                    {g.identified ? '✓' : <span className="dim">—</span>}</td>}
                 {showCol('n_sources') && <td className="gt-num">{g.n_sources}</td>}
                 {showCol('sources') && <td className="gt-srcs">{g.sources_summary}</td>}
                 {showCol('tags') && <td className="gt-tags">
@@ -853,6 +983,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             ))}
           </tbody>
         </table>
+        </div>
       )}
 
       {items.length < total && (
@@ -887,7 +1018,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       {tab === 'files' && <FilesTab />}
 
-      {selected && <Detail nk={selected} onClose={() => setSelected(null)} />}
+      {selected && <Detail nk={selected} onClose={() => { setSelected(null); refreshStats() }} />}
       {showSettings && <Settings onClose={() => setShowSettings(false)}
         onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} user={user} />}
       {showAddGame && <AddGame facets={facets} onClose={() => setShowAddGame(false)}
@@ -931,7 +1062,7 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
                 { id: 'credentials', name: 'Stores & providers' },
                 { id: 'dbsync', name: 'Database sync' },
                 { id: 'limits', name: 'Rate limits' }],
-  library: [{ id: 'preferences', name: 'Preferences' }],
+  library: [{ id: 'preferences', name: 'Preferences' }, { id: 'banned', name: 'Banned media' }],
   dashboard: [{ id: 'spotlight', name: 'Spotlight' }],
   metadata: [{ id: 'scan', name: 'Scan' },
              { id: 'review', name: 'Review' }],
@@ -948,6 +1079,14 @@ function Settings({ onClose, onPrefsChanged, user }: {
 
   const reload = () => api.aiConfig().then(setCfg).catch(() => {})
   useEffect(() => { reload() }, [])
+  useScrollLock()
+
+  // Escape closes the settings window (matches every other modal's expectation).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
 
   // "Account & Users" is admin-only.
   const sections = SECTIONS.filter((s) => s.id !== 'account' || user?.role === 'admin')
@@ -956,6 +1095,7 @@ function Settings({ onClose, onPrefsChanged, user }: {
   return (
     <div className="overlay" onClick={onClose}>
       <div className="settings-window" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose} aria-label="Close settings">×</button>
         <nav className="settings-nav">
           <div className="settings-title">Settings</div>
           {sections.map((s) => (
@@ -967,7 +1107,6 @@ function Settings({ onClose, onPrefsChanged, user }: {
           ))}
         </nav>
         <div className="settings-main">
-          <button className="close" onClick={onClose}>×</button>
           <div className="settings-tabs">
             {subs.map((t) => (
               <button key={t.id}
@@ -982,7 +1121,7 @@ function Settings({ onClose, onPrefsChanged, user }: {
                 : sub === 'dbsync' ? <DatabaseSync />
                 : sub === 'limits' ? <RateLimits /> : null)
               : section === 'library'
-              ? <LibraryPrefs onChanged={onPrefsChanged} />
+              ? (sub === 'banned' ? <BannedMediaPanel /> : <LibraryPrefs onChanged={onPrefsChanged} />)
               : section === 'dashboard'
               ? <DashboardPrefs onChanged={onPrefsChanged} />
               : section === 'metadata'
@@ -1339,11 +1478,50 @@ function CfAccessPanel() {
   )
 }
 
+const MEDIA_LANGUAGES = ['English', 'Japanese', 'French', 'German', 'Spanish',
+  'Italian', 'Portuguese', 'Dutch', 'Korean', 'Chinese', 'Russian', 'Polish']
 const MEDIA_MODES: { id: MediaMode; name: string; hint: string }[] = [
   { id: 'ondemand', name: 'On demand', hint: 'Keep references and fetch each image the first time it’s shown, then cache it. Lightest on storage; needs the source reachable.' },
   { id: 'chosen', name: 'Download what’s shown', hint: 'On each sync, pull the chosen image per game (cover, logo, …) into ludodex’s own repo — instant, self-contained, works offline. Extra candidates stay on-demand.' },
   { id: 'all', name: 'Download everything', hint: 'Also pull every alternate candidate — a full local archive. Uses the most storage.' },
 ]
+
+// Settings › Library › Banned media: assets you banned (deleted + never
+// re-downloaded). Unban to let the provider supply them again on the next fetch.
+function BannedMediaPanel() {
+  const [items, setItems] = useState<BannedMedia[] | null>(null)
+  const [busy, setBusy] = useState('')
+  const load = useCallback(() => api.bannedMedia().then((d) => setItems(d.banned)).catch(() => setItems([])), [])
+  useEffect(() => { load() }, [load])
+  const unban = async (b: BannedMedia) => {
+    setBusy(b.norm_key + b.ref)
+    try { await api.unbanMedia(b); await load() } catch { /* */ } finally { setBusy('') }
+  }
+  if (!items) return <div className="loading">Loading…</div>
+  return (
+    <div className="banned-media">
+      <h3>Banned media</h3>
+      <p className="dim">Assets you banned are deleted and never re-downloaded from their
+        provider. Unban one to let it come back on the next media fetch.</p>
+      {items.length === 0
+        ? <div className="sync-note dim">Nothing banned.</div>
+        : (
+          <div className="bm-list">
+            {items.map((b) => (
+              <div key={b.norm_key + b.kind + b.provider + b.ref} className="bm-row">
+                <span className="bm-title">{b.title}</span>
+                <span className="bm-kind">{b.kind.replace(/_/g, ' ')}</span>
+                <span className="bm-prov"><ProvTag origin={b.provider} /></span>
+                <span className="bm-ref dim" title={b.ref}>{b.ref.replace(/^https?:\/\//, '').slice(0, 48)}</span>
+                <button className="ops-btn" disabled={busy === b.norm_key + b.ref}
+                  onClick={() => unban(b)}>Unban</button>
+              </div>
+            ))}
+          </div>
+        )}
+    </div>
+  )
+}
 
 function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
   const [prefs, setPrefs] = useState<Prefs | null>(null)
@@ -1368,10 +1546,22 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
     setPrefs({ ...prefs, media_mode: m })
     try { await api.setPrefs({ media_mode: m }) } catch { load() }
   }
+  const setLang = async (v: string) => {
+    setPrefs({ ...prefs, media_language: v })
+    try { await api.setPrefs({ media_language: v }) } catch { load() }
+  }
   const downloadNow = async () => {
     setBusy(true)
     try { const r = await api.mediaMaterialize(); setPrefs((p) => p ? { ...p, media_job: r.media_job } : p) }
     finally { setBusy(false) }
+  }
+  const setApplyMode = async (m: FileopsApplyMode) => {
+    setPrefs({ ...prefs, fileops_apply_mode: m })
+    try { await api.setPrefs({ fileops_apply_mode: m }) } catch { load() }
+  }
+  const setManifests = async (v: boolean) => {
+    setPrefs({ ...prefs, manifests_enabled: v })
+    try { await api.setPrefs({ manifests_enabled: v }) } catch { load() }
   }
 
   return (
@@ -1416,6 +1606,58 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
               : job.ok ? `Downloaded ${job.downloaded} asset${job.downloaded === 1 ? '' : 's'}${job.dead ? `, dropped ${job.dead} dead ref${job.dead === 1 ? '' : 's'}` : ''} ✓`
               : job.finished ? `Failed: ${job.error || 'see server log'}` : ''}</span>}
           <span className="pref-hint media-actions-hint">Applies the setting above to your existing library right now.</span>
+        </div>
+      </div>
+
+      <div className="pref-section">
+        <div className="pref-name">Media language</div>
+        <span className="pref-hint">Preferred language for artwork &amp; media (logos, box art, manuals).
+          When set, the ✨ smart art picker prefers media in this language where quality is
+          comparable — otherwise it uses whatever's best.</span>
+        <select className="pref-select" value={prefs.media_language || ''}
+          onChange={(e) => setLang(e.target.value)}>
+          <option value="">Any (no preference)</option>
+          {MEDIA_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+        </select>
+      </div>
+
+      <div className="pref-section">
+        <div className="pref-name">File operations (Browse)</div>
+        <span className="pref-hint">When you drag files between panes in the Files → Browse
+          commander, should the move/copy be staged for review first, or run the instant you drop?</span>
+        <div className="media-modes">
+          {([['preview', 'Preview, then apply', 'A drop stages the operation — review source → destination, size and overwrite warnings, then Apply.'],
+             ['immediate', 'Immediate', 'A drop runs right away. (Deletes still ask to confirm.)']] as const).map(([id, name, hint]) => (
+            <label key={id} className={'media-mode' + ((prefs.fileops_apply_mode || 'preview') === id ? ' on' : '')}>
+              <input type="radio" name="fileops_apply_mode" checked={(prefs.fileops_apply_mode || 'preview') === id}
+                onChange={() => setApplyMode(id)} />
+              <div className="media-mode-body">
+                <div className="media-mode-name">{name}
+                  {id === 'preview' && <span className="media-mode-tag">default</span>}</div>
+                <div className="media-mode-hint">{hint}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+
+        <div className="pref-row" style={{ marginTop: 14 }}>
+          <label className="switch">
+            <input type="checkbox" checked={prefs.manifests_enabled !== false}
+              onChange={(e) => setManifests(e.target.checked)} />
+            <span className="track"><span className="knob" /></span>
+          </label>
+          <div className="pref-text">
+            <span className="pref-name">Write <code>.ludodex</code> folder manifests</span>
+            <span className="pref-hint">
+              When ludodex restructures, extracts or indexes a folder, it drops a small hidden
+              <code>.ludodex.json</code> at the folder's root recording what layout it follows, how many
+              games / files / systems it holds, and where its media lives. Any device that later sees the
+              folder reads this instead of re-scanning hundreds of thousands of files — so previews are
+              instant and operations already know what's there. It's a validated hint (re-checked cheaply,
+              ignored if the folder changed underneath it), is never moved or counted as a game, and holds
+              no private info. Turn off if you'd rather ludodex never write into your folders.
+            </span>
+          </div>
         </div>
       </div>
     </div>
@@ -1474,6 +1716,7 @@ const ADD_SOURCES = ['manual', 'steam', 'gog', 'epic', 'itch', 'ea', 'psn', 'xbo
 function AddGame({ facets, onClose, onAdded }: {
   facets: Facets | null; onClose: () => void; onAdded: () => void
 }) {
+  useScrollLock()
   const [tab, setTab] = useState<'manual' | 'image'>('manual')
   const systems = facets?.platforms || []
   const sources = Array.from(new Set([...ADD_SOURCES, ...(facets?.sources || [])]))
@@ -2215,6 +2458,7 @@ function AddManager({ deviceId, deviceName, kinds, onAdded }: {
   onAdded: (d: { devices: Device[] }) => void
 }) {
   const [open, setOpen] = useState(false)
+  useScrollLock(open)
   const [kind, setKind] = useState(kinds[0]?.[0] || 'roms')
   const [name, setName] = useState('')
   const [rom, setRom] = useState('')
@@ -2563,6 +2807,7 @@ function Credentials() {
                 {open && (
                   <div className="svc-body">
                     {s.hint && <span className="prov-hint">{s.hint}</span>}
+                    {s.doc && <a className="prov-doc" href={s.doc.url} target="_blank" rel="noreferrer noopener">{s.doc.label}</a>}
                     {s.fields.map((f) => (
                       <div key={f.key} className="svc-field">
                         <span className="svc-label">{f.label}</span>
@@ -2680,7 +2925,19 @@ function DeviceConnectFlow({ connect, onDone }: { connect: ServiceConnect; onDon
 function PasteConnectFlow({ connect, onDone }: { connect: ServiceConnect; onDone: () => void }) {
   const [val, setVal] = useState('')
   const [busy, setBusy] = useState(false)
+  const [starting, setStarting] = useState(false)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  // Dynamic sign-in URL (Nintendo): mint it server-side on click, then open it.
+  const openDynamic = async () => {
+    setStarting(true); setMsg(null)
+    try {
+      const r = await api.authorizeStart(connect.start!)
+      if (r.ok && r.url) window.open(r.url, '_blank', 'noopener')
+      else setMsg({ ok: false, text: r.error || "Couldn't start the sign-in." })
+    } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
+    finally { setStarting(false) }
+  }
 
   const go = async () => {
     if (!val.trim()) return
@@ -2701,9 +2958,13 @@ function PasteConnectFlow({ connect, onDone }: { connect: ServiceConnect; onDone
           : <span className="conn-off">○ Not connected</span>}
       </div>
       <div className="connect-row">
-        <a className="connect-link" href={connect.url} target="_blank" rel="noreferrer">
-          {connect.action_label} ↗
-        </a>
+        {connect.start
+          ? <button className="connect-link" disabled={starting} onClick={openDynamic}>
+              {starting ? 'Opening…' : connect.action_label + ' ↗'}
+            </button>
+          : <a className="connect-link" href={connect.url} target="_blank" rel="noreferrer">
+              {connect.action_label} ↗
+            </a>}
         <input className="connect-input" placeholder={connect.field_label}
           value={val} onChange={(e) => setVal(e.target.value)} />
         <button className="go" disabled={busy || !val.trim()} onClick={go}>
@@ -2768,6 +3029,7 @@ function RateLimits() {
 }
 
 function Dedupe({ onClose }: { onClose: () => void }) {
+  useScrollLock()
   const [loading, setLoading] = useState(true)
   const [items, setItems] = useState<DedupeSuggestion[]>([])
   const [err, setErr] = useState('')
@@ -3042,6 +3304,26 @@ function SyncMenu() {
             </div>
           )}
 
+          {job?.phases && job.phases.some((p) => p.state !== 'pending') && (
+            <div className="sync-list sync-phases">
+              {job.phases.map((p) => (
+                <div key={p.id} className="sync-row phase-row">
+                  <div className="sync-row-head static">
+                    <span className="sync-chev-pad" />
+                    <span className="sync-name">{p.label}</span>
+                    <span className="sync-meta">
+                      {p.state === 'running' ? <span className="sync-run">working…</span>
+                        : p.state === 'ok' ? <span className="conn-ok">✓{p.detail ? ' ' + p.detail : ''}</span>
+                        : p.state === 'failed' ? <span className="conn-off">✗ failed</span>
+                        : p.state === 'skipped' ? <span className="dim">—</span>
+                        : <span className="dim">pending</span>}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {romLocs.length > 0 && (
             <>
               <button className="sync-section" onClick={() => setRomListOpen((v) => !v)}>
@@ -3069,7 +3351,8 @@ function SyncMenu() {
                             {rs?.state === 'running' ? <span className="sync-run">scanning…</span>
                               : rs?.state === 'ok' ? <span className="conn-ok">✓ {(rs.roms ?? 0).toLocaleString()}</span>
                               : rs?.state === 'failed' ? <span className="conn-off">✗ failed</span>
-                              : l.count != null ? `${l.count.toLocaleString()} ROMs`
+                              : l.games != null ? <>{l.games.toLocaleString()} games<span className="sync-files"> · {(l.count ?? 0).toLocaleString()} files</span></>
+                              : l.count != null ? `${l.count.toLocaleString()} files`
                               : 'not scanned'}
                           </span>
                           {rs?.state !== 'running' && (
@@ -3241,9 +3524,6 @@ function ServerOps() {
 }
 
 const KIND_ORDER: Record<string, number> = {}
-function kindRank(k: string) {
-  return k in KIND_ORDER ? KIND_ORDER[k] : 999
-}
 
 const OS_NAME: Record<string, string> = { windows: 'Windows', mac: 'macOS', linux: 'Linux' }
 const OS_ABBR: Record<string, string> = { windows: 'Win', mac: 'Mac', linux: 'Linux' }
@@ -3260,6 +3540,7 @@ function systemLabel(source: string, platform: string): string | null {
 const TAG_GROUPS: [string, string][] = [
   ['genres', 'Genres'], ['themes', 'Themes'], ['game_modes', 'Modes'],
   ['player_perspectives', 'Perspective'], ['series', 'Series'],
+  ['os', 'OS'], ['device', 'Device'],
 ]
 
 // Tags are styled by ORIGIN so their provenance is visible at a glance (a
@@ -3371,12 +3652,13 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
                 <span className="ap-kname">{kind.replace(/_/g, ' ')}</span>
                 <span className="ap-vals">
                   {ov ? (
-                    <span className="ap-chip ap-chosen">{ov.value}
-                      <span className="attr-origin">{ov.origin}</span></span>
+                    <span className="ap-chip ap-chosen prov-badge" style={attrBadgeStyle([ov.origin])}>
+                      {ov.value}<ProvTag origin={ov.origin} /></span>
                   ) : vals.slice(0, 6).map((v, i) => (
-                    <span key={i} className="ap-chip">{v.ai && <span className="attr-sparkle" title="AI-derived">✨</span>}
+                    <span key={i} className="ap-chip prov-badge" style={attrBadgeStyle(v.origins)}>
+                      {v.ai && <span className="attr-sparkle" title="AI-derived">✨</span>}
                       {v.value}
-                      {v.origins.map((o) => <span key={o} className="attr-origin">{o}</span>)}</span>
+                      {v.origins.map((o) => <ProvDot key={o} origin={o} />)}</span>
                   ))}
                   {!ov && vals.length > 6 && <span className="dim">+{vals.length - 6}</span>}
                 </span>
@@ -3387,7 +3669,7 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
                   <div className="ar-h">Canonical value for “{kind.replace(/_/g, ' ')}”</div>
                   {ov && (
                     <div className="ar-cur">Currently pinned: <b>{ov.value}</b>
-                      <span className="attr-origin">{ov.origin}</span>
+                      <ProvTag origin={ov.origin} />
                       <button className="link-btn" onClick={() => clearOv(kind)}>revert to sources</button>
                     </div>
                   )}
@@ -3395,7 +3677,7 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
                     {vals.map((v, i) => (
                       <button key={i} className="ar-opt" onClick={() => setOv(kind, v.value, v.origins[0] || 'provider')}>
                         {v.ai && <span className="attr-sparkle">✨</span>}{v.value}
-                        {v.origins.map((o) => <span key={o} className="attr-origin">{o}</span>)}
+                        {v.origins.map((o) => <ProvTag key={o} origin={o} />)}
                       </button>
                     ))}
                   </div>
@@ -3416,8 +3698,13 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
   )
 }
 
-function About({ attrs, scores }: { attrs: Record<string, string[]>; scores?: Scores }) {
+function About({ attrs, scores, prov }: {
+  attrs: Record<string, string[]>; scores?: Scores
+  prov?: Record<string, { value: string; origins: string[]; ai: boolean }[]>
+}) {
   const first = (k: string) => attrs[k]?.[0]
+  const originsOf = (k: string, v: string) =>
+    prov?.[k]?.find((x) => x.value === v)?.origins ?? []
   const desc = first('description')
   const released = first('release_date') || first('release_year')
   const dev = attrs['developers']?.join(', ')
@@ -3473,7 +3760,15 @@ function About({ attrs, scores }: { attrs: Record<string, string[]>; scores?: Sc
         <div key={k} className="tag-group">
           <span className="tg-label">{label}</span>
           <span className="tg-tags">
-            {attrs[k].map((v) => <span key={v} className="tag">{v}</span>)}
+            {attrs[k].map((v) => {
+              const origins = originsOf(k, v)
+              return (
+                <span key={v} className="tag prov-badge"
+                  style={origins.length ? attrBadgeStyle(origins) : undefined}>
+                  {v}{origins.map((o) => <ProvDot key={o} origin={o} />)}
+                </span>
+              )
+            })}
           </span>
         </div>
       ) : null)}
@@ -3481,17 +3776,367 @@ function About({ attrs, scores }: { attrs: Record<string, string[]>; scores?: Sc
   )
 }
 
+// Accepted-but-unapplied metadata changes surface here, above the library search,
+// so applying isn't buried in Settings. Apply runs the batch job (link matches,
+// fetch records, rebuild); the bar clears once the pending count drops.
+function PendingApplyBar({ count, onApplied }: { count: number; onApplied: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const apply = async () => {
+    setBusy(true); setErr('')
+    try {
+      await api.aimetaApply(undefined, true)      // apply all accepted, all media
+    } catch (e) { setBusy(false); setErr(e instanceof Error ? e.message : 'failed'); return }
+    let tries = 0                                  // apply is a background job — poll
+    const poll = async () => {
+      tries += 1
+      const [s, jobs] = await Promise.all([
+        api.stats().catch(() => null),
+        api.jobs().then((r) => r.jobs).catch(() => [] as Job[]),
+      ])
+      const pendingCleared = !!s && (s.pending_meta ?? 0) < count
+      const jobDone = !jobs.some((j) =>
+        (j.kind === 'aimeta' || j.id.includes('aimeta')) &&
+        (j.status === 'running' || j.status === 'paused'))
+      if (pendingCleared || (jobDone && tries >= 2) || tries > 80) {
+        setBusy(false); onApplied(); return
+      }
+      setTimeout(poll, 3000)
+    }
+    setTimeout(poll, 3000)
+  }
+  return (
+    <div className="pending-apply">
+      <div className="pa-info">
+        <span className="pa-count">{count}</span>
+        <div className="pa-text">
+          <b>{count} metadata change{count === 1 ? '' : 's'} accepted — not applied yet.</b>
+          <span className="pa-sub">
+            Accepting only queues a change; your library won't update until you apply.
+            {err && <span className="pa-err"> · {err}</span>}
+          </span>
+        </div>
+      </div>
+      <button className="pa-btn" disabled={busy} onClick={apply}>
+        {busy ? 'Applying…' : 'Apply now'}
+      </button>
+    </div>
+  )
+}
+
+// Manual per-format ownership: mark a physical disc you own, or a per-platform
+// ROM/digital *want* that coexists with what you already have. Store/ROM syncs
+// can't know these, so they live in the durable ownership store.
+const OWN_FORMS: { id: string; label: string }[] = [
+  { id: 'physical', label: '💿 Physical' },
+  { id: 'rom', label: '🎮 ROM' },
+  { id: 'digital', label: '☁ Digital' },
+]
+const formLabel = (f: string) => OWN_FORMS.find((x) => x.id === f)?.label ?? f
+const stateIcon = (s: string) => (s === 'want' ? '🕗' : '✓')
+// Pretty-print a stored ownership platform slug: prefer the live IGDB system name,
+// then systemLabel's mapping, else the raw slug.
+const prettyPlatform = (slug: string, form: string, names?: Map<string, string>) =>
+  (slug && names?.get(slug)) || systemLabel(form === 'rom' ? 'emulation' : form, slug) || slug
+
+function OwnershipEditor({ nk, title, facts, onChanged }: {
+  nk: string; title: string; facts: OwnershipFact[]; onChanged: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  const remove = async (f: OwnershipFact) => {
+    setBusy(true)
+    try { await api.clearOwnership(nk, f.form, f.platform, f.state); onChanged() }
+    catch { /* surfaced elsewhere */ } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="own-editor">
+      <div className="own-editor-head">
+        <span className="own-editor-title">Track ownership manually</span>
+        <button className="own-add-toggle" onClick={() => setOpen(true)}>
+          + Add physical / want
+        </button>
+      </div>
+      {facts.length > 0 && (
+        <div className="own-facts">
+          {facts.map((f, i) => (
+            <span key={i} className={'own-chip ' + f.state}>
+              <span className="own-chip-state">{stateIcon(f.state)}</span>
+              {formLabel(f.form)}{f.platform ? ' · ' + prettyPlatform(f.platform, f.form) : ''}
+              <button className="own-chip-x" title="Remove" disabled={busy}
+                onClick={() => remove(f)}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      {open && <OwnershipOverlay nk={nk} title={title} facts={facts}
+        onChanged={onChanged} onClose={() => setOpen(false)} />}
+    </div>
+  )
+}
+
+// Full-screen overlay for adding ownership: pick what you're recording (form +
+// have/want) once, then click any system to toggle it. Two lists — the game's
+// real IGDB cross-platform releases up top, and the full searchable catalog of
+// known systems below for anything IGDB doesn't list.
+function OwnershipOverlay({ nk, title, facts, onChanged, onClose }: {
+  nk: string; title: string; facts: OwnershipFact[]
+  onChanged: () => void; onClose: () => void
+}) {
+  useScrollLock()
+  const [form, setForm] = useState<'physical' | 'rom' | 'digital'>('physical')
+  const [state, setState] = useState<'have' | 'want'>('have')
+  const [q, setQ] = useState('')
+  const [releases, setReleases] = useState<GameRelease[] | null>(null)
+  const [relInfo, setRelInfo] = useState<{ resolved: boolean; source?: string | null }>({ resolved: false })
+  const [systems, setSystems] = useState<SystemEntry[]>([])
+  const [busy, setBusy] = useState('')
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    let live = true
+    api.gameReleases(nk)
+      .then((r) => { if (live) { setReleases(r.releases || []); setRelInfo({ resolved: r.resolved, source: r.source }) } })
+      .catch(() => { if (live) setReleases([]) })
+    api.knownSystems().then((r) => { if (live) setSystems(r.systems || []) }).catch(() => {})
+    return () => { live = false }
+  }, [nk])
+
+  // name lookup for prettifying chips (releases first, then the full catalog)
+  const names = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const s of systems) m.set(s.id, s.name)
+    for (const r of (releases || [])) m.set(r.id, r.name)
+    return m
+  }, [systems, releases])
+
+  const factOf = (pid: string) => facts.find((f) => f.platform === pid && f.form === form && f.state === state)
+  const otherFacts = (pid: string) => facts.filter((f) => f.platform === pid && !(f.form === form && f.state === state))
+
+  const toggle = async (sys: { id: string; name: string }) => {
+    setBusy(sys.id); setErr('')
+    try {
+      if (factOf(sys.id)) await api.clearOwnership(nk, form, sys.id, state)
+      else await api.setOwnership(nk, form, sys.id, state, '', title)
+      onChanged()
+    } catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
+    finally { setBusy('') }
+  }
+
+  const ql = q.trim().toLowerCase()
+  const match = (name: string, id: string, abbr?: string) =>
+    !ql || name.toLowerCase().includes(ql) || id.includes(ql) || (abbr || '').toLowerCase().includes(ql)
+  const rel = (releases || []).filter((r) => match(r.name, r.id, r.abbr))
+  const relIds = new Set((releases || []).map((r) => r.id))
+  const sys = systems.filter((s) => !relIds.has(s.id) && match(s.name, s.id, s.abbr))
+    .slice(0, ql ? 300 : 80)
+
+  const Row = (s: { id: string; name: string; abbr?: string; year?: number | null }) => {
+    const on = !!factOf(s.id)
+    const others = otherFacts(s.id)
+    return (
+      <button key={s.id} type="button" disabled={busy === s.id}
+        className={'own-sys' + (on ? ' on' : '') + (busy === s.id ? ' busy' : '')}
+        onClick={() => toggle(s)}>
+        <span className="own-sys-check">{on ? '✓' : '+'}</span>
+        <span className="own-sys-name">{s.name}</span>
+        {s.year ? <span className="own-sys-year dim">{s.year}</span> : null}
+        {others.length > 0 && (
+          <span className="own-sys-badges" title="Already marked in other forms">
+            {others.map((o, i) => (
+              <span key={i} className={'own-sys-badge ' + o.state}>
+                {stateIcon(o.state)}{formLabel(o.form).replace(/^\S+\s/, '')}
+              </span>
+            ))}
+          </span>
+        )}
+      </button>
+    )
+  }
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="panel own-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose}>×</button>
+        <h2 className="own-panel-title">Track ownership<span className="dim"> · {title}</span></h2>
+        <p className="own-panel-desc dim">
+          Pick what you're recording, then click a system to mark it. Toggle again to remove.
+        </p>
+
+        <div className="own-controls">
+          <div className="own-seg own-form-seg">
+            {OWN_FORMS.map((f) => (
+              <button key={f.id} className={form === f.id ? 'on' : ''}
+                onClick={() => setForm(f.id as typeof form)}>{f.label}</button>
+            ))}
+          </div>
+          <div className="own-seg own-state-seg">
+            <button className={state === 'have' ? 'on' : ''} onClick={() => setState('have')}>✓ Have</button>
+            <button className={state === 'want' ? 'on want' : 'want'} onClick={() => setState('want')}>🕗 Want</button>
+          </div>
+        </div>
+
+        <input className="own-search" placeholder="Search systems…" value={q} autoFocus
+          onChange={(e) => setQ(e.target.value)} />
+        {err && <div className="own-err">⚠ {err}</div>}
+
+        <div className="own-lists">
+          <section className="own-sect">
+            <h3 className="own-sect-h">Released on
+              {releases && relInfo.resolved && <span className="dim"> · {(releases || []).length} platform{releases.length === 1 ? '' : 's'} per IGDB</span>}
+            </h3>
+            {releases === null
+              ? <div className="dim own-note">Looking up releases…</div>
+              : !relInfo.resolved
+                ? <div className="dim own-note">No IGDB match for this game — search the full system list below.</div>
+                : rel.length === 0
+                  ? <div className="dim own-note">{ql ? 'No matching release.' : 'No platform data.'}</div>
+                  : <div className="own-sys-grid">{rel.map(Row)}</div>}
+          </section>
+
+          <section className="own-sect">
+            <h3 className="own-sect-h">All systems
+              <span className="dim"> · {systems.length ? 'search to narrow' : 'loading…'}</span>
+            </h3>
+            {sys.length === 0
+              ? <div className="dim own-note">{ql ? 'No system matches.' : ''}</div>
+              : <div className="own-sys-grid">{sys.map(Row)}</div>}
+            {!ql && systems.length > sys.length + relIds.size &&
+              <div className="dim own-note">…and {systems.length - sys.length - relIds.size} more — type to search.</div>}
+          </section>
+        </div>
+
+        {facts.length > 0 && (
+          <div className="own-current">
+            <span className="own-current-h dim">Marked:</span>
+            {facts.map((f, i) => (
+              <span key={i} className={'own-chip ' + f.state}>
+                <span className="own-chip-state">{stateIcon(f.state)}</span>
+                {formLabel(f.form)}{f.platform ? ' · ' + prettyPlatform(f.platform, f.form, names) : ''}
+                <button className="own-chip-x" title="Remove"
+                  onClick={() => api.clearOwnership(nk, f.form, f.platform, f.state).then(onChanged).catch(() => {})}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Gear + sliders to position/zoom one image inside its viewport. Live-previews
+// through onChange (the parent applies it to the image) and debounce-saves.
+function FrameEditor({ nk, kind, value, onChange, label, disabled }: {
+  nk: string; kind: string; value?: Frame
+  onChange: (f: Frame | undefined) => void; label?: string; disabled?: boolean
+}) {
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const gearRef = useRef<HTMLButtonElement>(null)
+  const f = value ?? DEFAULT_FRAME
+  const saveT = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const set = (patch: Partial<Frame>) => {
+    const nf = { ...f, ...patch }
+    onChange(nf)
+    clearTimeout(saveT.current)
+    saveT.current = setTimeout(() => { api.setFraming(nk, kind, nf).catch(() => {}) }, 350)
+  }
+  const reset = () => {
+    clearTimeout(saveT.current); onChange(undefined)
+    api.clearFraming(nk, kind).catch(() => {})
+  }
+  const toggle = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (pos) { setPos(null); return }
+    const r = gearRef.current?.getBoundingClientRect()
+    if (r) setPos({ top: Math.min(r.bottom + 6, window.innerHeight - 250),
+                    left: Math.min(r.left, window.innerWidth - 250) })
+  }
+  if (disabled) {
+    return <button className="frame-gear disabled" disabled
+      title="No position/zoom settings for this media type">⚙</button>
+  }
+  return (
+    <>
+      <button ref={gearRef} className="frame-gear" title={`Frame the ${label ?? kind}`}
+        onClick={toggle}>⚙</button>
+      {pos && (
+        <>
+          <div className="frame-backdrop" onClick={(e) => { e.stopPropagation(); setPos(null) }} />
+          <div className="frame-panel" style={{ top: pos.top, left: pos.left }}
+            onClick={(e) => e.stopPropagation()}>
+            <div className="frame-panel-head">Frame the {label ?? kind}</div>
+            <div className="frame-row">
+              <label>Zoom</label>
+              <input type="range" min={0.25} max={5} step={0.05} value={f.zoom}
+                onChange={(e) => set({ zoom: Number(e.target.value) })} />
+              <span className="frame-val">{Math.round(f.zoom * 100)}%</span>
+            </div>
+            {(['top', 'right', 'bottom', 'left'] as const).map((side) => (
+              <div className="frame-row" key={side}>
+                <label>{side}</label>
+                <input type="range" min={-50} max={50} step={1} value={f[side]}
+                  onChange={(e) => set({ [side]: Number(e.target.value) } as Partial<Frame>)} />
+                <span className="frame-val">{f[side] > 0 ? '+' : ''}{f[side]}%</span>
+              </div>
+            ))}
+            <div className="frame-acts">
+              <button className="frame-reset" onClick={reset}>Reset</button>
+              <button className="frame-done" onClick={() => setPos(null)}>Done</button>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  )
+}
+
+// Fly a ✨ from a source element toward the Jobs monitor, insinuating the work was
+// handed off there. Pure DOM (no React state) so it survives the overlay closing.
+function flyToJobs(from: DOMRect) {
+  const target = document.querySelector('.jobmon')?.getBoundingClientRect()
+  const el = document.createElement('span')
+  el.className = 'wand-fly'
+  el.textContent = '✨'
+  const sx = from.left + from.width / 2, sy = from.top + from.height / 2
+  el.style.left = sx + 'px'
+  el.style.top = sy + 'px'
+  document.body.appendChild(el)
+  const tx = (target ? target.left + target.width / 2 : window.innerWidth - 40) - sx
+  const ty = (target ? target.top + target.height / 2 : 20) - sy
+  requestAnimationFrame(() => {
+    el.style.transform = `translate(${tx}px, ${ty}px) scale(0.25) rotate(200deg)`
+    el.style.opacity = '0'
+  })
+  window.setTimeout(() => el.remove(), 950)
+}
+
+// Lightweight transient toast, body-mounted so it outlives whatever fired it.
+function showToast(msg: string) {
+  const el = document.createElement('div')
+  el.className = 'app-toast'
+  el.textContent = msg
+  document.body.appendChild(el)
+  requestAnimationFrame(() => el.classList.add('show'))
+  window.setTimeout(() => {
+    el.classList.remove('show')
+    window.setTimeout(() => el.remove(), 350)
+  }, 4200)
+}
+
 function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
+  useScrollLock()
   const [d, setD] = useState<GameDetail | null>(null)
   const [media, setMedia] = useState<MediaLibrary | null>(null)
   const [kinds, setKinds] = useState<MediaKind[]>([])
-  const [tab, setTab] = useState<'attributes' | 'media'>('attributes')
-  const [wandBusy, setWandBusy] = useState(false)
-  const [wandDone, setWandDone] = useState<number | null>(null)
+  const [wandSent, setWandSent] = useState(false)
   const [wandErr, setWandErr] = useState('')
+  const [frames, setFrames] = useState<Record<string, Frame>>({})
 
   const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
   useEffect(() => { reloadDetail() }, [reloadDetail])
+  useEffect(() => { setFrames(d?.framing ?? {}) }, [d?.framing])
   useEffect(() => { setMedia(null); api.mediaLibrary(nk).then(setMedia).catch(() => {}) }, [nk])
   useEffect(() => {
     api.mediaKinds().then((r) => {
@@ -3500,28 +4145,21 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
     }).catch(() => {})
   }, [])
 
-  // Single-game magic wand: scan just this game (AI + provider match + web),
-  // then reload so suggestions surface in the AI-metadata callout below.
-  const runWand = async () => {
+  // Single-game magic wand: fire-and-forget. Kick off a background scan job, fling
+  // a ✨ toward the Jobs monitor, and tell the user to review/accept it there — so
+  // they can keep browsing and queue up as many as they like. No inline waiting.
+  const runWand = (e: ReactMouseEvent) => {
     if (!d) return
-    setWandBusy(true); setWandErr(''); setWandDone(null)
-    try {
-      const r = await api.aimetaScan({ norm_keys: [nk], label: d.title, media: true, metadata: true, web: true })
-      const runId = r.run_id
-      const poll = async () => {
-        try {
-          const { scans } = await api.aimetaScans()
-          const run = scans.find((s) => s.id === runId)
-          if (run && (run.finished !== null || (run.total > 0 && run.done >= run.total))) {
-            reloadDetail()
-            api.mediaLibrary(nk).then(setMedia).catch(() => {})
-            setWandBusy(false); setWandDone(run.findings); return
-          }
-        } catch { /* keep polling */ }
-        setTimeout(poll, 2000)
-      }
-      setTimeout(poll, 1500)
-    } catch (e) { setWandBusy(false); setWandErr((e as Error).message) }
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    setWandErr('')
+    api.aimetaScan({ norm_keys: [nk], label: d.title, media: true, metadata: true, web: true })
+      .then(() => {
+        flyToJobs(rect)
+        showToast('✨ Magic sent to the job monitor — check there for status & to accept')
+        setWandSent(true)
+        window.setTimeout(() => setWandSent(false), 5000)
+      })
+      .catch((err) => setWandErr((err as Error).message))
   }
 
   const assets = media?.assets ?? []
@@ -3529,8 +4167,17 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
     const of = assets.filter((a) => a.kind === kind && a.is_image)
     return of.find((a) => a.pinned) ?? of[0] ?? null
   }
-  const bg = pickKind('hero') ?? pickKind('background') ?? pickKind('header')
+  // a game is "identified" once it's a known title (a provider match or a real
+  // store/manual source); a bare ROM (emulation/archive only, no match) is not.
+  const identified = (d?.metadata_links?.length ?? 0) > 0 ||
+    (d?.sources ?? []).some((s) => !NON_ID_SRC.has(s.source))
+  const bgKind = pickKind('hero') ? 'hero' : pickKind('background') ? 'background'
+    : pickKind('header') ? 'header' : null
+  const bg = bgKind ? pickKind(bgKind) : null
   const logo = pickKind('logo')
+  // No wide hero art → float ALL of the game's images by, right-to-left in a loop,
+  // so a cover/screenshot-only game still gets a lively header instead of a swatch.
+  const marquee = bg ? [] : assets.filter((a) => a.is_image && a.kind !== 'logo')
 
   return (
     <div className="overlay" onClick={onClose}>
@@ -3538,9 +4185,23 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
         <button className="close" onClick={onClose}>×</button>
         {!d ? <div className="loading">Loading…</div> : (
           <>
-            <div className={'hero' + (bg ? '' : ' hero-plain')}
-                 style={bg ? undefined : { ['--h' as string]: hueOf(d.title) } as CSSProperties}>
-              {bg && <img className="hero-bg" src={bg.url} alt="" />}
+            <div className={'hero' + (bg ? '' : marquee.length ? ' hero-marquee-mode' : ' hero-plain')}
+                 style={(bg || marquee.length) ? undefined : { ['--h' as string]: hueOf(d.title) } as CSSProperties}>
+              {bg && (
+                <div className="hero-bg-frame" style={frameStyle(bgKind ? frames[bgKind] : undefined)}>
+                  <img className="hero-bg" src={bg.url} alt="" />
+                </div>
+              )}
+              {!bg && marquee.length > 0 && (
+                <div className="hero-marquee" aria-hidden="true">
+                  <div className="hero-marquee-track"
+                       style={{ animationDuration: Math.max(18, marquee.length * 7) + 's' }}>
+                    {[...marquee, ...marquee].map((a, i) => (
+                      <img key={i} className="hero-marquee-img" src={a.url} alt="" loading="lazy" />
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="hero-shade" />
               <div className="hero-fg">
                 {logo
@@ -3548,37 +4209,28 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
                   : <h2 className="hero-title">{d.title}</h2>}
                 <div className="hero-sub">{d.title}</div>
               </div>
-            </div>
-
-            <ArtStrip nk={nk} assets={assets} loading={!media} kinds={kinds}
-                      onChange={setMedia} />
-
-            <div className="detail-actions">
-              <button className="wand-btn detail-wand-btn" disabled={wandBusy} onClick={runWand}
-                title="Let AI enrich and supplement this game's metadata and media">
-                <span className="wand-spark">✨</span> {wandBusy ? 'Enriching…' : 'Magic wand'}
+              <button className="wand-btn hero-wand" onClick={runWand}
+                title="Send this game to the AI enrichment queue — review & accept in the Jobs monitor">
+                <span className="wand-spark">✨</span> Magic wand
               </button>
-              {wandBusy && <span className="dim detail-wand-note">Searching providers & the web for “{d.title}”…</span>}
-              {wandDone != null && !wandBusy && (
-                <span className="detail-wand-note">{wandDone > 0
-                  ? <><b>✨ {wandDone} suggestion{wandDone === 1 ? '' : 's'}</b> — review below</>
-                  : '✨ Nothing new to add — already well-matched'}</span>
+              {(wandSent || wandErr) && (
+                <span className={'hero-wand-note' + (wandErr ? ' err' : '')}>
+                  {wandErr || '✨ Sent to the job monitor — review & accept there'}</span>
               )}
-              {wandErr && <span className="connect-msg err detail-wand-note">{wandErr}</span>}
             </div>
 
-            <ParticleTabs className="panel-tabs2" active={tab}
-              onSelect={(id) => setTab(id as 'attributes' | 'media')}
-              tabs={[{ id: 'attributes', label: 'Attributes' }, { id: 'media', label: 'All Media' }]} />
+            <ArtStrip nk={nk} assets={assets} loading={!media} kinds={kinds} onChange={setMedia}
+              frames={frames} onFrame={(k, fr) => setFrames((p) => {
+                const n = { ...p }; if (fr) n[k] = fr; else delete n[k]; return n
+              })} />
 
-            {tab === 'attributes' ? (
               <div className="panel-body">
                 <Achievements nk={d.norm_key} />
 
                 {d.ai_meta && d.ai_meta.status !== 'rejected' &&
                   <AiMetaCallout finding={d.ai_meta} onChanged={reloadDetail} />}
 
-                <About attrs={d.attributes} scores={d.scores} />
+                <About attrs={d.attributes} scores={d.scores} prov={d.attribute_provenance} />
 
                 <AttributeProvenance d={d} onChanged={reloadDetail} />
 
@@ -3586,11 +4238,12 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
 
                 <section>
                   <h3>In your library
-                    <span className="sec-help">where you own this game — one row per file or store entry</span>
+                    <span className="sec-help">how you have (or want) this game — one row per format, store entry, or console</span>
                   </h3>
                   <table className="sources-table">
                     <thead>
                       <tr>
+                        <th>Status</th>
                         <th>Source</th>
                         <th>System</th>
                         <th>OS</th>
@@ -3600,8 +4253,14 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
                     </thead>
                     <tbody>
                       {d.sources.map((s, i) => (
-                        <tr key={i}>
-                          <td className="badge">{s.source}</td>
+                        <tr key={i} className={s.state === 'want' ? 'src-want' : ''}>
+                          <td>{s.state === 'want'
+                            ? <span className="own-pill want">🕗 Want</span>
+                            : !identified && NON_ID_SRC.has(s.source)
+                            ? <span className="own-pill unmatched" title="Not identified yet — identify it (Magic wand or manually) to add it to your library">◌ Unmatched</span>
+                            : <span className="own-pill have">✓ Have</span>}</td>
+                          <td className="badge" style={{ color: providerColor(s.source) }}>
+                            {s.source === 'physical' ? '💿 physical' : s.source}</td>
                           <td>{systemLabel(s.source, s.platform)
                             ?? <span className="dim">—</span>}</td>
                           <td>{s.os && s.os.length
@@ -3615,6 +4274,7 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
                       ))}
                     </tbody>
                   </table>
+                  <OwnershipEditor nk={d.norm_key} title={d.title} facts={d.ownership ?? []} onChanged={reloadDetail} />
                 </section>
 
                 {d.metadata_links.length > 0 && (
@@ -3637,12 +4297,6 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
                   </section>
                 )}
               </div>
-            ) : (
-              <div className="panel-body">
-                <AllMedia nk={d.norm_key} kinds={kinds} assets={assets} onChange={setMedia} />
-                <ArtPicker nk={d.norm_key} />
-              </div>
-            )}
           </>
         )}
       </div>
@@ -3651,128 +4305,64 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
 }
 
 // Horizontally-scrollable strip of every art asset the game actually has, with
-// pin controls. Pinned assets are what gets exported; scalar kinds keep one,
-// others up to the cap, in the order you arrange them.
-// Full-screen media viewer: enlarged image with prev/next (buttons, arrow keys,
-// mouse wheel). `items` are the navigable images; `index` is the current one.
-function Lightbox({ items, index, onClose, onIndex }: {
-  items: MediaAsset[]; index: number; onClose: () => void; onIndex: (i: number) => void
-}) {
-  const n = items.length
-  const go = useCallback((dir: number) => {
-    if (n) onIndex((index + dir + n) % n)
-  }, [index, n, onIndex])
-  const lastWheel = useRef(0)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-      else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') go(1)
-      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') go(-1)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [go, onClose])
-
-  const a = items[index]
-  if (!a) return null
-  return (
-    <div className="lightbox" onClick={onClose}
-      onWheel={(e) => {
-        if (e.timeStamp - lastWheel.current < 110) return   // throttle wheel steps
-        lastWheel.current = e.timeStamp
-        go(e.deltaY > 0 ? 1 : -1)
-      }}>
-      <button className="lb-close" title="Close (Esc)" onClick={onClose}>×</button>
-      {n > 1 && <button className="lb-nav lb-prev" title="Previous (←)"
-        onClick={(e) => { e.stopPropagation(); go(-1) }}>‹</button>}
-      <figure className="lb-figure" onClick={(e) => e.stopPropagation()}>
-        <img className="lb-img" src={a.url} alt={a.kind} />
-        <figcaption className="lb-cap">
-          <span className="lb-kind">{a.kind.replace(/_/g, ' ')}</span>
-          <span className="lb-prov">{a.provider}{a.width ? ` · ${a.width}×${a.height}` : ''}</span>
-          <span className="lb-count">{index + 1} / {n}</span>
-        </figcaption>
-      </figure>
-      {n > 1 && <button className="lb-nav lb-next" title="Next (→)"
-        onClick={(e) => { e.stopPropagation(); go(1) }}>›</button>}
-    </div>
-  )
-}
-
-function ArtStrip({ nk, assets, loading, kinds, onChange }: {
+// image kinds that render into a fixed viewport, so framing (position+zoom) applies
+const FRAMABLE_KINDS = new Set(['cover', 'background', 'hero', 'header', 'fanart'])
+const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv'])
+const isVideo = (a: MediaAsset) => !a.is_image && VIDEO_EXTS.has((a.ext || '').toLowerCase())
+const isPdf = (a: MediaAsset) => (a.ext || '').toLowerCase() === 'pdf'
+// sources that don't, by themselves, identify a game (just a file/ownership fact)
+const NON_ID_SRC = new Set(['emulation', 'archive', 'physical', 'rom', 'digital'])
+// The strip under the hero: compact icon buttons for the browse-worthy media
+// collections (screenshots / videos / manuals). Every other kind is still
+// collected + managed in the All Media tab — this just surfaces these three;
+// clicking one opens the per-kind overview (MediaKindOverlay).
+const STRIP_KINDS: { kind: string; icon: string; label: string }[] = [
+  { kind: 'screenshot', icon: '📷', label: 'Screenshots' },
+  { kind: 'video', icon: '🎬', label: 'Videos' },
+  { kind: 'manual', icon: '📖', label: 'Manuals' },
+]
+function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame }: {
   nk: string; assets: MediaAsset[]; loading: boolean; kinds: MediaKind[]
   onChange: (m: MediaLibrary) => void
+  frames?: Record<string, Frame>; onFrame?: (kind: string, f: Frame | undefined) => void
 }) {
-  const [viewIdx, setViewIdx] = useState<number | null>(null)
-  const [busy, setBusy] = useState(false)
-  const desc = (k: string) => kinds.find((x) => x.kind === k)?.description ?? k
-  const scalar = (k: string) => kinds.find((x) => x.kind === k)?.scalar ?? true
-
-  const pinnedIds = (kind: string) =>
-    assets.filter((a) => a.kind === kind && a.pinned)
-      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0)).map((a) => a.id)
-
-  const commit = async (kind: string, ids: number[]) => {
-    setBusy(true)
-    try { onChange(await api.setPins(nk, kind, ids)) }
-    catch { /* ignore */ } finally { setBusy(false) }
-  }
-  const toggle = (a: MediaAsset) => {
-    const cur = pinnedIds(a.kind)
-    commit(a.kind, a.pinned ? cur.filter((i) => i !== a.id) : [...cur, a.id])
-  }
-  const move = (a: MediaAsset, dir: -1 | 1) => {
-    const cur = pinnedIds(a.kind)
-    const i = cur.indexOf(a.id), j = i + dir
-    if (i < 0 || j < 0 || j >= cur.length) return
-    ;[cur[i], cur[j]] = [cur[j], cur[i]]
-    commit(a.kind, cur)
-  }
-
-  const ordered = [...assets].sort((a, b) => {
-    const kr = kindRank(a.kind) - kindRank(b.kind)
-    if (kr) return kr
-    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
-    return (a.rank ?? 99) - (b.rank ?? 99)
-  })
-  const viewable = ordered.filter((a) => a.is_image)     // navigable in the lightbox
-
-  if (loading) return <div className="art-strip loading-sm">Loading artwork…</div>
-  if (!ordered.length)
-    return <div className="art-strip art-empty">No artwork indexed for this game yet.</div>
-
+  const [openKind, setOpenKind] = useState<MediaKind | null>(null)
+  const [allOpen, setAllOpen] = useState(false)
+  const items = STRIP_KINDS
+    .map((s) => ({ ...s, n: assets.filter((a) => a.kind === s.kind).length,
+                   mk: kinds.find((x) => x.kind === s.kind) }))
+    .filter((s) => s.mk)
+  if (loading) return <div className="art-strip loading-sm">Loading media…</div>
   return (
-    <div className={'art-strip' + (busy ? ' busy' : '')}>
-      {ordered.map((a) => (
-        <div key={a.id} className={'art-tile' + (a.pinned ? ' pinned' : '')}
-             title={desc(a.kind)}>
-          <div className="art-thumb">
-            {a.is_image
-              ? <img loading="lazy" className="art-open" src={a.thumb ?? a.url} alt={a.kind}
-                  onClick={() => setViewIdx(viewable.indexOf(a))} title="Click to enlarge" />
-              : <a className="art-ext" href={a.url} target="_blank" rel="noreferrer"
-                  title="Open file">{(a.ext ?? '?').toUpperCase()}</a>}
-            <button className="art-pin" onClick={() => toggle(a)}
-              title={a.pinned ? 'Unpin (exclude from export)' : 'Pin (include in export)'}>
-              {a.pinned
-                ? (scalar(a.kind) ? '★' : a.rank)
-                : '☆'}
-            </button>
-            {a.pinned && !scalar(a.kind) && (
-              <div className="art-order">
-                <button onClick={() => move(a, -1)} title="Move earlier">‹</button>
-                <button onClick={() => move(a, 1)} title="Move later">›</button>
-              </div>
-            )}
-          </div>
-          <div className="art-kind">{a.kind.replace(/_/g, ' ')}</div>
-          <div className="art-prov">{a.provider}</div>
-        </div>
+    <div className="media-strip">
+      {items.map((s) => (
+        <button key={s.kind} className={'ms-btn' + (s.n ? '' : ' empty')} disabled={!s.n}
+          title={s.n ? `View ${s.n} ${s.label.toLowerCase()}` : `No ${s.label.toLowerCase()} yet`}
+          onClick={() => s.mk && setOpenKind(s.mk)}>
+          <span className="ms-icon">{s.icon}</span>
+          <span className="ms-text">{s.label}</span>
+          <span className="ms-count">{s.n || 0}</span>
+        </button>
       ))}
-      {viewIdx !== null && viewable[viewIdx] && (
-        <Lightbox items={viewable} index={viewIdx}
-          onClose={() => setViewIdx(null)} onIndex={setViewIdx} />
+      <button className="ms-btn ms-all" title="Browse & manage every media type — add, reorder, frame, ban"
+        onClick={() => setAllOpen(true)}>
+        <span className="ms-icon">🗂</span>
+        <span className="ms-text">All Media</span>
+      </button>
+      {openKind && (
+        <MediaKindOverlay nk={nk} kind={openKind}
+          assets={assets.filter((a) => a.kind === openKind.kind)}
+          onChange={onChange} onClose={() => setOpenKind(null)} />
+      )}
+      {allOpen && (
+        <div className="overlay" onClick={() => setAllOpen(false)}>
+          <div className="panel mko-panel allmedia-panel" onClick={(e) => e.stopPropagation()}>
+            <button className="close" onClick={() => setAllOpen(false)}>×</button>
+            <AllMedia nk={nk} kinds={kinds} assets={assets} onChange={onChange}
+              frames={frames} onFrame={onFrame} />
+            <ArtPicker nk={nk} />
+          </div>
+        </div>
       )}
     </div>
   )
@@ -3780,33 +4370,143 @@ function ArtStrip({ nk, assets, loading, kinds, onChange }: {
 
 // The full media classification vocabulary — every kind, present or not, with a
 // tooltip explaining what it is and why it exists.
-function AllMedia({ nk, kinds, assets, onChange }: {
+function AllMedia({ nk, kinds, assets, onChange, frames, onFrame }: {
   nk: string; kinds: MediaKind[]; assets: MediaAsset[]
   onChange: (m: MediaLibrary) => void
+  frames?: Record<string, Frame>; onFrame?: (kind: string, f: Frame | undefined) => void
 }) {
   const byKind: Record<string, MediaAsset[]> = {}
   assets.forEach((a) => { (byKind[a.kind] ??= []).push(a) })
   return (
     <section className="all-media">
-      <h3>All Media <span className="am-note">every classification — add your own from a URL or your device</span></h3>
+      <h3>All Media <span className="am-note">every classification — the ⚙ frames position &amp; zoom (grayed where it doesn't apply)</span></h3>
       <div className="am-grid">
         {kinds.map((k) => (
           <MediaKindCard key={k.kind} nk={nk} kind={k}
-            assets={byKind[k.kind] ?? []} onChange={onChange} />
+            assets={byKind[k.kind] ?? []} onChange={onChange}
+            frames={frames} onFrame={onFrame} />
         ))}
       </div>
     </section>
   )
 }
 
-// One media-kind card with an upload affordance: paste a direct URL (server
-// downloads it) or upload a file from the device. User uploads show as removable
-// thumbnails and take precedence as the game's art for that kind.
-function MediaKindCard({ nk, kind, assets, onChange }: {
-  nk: string; kind: MediaKind; assets: MediaAsset[]
+// Overlay gallery of every asset of ONE media kind: drag to set priority order,
+// click any item to view it enlarged (close returns here), videos play inline.
+function MediaKindOverlay({ nk, kind, assets, onClose, onChange }: {
+  nk: string; kind: MediaKind; assets: MediaAsset[]; onClose: () => void
   onChange: (m: MediaLibrary) => void
 }) {
+  useScrollLock()
+  const byRank = (list: MediaAsset[]) =>
+    [...list].sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9))
+  const [order, setOrder] = useState<MediaAsset[]>(() => byRank(assets))
+  const [viewing, setViewing] = useState<MediaAsset | null>(null)
+  const [drag, setDrag] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { setOrder(byRank(assets)) }, [assets])
+
+  const persist = async (next: MediaAsset[]) => {
+    setBusy(true)
+    try { onChange(await api.setPins(nk, kind.kind, next.map((a) => a.id))) }
+    catch { /* */ } finally { setBusy(false) }
+  }
+  const drop = (to: number) => {
+    if (drag === null || drag === to) { setDrag(null); return }
+    const next = [...order]
+    next.splice(to, 0, next.splice(drag, 1)[0])
+    setOrder(next); setDrag(null); persist(next)
+  }
+  const act = async (fn: () => Promise<MediaLibrary>) => {
+    setBusy(true)
+    try { onChange(await fn()) } catch { /* */ } finally { setBusy(false) }
+  }
+  const redist = (a: MediaAsset, val: boolean) => act(() => api.setMediaRedist(nk, a.id, val))
+  const remove = (a: MediaAsset) => {
+    if (a.user) { act(() => api.deleteUserMedia(nk, a.id)); return }
+    if (window.confirm(`Ban this ${a.kind.replace(/_/g, ' ')}?\n\nIt'll be deleted and `
+      + `never re-downloaded from ${a.provider}. You can unban it later in `
+      + `Settings › Banned media.`)) act(() => api.banMedia(nk, a.id))
+  }
+  const thumb = (a: MediaAsset) => isVideo(a)
+    ? <video src={a.url} muted preload="metadata" playsInline />
+    : (a.thumb || a.is_image)
+    ? <img src={a.thumb || a.url} alt={a.kind} loading="lazy" />
+    : <span className="mko-file">{(a.ext || 'file').toUpperCase()}</span>
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="panel mko-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose}>×</button>
+        <h2 className="mko-title">{kind.kind.replace(/_/g, ' ')}
+          <span className="dim"> · {order.length}</span>
+          {busy && <span className="dim mko-saving"> · saving…</span>}</h2>
+        <p className="mko-desc dim">Drag to set priority (the order they're used)
+          · click to enlarge{kind.description ? ' · ' + kind.description : ''}</p>
+        {order.length === 0
+          ? <div className="sync-note dim">No media of this type yet.</div>
+          : (
+            <div className="mko-grid">
+              {order.map((a, i) => (
+                <figure key={a.id} className={'mko-item' + (drag === i ? ' dragging' : '')}
+                  draggable onDragStart={() => setDrag(i)}
+                  onDragOver={(e) => e.preventDefault()} onDrop={() => drop(i)}
+                  onDragEnd={() => setDrag(null)}>
+                  <div className="mko-media" onClick={() => setViewing(a)} title="Click to enlarge">
+                    {thumb(a)}
+                    <span className="mko-rank" title="Priority order">{i + 1}</span>
+                  </div>
+                  <figcaption className="mko-cap">
+                    <span>{a.provider}{a.user ? ' · yours' : ''}</span>
+                    {a.width ? <span className="dim">{a.width}×{a.height}</span> : null}
+                  </figcaption>
+                  <div className="mko-ctl">
+                    <label className="mko-redist"
+                      title="Uncheck to keep this locally but NOT copy it to other machines when games are sent to them">
+                      <input type="checkbox" checked={a.redistributable !== false}
+                        onChange={(e) => redist(a, e.target.checked)} /> shareable
+                    </label>
+                    {a.user
+                      ? <button className="mko-remove" title="Delete this upload"
+                          onClick={() => remove(a)}>🗑</button>
+                      : <button className="mko-remove" title="Ban — delete & never re-download from the provider"
+                          onClick={() => remove(a)}>🚫</button>}
+                  </div>
+                </figure>
+              ))}
+            </div>
+          )}
+      </div>
+      {viewing && (
+        <div className="overlay mko-view" onClick={() => setViewing(null)}>
+          <button className="close" onClick={() => setViewing(null)}>×</button>
+          <div className="mko-view-inner" onClick={(e) => e.stopPropagation()}>
+            {viewing.is_image
+              ? <img src={viewing.url} alt={viewing.kind} />
+              : isVideo(viewing)
+              ? <video src={viewing.url} controls autoPlay playsInline />
+              : isPdf(viewing)
+              ? <iframe className="mko-pdf" src={viewing.url} title={viewing.kind} />
+              : <a className="mko-file big" href={viewing.url} target="_blank" rel="noreferrer">
+                  Open {(viewing.ext || 'file').toUpperCase()}</a>}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// One media-kind card with an upload affordance: paste a direct URL (server
+// downloads it) or upload a file from the device. User uploads show as removable
+// thumbnails and take precedence as the game's art for that kind. Clicking the
+// name/count opens a gallery overlay of every asset of this kind.
+function MediaKindCard({ nk, kind, assets, onChange, frames, onFrame }: {
+  nk: string; kind: MediaKind; assets: MediaAsset[]
+  onChange: (m: MediaLibrary) => void
+  frames?: Record<string, Frame>; onFrame?: (kind: string, f: Frame | undefined) => void
+}) {
   const [open, setOpen] = useState(false)
+  const [gallery, setGallery] = useState(false)
   const [url, setUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
@@ -3829,9 +4529,17 @@ function MediaKindCard({ nk, kind, assets, onChange }: {
   return (
     <div className={'am-item' + (n ? ' has' : '')}>
       <div className="am-head">
-        <span className="am-name" title={kind.description}>{kind.kind.replace(/_/g, ' ')}</span>
+        <span className={'am-name' + (n ? ' am-clickable' : '')}
+          title={n ? `View all ${kind.kind.replace(/_/g, ' ')} media` : kind.description}
+          onClick={() => { if (n) setGallery(true) }}>{kind.kind.replace(/_/g, ' ')}</span>
         <span className="am-actions">
-          <span className="am-badge">{n ? `×${n}` : '—'}</span>
+          <button className={'am-badge' + (n ? ' am-clickable' : '')} disabled={!n}
+            title={n ? 'View all' : undefined}
+            onClick={() => { if (n) setGallery(true) }}>{n ? `×${n}` : '—'}</button>
+          {onFrame && (
+            <FrameEditor nk={nk} kind={kind.kind} value={frames?.[kind.kind]} label={kind.kind}
+              onChange={(fr) => onFrame(kind.kind, fr)} disabled={!FRAMABLE_KINDS.has(kind.kind)} />
+          )}
           <button className={'am-up' + (open ? ' on' : '')} title="Add media"
             onClick={() => setOpen((v) => !v)}>+</button>
         </span>
@@ -3843,7 +4551,9 @@ function MediaKindCard({ nk, kind, assets, onChange }: {
         <div className="am-thumbs">
           {userAssets.map((a) => (
             <span key={a.id} className="am-thumb">
-              {a.is_image
+              {isVideo(a)
+                ? <video src={a.url} muted controls preload="metadata" playsInline />
+                : (a.thumb || a.is_image)
                 ? <img src={a.thumb || a.url} alt="" />
                 : <span className="am-file">{(a.ext || 'file').toUpperCase()}</span>}
               <button className="am-del" title="Remove upload" disabled={busy}
@@ -3871,6 +4581,8 @@ function MediaKindCard({ nk, kind, assets, onChange }: {
           {err && <div className="am-err">{err}</div>}
         </div>
       )}
+      {gallery && <MediaKindOverlay nk={nk} kind={kind} assets={assets}
+        onChange={onChange} onClose={() => setGallery(false)} />}
     </div>
   )
 }
@@ -3888,10 +4600,15 @@ function SpotlightSection({ onOpen, prefsTick }: {
   const [seconds, setSeconds] = useState(12)
   const [cycle, setCycle] = useState(0)   // remounts the timer bar → restarts it
   const [paused, setPaused] = useState(false)
+  const kindRef = useRef<string | undefined>(undefined)   // last theme, to avoid repeats
 
   const load = useCallback(async () => {
     setLoading(true)
-    try { setSp(await api.spotlight('random')) } catch { /* offline */ }
+    try {
+      const next = await api.spotlight('random', kindRef.current)
+      kindRef.current = next.kind
+      setSp(next)
+    } catch { /* offline */ }
     finally { setLoading(false); setCycle((c) => c + 1) }
   }, [])
   useEffect(() => { load() }, [load])
@@ -3899,6 +4616,13 @@ function SpotlightSection({ onOpen, prefsTick }: {
   useEffect(() => {
     api.prefs().then((p) => setSeconds(p.spotlight_seconds)).catch(() => {})
   }, [prefsTick])
+  // Rotate on a real timer (not the CSS animationend, which can silently miss a
+  // fire when the tab is backgrounded/paused and leave the spotlight stuck).
+  useEffect(() => {
+    if (paused || loading || !sp) return
+    const t = window.setTimeout(load, Math.max(3, seconds) * 1000)
+    return () => window.clearTimeout(t)
+  }, [paused, loading, sp, seconds, load])
 
   if (!sp || !sp.items.length) return null
   return (
@@ -3915,8 +4639,7 @@ function SpotlightSection({ onOpen, prefsTick }: {
       </div>
       <div className="sl-timer-track">
         <div key={cycle} className="sl-timer"
-          style={{ animationDuration: seconds + 's', animationPlayState: paused ? 'paused' : 'running' }}
-          onAnimationEnd={() => { if (!paused && !loading) load() }} />
+          style={{ animationDuration: seconds + 's', animationPlayState: paused ? 'paused' : 'running' }} />
       </div>
       <div className={'sl-row' + (loading ? ' fading' : '')}>
         {sp.items.map((g, i) => (
@@ -3947,8 +4670,9 @@ function Dashboard({ stats, onBrowse, onFilter, onOpen, prefsTick }: {
       <SpotlightSection onOpen={onOpen} prefsTick={prefsTick} />
       <div className="dash-cards">
         <div className="dash-card">
-          <div className="dc-num">{stats.games.toLocaleString()}</div>
-          <div className="dc-label">Games</div>
+          <div className="dc-num">{(stats.identified ?? stats.games).toLocaleString()}</div>
+          <div className="dc-label">Games{!!stats.unidentified &&
+            <span className="dc-sub"> · {stats.unidentified.toLocaleString()} unidentified</span>}</div>
         </div>
         <div className="dash-card">
           <div className="dc-num">{stats.media.games_with_art.toLocaleString()}</div>
@@ -4088,103 +4812,441 @@ function useDevices() {
 }
 
 // ---- Files tab: a dedicated top-level home for file-structure work ----------
-type BrowseNode = {
-  dirs: { name: string; nfiles: number }[]
-  files: { name: string; size: number }[]
-  loading?: boolean
-  error?: string
-}
 const joinPath = (base: string, name: string) =>
   (base === '/' ? '' : base.replace(/\/$/, '')) + '/' + name
 
-// One row of the read-only browse tree: a folder that lazy-loads its children.
-function DirNode({ abs, name, nfiles, tree, open, onToggle, depth }: {
-  abs: string; name: string; nfiles: number
-  tree: Record<string, BrowseNode>; open: Set<string>
-  onToggle: (abs: string) => void; depth: number
+// ---- Commander: a dual-pane file manager (Total-Commander style) ------------
+// Each pane is rooted at a device; you navigate, multi-select and drag files
+// between panes. A drop stages a Move/Copy (preview) that you Apply — or runs
+// immediately (per the fileops_apply_mode setting). Same-device ops go through
+// the reversible runbook engine (undoable in History); cross-device ops run as
+// rsync background jobs (the Jobs monitor).
+type PaneState = {
+  deviceId: number; path: string
+  dirs: { name: string; nfiles: number }[]
+  files: { name: string; size: number }[]
+  loading: boolean; error?: string
+  sel: Set<string>; anchor: string | null
+}
+type Dragload = { deviceId: number; dir: string; names: string[]; sizes: Record<string, number> }
+type Staged = {
+  srcDevice: number; srcDir: string; items: string[]
+  dstDevice: number; dstDir: string; mode: 'move' | 'copy'
+  total: number; overwrites: string[]
+}
+type Side = 'left' | 'right'
+const newPane = (deviceId: number): PaneState =>
+  ({ deviceId, path: '/', dirs: [], files: [], loading: false, sel: new Set(), anchor: null })
+const orderedNames = (p: PaneState) => [...p.dirs.map((d) => d.name), ...p.files.map((f) => f.name)]
+const parentPath = (p: string) => {
+  const q = p.replace(/\/+$/, ''); const i = q.lastIndexOf('/')
+  return i <= 0 ? '/' : q.slice(0, i)
+}
+const commonAncestor = (paths: string[]): string => {
+  const split = paths.map((p) => p.replace(/\/+$/, '').split('/').filter(Boolean))
+  const first = split[0] || []; const out: string[] = []
+  for (let i = 0; i < first.length; i++) {
+    if (split.every((s) => s[i] === first[i])) out.push(first[i]); else break
+  }
+  return '/' + out.join('/')
+}
+const relTo = (root: string, abs: string) =>
+  abs.replace(/\/+$/, '').slice(root === '/' ? 1 : root.length + 1)
+const shortPath = (p: string) => { const s = p.split('/').filter(Boolean); return s.length > 2 ? '…/' + s.slice(-2).join('/') : p }
+
+function CommanderPane({ pane, devices, active, showChecks, onActivate, onDevice, onNavigate,
+  onClickRow, onToggleCheck, onContextRow, onContextPane, onDragStartRow, onDropInto,
+  onRefresh, onNewFolder, onDelete }: {
+  pane: PaneState; devices: Device[]; active: boolean; showChecks: boolean
+  onActivate: () => void
+  onDevice: (id: number) => void
+  onNavigate: (path: string) => void
+  onClickRow: (name: string, e: ReactMouseEvent) => void
+  onToggleCheck: (name: string) => void
+  onContextRow: (name: string, e: ReactMouseEvent) => void
+  onContextPane: (e: ReactMouseEvent) => void
+  onDragStartRow: (name: string, e: DragEvent) => void
+  onDropInto: (dstDir: string, dstNames: string[] | null) => void
+  onRefresh: () => void; onNewFolder: () => void; onDelete: () => void
 }) {
-  const node = tree[abs]
-  const isOpen = open.has(abs)
-  const pad = (d: number) => ({ paddingLeft: d * 16 + 8 })
+  const [over, setOver] = useState<string | null>(null)
+  const segs = pane.path.split('/').filter(Boolean)
+  const devName = pane.deviceId === 0 ? 'This server'
+    : (devices.find((d) => d.id === pane.deviceId)?.name || 'Device ' + pane.deviceId)
+  const allow = (e: DragEvent) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' }
+  const check = (name: string) => showChecks && (
+    <input type="checkbox" className="cmd-check" checked={pane.sel.has(name)}
+      onClick={(e) => e.stopPropagation()} onChange={() => onToggleCheck(name)} />
+  )
+
   return (
-    <div className="fb-node">
-      <button className="fb-dir" style={pad(depth)} onClick={() => onToggle(abs)}>
-        <span className="fb-caret">{isOpen ? '▾' : '▸'}</span> 📁 <span className="fb-name">{name}</span>
-        <span className="dim fb-count">{nfiles.toLocaleString()} item{nfiles === 1 ? '' : 's'}</span>
-      </button>
-      {isOpen && node && (
-        <>
-          {node.loading && <div className="dim fb-note" style={pad(depth + 1)}>Loading…</div>}
-          {node.error && <div className="fo-warn fb-note" style={pad(depth + 1)}>⚠ {node.error}</div>}
-          {node.dirs.map((d) => (
-            <DirNode key={d.name} abs={joinPath(abs, d.name)} name={d.name} nfiles={d.nfiles}
-              tree={tree} open={open} onToggle={onToggle} depth={depth + 1} />
-          ))}
-          {node.files.map((f) => (
-            <div key={f.name} className="fb-file" style={pad(depth + 1)}>
-              📄 <span className="fb-name">{f.name}</span> <span className="dim fb-size">{fmtBytes(f.size)}</span>
-            </div>
-          ))}
-        </>
-      )}
+    <div className={'cmd-pane' + (active ? ' active' : '')} onMouseDown={onActivate}>
+      <div className="cmd-head">
+        <select className="cmd-dev" value={pane.deviceId}
+          onChange={(e) => onDevice(Number(e.target.value))}>
+          <option value={0}>This server (local)</option>
+          {devices.map((d) => <option key={d.id} value={d.id}>{d.name}{d.host ? ` (${d.host})` : ''}</option>)}
+        </select>
+        <div className="cmd-tools">
+          <button title="Up" disabled={pane.path === '/'} onClick={() => onNavigate(parentPath(pane.path))}>↑</button>
+          <button title="Refresh" onClick={onRefresh}>⟳</button>
+          <button title="New folder" onClick={onNewFolder}>＋</button>
+          <button title="Delete selected" disabled={!pane.sel.size} onClick={onDelete}>🗑</button>
+        </div>
+      </div>
+      <div className="cmd-crumb">
+        <button className="crumb" onClick={() => onNavigate('/')}>🖥 {devName}</button>
+        {segs.map((s, i) => (
+          <Fragment key={i}>
+            <span className="crumb-sep">/</span>
+            <button className="crumb" onClick={() => onNavigate('/' + segs.slice(0, i + 1).join('/'))}>{s}</button>
+          </Fragment>
+        ))}
+      </div>
+      <div className={'cmd-list' + (over === '' ? ' drop' : '')}
+        onDragOver={allow} onDragLeave={() => setOver(null)}
+        onContextMenu={onContextPane}
+        onDrop={(e) => { e.preventDefault(); setOver(null); onDropInto(pane.path, orderedNames(pane)) }}>
+        {pane.loading && <div className="dim cmd-note">Loading…</div>}
+        {pane.error && <div className="fo-warn cmd-note">⚠ {pane.error}</div>}
+        {!pane.loading && !pane.error && !pane.dirs.length && !pane.files.length &&
+          <div className="dim cmd-note">Empty folder.</div>}
+        {pane.dirs.map((d) => (
+          <div key={'d/' + d.name}
+            className={'cmd-row dir' + (pane.sel.has(d.name) ? ' sel' : '') + (over === d.name ? ' drop' : '')}
+            draggable onDragStart={(e) => onDragStartRow(d.name, e)}
+            onClick={(e) => onClickRow(d.name, e)}
+            onContextMenu={(e) => onContextRow(d.name, e)}
+            onDoubleClick={() => onNavigate(joinPath(pane.path, d.name))}
+            onDragOver={(e) => { allow(e); setOver(d.name) }}
+            onDragLeave={() => setOver((o) => (o === d.name ? null : o))}
+            onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setOver(null); onDropInto(joinPath(pane.path, d.name), null) }}>
+            {check(d.name)}
+            <span className="cmd-ic">📁</span><span className="fb-name">{d.name}</span>
+            <span className="dim cmd-meta">{d.nfiles.toLocaleString()}</span>
+          </div>
+        ))}
+        {pane.files.map((f) => (
+          <div key={'f/' + f.name}
+            className={'cmd-row file' + (pane.sel.has(f.name) ? ' sel' : '')}
+            draggable onDragStart={(e) => onDragStartRow(f.name, e)}
+            onClick={(e) => onClickRow(f.name, e)}
+            onContextMenu={(e) => onContextRow(f.name, e)}>
+            {check(f.name)}
+            <span className="cmd-ic">📄</span><span className="fb-name">{f.name}</span>
+            <span className="dim cmd-meta">{fmtBytes(f.size)}</span>
+          </div>
+        ))}
+      </div>
+      <div className="cmd-foot dim">
+        {pane.dirs.length + pane.files.length} item{pane.dirs.length + pane.files.length === 1 ? '' : 's'}
+        {pane.sel.size > 0 && <> · {pane.sel.size} selected</>}
+      </div>
     </div>
   )
 }
 
-// Read-only folder explorer: pick device + folder, then lazily expand the tree.
-function FileBrowse() {
-  const devices = useDevices()
-  const [deviceId, setDeviceId] = useState(0)
-  const [root, setRoot] = useState('')
-  const [openedRoot, setOpenedRoot] = useState('')
-  const [tree, setTree] = useState<Record<string, BrowseNode>>({})
-  const [open, setOpen] = useState<Set<string>>(new Set())
-
-  useEffect(() => { setTree({}); setOpen(new Set()); setOpenedRoot('') }, [deviceId])
-
-  const load = useCallback(async (abs: string) => {
-    setTree((t) => ({ ...t, [abs]: { dirs: t[abs]?.dirs || [], files: t[abs]?.files || [], loading: true } }))
-    try {
-      const r = await api.browseEntries(deviceId, abs)
-      setTree((t) => ({ ...t, [abs]: { dirs: r.dirs, files: r.files, loading: false, error: r.ok ? '' : r.error } }))
-    } catch (e) {
-      setTree((t) => ({ ...t, [abs]: { dirs: [], files: [], loading: false, error: (e as Error).message } }))
+// Inspect: basic stats for one file/folder on a device (right-click → Inspect).
+function InspectModal({ deviceId, path, name, onClose }: {
+  deviceId: number; path: string; name: string; onClose: () => void
+}) {
+  useScrollLock()
+  const [st, setSt] = useState<FsStat | null>(null)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    let live = true
+    api.fsStat(deviceId, path).then((s) => { if (live) setSt(s) })
+      .catch((e) => { if (live) setErr((e as Error).message) })
+    return () => { live = false }
+  }, [deviceId, path])
+  const isDir = (st?.type || '').includes('directory')
+  const rows: [string, string][] = []
+  if (st?.ok) {
+    rows.push(['Type', isDir ? 'Folder' : (st.type || 'File')])
+    if (isDir) {
+      rows.push(['Contains', `${(st.dirs ?? 0).toLocaleString()} folder${st.dirs === 1 ? '' : 's'}, ${(st.files ?? 0).toLocaleString()} file${st.files === 1 ? '' : 's'}`])
+      rows.push(['Total size', st.total != null ? fmtBytes(st.total) : '—'])
+    } else {
+      rows.push(['Size', st.size != null ? `${fmtBytes(st.size)} (${st.size.toLocaleString()} bytes)` : '—'])
     }
-  }, [deviceId])
+    if (st.mtime) rows.push(['Modified', `${relTime(st.mtime)} · ${new Date(st.mtime * 1000).toLocaleString()}`])
+    if (st.perm) rows.push(['Permissions', `${st.perm}${st.owner ? `  ·  ${st.owner}:${st.group || ''}` : ''}`])
+  }
+  return (
+    <div className="overlay overlay-2" onClick={onClose}>
+      <div className="cmd-inspect" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose}>×</button>
+        <h2>{isDir ? '📁' : '📄'} {name}</h2>
+        <code className="dm-path">{path}</code>
+        {!st && !err && <div className="loading">Reading…</div>}
+        {err && <div className="connect-msg err">{err}</div>}
+        {st && !st.ok && <div className="connect-msg err">{st.error || 'Could not stat this path'}</div>}
+        {st?.ok && (
+          <table className="cmd-inspect-tbl"><tbody>
+            {rows.map(([k, v]) => (
+              <tr key={k}><th>{k}</th><td>{v}</td></tr>
+            ))}
+          </tbody></table>
+        )}
+      </div>
+    </div>
+  )
+}
 
-  const toggle = (abs: string) => {
-    setOpen((s) => { const n = new Set(s); n.has(abs) ? n.delete(abs) : n.add(abs); return n })
-    if (!tree[abs]) load(abs)
+function Commander() {
+  const devices = useDevices()
+  const [left, setLeft] = useState<PaneState>(() => newPane(0))
+  const [right, setRight] = useState<PaneState>(() => newPane(0))
+  const [active, setActive] = useState<Side>('left')
+  const [applyMode, setApplyMode] = useState<FileopsApplyMode>('preview')
+  const [staged, setStaged] = useState<Staged | null>(null)
+  const [openRun, setOpenRun] = useState<number | null>(null)
+  const [toast, setToast] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [showChecks, setShowChecks] = useState(false)
+  const [menu, setMenu] = useState<{ side: Side; name: string | null; x: number; y: number } | null>(null)
+  const [inspect, setInspect] = useState<{ deviceId: number; path: string; name: string } | null>(null)
+  const dragRef = useRef<Dragload | null>(null)
+  const setPane = (side: Side, up: (p: PaneState) => PaneState) =>
+    (side === 'left' ? setLeft : setRight)(up)
+  const paneOf = (side: Side) => (side === 'left' ? left : right)
+
+  useEffect(() => { api.prefs().then((p) => setApplyMode(p.fileops_apply_mode)).catch(() => {}) }, [])
+
+  const loadPane = useCallback(async (side: Side, deviceId: number, path: string) => {
+    const p = path.replace(/\/+$/, '') || '/'
+    setPane(side, (s) => ({ ...s, deviceId, path: p, loading: true, error: '', sel: new Set(), anchor: null }))
+    try {
+      const r = await api.browseEntries(deviceId, p)
+      setPane(side, (s) => (s.deviceId === deviceId && s.path === p
+        ? { ...s, dirs: r.dirs, files: r.files, loading: false, error: r.ok ? '' : r.error } : s))
+    } catch (e) {
+      setPane(side, (s) => (s.deviceId === deviceId && s.path === p
+        ? { ...s, dirs: [], files: [], loading: false, error: (e as Error).message } : s))
+    }
+  }, [])
+
+  // initial + on-mount load of both panes at their device root
+  useEffect(() => { loadPane('left', 0, '/'); loadPane('right', 0, '/') }, [loadPane])
+
+  const onDevice = (side: Side, id: number) => loadPane(side, id, '/')
+  const onNavigate = (side: Side, path: string) => loadPane(side, paneOf(side).deviceId, path)
+  const refreshBoth = () => { const l = left, r = right; loadPane('left', l.deviceId, l.path); loadPane('right', r.deviceId, r.path) }
+
+  const onClickRow = (side: Side, name: string, e: ReactMouseEvent) => {
+    setActive(side)
+    setPane(side, (p) => {
+      const names = orderedNames(p)
+      if (e.shiftKey && p.anchor) {
+        const a = names.indexOf(p.anchor), b = names.indexOf(name)
+        if (a >= 0 && b >= 0) return { ...p, sel: new Set(names.slice(Math.min(a, b), Math.max(a, b) + 1)) }
+      }
+      if (e.metaKey || e.ctrlKey) {
+        const sel = new Set(p.sel); sel.has(name) ? sel.delete(name) : sel.add(name)
+        return { ...p, sel, anchor: name }
+      }
+      return { ...p, sel: new Set([name]), anchor: name }
+    })
   }
-  const openRoot = () => {
-    const p = root.trim().replace(/\/+$/, '') || '/'
-    setTree({}); setOpen(new Set([p])); setOpenedRoot(p); load(p)
+
+  const onDragStartRow = (side: Side, name: string, e: DragEvent) => {
+    setActive(side)
+    const p = paneOf(side)
+    const names = p.sel.has(name) && p.sel.size ? [...p.sel] : [name]
+    const sizes: Record<string, number> = {}
+    for (const f of p.files) if (names.includes(f.name)) sizes[f.name] = f.size
+    dragRef.current = { deviceId: p.deviceId, dir: p.path, names, sizes }
+    e.dataTransfer.effectAllowed = 'copyMove'
+    e.dataTransfer.setData('text/plain', names.join('\n'))
   }
-  const rootNode = tree[openedRoot]
-  const rootCount = rootNode ? rootNode.dirs.length + rootNode.files.length : 0
+
+  const stage = (o: Staged) => { if (applyMode === 'immediate') dispatch(o); else setStaged(o) }
+
+  const onDropInto = (dstSide: Side, dstDir: string, dstNames: string[] | null) => {
+    const d = dragRef.current; dragRef.current = null
+    if (!d || !d.names.length) return
+    const dstDevice = paneOf(dstSide).deviceId
+    if (d.deviceId === dstDevice && d.dir === dstDir) return          // dropped where it already lives
+    const total = Object.values(d.sizes).reduce((a, b) => a + b, 0)
+    const overwrites = dstNames ? d.names.filter((n) => dstNames.includes(n)) : []
+    stage({ srcDevice: d.deviceId, srcDir: d.dir, items: d.names,
+      dstDevice, dstDir, mode: 'move', total, overwrites })
+  }
+
+  const onToggleCheck = (side: Side, name: string) => {
+    setActive(side)
+    setPane(side, (p) => {
+      const sel = new Set(p.sel); sel.has(name) ? sel.delete(name) : sel.add(name)
+      return { ...p, sel, anchor: name }
+    })
+  }
+  const onContextRow = (side: Side, name: string, e: ReactMouseEvent) => {
+    e.preventDefault(); e.stopPropagation()
+    setActive(side)
+    setPane(side, (p) => p.sel.has(name) ? p : { ...p, sel: new Set([name]), anchor: name })
+    setMenu({ side, name, x: e.clientX, y: e.clientY })
+  }
+  const onContextPane = (side: Side, e: ReactMouseEvent) => {
+    e.preventDefault()
+    setActive(side)
+    setMenu({ side, name: null, x: e.clientX, y: e.clientY })
+  }
+  const openInspect = (side: Side, name: string) => {
+    const p = paneOf(side)
+    setInspect({ deviceId: p.deviceId, path: joinPath(p.path, name), name })
+  }
+
+  const sendTo = (mode: 'move' | 'copy', fromSide: Side = active) => {
+    const src = paneOf(fromSide), dst = paneOf(fromSide === 'left' ? 'right' : 'left')
+    if (!src.sel.size) { setToast('Select files in the ' + fromSide + ' pane first.'); return }
+    if (src.deviceId === dst.deviceId && src.path === dst.path) { setToast('Both panes show the same folder.'); return }
+    const items = [...src.sel]
+    const total = items.reduce((a, n) => a + (src.files.find((f) => f.name === n)?.size || 0), 0)
+    const dstNames = orderedNames(dst)
+    stage({ srcDevice: src.deviceId, srcDir: src.path, items,
+      dstDevice: dst.deviceId, dstDir: dst.path, mode, total,
+      overwrites: items.filter((n) => dstNames.includes(n)) })
+  }
+
+  const dispatch = async (o: Staged) => {
+    setBusy(true); setToast('')
+    try {
+      if (o.srcDevice === o.dstDevice) {                              // same device → reversible runbook
+        const root = commonAncestor([o.srcDir, o.dstDir])
+        const ops = o.items.map((n) => ({ op: o.mode,
+          src: relTo(root, joinPath(o.srcDir, n)), dst: relTo(root, joinPath(o.dstDir, n)) }))
+        const { run_id } = await api.createRunbookOps({ device_id: o.srcDevice, root, ops,
+          label: `${o.mode === 'move' ? 'Move' : 'Copy'} ${o.items.length} item${o.items.length === 1 ? '' : 's'}` })
+        await api.executeRunbook(run_id)
+        setOpenRun(run_id)
+      } else {                                                        // cross device → background rsync
+        await api.fsTransfer({ src_device: o.srcDevice, dst_device: o.dstDevice,
+          src_dir: o.srcDir, dst_dir: o.dstDir, items: o.items, mode: o.mode })
+        setToast('Transfer started — track it in the Jobs monitor (top-right).')
+      }
+      setStaged(null)
+      refreshBoth()
+    } catch (e) { setToast('Failed: ' + (e as Error).message) }
+    finally { setBusy(false) }
+  }
+
+  const newFolder = async (side: Side) => {
+    const p = paneOf(side)
+    const name = window.prompt('New folder name in ' + p.path + ':')?.trim()
+    if (!name) return
+    try { await api.fsMkdir(p.deviceId, joinPath(p.path, name)); loadPane(side, p.deviceId, p.path) }
+    catch (e) { setToast('Create folder failed: ' + (e as Error).message) }
+  }
+  const del = async (side: Side) => {
+    const p = paneOf(side)
+    if (!p.sel.size) return
+    if (!window.confirm(`Delete ${p.sel.size} item${p.sel.size === 1 ? '' : 's'} — this can't be undone. Continue?`)) return
+    try { await api.fsDelete(p.deviceId, [...p.sel].map((n) => joinPath(p.path, n))); loadPane(side, p.deviceId, p.path) }
+    catch (e) { setToast('Delete failed: ' + (e as Error).message) }
+  }
+  const setMode = async (m: FileopsApplyMode) => {
+    setApplyMode(m)
+    try { await api.setPrefs({ fileops_apply_mode: m }) } catch { /* keep optimistic */ }
+  }
+  const devName = (id: number) => id === 0 ? 'This server' : (devices.find((d) => d.id === id)?.name || 'Device ' + id)
+
+  const renderPane = (side: Side) => (
+    <CommanderPane pane={paneOf(side)} devices={devices} active={active === side} showChecks={showChecks}
+      onActivate={() => setActive(side)}
+      onDevice={(id) => onDevice(side, id)}
+      onNavigate={(path) => onNavigate(side, path)}
+      onClickRow={(name, e) => onClickRow(side, name, e)}
+      onToggleCheck={(name) => onToggleCheck(side, name)}
+      onContextRow={(name, e) => onContextRow(side, name, e)}
+      onContextPane={(e) => onContextPane(side, e)}
+      onDragStartRow={(name, e) => onDragStartRow(side, name, e)}
+      onDropInto={(dstDir, dstNames) => onDropInto(side, dstDir, dstNames)}
+      onRefresh={() => loadPane(side, paneOf(side).deviceId, paneOf(side).path)}
+      onNewFolder={() => newFolder(side)}
+      onDelete={() => del(side)} />
+  )
+
+  // Context menu: item actions when a row was right-clicked, else pane actions.
+  const menuPane = menu ? paneOf(menu.side) : null
+  const menuIsDir = !!(menu?.name && menuPane?.dirs.some((d) => d.name === menu.name))
+  const menuMulti = (menuPane?.sel.size || 0) > 1
+  const closeMenu = () => setMenu(null)
 
   return (
-    <div className="fo-panel fb-panel">
-      <div className="fo-form">
-        <label className="fo-field">
-          <span>Device</span>
-          <select value={deviceId} onChange={(e) => setDeviceId(Number(e.target.value))}>
-            <option value={0}>This server (local)</option>
-            {devices.map((d) => <option key={d.id} value={d.id}>{d.name}{d.host ? ` (${d.host})` : ''}</option>)}
-          </select>
-        </label>
-        <label className="fo-field fo-grow">
-          <span>Folder</span>
-          <PathInput deviceId={deviceId} value={root} onChange={setRoot} placeholder="/path/to/roms" />
-        </label>
-        <button className="go" disabled={!root.trim()} onClick={openRoot}>Open</button>
-      </div>
-      {openedRoot
-        ? <div className="fb-tree">
-            <DirNode abs={openedRoot} name={openedRoot} nfiles={rootCount}
-              tree={tree} open={open} onToggle={toggle} depth={0} />
+    <div className="cmd">
+      <div className="cmd-frame">
+        <div className="cmd-bar">
+          <div className="cmd-bar-ops">
+            <button onClick={() => sendTo('copy')} title="Copy active selection to the other pane">Copy →</button>
+            <button onClick={() => sendTo('move')} title="Move active selection to the other pane">Move →</button>
           </div>
-        : <div className="dim fb-empty">Pick a device and folder, then Open to browse it (read-only).</div>}
+          <div className="cmd-bar-mode">
+            <button className={'cmd-check-toggle' + (showChecks ? ' on' : '')} onClick={() => setShowChecks((v) => !v)}
+              title="Show a selection checkbox next to every item">☑ Checkboxes</button>
+            <span className="cmd-bar-div" />
+            <span className="dim">On drop:</span>
+            <button className={applyMode === 'preview' ? 'on' : ''} onClick={() => setMode('preview')}
+              title="Stage the operation and let you review it before applying">Preview</button>
+            <button className={applyMode === 'immediate' ? 'on' : ''} onClick={() => setMode('immediate')}
+              title="Run the operation the instant you drop">Immediate</button>
+          </div>
+        </div>
+        <div className="cmd-panes">
+          {renderPane('left')}
+          {renderPane('right')}
+        </div>
+      </div>
+      {staged && (
+        <div className="cmd-stage">
+          <div className="cmd-stage-mode">
+            <button className={staged.mode === 'move' ? 'on' : ''} onClick={() => setStaged({ ...staged, mode: 'move' })}>Move</button>
+            <button className={staged.mode === 'copy' ? 'on' : ''} onClick={() => setStaged({ ...staged, mode: 'copy' })}>Copy</button>
+          </div>
+          <div className="cmd-stage-text">
+            <b>{staged.items.length}</b> item{staged.items.length === 1 ? '' : 's'} ·{' '}
+            {shortPath(staged.srcDir)} → <b>{devName(staged.dstDevice)}</b>:{shortPath(staged.dstDir)}
+            {staged.total > 0 && <> · {fmtBytes(staged.total)}</>}
+            {staged.srcDevice !== staged.dstDevice
+              ? <span className="cmd-stage-x"> · cross-device (background{staged.mode === 'move' ? ', not undoable' : ''})</span>
+              : <span className="dim"> · reversible</span>}
+            {staged.overwrites.length > 0 && <span className="cmd-stage-warn"> · ⚠ {staged.overwrites.length} would overwrite</span>}
+          </div>
+          <div className="cmd-stage-act">
+            <button className="go" disabled={busy} onClick={() => dispatch(staged)}>{busy ? 'Applying…' : 'Apply'}</button>
+            <button className="ghost" onClick={() => setStaged(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {toast && <div className="cmd-toast" onClick={() => setToast('')}>{toast}</div>}
+      {menu && (
+        <>
+          <div className="cmd-menu-backdrop" onClick={closeMenu}
+            onContextMenu={(e) => { e.preventDefault(); closeMenu() }} />
+          <div className="cmd-menu" style={{ left: Math.min(menu.x, window.innerWidth - 220), top: Math.min(menu.y, window.innerHeight - 240) }}>
+            {menu.name ? (
+              <>
+                <div className="cmd-menu-head">{menuMulti ? `${menuPane?.sel.size} items` : menu.name}</div>
+                {!menuMulti && menuIsDir &&
+                  <button onClick={() => { onNavigate(menu.side, joinPath(menuPane!.path, menu.name!)); closeMenu() }}>Open</button>}
+                {!menuMulti &&
+                  <button onClick={() => { openInspect(menu.side, menu.name!); closeMenu() }}>Inspect…</button>}
+                <button onClick={() => { sendTo('copy', menu.side); closeMenu() }}>Copy → other pane</button>
+                <button onClick={() => { sendTo('move', menu.side); closeMenu() }}>Move → other pane</button>
+                <div className="cmd-menu-sep" />
+                <button className="danger" onClick={() => { del(menu.side); closeMenu() }}>Delete…</button>
+              </>
+            ) : (
+              <>
+                <button onClick={() => { newFolder(menu.side); closeMenu() }}>New folder…</button>
+                <button onClick={() => { loadPane(menu.side, paneOf(menu.side).deviceId, paneOf(menu.side).path); closeMenu() }}>Refresh</button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+      {inspect && <InspectModal deviceId={inspect.deviceId} path={inspect.path} name={inspect.name}
+        onClose={() => setInspect(null)} />}
+      {openRun !== null && <RunbookModal runId={openRun} onClose={() => { setOpenRun(null); refreshBoth() }} />}
     </div>
   )
 }
@@ -4198,7 +5260,7 @@ function FilesTab() {
         tabs={[{ id: 'browse', label: 'Browse' }, { id: 'operations', label: 'Operations' },
                { id: 'profiles', label: 'Profiles' }, { id: 'history', label: 'History' }]} />
       <div className="files-body">
-        {sub === 'browse' ? <FileBrowse />
+        {sub === 'browse' ? <Commander />
           : sub === 'operations' ? <FileOpsOperations />
           : sub === 'profiles' ? <FileProfiles />
           : <FileHistory />}
@@ -4239,6 +5301,52 @@ function TreeRows({ node, depth = 0 }: { node: TNode; depth?: number }) {
   )
 }
 
+// Above this file count, don't auto-plan (planning reads every file) — make it an
+// explicit "Preview plan" click. Detection itself is always cheap (bounded).
+const AUTO_PLAN_LIMIT = 5000
+
+// Seconds elapsed while `active`, for "working…" readouts. Resets when it stops.
+function useElapsed(active: boolean) {
+  const [s, setS] = useState(0)
+  useEffect(() => {
+    if (!active) { setS(0); return }
+    const t0 = Date.now()
+    const iv = setInterval(() => setS(Math.round((Date.now() - t0) / 1000)), 500)
+    return () => clearInterval(iv)
+  }, [active])
+  return s
+}
+
+// Plain-language explanation of each operation type, shown under the picker.
+const OP_INFO: Record<'restructure' | 'extract', {
+  blurb: string; points: string[]; safe: string
+}> = {
+  restructure: {
+    blurb: 'Reorganize an existing ROM folder so its structure matches a layout profile — ' +
+      'renaming and re-nesting files and folders to whatever your emulator or frontend expects. ' +
+      'The games themselves are never opened or altered.',
+    points: [
+      'Flatten, or group into per-system folders, to match the chosen profile',
+      'Generate .m3u playlists so multi-disc games load as one entry',
+      'Normalize names (regions, tags, brackets) and prune the empty folders left behind',
+    ],
+    safe: 'Nothing is downloaded or deleted — every file is moved in place, and the whole change ' +
+      'applies as a single reversible runbook you can undo from History.',
+  },
+  extract: {
+    blurb: 'Pull the box art, screenshots and logos that are tangled up inside your ROM folders ' +
+      '(loose images, per-system media/ subfolders, and art referenced by gamelist.xml) out into ' +
+      'a clean, standardized media folder.',
+    points: [
+      'Sort artwork by system and by kind — covers, screenshots, marquees',
+      'Gather loose and gamelist-referenced images into one predictable place',
+      'Leave every ROM exactly where it is — only the artwork moves',
+    ],
+    safe: 'Only artwork is relocated, into the destination folder below; the change applies as a ' +
+      'single reversible runbook you can undo from History.',
+  },
+}
+
 // File operations as a Before → After split: pick an operation type, then see the
 // current layout transform into the target, and Apply it as a reversible runbook.
 function FileOpsOperations() {
@@ -4251,26 +5359,44 @@ function FileOpsOperations() {
   const [profiles, setProfiles] = useState<FileProfile[]>([])
   const [profileId, setProfileId] = useState('builtin:flat')
   const [dest, setDest] = useState('downloaded_media')
+  const [mediaLayout, setMediaLayout] = useState('esde')
+  const [extractOp, setExtractOp] = useState<'move' | 'copy'>('move')
+  const [layouts, setLayouts] = useState<{ id: string; name: string; desc: string }[]>([])
   const [plan, setPlan] = useState<FilePlan | null>(null)
   const [current, setCurrent] = useState<FileDetect | null>(null)   // the actual current folder (Before)
   const [detecting, setDetecting] = useState(false)
   const [srcModel, setSrcModel] = useState<SourceModel | null>(null)
+  const [srcDeclare, setSrcDeclare] = useState('')                  // '' = auto-detect; else a profile id
+  const [planRequested, setPlanRequested] = useState(false)         // opted into planning a big folder
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
+  const [msg, setMsg] = useState('')
   const [openRun, setOpenRun] = useState<number | null>(null)
   const seq = useRef(0)
   const dseq = useRef(0)
+  const planAbort = useRef<AbortController | null>(null)
 
   useEffect(() => { api.fileProfiles().then((p) => setProfiles(p.profiles)).catch(() => {}) }, [])
+  useEffect(() => { api.mediaLayouts().then((r) => setLayouts(r.layouts)).catch(() => {}) }, [])
   const base = () => ({ device_id: deviceId, root: root.trim(), scope, system: system.trim() || undefined })
 
-  // Before = the ACTUAL current folder. Refetch (fast, sampled) whenever the
-  // folder/device/scope changes, independent of the plan, so it always reflects
-  // what you're pointing at and updates the moment you switch folders.
+  // How big is the folder, and can we auto-plan it? Detection reports a `capped`
+  // flag + a (floor) file count; past AUTO_PLAN_LIMIT planning is opt-in.
+  const big = !!current && (current.capped || current.counts.files > AUTO_PLAN_LIMIT)
+  const mf = current?.manifest || null
+  const mfProfile = mf?.fresh ? mf.profile : null
+  // Declaring the source already matches the TARGET profile — or a fresh manifest
+  // that already records that conformance — ⇒ nothing to plan.
+  const conforms = op === 'restructure'
+    && ((!!srcDeclare && srcDeclare === profileId) || (!!mfProfile && mfProfile === profileId))
+  const shouldPlan = !!current && !conforms && (!big || planRequested)
+
+  // Before = the ACTUAL current folder. Refetch (fast, bounded) whenever the
+  // folder/device/scope changes, independent of the plan.
   useEffect(() => {
     if (!root.trim()) { setCurrent(null); setSrcModel(null); return }
     const id = ++dseq.current
-    setSrcModel(null)
+    setSrcModel(null); setPlanRequested(false)
     const t = setTimeout(async () => {
       setDetecting(true)
       try { const d = await api.fileDetect(base()); if (id === dseq.current) setCurrent(d) }
@@ -4281,25 +5407,39 @@ function FileOpsOperations() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceId, root, scope, system])
 
-  // Auto-preview (debounced) whenever the operation inputs change.
+  // Preview the plan — but only when it's cheap or you've asked for it. Big folders
+  // wait for a "Preview plan" click (planning reads every file); declaring the source
+  // already matches the target skips it entirely.
   useEffect(() => {
-    if (!root.trim()) { setPlan(null); return }
+    if (!shouldPlan) { setPlan(null); if (planAbort.current) planAbort.current.abort(); return }
     const id = ++seq.current
     setErr('')
     const t = setTimeout(async () => {
+      planAbort.current?.abort()
+      const ac = new AbortController(); planAbort.current = ac
       setBusy('plan')
       try {
         const pl = op === 'extract'
-          ? await api.planExtract({ ...base(), dest: dest.trim() || 'downloaded_media' })
-          : await api.filePlan({ ...base(), profile: profileId })
+          ? await api.planExtract({ ...base(), dest: dest.trim() || 'downloaded_media', layout: mediaLayout, op: extractOp }, ac.signal)
+          : await api.filePlan({ ...base(), profile: profileId }, ac.signal)
         if (id === seq.current) setPlan(pl)
-      } catch (e) { if (id === seq.current) { setErr((e as Error).message); setPlan(null) } }
-      finally { if (id === seq.current) setBusy('') }
-    }, 600)
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return
+        if (id === seq.current) { setErr((e as Error).message); setPlan(null) }
+      } finally { if (id === seq.current) setBusy('') }
+    }, 300)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [op, deviceId, root, scope, system, profileId, dest])
+  }, [shouldPlan, op, deviceId, root, scope, system, profileId, dest, mediaLayout, extractOp])
 
+  const cancelPlan = () => { planAbort.current?.abort(); seq.current++; setBusy(''); setPlanRequested(false) }
+  const reindex = async () => {
+    setBusy('index'); setErr(''); setMsg('')
+    try {
+      await api.manifestWrite({ ...base(), operation: 'index' })
+      setMsg('Indexing this folder in the background — it will show a fresh manifest when done (track it in the Jobs monitor).')
+    } catch (e) { setErr((e as Error).message) } finally { setBusy('') }
+  }
   const modelIt = async () => {
     setBusy('model'); setErr('')
     try { setSrcModel((await api.modelSource(base())).model) }
@@ -4309,7 +5449,7 @@ function FileOpsOperations() {
     setBusy('apply'); setErr('')
     try {
       const b = op === 'extract'
-        ? { ...base(), operation: 'extract', dest: dest.trim() || 'downloaded_media' }
+        ? { ...base(), operation: 'extract', dest: dest.trim() || 'downloaded_media', layout: mediaLayout, op: extractOp }
         : { ...base(), profile: profileId }
       setOpenRun((await api.createRunbook(b)).run_id)
     } catch (e) { setErr((e as Error).message) } finally { setBusy('') }
@@ -4322,6 +5462,9 @@ function FileOpsOperations() {
   const beforeTree = pathsToTree(current?.sample || [])
   const afterTree = pathsToTree((plan?.sample || []).map((m) => m.dst))
   const planning = busy === 'plan'
+  const detElapsed = useElapsed(detecting)
+  const planElapsed = useElapsed(planning)
+  const fileCount = current ? current.counts.files.toLocaleString() + (current.capped ? '+' : '') : ''
 
   return (
     <>
@@ -4334,6 +5477,18 @@ function FileOpsOperations() {
       <div className="fo-optype">
         <button className={'fo-optype-btn' + (op === 'restructure' ? ' on' : '')} onClick={() => setOp('restructure')}>Restructure ROMs</button>
         <button className={'fo-optype-btn' + (op === 'extract' ? ' on' : '')} onClick={() => setOp('extract')}>Extract media</button>
+      </div>
+
+      <div className="fo-optype-info">
+        <div className="fo-oi-head">
+          <span className="fo-oi-icon">{op === 'restructure' ? '🗂' : '🖼'}</span>
+          <span className="fo-oi-title">{op === 'restructure' ? 'Restructure ROMs' : 'Extract media'}</span>
+        </div>
+        <p className="fo-oi-blurb">{OP_INFO[op].blurb}</p>
+        <ul className="fo-oi-points">
+          {OP_INFO[op].points.map((p, i) => <li key={i}>{p}</li>)}
+        </ul>
+        <p className="fo-oi-safe">🛡 {OP_INFO[op].safe}</p>
       </div>
 
       <div className="fo-form">
@@ -4358,6 +5513,7 @@ function FileOpsOperations() {
         )}
       </div>
       {err && <div className="connect-msg err">{err}</div>}
+      {msg && <div className="connect-msg fo-msg">{msg}</div>}
       </div>
 
       <div className="fo-split">
@@ -4367,9 +5523,34 @@ function FileOpsOperations() {
           <div className="fo-side-body">
             <div className="fo-side-controls">
               <button className="ops-btn" disabled={!root.trim() || busy !== ''} onClick={modelIt}>
-                {busy === 'model' ? 'Modeling…' : '✨ Model this folder'}</button>
-              {current && <span className="dim fo-cur-note">{current.counts.files.toLocaleString()} files · {current.systems.length} systems · {current.current === 'folder' ? 'folder-per-game' : 'flat'}</span>}
+                {busy === 'model' ? <><span className="fo-spinner fo-spinner-sm" /> Modeling…</> : '✨ Model this folder'}</button>
+              {current && <span className="dim fo-cur-note">{fileCount} files · {current.systems.length} systems · {current.current === 'folder' ? 'folder-per-game' : 'flat'}{current.capped ? ' · large' : ''}</span>}
             </div>
+            {mf ? (
+              <div className={'fo-manifest' + (mf.fresh ? ' fresh' : ' stale')}>
+                <div className="fo-mf-head">
+                  <span className="fo-mf-tag">🏷 {mf.fresh ? 'Managed folder' : 'Manifest out of date'}</span>
+                  {mf.fresh && mf.written_at && <span className="dim">indexed {relTime(Date.parse(mf.written_at) / 1000)}</span>}
+                </div>
+                {mf.profile_name && <div className="fo-mf-line">Follows <b>{mf.profile_name}</b>{mf.conforms ? ' ✓' : ''}</div>}
+                {(mf.media || []).map((m, i) => (
+                  <div key={i} className="dim fo-mf-line">media → <code>{m.where}</code>{m.device ? ` on ${m.device}` : ''} ({m.layout})</div>
+                ))}
+                {!mf.fresh && <div className="dim fo-mf-line">The folder changed since it was indexed — ludodex fell back to reading it directly.
+                  <button className="fo-mf-btn" disabled={busy !== ''} onClick={reindex}>Re-index</button></div>}
+              </div>
+            ) : current && (
+              <button className="fo-mf-index" disabled={busy !== ''} onClick={reindex}>
+                {busy === 'index' ? 'Indexing…' : '🏷 Index this folder (write a manifest)'}</button>
+            )}
+            {op === 'restructure' && (
+              <label className="fo-declare"><span>Source already follows</span>
+                <select value={srcDeclare} onChange={(e) => setSrcDeclare(e.target.value)}>
+                  <option value="">Auto-detect (read the folder)</option>
+                  {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </label>
+            )}
             {srcModel && (
               <div className="fo-srcmodel">
                 {srcModel.summary && <div>{srcModel.summary}</div>}
@@ -4377,7 +5558,7 @@ function FileOpsOperations() {
               </div>
             )}
             <div className="fo-tree">
-              {detecting ? <div className="fo-tree-empty">Reading…</div>
+              {detecting ? <div className="fo-tree-empty fo-loading"><span className="fo-spinner" /> Reading…{detElapsed > 1 ? ` ${detElapsed}s` : ''}</div>
                 : current && current.sample.length ? <TreeRows node={beforeTree} />
                 : <div className="fo-tree-empty">Set a path to preview.</div>}
             </div>
@@ -4394,15 +5575,43 @@ function FileOpsOperations() {
                   {customs.length > 0 && <optgroup label="Custom">{customs.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>}
                 </select>
               ) : (
-                <label className="fo-field fo-grow"><span>Media folder (under the path)</span>
-                  <input value={dest} onChange={(e) => setDest(e.target.value)} placeholder="downloaded_media" /></label>
+                <>
+                  <label className="fo-field fo-grow"><span>Where does it go? (folder under the path)</span>
+                    <input value={dest} onChange={(e) => setDest(e.target.value)} placeholder="downloaded_media" /></label>
+                  <label className="fo-field fo-grow"><span>Media structure</span>
+                    <select value={mediaLayout} onChange={(e) => setMediaLayout(e.target.value)}>
+                      {layouts.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                    </select></label>
+                  <div className="fo-copymove" role="group" aria-label="Copy or move">
+                    <button type="button" className={extractOp === 'move' ? 'on' : ''} onClick={() => setExtractOp('move')}
+                      title="Relocate the art out of the ROM tree (originals removed)">Move</button>
+                    <button type="button" className={extractOp === 'copy' ? 'on' : ''} onClick={() => setExtractOp('copy')}
+                      title="Duplicate the art into the media folder (originals kept)">Copy</button>
+                  </div>
+                </>
               )}
             </div>
             {op === 'restructure' && sel && <div className="fo-profile-hint"><code>{sel.target}</code><span className="dim"> — {sel.description}</span></div>}
-            {op === 'extract' && <div className="dim fo-hint">→ {dest || 'downloaded_media'}/&lt;system&gt;/covers·screenshots·marquees/&lt;game&gt; — ES-DE layout the library also indexes. ROM files aren't touched.</div>}
+            {op === 'extract' && (() => {
+              const ld = layouts.find((l) => l.id === mediaLayout)
+              return <div className="dim fo-hint">→ {(ld?.desc || 'downloaded_media/&lt;system&gt;/…').replace('<dest>', dest || 'downloaded_media')} · {extractOp === 'copy' ? 'originals kept (copy)' : 'originals moved out'} · ROM files aren't touched.</div>
+            })()}
             <div className="fo-tree">
-              {planning ? <div className="fo-tree-empty">Planning…</div>
-                : plan && plan.sample.length ? <TreeRows node={afterTree} />
+              {conforms ? (
+                <div className="fo-tree-empty fo-conforms">✓ You've declared this folder already follows <b>{sel?.name || srcDeclare}</b> — nothing to plan.</div>
+              ) : planning ? (
+                <div className="fo-tree-empty fo-loading">
+                  <div><span className="fo-spinner" /> Planning…{planElapsed > 1 ? ` ${planElapsed}s` : ''}</div>
+                  {big && <><div className="dim fo-plan-note">Reading all {fileCount} files — this can take a while.</div>
+                    <button className="ops-btn fo-cancel" onClick={cancelPlan}>Cancel</button></>}
+                </div>
+              ) : big && !planRequested ? (
+                <div className="fo-tree-empty fo-optin">
+                  <div className="fo-optin-scale">This folder is large — <b>{fileCount}</b> files.</div>
+                  <p className="dim">Planning reads every file to compute the exact moves, so it isn't run automatically. Preview it when you're ready — or tell it the source layout on the left to skip this.</p>
+                  <button className="go" onClick={() => setPlanRequested(true)}>Preview plan ▸</button>
+                </div>
+              ) : plan && plan.sample.length ? <TreeRows node={afterTree} />
                 : plan ? <div className="fo-tree-empty">Nothing to change — already in this layout.</div>
                 : <div className="fo-tree-empty">Set a path to see the result.</div>}
             </div>
@@ -4490,6 +5699,7 @@ function ProfileRow({ p, onEdit, onClone, onDelete }: { p: FileProfile; onEdit?:
 }
 
 function ProfileEditor({ profile, vars, onClose, onSaved }: { profile: FileProfile; vars: FileVariable[]; onClose: () => void; onSaved: () => void }) {
+  useScrollLock()
   const [p, setP] = useState<FileProfile>(profile)
   const [err, setErr] = useState('')
   const [saving, setSaving] = useState(false)
@@ -4753,6 +5963,7 @@ function ScopeCategory({ name, unit, items, master, setMaster, picked, setPicked
 function MagicWandOverlay({ filterQuery, filterCount, onClose }: {
   filterQuery: GamesQuery; filterCount: number; onClose: () => void
 }) {
+  useScrollLock()
   const [targets, setTargets] = useState<AiScanTargets | null>(null)
   const [scope, setScope] = useState<'all' | 'filtered'>('filtered')
   const [web, setWeb] = useState(false)
@@ -4980,20 +6191,20 @@ function findingChanges(f: AiFinding): Change[] {
   return out
 }
 
-function MetadataChangeset() {
+function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: () => void }) {
   const [findings, setFindings] = useState<AiFinding[] | null>(null)
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(() => {
-    api.aimetaFindings('proposed').then((d) => {
+    api.aimetaFindings('proposed', undefined, runId).then((d) => {
       setFindings(d.findings)
       const all = new Set<string>()
       d.findings.forEach((f) => findingChanges(f).forEach((c) => all.add(c.id)))
       setSel(all)
     }).catch(() => setFindings([]))
-  }, [])
+  }, [runId])
   useEffect(() => { load() }, [load])
 
   const groups = (findings || []).map((f) => ({ f, changes: findingChanges(f) }))
@@ -5024,16 +6235,18 @@ function MetadataChangeset() {
     if (!selections.length) return
     setBusy(true); setNote('')
     try {
-      await api.aimetaApply(selections, wandMedia())
-      setNote(`✨ Applying ${selectedCount} change(s) across ${gamesTouched} game(s) — linking provider matches and rebuilding. Track it in the job monitor.`)
-      load()
+      const r = await api.aimetaApply(selections, wandMedia())
+      const msg = `✨ Applying ${selectedCount} change(s) across ${gamesTouched} game(s)` +
+        (r.coalesced ? ' — added to the running rebuild.' : ' — rebuilding. Track it in the job monitor.')
+      if (onApplied) { showToast(msg); onApplied() } else { setNote(msg); load() }
     } catch (e) { setNote((e as Error).message) } finally { setBusy(false) }
   }
 
   if (!findings) return <div className="loading">Loading…</div>
   if (!groups.length) {
-    return <div className="sync-note dim">No proposed changes — run the ✨ Magic wand
-      or a scan first.</div>
+    return <div className="sync-note dim">{runId
+      ? 'Nothing left to review here — these changes were already applied (or dismissed).'
+      : 'No proposed changes — run the ✨ Magic wand or a scan first.'}</div>
   }
 
   return (
@@ -5089,7 +6302,7 @@ function MetadataChangeset() {
         <button className="ops-btn" onClick={() => setAll(true)}>Select all</button>
         <button className="ops-btn" onClick={() => setAll(false)}>Deselect all</button>
         <button className="ops-btn go" disabled={busy || selectedCount === 0} onClick={apply}>
-          {busy ? 'Applying…' : '✨ Apply selected'}</button>
+          {busy ? 'Applying…' : onApplied ? '✨ Accept & apply' : '✨ Apply selected'}</button>
       </div>
     </div>
   )
@@ -5210,14 +6423,23 @@ function AiMetaCallout({ finding, onChanged }: { finding: AiFinding; onChanged: 
         {finding.kind === 'supplement' && <><b>AI can fill:</b>{' '}
           {Object.keys(p.attributes || {}).map((k) => k.replace(/_/g, ' ')).join(', ')}</>}
         {providerMatches(p).length > 0 && <div className="aim-issue">✓ Real provider match:{' '}
-          {providerMatches(p).map((m) => `${pmLabel(m)} — ${m.name}${m.year ? ` (${m.year})` : ''}`).join('; ')} — Apply in AI Metadata to link it.</div>}
+          {providerMatches(p).map((m) => `${pmLabel(m)} — ${m.name}${m.year ? ` (${m.year})` : ''}`).join('; ')}</div>}
       </div>
-      {finding.status === 'proposed'
-        ? <div className="aim-actions">
-            <button className="ops-btn go" disabled={busy} onClick={() => act('accept')}>Accept</button>
-            <button className="ops-btn" disabled={busy} onClick={() => act('reject')}>Reject</button>
-          </div>
-        : <span className={'run-badge s-' + (finding.status === 'accepted' ? 'done' : 'failed')}>{finding.status}</span>}
+      {finding.status === 'proposed' ? (
+        <div className="aim-actions">
+          <button className="ops-btn go" disabled={busy} onClick={() => act('accept')}>Accept</button>
+          <button className="ops-btn" disabled={busy} onClick={() => act('reject')}>Reject</button>
+          <span className="aim-hint">Accepting just queues it — you still Apply from the banner above Search.</span>
+        </div>
+      ) : finding.status === 'accepted' ? (
+        <div className="aim-pending">
+          <span className="aim-pending-badge">✓ Accepted — not applied yet</span>
+          <span className="aim-pending-note">This won't change your library until you <b>Apply pending changes</b> (banner above the library search).</span>
+        </div>
+      ) : (
+        <span className={'run-badge s-' + (finding.status === 'applied' ? 'done' : 'failed')}>
+          {finding.status === 'applied' ? '✓ applied' : finding.status}</span>
+      )}
     </div>
   )
 }
@@ -5331,16 +6553,45 @@ function RunbookExtras({ rb }: { rb: Runbook }) {
   )
 }
 
+// The diff/accept screen for one finished wand scan job: shows exactly what will
+// change (reusing the changeset), scoped to that run; accepting applies it.
+function AiReviewModal({ runId, title, onClose }: { runId: number; title: string; onClose: () => void }) {
+  useScrollLock()
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="panel review-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose}>×</button>
+        <h2>✨ Review changes{title ? <> — <span className="rv-title">{title}</span></> : null}</h2>
+        <p className="dim">Exactly what the AI wants to change for this game. Tick what to keep,
+          then Accept &amp; apply — it goes straight into your catalog.</p>
+        <MetadataChangeset runId={runId} onApplied={onClose} />
+      </div>
+    </div>
+  )
+}
+
+// Strip the "Metadata scan — " prefix so the review header reads as the game name.
+const scanTitle = (label: string) => label.replace(/^Metadata scan\s*[—-]\s*/, '')
+
+// A finished wand scan that produced suggestions is ready to review & accept.
+const reviewable = (j: Job) => j.kind === 'aimeta' && j.status === 'done' && (j.findings ?? 0) > 0
+
 function JobMonitor() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [open, setOpen] = useState(false)
+  const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
   const load = useCallback(() => api.jobs().then((j) => setJobs(j.jobs)).catch(() => {}), [])
   useEffect(() => { load(); const t = setInterval(load, 2500); return () => clearInterval(t) }, [load])
 
+  // Surface any reviewable scan even when other jobs are active, so accepting is
+  // never buried — the whole point is to queue wands and accept them from here.
   const active = jobs.filter((j) => j.status === 'running' || j.status === 'paused')
-  const shown = (active.length ? active : jobs).slice(0, 2)
+  const ready = jobs.filter(reviewable)
+  const base = active.length ? active : jobs
+  const shown = [...ready, ...base.filter((j) => !reviewable(j))].slice(0, 3)
   const pause = async (id: string) => { await api.pauseJob(id).catch(() => {}); load() }
   const del = async (id: string) => { await api.deleteJob(id).catch(() => {}); load() }
+  const openReview = (j: Job) => setReview({ runId: j.run_id!, title: scanTitle(j.label) })
 
   return (
     <div className={'jobmon' + (active.length ? ' busy' : ' idle')}>
@@ -5351,19 +6602,27 @@ function JobMonitor() {
             {jobs.length ? `${jobs.length} recent job${jobs.length === 1 ? '' : 's'}` : 'No active jobs'}
           </button>
         ) : shown.map((j) => (
-          <div key={j.id} className="jobmon-row">
+          <div key={j.id} className={'jobmon-row' + (reviewable(j) ? ' jm-ready' : '')}>
             <span className="jm-label" title={j.detail ? `${j.label} — ${j.detail}` : j.label}>
               {j.label}{j.detail ? <span className="dim"> — {j.detail}</span> : null}</span>
-            <ProgressBar done={j.progress.done} total={j.progress.total} failed={j.progress.failed} running={j.status === 'running'} />
-            <span className={'jm-status s-' + j.status}>{j.status}</span>
+            {reviewable(j) ? (
+              <button className="jm-accept" title="Review & accept these changes" onClick={() => openReview(j)}>
+                ✨ Review &amp; accept
+              </button>
+            ) : (
+              <ProgressBar done={j.progress.done} total={j.progress.total} failed={j.progress.failed} running={j.status === 'running'} />
+            )}
+            {!reviewable(j) && <span className={'jm-status s-' + j.status}>{j.status}</span>}
             {j.cancelable && <button className="jm-btn" title="Pause" onClick={() => pause(j.id)}>⏸</button>}
             {j.deletable && <button className="jm-btn" title="Remove" onClick={() => del(j.id)}>×</button>}
           </div>
         ))}
-        {active.length > 2 && <span className="jm-more">+{active.length - 2} more</span>}
+        {active.length > 3 && <span className="jm-more">+{active.length - 3} more</span>}
       </div>
       <button className="jm-expand icon-btn" title="All jobs" onClick={() => setOpen(true)}>⤢</button>
       {open && <JobOverlay onClose={() => setOpen(false)} />}
+      {review && <AiReviewModal runId={review.runId} title={review.title}
+        onClose={() => { setReview(null); load() }} />}
     </div>
   )
 }
@@ -5371,6 +6630,7 @@ function JobMonitor() {
 function JobOverlay({ onClose }: { onClose: () => void }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [openRun, setOpenRun] = useState<number | null>(null)
+  const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
   const wrapRef = useClickOutside<HTMLDivElement>(true, onClose)
   const load = useCallback(() => api.jobs().then((j) => setJobs(j.jobs)).catch(() => {}), [])
   useEffect(() => { load(); const t = setInterval(load, 2000); return () => clearInterval(t) }, [load])
@@ -5391,6 +6651,12 @@ function JobOverlay({ onClose }: { onClose: () => void }) {
               <ProgressBar done={j.progress.done} total={j.progress.total} failed={j.progress.failed} running={j.status === 'running'} />
               <span className="dim job-when">{relTime(j.when)}</span>
               <span className="job-acts" onClick={(e) => e.stopPropagation()}>
+                {reviewable(j) && (
+                  <button className="jm-accept" title="Review & accept these changes"
+                    onClick={() => setReview({ runId: j.run_id!, title: scanTitle(j.label) })}>
+                    ✨ Review &amp; accept
+                  </button>
+                )}
                 {j.cancelable && <button className="jm-btn" title="Pause" onClick={() => act(api.pauseJob(j.id))}>⏸</button>}
                 {j.restartable && <button className="jm-btn" title="Restart / resume" onClick={() => act(api.restartJob(j.id))}>▶</button>}
                 {j.deletable && <button className="jm-btn" title="Delete" onClick={() => act(api.deleteJob(j.id))}>×</button>}
@@ -5400,6 +6666,8 @@ function JobOverlay({ onClose }: { onClose: () => void }) {
           ))}
         </div>
         {openRun != null && <RunbookModal runId={openRun} onClose={() => { setOpenRun(null); load() }} />}
+        {review && <AiReviewModal runId={review.runId} title={review.title}
+          onClose={() => { setReview(null); load() }} />}
       </div>
     </div>
   )

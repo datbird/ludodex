@@ -13,10 +13,19 @@ export interface GameRow {
   sources_summary: string
   platforms: string
   emulation: boolean       // has an emulation/ROM source (selectable for device wishlist)
-  matched: boolean
+  matched: boolean         // cross-referenced to a metadata provider (IGDB/ScreenScraper)
+  identified: boolean      // a known title: matched OR from a real store/manual source
   has_cover: boolean
   ludodex_score: number | null
   tags: TagRef[]
+  wanted?: boolean         // a wishlist-only entry (you want it, don't own it)
+  framing_cover?: Frame    // saved position+zoom for this game's cover, if any
+}
+
+// Per-image framing: edge insets (% of viewport; negative bleeds/crops, positive
+// letterboxes) + zoom (0.1–5.0). Applied at render time.
+export interface Frame {
+  top: number; right: number; bottom: number; left: number; zoom: number
 }
 
 export interface ScoreSource {
@@ -37,6 +46,7 @@ export interface Scores {
 
 export interface GamesPage {
   total: number
+  hidden_unidentified?: number   // unidentified matches hidden by the toggle (search)
   limit: number
   offset: number
   items: GameRow[]
@@ -45,7 +55,7 @@ export interface GamesPage {
 export interface GameDetail {
   norm_key: string
   title: string
-  sources: { source: string; platform: string; source_id: string; title_raw: string; detail: string; os: string[] | null }[]
+  sources: { source: string; platform: string; source_id: string; title_raw: string; detail: string; os: string[] | null; state?: 'have' | 'want' }[]
   attributes: Record<string, string[]>
   tags: TagRef[]
   scores: Scores
@@ -54,7 +64,23 @@ export interface GameDetail {
   ai_meta?: AiFinding | null
   attribute_provenance?: Record<string, { value: string; origins: string[]; ai: boolean }[]>
   attribute_overrides?: Record<string, { value: string; origin: string }>
+  ownership?: OwnershipFact[]
+  framing?: Record<string, Frame>   // kind -> saved position+zoom
 }
+
+export interface OwnershipFact {
+  form: 'physical' | 'rom' | 'digital'
+  platform: string
+  state: 'have' | 'want'
+  note: string
+}
+
+// A known gaming system (from the IGDB platform catalog) — the searchable list
+// in the ownership overlay's "add any system" section.
+export interface SystemEntry { id: string; name: string; abbr?: string }
+// One platform this game released on, per IGDB.
+export interface GameRelease { id: string; name: string; abbr?: string
+  year?: number | null; human?: string | null }
 
 export interface ProviderMatch {
   provider?: 'igdb' | 'screenscraper'
@@ -91,7 +117,7 @@ export interface AiFinding {
   norm_key: string
   title: string
   kind: 'match' | 'identify' | 'supplement'
-  status: 'proposed' | 'accepted' | 'rejected'
+  status: 'proposed' | 'accepted' | 'rejected' | 'applied'
   confidence: number
   model: string
   created: number
@@ -124,11 +150,15 @@ export interface GameTags {
 
 export interface Stats {
   games: number
+  identified?: number
+  unidentified?: number
+  wanted?: number
   cross_source: number
   unmatched: number
   no_media: number
   by_source: Record<string, number>
   media: { games_with_art: number; by_kind: Record<string, number> }
+  pending_meta?: number
 }
 
 export interface Facets {
@@ -219,10 +249,20 @@ export type MediaJob = {
   running?: boolean; finished?: boolean; mode?: string; step?: string
   ok?: boolean | null; downloaded?: number; dead?: number; error?: string
 }
+export interface FsStat {
+  ok: boolean; error?: string; path?: string
+  type?: string; size?: number | null; mtime?: number | null
+  perm?: string; owner?: string; group?: string
+  dirs?: number | null; files?: number | null; total?: number | null
+}
+export type FileopsApplyMode = 'preview' | 'immediate'
 export interface Prefs {
   hide_non_games: boolean
   spotlight_seconds: number
   media_mode: MediaMode
+  media_language: string       // '' = any; else the preferred media language
+  fileops_apply_mode: FileopsApplyMode
+  manifests_enabled: boolean
   media_job: MediaJob | null
 }
 export interface IdentifyCandidate {
@@ -276,6 +316,7 @@ export interface Service {
   limits: LimitField[]
   connect?: ServiceConnect
   enabled?: boolean
+  doc?: { url: string; label: string }
 }
 
 export interface SyncService {
@@ -293,6 +334,12 @@ export interface SyncJobService {
   count: number | null
   error: string | null
 }
+export interface SyncPhase {
+  id: string
+  label: string
+  state: 'pending' | 'running' | 'ok' | 'failed' | 'skipped'
+  detail: string
+}
 export interface SyncJob {
   running: boolean
   finished: boolean
@@ -300,16 +347,18 @@ export interface SyncJob {
   error: string | null
   added: number | null
   services: Record<string, SyncJobService>
+  phases?: SyncPhase[]
 }
 
 // ROM-repo sync (Connections devices with ROM library managers)
 export interface RomManager {
   id: number; kind: string; kind_label: string; name: string
-  rom_path: string; count: number | null
+  rom_path: string; count: number | null; games?: number | null
 }
 export interface RomLocation {
   id: number; name: string; transport: string; host: string
   enabled: boolean; managers: RomManager[]; count: number | null
+  games?: number | null
 }
 export interface RomJobDevice {
   state: 'pending' | 'running' | 'ok' | 'failed'
@@ -349,9 +398,14 @@ export interface MediaAsset {
   is_image: boolean
   pinned: boolean
   rank: number | null
+  redistributable?: boolean   // false = keep locally, don't copy to other machines
   url: string
   thumb: string | null
   user?: boolean
+}
+export interface BannedMedia {
+  norm_key: string; kind: string; provider: string; ref: string
+  updated: number; title: string
 }
 export interface MediaLibrary {
   norm_key: string
@@ -394,12 +448,15 @@ export interface Spotlight {
 
 export interface GamesQuery {
   q?: string
+  query?: string   // advanced query-language search (field:value, -neg, year:>N)
   source?: string
   platform?: string
   has_kind?: string
   include?: string[]
   exclude?: string[]
   sort?: string[]
+  status?: 'owned' | 'wanted' | 'all'   // ownership filter (default owned)
+  identified?: 'only' | 'all' | 'unidentified'  // hide bare ROMs (default only)
   limit?: number
   offset?: number
 }
@@ -411,9 +468,17 @@ export interface FileProfile {
   m3u: boolean; prune_empty: boolean; rename: boolean; all_files: boolean
   archive_policy: string; builtin?: boolean; source?: string
 }
+export interface ManifestMedia { kinds: string[]; where: string; device: string | null; layout: string; for: string }
+export interface ManifestBrief {
+  profile: string | null; profile_name?: string | null
+  conforms?: boolean; written_at?: string; written_by?: string
+  media?: ManifestMedia[]; role?: string; fresh: boolean; files?: number | null
+}
 export interface FileDetect {
   current: 'flat' | 'folder'; systems: string[]
-  counts: { files: number; top_exts: [string, number][] }; sample: string[]
+  counts: { files: number; capped?: boolean; top_exts: [string, number][] }; sample: string[]
+  capped?: boolean
+  manifest?: ManifestBrief | null
 }
 export interface FilePlanSummary {
   files: number; units: number; moves: number; renames: number
@@ -457,9 +522,10 @@ export interface Troubleshoot {
 }
 export interface JobProgress { done: number; total: number; failed: number }
 export interface Job {
-  id: string; kind: 'sync' | 'romsync' | 'fileops' | 'aimeta'; run_id?: number; label: string
+  id: string; kind: 'sync' | 'romsync' | 'fileops' | 'aimeta' | 'aimeta-apply'; run_id?: number; label: string
   status: string; detail: string; error: string | null; progress: JobProgress
   when: number | null; cancelable: boolean; restartable: boolean; deletable: boolean
+  findings?: number   // aimeta scan jobs: how many suggestions to review/accept
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -537,12 +603,15 @@ export const api = {
   games: (qy: GamesQuery) => {
     const p = new URLSearchParams()
     if (qy.q) p.set('q', qy.q)
+    if (qy.query) p.set('query', qy.query)
     if (qy.source) p.set('source', qy.source)
     if (qy.platform) p.set('platform', qy.platform)
     if (qy.has_kind) p.set('has_kind', qy.has_kind)
     if (qy.include?.length) p.set('include', qy.include.join(','))
     if (qy.exclude?.length) p.set('exclude', qy.exclude.join(','))
     if (qy.sort?.length) p.set('sort', qy.sort.join(','))
+    if (qy.status && qy.status !== 'owned') p.set('status', qy.status)
+    if (qy.identified && qy.identified !== 'only') p.set('identified', qy.identified)
     p.set('limit', String(qy.limit ?? 60))
     p.set('offset', String(qy.offset ?? 0))
     return get<GamesPage>('/api/games?' + p.toString())
@@ -565,6 +634,46 @@ export const api = {
       encodeURIComponent(tag), { method: 'DELETE' })
     if (!r.ok) throw new Error(`${r.status} tag`)
     return r.json() as Promise<GameTags>
+  },
+  setOwnership: async (nk: string, form: string, platform: string, state: string, note = '', title?: string) => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/ownership', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ form, platform, state, note, title }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ ownership: OwnershipFact[] }>
+  },
+  clearOwnership: async (nk: string, form: string, platform: string, state: string) => {
+    const q = new URLSearchParams({ form, platform, state }).toString()
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/ownership?' + q,
+      { method: 'DELETE' })
+    if (!r.ok) throw new Error(`${r.status} ownership`)
+    return r.json() as Promise<{ ownership: OwnershipFact[] }>
+  },
+  gameReleases: async (nk: string) => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/releases')
+    if (!r.ok) throw new Error(`${r.status} releases`)
+    return r.json() as Promise<{ resolved: boolean; igdb_id?: number; name?: string;
+      releases: GameRelease[]; source?: string | null; error?: string }>
+  },
+  knownSystems: async () => {
+    const r = await fetch('/api/systems')
+    if (!r.ok) throw new Error(`${r.status} systems`)
+    return r.json() as Promise<{ systems: SystemEntry[]; error?: string }>
+  },
+  setFraming: async (nk: string, kind: string, f: Frame) => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/framing', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind, ...f }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ kind: string; framing: Frame }>
+  },
+  clearFraming: async (nk: string, kind: string) => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/framing?kind=' +
+      encodeURIComponent(kind), { method: 'DELETE' })
+    if (!r.ok) throw new Error(`${r.status} framing`)
+    return r.json()
   },
   mediaLibrary: (nk: string) =>
     get<MediaLibrary>('/api/games/' + encodeURIComponent(nk) + '/media'),
@@ -601,6 +710,28 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} pins`)
     return r.json() as Promise<MediaLibrary>
   },
+  banMedia: async (nk: string, id: number) => {
+    const r = await fetch(`/api/games/${encodeURIComponent(nk)}/media/${id}/ban`, { method: 'POST' })
+    if (!r.ok) throw new Error(`${r.status} ban`)
+    return r.json() as Promise<MediaLibrary>
+  },
+  setMediaRedist: async (nk: string, id: number, redistributable: boolean) => {
+    const r = await fetch(`/api/games/${encodeURIComponent(nk)}/media/${id}/redist`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ redistributable }),
+    })
+    if (!r.ok) throw new Error(`${r.status} redist`)
+    return r.json() as Promise<MediaLibrary>
+  },
+  bannedMedia: () => get<{ banned: BannedMedia[] }>('/api/media/banned'),
+  unbanMedia: async (b: { norm_key: string; kind: string; provider: string; ref: string }) => {
+    const r = await fetch('/api/media/unban', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(b),
+    })
+    if (!r.ok) throw new Error(`${r.status} unban`)
+    return r.json() as Promise<{ ok: boolean }>
+  },
   mediaUrl: (nk: string, kind: string, thumb = false) =>
     `/api/media/${encodeURIComponent(nk)}/${encodeURIComponent(kind)}` +
     (thumb ? '?size=thumb' : ''),
@@ -629,8 +760,9 @@ export const api = {
     return r.json() as Promise<{ suggestions: DedupeSuggestion[] }>
   },
   // Dashboard spotlight (themed top-N; 'random' rotates through themes)
-  spotlight: (kind = 'random') =>
-    get<Spotlight>('/api/spotlight?kind=' + encodeURIComponent(kind)),
+  spotlight: (kind = 'random', exclude?: string) =>
+    get<Spotlight>('/api/spotlight?kind=' + encodeURIComponent(kind)
+      + (exclude ? '&exclude=' + encodeURIComponent(exclude) : '')),
   // Global preferences
   prefs: () => get<Prefs>('/api/prefs'),
   setPrefs: async (p: Partial<Prefs>) => {
@@ -802,6 +934,13 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ ok: boolean; account: string | null; error?: string }>
   },
+  // Dynamic sign-in URL (Nintendo PKCE): the button asks the server to mint the
+  // authorize URL (and stash the matching verifier) right before opening it.
+  authorizeStart: async (startPath: string) => {
+    const r = await fetch(startPath, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{ ok: boolean; url?: string; error?: string }>
+  },
   // Device-code flow (Xbox): start returns the short user code + link; poll is
   // called on a timer until Microsoft reports the sign-in finished.
   deviceStart: async (startPath: string) => {
@@ -917,23 +1056,24 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} profile`)
     return r.json() as Promise<{ profiles: FileProfile[] }>
   },
-  fileDetect: async (body: { device_id: number; root: string; scope: string; system?: string }) => {
+  fileDetect: async (body: { device_id: number; root: string; scope: string; system?: string }, signal?: AbortSignal) => {
     const r = await fetch('/api/fileops/detect', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal,
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<FileDetect>
   },
-  filePlan: async (body: { device_id: number; root: string; profile: string | FileProfile; scope: string; system?: string }) => {
+  filePlan: async (body: { device_id: number; root: string; profile: string | FileProfile; scope: string; system?: string }, signal?: AbortSignal) => {
     const r = await fetch('/api/fileops/plan', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal,
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<FilePlan>
   },
-  planExtract: async (body: { device_id: number; root: string; dest?: string; scope: string; system?: string }) => {
+  mediaLayouts: () => get<{ layouts: { id: string; name: string; desc: string }[] }>('/api/fileops/media-layouts'),
+  planExtract: async (body: { device_id: number; root: string; dest?: string; scope: string; system?: string; layout?: string; op?: 'move' | 'copy' }, signal?: AbortSignal) => {
     const r = await fetch('/api/fileops/plan-extract', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal,
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<FilePlan>
@@ -959,7 +1099,7 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<FileCommandResult>
   },
-  createRunbook: async (body: { device_id: number; root: string; profile?: string | FileProfile; operation?: string; dest?: string; scope: string; system?: string; note?: string }) => {
+  createRunbook: async (body: { device_id: number; root: string; profile?: string | FileProfile; operation?: string; dest?: string; scope: string; system?: string; note?: string; layout?: string; op?: 'move' | 'copy' }) => {
     const r = await fetch('/api/fileops/runbook', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     })
@@ -977,8 +1117,59 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} undo`)
     return r.json() as Promise<{ started: boolean; run_id: number }>
   },
+  // ---- Commander: build a reversible runbook from raw same-device drops ----
+  createRunbookOps: async (body: { device_id: number; root: string; ops: { op: string; src?: string; dst?: string }[]; label?: string; note?: string }) => {
+    const r = await fetch('/api/fileops/runbook-ops', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ run_id: number; runbook: Runbook }>
+  },
+  // ---- Commander: cross-device transfer (backgrounded rsync job) ----
+  fsTransfer: async (body: { src_device: number; dst_device: number; src_dir: string; dst_dir: string; items: string[]; mode: 'copy' | 'move' }) => {
+    const r = await fetch('/api/fs/transfer', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ started: boolean; jid: string }>
+  },
+  fsMkdir: async (device_id: number, path: string) => {
+    const r = await fetch('/api/fs/mkdir', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_id, path }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ ok: boolean }>
+  },
+  fsDelete: async (device_id: number, paths: string[]) => {
+    const r = await fetch('/api/fs/delete', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_id, paths }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ ok: boolean; removed: number }>
+  },
+  fsStat: async (device_id: number, path: string) => {
+    const r = await fetch('/api/fs/stat', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_id, path }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<FsStat>
+  },
   troubleshootRunbook: (id: number) => get<Troubleshoot>('/api/fileops/runbook/' + id + '/troubleshoot'),
   fileHistory: () => get<{ runs: RunHistoryRow[] }>('/api/fileops/history'),
+  manifestWrite: async (body: { device_id: number; root: string; operation?: string; profile?: string; scope?: string; system?: string; dest?: string }) => {
+    const r = await fetch('/api/fileops/manifest', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ started: boolean; jid: string }>
+  },
+  manifestDelete: async (device_id: number, root: string) => {
+    const r = await fetch('/api/fileops/manifest/delete', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_id, root }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ ok: boolean }>
+  },
   // ---- Unified job monitor (library sync + file-op runbooks) ----
   jobs: () => get<{ jobs: Job[] }>('/api/jobs'),
   pauseJob: async (id: string) => {
@@ -999,10 +1190,11 @@ export const api = {
   // ---- AI metadata audit & supplement ----
   aimetaTargets: () => get<AiScanTargets>('/api/aimeta/targets'),
   aimetaScans: () => get<{ scans: AiScanRun[] }>('/api/aimeta/scans'),
-  aimetaFindings: (status?: string, kind?: string) => {
+  aimetaFindings: (status?: string, kind?: string, runId?: number) => {
     const p = new URLSearchParams()
     if (status) p.set('status', status)
     if (kind) p.set('kind', kind)
+    if (runId) p.set('run_id', String(runId))
     const q = p.toString()
     return get<{ findings: AiFinding[]; counts: AiFindingCounts }>(
       '/api/aimeta/findings' + (q ? '?' + q : ''))
@@ -1039,7 +1231,7 @@ export const api = {
       body: JSON.stringify(body),
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ started: boolean; selected: number | null }>
+    return r.json() as Promise<{ started: boolean; selected: number | null; coalesced?: boolean }>
   },
   setAttributeOverride: async (nk: string, kind: string, value: string, origin: string) => {
     const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/attribute', {
