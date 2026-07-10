@@ -59,6 +59,103 @@ def token(con, cid, csec):
     return tok
 
 
+def _live_token():
+    """(client_id, token) for live IGDB calls, or (None, None) when IGDB is
+    disabled / uncredentialed. Reuses the cached OAuth token."""
+    if not config.metadata_enabled("igdb"):
+        return None, None
+    cid, csec = config.igdb_creds()
+    if not (cid and csec):
+        return None, None
+    con = cache_con()
+    try:
+        return cid, token(con, cid, csec)
+    finally:
+        con.close()
+
+
+def _has_release_fields(g):
+    return bool(g and (g.get("platforms") or g.get("release_dates")))
+
+
+def releases_for(norm_key, allow_fetch=True):
+    """A game's cross-platform release list from IGDB, cache-first + self-healing.
+    Older cached records (fetched before platforms/release_dates were requested) are
+    transparently re-fetched once. Returns
+    {resolved, igdb_id, name, releases:[{id,name,abbr,year,human}], source}."""
+    con = cache_con()
+    try:
+        row = con.execute("SELECT igdb_id FROM igdb_resolution WHERE norm_key=?",
+                          (norm_key,)).fetchone()
+        iid = row[0] if row else 0
+        if not iid:
+            return {"resolved": False, "releases": []}
+        m = con.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?",
+                        (iid,)).fetchone()
+        g = json.loads(m[0]) if m and m[0] else None
+        source = "cache"
+        if allow_fetch and not _has_release_fields(g):
+            cid, tok = _live_token()
+            if cid:
+                body = "fields %s; where id = %d; limit 1;" % (igdb.GAME_FIELDS, iid)
+                hits = igdb.query("games", body, cid, tok)
+                if hits:
+                    g = hits[0]
+                    con.execute("INSERT OR REPLACE INTO igdb_meta"
+                                "(igdb_id,payload_json,fetched_at) VALUES(?,?,?)",
+                                (iid, json.dumps(g, ensure_ascii=False),
+                                 int(time.time())))
+                    con.commit()
+                    source = "live"
+        if not g:
+            return {"resolved": True, "igdb_id": iid, "releases": [], "source": None}
+        return {"resolved": True, "igdb_id": iid, "name": g.get("name"),
+                "releases": igdb.releases(g), "source": source}
+    finally:
+        con.close()
+
+
+def all_platforms(allow_fetch=True):
+    """The full IGDB platform catalog (fetched once, then cached) as
+    [{id,name,abbr}] — powers the ownership overlay's 'search any system'."""
+    con = cache_con()
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS igdb_platforms("
+                    "igdb_id INTEGER PRIMARY KEY, name TEXT, abbreviation TEXT,"
+                    " fetched_at INTEGER)")
+        con.commit()
+        rows = con.execute("SELECT name, abbreviation FROM igdb_platforms").fetchall()
+        if not rows and allow_fetch:
+            cid, tok = _live_token()
+            if cid:
+                off, now = 0, int(time.time())
+                while True:
+                    hits = igdb.query(
+                        "platforms",
+                        "fields id,name,abbreviation; limit 500; offset %d;" % off,
+                        cid, tok)
+                    for p in hits:
+                        con.execute("INSERT OR REPLACE INTO igdb_platforms"
+                                    "(igdb_id,name,abbreviation,fetched_at) "
+                                    "VALUES(?,?,?,?)", (p["id"], p.get("name"),
+                                                        p.get("abbreviation"), now))
+                    off += 500
+                    if len(hits) < 500:
+                        break
+                con.commit()
+                rows = con.execute(
+                    "SELECT name, abbreviation FROM igdb_platforms").fetchall()
+        seen, out = set(), []
+        for n, a in rows:
+            e = igdb.platform_entry({"name": n, "abbreviation": a})
+            if e and e["id"] not in seen:
+                seen.add(e["id"])
+                out.append(e)
+        return sorted(out, key=lambda e: e["name"].lower())
+    finally:
+        con.close()
+
+
 def main(argv):
     do_all = "--all" in argv
     limit = int(argv[argv.index("--limit") + 1]) if "--limit" in argv else None

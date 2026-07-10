@@ -30,15 +30,71 @@ EXTERNAL_SOURCE = {"steam": 1, "gog": 5, "microsoft": 11, "epic": 26,
                    "itch": 30}
 STEAM_SOURCE = 1
 
-# Fields requested for a full game record (with nested expansions).
+# Fields requested for a full game record (with nested expansions). Includes the
+# platforms the game released on and per-platform release dates, so ludodex can
+# offer "this game also came out on …" in the ownership overlay.
 GAME_FIELDS = (
     "id,name,slug,summary,first_release_date,"
     "genres.name,themes.name,game_modes.name,player_perspectives.name,"
     "franchises.name,involved_companies.developer,"
     "involved_companies.publisher,involved_companies.company.name,"
+    "platforms.name,platforms.abbreviation,"
+    "release_dates.y,release_dates.human,release_dates.platform.name,"
+    "release_dates.platform.abbreviation,"
     "total_rating,total_rating_count,aggregated_rating,aggregated_rating_count,"
     "rating,rating_count"
 )
+
+# Vendor words dropped when slugging a platform that has no abbreviation, so
+# "Nintendo GameCube" -> "gamecube" rather than "nintendogamecube".
+_PLATFORM_VENDORS = {"nintendo", "sony", "microsoft", "sega", "atari", "nec",
+                     "snk", "commodore", "sinclair", "bandai", "nintendo's"}
+
+
+def _platform_slug(abbr, name):
+    """A terse, stable id for a platform — the abbreviation if present (SNES->snes,
+    PS4->ps4), else the name minus a leading vendor word, alphanumerics only."""
+    import re
+    base = (abbr or "").strip()
+    if not base:
+        words = [w for w in re.split(r"\s+", (name or "").strip()) if w]
+        if words and words[0].lower() in _PLATFORM_VENDORS:
+            words = words[1:]
+        base = "".join(words)
+    return re.sub(r"[^a-z0-9]", "", base.lower())
+
+
+def platform_entry(p):
+    """{id,name,abbr} from an IGDB platform dict (or a {'name','abbreviation'})."""
+    if not isinstance(p, dict):
+        return None
+    name = (p.get("name") or "").strip()
+    abbr = (p.get("abbreviation") or "").strip()
+    if not name and not abbr:
+        return None
+    return {"id": _platform_slug(abbr, name) or (name or abbr).lower(),
+            "name": name or abbr, "abbr": abbr}
+
+
+def releases(g):
+    """Distinct per-platform releases for an IGDB game record ->
+    [{id,name,abbr,year,human}] sorted by year then name. Prefers release_dates
+    (per-platform year); platforms with no dated release are still listed."""
+    out = {}
+    for rd in (g.get("release_dates") or []):
+        e = platform_entry(rd.get("platform"))
+        if not e:
+            continue
+        y = rd.get("y")
+        prev = out.get(e["id"])
+        # keep the earliest known year for a platform (first release, not a re-release)
+        if not prev or (y and (not prev.get("year") or y < prev["year"])):
+            out[e["id"]] = {**e, "year": y, "human": rd.get("human")}
+    for p in (g.get("platforms") or []):
+        e = platform_entry(p)
+        if e:
+            out.setdefault(e["id"], {**e, "year": None, "human": None})
+    return sorted(out.values(), key=lambda r: (r.get("year") or 9999, r["name"]))
 
 MIN_INTERVAL = 0.26            # IGDB rate limit ~4 req/s — throttle to stay under
 _last = [0.0]
