@@ -42,10 +42,201 @@ def _usage_con():
         provider TEXT, model TEXT, day TEXT, calls INTEGER DEFAULT 0,
         input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
         PRIMARY KEY(provider, model, day))""")
+    # A limit row can cap several dimensions at once — any one being hit blocks
+    # further calls. monthly_tokens = total-token cap (kept for back-compat);
+    # usd_budget = $/month; in_cap/out_cap = separate input / output token caps.
     con.execute("""CREATE TABLE IF NOT EXISTS limits(
         scope TEXT, key TEXT, monthly_tokens INTEGER, PRIMARY KEY(scope, key))""")
+    for c, decl in (("usd_budget", "REAL"), ("in_cap", "INTEGER"),
+                    ("out_cap", "INTEGER")):
+        if c not in {r[1] for r in con.execute("PRAGMA table_info(limits)")}:
+            con.execute("ALTER TABLE limits ADD COLUMN %s %s" % (c, decl))
+    # Editable per-model price table (USD per 1M tokens). source='manual' rows are
+    # user-set and never overwritten by a refresh; 'openrouter' rows are fetched.
+    con.execute("""CREATE TABLE IF NOT EXISTS prices(
+        provider TEXT, model TEXT, in_usd REAL, out_usd REAL, cached_usd REAL,
+        source TEXT, updated TEXT, PRIMARY KEY(provider, model))""")
     con.row_factory = sqlite3.Row
     return con
+
+
+# ---- pricing: cost is tokens (authoritative, from each API response) × price ---
+# NATIVE per-provider defaults, taken from each provider's OWN published pricing
+# (not a router). USD per 1,000,000 tokens: (input, output, cached-input|None).
+# These are shipped so cost works out of the box without any external fetch; the
+# optional OpenRouter refresh is off by default. A model with NO price row has an
+# UNKNOWN cost — its $ budget can't be enforced, but the token caps still can.
+# Verify against the provider's page over time; every rate is user-editable.
+DEFAULT_PRICES = {
+    # Google Gemini — ai.google.dev/gemini-api/docs/pricing (global rates)
+    ("gemini", "gemini-3.5-flash"): (1.50, 9.00, 0.15),
+    ("gemini", "gemini-3.1-pro"): (2.00, 12.00, None),
+    ("gemini", "gemini-2.5-pro"): (1.25, 10.00, None),
+    ("gemini", "gemini-2.5-flash"): (0.30, 2.50, None),
+    ("gemini", "gemini-2.5-flash-lite"): (0.10, 0.40, None),
+    # Anthropic Claude — platform.claude.com/docs/en/about-claude/pricing
+    # (cached input = 90% off input)
+    ("anthropic", "claude-opus-4-8"): (5.00, 25.00, 0.50),
+    ("anthropic", "claude-sonnet-5"): (2.00, 10.00, 0.20),
+    ("anthropic", "claude-sonnet-4-6"): (3.00, 15.00, 0.30),
+    ("anthropic", "claude-haiku-4-5"): (1.00, 5.00, 0.10),
+    # OpenAI — developers.openai.com/api/docs/pricing
+    ("openai", "gpt-5.5"): (5.00, 30.00, None),
+    ("openai", "gpt-5.4"): (2.50, 15.00, None),
+    ("openai", "gpt-5.4-mini"): (0.75, 4.50, None),
+    ("openai", "gpt-5.4-nano"): (0.20, 1.25, None),
+    ("openai", "gpt-5-mini"): (0.25, 2.00, None),
+    ("openai", "gpt-5-nano"): (0.05, 0.40, None),
+}
+
+
+def prices_openrouter_enabled():
+    """Whether the optional OpenRouter price fetch is allowed (off by default)."""
+    return bool(config.get_bool("ai_prices_openrouter", False))
+
+
+def prices_openrouter_set(on):
+    config.set_("ai_prices_openrouter", "1" if on else "0")
+    return prices_openrouter_enabled()
+
+
+def price_schedule_get():
+    """{daily, time} — the daily auto-refresh schedule. `time` is 'HH:MM' in the
+    ludodex install's local timezone; defaults to 04:00."""
+    return {"daily": bool(config.get_bool("price_update_daily", True)),
+            "time": config.get("price_update_time") or "04:00"}
+
+
+def price_schedule_set(daily=None, time=None):
+    if daily is not None:
+        config.set_("price_update_daily", "1" if daily else "0")
+    if time is not None:
+        m = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)$", str(time).strip())
+        if not m:
+            raise ValueError("time must be HH:MM (24-hour)")
+        config.set_("price_update_time", "%02d:%02d" % (int(m.group(1)), int(m.group(2))))
+    return price_schedule_get()
+
+
+def price_update_last():
+    return config.get("price_update_last")
+
+
+def run_daily_price_update(force=False):
+    """The scheduled daily refresh. No-ops unless the OpenRouter source is enabled
+    (the only auto-price feed) and — unless forced — there are limits worth keeping
+    accurate. Returns a small status dict; never raises."""
+    if not prices_openrouter_enabled():
+        return {"skipped": "openrouter-off"}
+    if not force and not limits_list():
+        return {"skipped": "no-limits"}
+    try:
+        return prices_refresh()
+    except Exception as e:                       # noqa: BLE001 — best-effort
+        return {"error": str(e)}
+
+
+def _seed_prices(con):
+    for (prov, model), (i, o, c) in DEFAULT_PRICES.items():
+        con.execute("INSERT OR IGNORE INTO prices"
+                    "(provider,model,in_usd,out_usd,cached_usd,source,updated) "
+                    "VALUES(?,?,?,?,?,'default',?)",
+                    (prov, model, i, o, c, datetime.date.today().isoformat()))
+
+
+def price_get(provider, model):
+    """(in_usd, out_usd, cached_usd) per 1M tokens for a model, or None if unknown."""
+    try:
+        con = _usage_con()
+        _seed_prices(con)
+        r = con.execute("SELECT in_usd,out_usd,cached_usd FROM prices "
+                        "WHERE provider=? AND model=?", (provider, model)).fetchone()
+        con.close()
+        return (r["in_usd"], r["out_usd"], r["cached_usd"]) if r else None
+    except Exception:
+        return None
+
+
+def price_set(provider, model, in_usd, out_usd, cached_usd=None, source="manual"):
+    con = _usage_con()
+    con.execute("INSERT INTO prices(provider,model,in_usd,out_usd,cached_usd,source,"
+                "updated) VALUES(?,?,?,?,?,?,?) ON CONFLICT(provider,model) DO UPDATE "
+                "SET in_usd=excluded.in_usd, out_usd=excluded.out_usd, "
+                "cached_usd=excluded.cached_usd, source=excluded.source, "
+                "updated=excluded.updated",
+                (provider, model, float(in_usd or 0), float(out_usd or 0),
+                 (float(cached_usd) if cached_usd not in (None, "") else None),
+                 source, datetime.date.today().isoformat()))
+    con.commit()
+    con.close()
+
+
+def prices_list():
+    con = _usage_con()
+    _seed_prices(con)
+    con.commit()
+    rows = [dict(r) for r in con.execute(
+        "SELECT provider,model,in_usd,out_usd,cached_usd,source,updated FROM prices "
+        "ORDER BY provider, model")]
+    con.close()
+    return rows
+
+
+def prices_refresh():
+    """Populate/refresh prices from OpenRouter's public models API (it lists
+    per-token pricing for models across providers). Matches by model name, so it
+    also seeds direct-provider models. NEVER overwrites source='manual' rows.
+    Returns {updated, checked}."""
+    import urllib.request
+    req = urllib.request.Request("https://openrouter.ai/api/v1/models",
+                                 headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = json.load(r)
+    models = data.get("data") or []
+    # name (last path segment) -> (in_usd_per_mtok, out_usd_per_mtok)
+    by_name = {}
+    for m in models:
+        mid = m.get("id") or ""
+        name = mid.split("/", 1)[1] if "/" in mid else mid
+        pr = m.get("pricing") or {}
+        try:                                   # OpenRouter prices are USD per token
+            i = float(pr.get("prompt") or 0) * 1e6
+            o = float(pr.get("completion") or 0) * 1e6
+        except (TypeError, ValueError):
+            continue
+        if name and (i or o):
+            by_name[name] = (i, o)
+    con = _usage_con()
+    updated = 0
+    today = datetime.date.today().isoformat()
+    # refresh existing non-manual rows + any usage model we can name-match
+    seen = set(con.execute("SELECT provider, model FROM prices "
+                           "WHERE source='manual'"))
+    targets = set(con.execute("SELECT DISTINCT provider, model FROM usage"))
+    targets |= {(r["provider"], r["model"]) for r in con.execute(
+        "SELECT provider, model FROM prices WHERE source!='manual'")}
+    for prov, model in targets:
+        if (prov, model) in seen:              # never clobber a manual override
+            continue
+        pr = by_name.get(model)
+        if pr:
+            con.execute("INSERT INTO prices(provider,model,in_usd,out_usd,cached_usd,"
+                        "source,updated) VALUES(?,?,?,?,NULL,'openrouter',?) "
+                        "ON CONFLICT(provider,model) DO UPDATE SET in_usd=excluded.in_usd,"
+                        " out_usd=excluded.out_usd, source='openrouter', updated=excluded.updated",
+                        (prov, model, pr[0], pr[1], today))
+            updated += 1
+    con.commit()
+    con.close()
+    return {"updated": updated, "checked": len(by_name)}
+
+
+def cost_usd(in_tok, out_tok, provider, model):
+    """USD cost of one (in,out) token pair for a model, or None if unpriced."""
+    p = price_get(provider, model)
+    if not p:
+        return None
+    return (in_tok or 0) / 1e6 * (p[0] or 0) + (out_tok or 0) / 1e6 * (p[1] or 0)
 
 
 def record_usage(provider, model, in_tok, out_tok):
@@ -88,14 +279,63 @@ def month_tokens(provider, model=None):
         return 0
 
 
+def month_io(provider, model=None):
+    """(input_tokens, output_tokens) used this month by a provider (or model)."""
+    try:
+        con = _usage_con()
+        q = ("SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) "
+             "FROM usage WHERE provider=? AND day LIKE ?")
+        args = [provider, _month_prefix() + "%"]
+        if model is not None:
+            q += " AND model=?"
+            args.append(model)
+        i, o = con.execute(q, args).fetchone()
+        con.close()
+        return int(i or 0), int(o or 0)
+    except Exception:
+        return 0, 0
+
+
+def month_cost(provider, model=None):
+    """(usd_cost, has_unpriced) for this month's usage — has_unpriced is True when a
+    used model has no price row, so the $ total is a floor (and $ caps can't bind)."""
+    try:
+        con = _usage_con()
+        q = ("SELECT model, COALESCE(SUM(input_tokens),0) i, "
+             "COALESCE(SUM(output_tokens),0) o FROM usage "
+             "WHERE provider=? AND day LIKE ?")
+        args = [provider, _month_prefix() + "%"]
+        if model is not None:
+            q += " AND model=?"
+            args.append(model)
+        q += " GROUP BY model"
+        rows = con.execute(q, args).fetchall()
+        con.close()
+    except Exception:
+        return 0.0, False
+    cost, unpriced = 0.0, False
+    for r in rows:
+        c = cost_usd(r["i"], r["o"], provider, r["model"])
+        if c is None:
+            if r["i"] or r["o"]:
+                unpriced = True
+        else:
+            cost += c
+    return round(cost, 4), unpriced
+
+
 def limits_map():
-    """{'provider': {id: cap}, 'model': {id: cap}} of configured monthly caps."""
+    """{'provider': {id: capsdict}, 'model': {id: capsdict}} — each capsdict is
+    {total, usd, input, output} (0/None where unset)."""
     out = {"provider": {}, "model": {}}
     try:
         con = _usage_con()
-        for r in con.execute("SELECT scope, key, monthly_tokens FROM limits"):
-            if r["monthly_tokens"]:
-                out.setdefault(r["scope"], {})[r["key"]] = r["monthly_tokens"]
+        for r in con.execute("SELECT scope, key, monthly_tokens, usd_budget, in_cap, "
+                             "out_cap FROM limits"):
+            caps = {"total": r["monthly_tokens"] or 0, "usd": r["usd_budget"] or 0,
+                    "input": r["in_cap"] or 0, "output": r["out_cap"] or 0}
+            if any(caps.values()):
+                out.setdefault(r["scope"], {})[r["key"]] = caps
         con.close()
     except Exception:
         pass
@@ -115,48 +355,106 @@ def _month_tokens_model(model):
         return 0
 
 
+def _month_usage(scope, key):
+    """(total, input, output, usd_cost, unpriced) used this month by a provider
+    or (across providers) a model."""
+    if scope == "provider":
+        i, o = month_io(key)
+        cost, unp = month_cost(key)
+        return i + o, i, o, cost, unp
+    try:
+        con = _usage_con()
+        rows = con.execute("SELECT provider, COALESCE(SUM(input_tokens),0) i, "
+                           "COALESCE(SUM(output_tokens),0) o FROM usage WHERE model=? "
+                           "AND day LIKE ? GROUP BY provider",
+                           (key, _month_prefix() + "%")).fetchall()
+        con.close()
+    except Exception:
+        return 0, 0, 0, 0.0, False
+    ti = to = 0
+    cost, unp = 0.0, False
+    for r in rows:
+        ti += r["i"]
+        to += r["o"]
+        c = cost_usd(r["i"], r["o"], r["provider"], key)
+        if c is None:
+            if r["i"] or r["o"]:
+                unp = True
+        else:
+            cost += c
+    return ti + to, ti, to, round(cost, 4), unp
+
+
 def limits_list():
-    """Configured monthly caps as a flat list with this month's usage:
-    [{scope, key, cap, month}]. Empty when nothing is capped."""
+    """Configured caps as a flat list, each with this month's usage per dimension:
+    [{scope, key, caps:{total,usd,input,output}, used:{total,input,output,usd,unpriced}}]."""
     lm = limits_map()
-    out = [{"scope": "provider", "key": p, "cap": c, "month": month_tokens(p)}
-           for p, c in sorted(lm.get("provider", {}).items())]
-    out += [{"scope": "model", "key": m, "cap": c, "month": _month_tokens_model(m)}
-            for m, c in sorted(lm.get("model", {}).items())]
+    out = []
+    for scope in ("provider", "model"):
+        for k, caps in sorted(lm.get(scope, {}).items()):
+            total, i, o, cost, unp = _month_usage(scope, k)
+            out.append({"scope": scope, "key": k, "caps": caps,
+                        "used": {"total": total, "input": i, "output": o,
+                                 "usd": cost, "unpriced": unp}})
     return out
 
 
-def set_limit(scope, key, monthly_tokens):
-    """Set (or clear, when falsy) a monthly token cap for a provider or model."""
+def set_limit(scope, key, caps):
+    """Set (or clear) a limit row for a provider/model. `caps` is a dict with any of
+    {total, usd, input, output}; falsy dimensions are cleared, and a row with no
+    active dimension is removed entirely."""
     if scope not in ("provider", "model") or not key:
         raise ValueError("bad limit scope/key")
+    if not isinstance(caps, dict):               # back-compat: a bare number = total
+        caps = {"total": caps}
+    total = int(caps.get("total") or 0)
+    usd = float(caps.get("usd") or 0)
+    inn = int(caps.get("input") or 0)
+    outc = int(caps.get("output") or 0)
     con = _usage_con()
-    if monthly_tokens and int(monthly_tokens) > 0:
-        con.execute("INSERT INTO limits(scope,key,monthly_tokens) VALUES(?,?,?) "
-                    "ON CONFLICT(scope,key) DO UPDATE SET monthly_tokens=excluded.monthly_tokens",
-                    (scope, key, int(monthly_tokens)))
+    if total or usd or inn or outc:
+        con.execute("INSERT INTO limits(scope,key,monthly_tokens,usd_budget,in_cap,"
+                    "out_cap) VALUES(?,?,?,?,?,?) ON CONFLICT(scope,key) DO UPDATE SET "
+                    "monthly_tokens=excluded.monthly_tokens, usd_budget=excluded.usd_budget, "
+                    "in_cap=excluded.in_cap, out_cap=excluded.out_cap",
+                    (scope, key, total, usd, inn, outc))
     else:
         con.execute("DELETE FROM limits WHERE scope=? AND key=?", (scope, key))
     con.commit()
     con.close()
 
 
+def _enforce(scope, key, tag):
+    """Raise if any active cap on this (scope,key) is hit. The $ cap is skipped when
+    a used model is unpriced (cost unknowable) — the token caps are the fallback."""
+    caps = limits_map()[scope].get(key)
+    if not caps:
+        return
+    total, i, o, cost, unpriced = _month_usage(scope, key)
+    where = " — adjust it in Settings › AI › Budgets & limits"
+    if caps["total"] and total >= caps["total"]:
+        raise RuntimeError("monthly token cap reached for %s (%d tokens)%s"
+                           % (tag, caps["total"], where))
+    if caps["input"] and i >= caps["input"]:
+        raise RuntimeError("monthly INPUT-token cap reached for %s (%d)%s"
+                           % (tag, caps["input"], where))
+    if caps["output"] and o >= caps["output"]:
+        raise RuntimeError("monthly OUTPUT-token cap reached for %s (%d)%s"
+                           % (tag, caps["output"], where))
+    if caps["usd"] and not unpriced and cost >= caps["usd"]:
+        raise RuntimeError("monthly budget reached for %s ($%.2f of $%.2f)%s"
+                           % (tag, cost, caps["usd"], where))
+
+
 def check_limit(provider, model):
-    """Raise RuntimeError if this month's usage has hit the provider or model cap."""
-    lm = limits_map()
-    pcap = lm["provider"].get(provider)
-    if pcap and month_tokens(provider) >= pcap:
-        raise RuntimeError("monthly usage limit reached for provider %r "
-                           "(%d tokens) — raise it in Settings › AI › Usage report"
-                           % (provider, pcap))
-    mcap = lm["model"].get(model)
-    if mcap and month_tokens(provider, model) >= mcap:
-        raise RuntimeError("monthly usage limit reached for model %r (%d tokens) — "
-                           "raise it in Settings › AI › Usage report" % (model, mcap))
+    """Raise RuntimeError if this month's usage has hit any provider- or model-scoped
+    cap (total / input / output tokens, or the $ budget)."""
+    _enforce("provider", provider, "provider %r" % provider)
+    _enforce("model", model, "model %r" % model)
 
 
 def usage_summary():
-    """Per (provider, model): lifetime + this-month totals + configured cap."""
+    """Per (provider, model): lifetime + this-month totals, USD cost, price, caps."""
     lm = limits_map()
     try:
         con = _usage_con()
@@ -171,21 +469,52 @@ def usage_summary():
     out = []
     for r in rows:
         inp, outp = r["inp"] or 0, r["outp"] or 0
+        price = price_get(r["provider"], r["model"])
+        life_usd = cost_usd(inp, outp, r["provider"], r["model"])
+        m_usd, m_unp = month_cost(r["provider"], r["model"])
         out.append({
             "provider": r["provider"], "model": r["model"], "calls": r["calls"] or 0,
             "input": inp, "output": outp, "total": inp + outp,
             "month": month_tokens(r["provider"], r["model"]),
+            "month_usd": m_usd, "lifetime_usd": life_usd, "unpriced": price is None,
+            "price": {"in": price[0], "out": price[1], "cached": price[2]} if price else None,
             "last_day": r["last_day"], "active_days": r["days"] or 0,
-            "model_cap": lm["model"].get(r["model"], 0)})
+            "caps": lm["model"].get(r["model"])})
     prov = {}
     for r in out:
         p = prov.setdefault(r["provider"], {"provider": r["provider"], "month": 0,
-                                            "total": 0, "cap": lm["provider"].get(r["provider"], 0)})
+                            "total": 0, "month_usd": 0.0, "unpriced": False,
+                            "caps": lm["provider"].get(r["provider"])})
         p["total"] += r["total"]
     for p in prov.values():
         p["month"] = month_tokens(p["provider"])
-    return {"models": out, "providers": sorted(prov.values(),
-            key=lambda x: -x["total"])}
+        c, unp = month_cost(p["provider"])
+        p["month_usd"], p["unpriced"] = c, unp
+    return {"models": out, "providers": sorted(prov.values(), key=lambda x: -x["total"]),
+            "currency": currency_get()}
+
+
+def currency_get():
+    """{code, fx} — fx = units of `code` per 1 USD (1.0 for USD). Budgets are stored
+    in USD; the UI multiplies by fx for display and divides for entry."""
+    code = (config.get("ai_budget_currency") or "USD").upper()
+    try:
+        fx = float(config.get("ai_budget_fx") or 1.0)
+    except (TypeError, ValueError):
+        fx = 1.0
+    if code == "USD":
+        fx = 1.0
+    return {"code": code, "fx": fx or 1.0}
+
+
+def currency_set(code, fx=None):
+    code = (code or "USD").upper()[:3]
+    config.set_("ai_budget_currency", code)
+    if code == "USD":
+        config.set_("ai_budget_fx", "1.0")
+    elif fx not in (None, ""):
+        config.set_("ai_budget_fx", str(float(fx)))
+    return currency_get()
 
 
 def usage_series(provider, model, days=31):
@@ -213,6 +542,7 @@ AREAS = [
     {"id": "search", "name": "Natural-language search", "status": "live",
      "description": "Turns a plain-English query in the search bar into a catalog filter."},
     {"id": "art", "name": "Smart art / metadata pick", "status": "live", "vision": True,
+     "data": True,
      "description": "Picks the best cover/art when providers disagree (per-game, in the detail view)."},
     {"id": "identify", "name": "Add-by-image recognition", "status": "live", "vision": True,
      "description": "Recognizes games from photos/screenshots/box art in the library's "
@@ -578,6 +908,10 @@ def status():
         ],
         "areas": [
             {**a,
+             # modality badges: vision = analyzes images, data = works over the
+             # catalog/text. Default data = "not vision"; an area can set both.
+             "vision": bool(a.get("vision")),
+             "data": bool(a.get("data", not a.get("vision"))),
              "assigned": (config.get("ai_area_" + a["id"]) or None),
              "assigned_model": (config.get("ai_area_" + a["id"] + "_model") or None),
              "effective": provider_for_area(a["id"]),

@@ -180,6 +180,7 @@ export interface AiArea {
   status: string
   description: string
   vision?: boolean
+  data?: boolean
   assigned: string | null
   assigned_model: string | null
   effective: string | null
@@ -189,14 +190,30 @@ export interface AiArea {
   prompt_vars: string[]          // <<token>> placeholders the prompt supports
 }
 
+export interface Caps { total: number; usd: number; input: number; output: number }
+export interface CapUsed { total: number; input: number; output: number; usd: number; unpriced: boolean }
 export interface AiUsageModel {
   provider: string; model: string; calls: number
   input: number; output: number; total: number; month: number
-  last_day: string | null; active_days: number; model_cap: number
+  month_usd: number; lifetime_usd: number | null; unpriced: boolean
+  price: { in: number; out: number; cached: number | null } | null
+  last_day: string | null; active_days: number; caps: Caps | null
 }
-export interface AiUsageProvider { provider: string; month: number; total: number; cap: number }
+export interface AiUsageProvider {
+  provider: string; month: number; total: number
+  month_usd: number; unpriced: boolean; caps: Caps | null
+}
 export interface AiUsageDay { day: string; calls: number; input: number; output: number }
-export interface AiCap { scope: 'provider' | 'model'; key: string; cap: number; month: number }
+export interface Currency { code: string; fx: number }
+export interface AiUsageSummary {
+  models: AiUsageModel[]; providers: AiUsageProvider[]; currency: Currency
+}
+export interface AiCap { scope: 'provider' | 'model'; key: string; caps: Caps; used: CapUsed }
+export interface AiPrice {
+  provider: string; model: string
+  in_usd: number | null; out_usd: number | null; cached_usd: number | null
+  source: string; updated: string
+}
 
 export interface AiConfig {
   active: string | null
@@ -897,18 +914,57 @@ export const api = {
     return r.json() as Promise<{ locations: EmuLocation[] }>
   },
   // AI token usage + monthly limits
-  aiUsage: () => get<{ models: AiUsageModel[]; providers: AiUsageProvider[] }>('/api/ai/usage'),
+  aiUsage: () => get<AiUsageSummary>('/api/ai/usage'),
   aiUsageSeries: (provider: string, model: string) =>
     get<{ provider: string; model: string; days: AiUsageDay[] }>(
       `/api/ai/usage/series?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`),
   aiLimits: () => get<{ caps: AiCap[] }>('/api/ai/limits'),
-  setAiLimit: async (scope: 'provider' | 'model', key: string, monthly_tokens: number) => {
+  setAiLimit: async (scope: 'provider' | 'model', key: string, caps: Partial<Caps>) => {
     const r = await fetch('/api/ai/limit', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ scope, key, monthly_tokens }),
+      body: JSON.stringify({ scope, key, caps }),
     })
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ caps: AiCap[]; usage: { models: AiUsageModel[]; providers: AiUsageProvider[] } }>
+    return r.json() as Promise<{ caps: AiCap[]; usage: AiUsageSummary }>
+  },
+  aiPrices: () => get<{ prices: AiPrice[]; currency: Currency; openrouter: boolean;
+    schedule: { daily: boolean; time: string }; last_update: string | null }>('/api/ai/prices'),
+  setPricesOpenRouter: async (openrouter: boolean) => {
+    const r = await fetch('/api/ai/prices/source', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ openrouter }),
+    })
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
+    return r.json() as Promise<{ openrouter: boolean }>
+  },
+  setPriceSchedule: async (daily: boolean, time?: string) => {
+    const r = await fetch('/api/ai/prices/schedule', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ daily, time }),
+    })
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
+    return r.json() as Promise<{ schedule: { daily: boolean; time: string } }>
+  },
+  setAiPrice: async (provider: string, model: string, in_usd: number, out_usd: number, cached_usd?: number | null) => {
+    const r = await fetch('/api/ai/price', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider, model, in_usd, out_usd, cached_usd }),
+    })
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
+    return r.json() as Promise<{ prices: AiPrice[] }>
+  },
+  refreshAiPrices: async () => {
+    const r = await fetch('/api/ai/prices/refresh', { method: 'POST' })
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
+    return r.json() as Promise<{ updated: number; checked: number; prices: AiPrice[] }>
+  },
+  setCurrency: async (code: string, fx?: number) => {
+    const r = await fetch('/api/ai/currency', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, fx }),
+    })
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
+    return r.json() as Promise<{ currency: Currency }>
   },
   // AI provider config (phase 3 — BYOAI; keys are write-only, never returned)
   aiConfig: () => get<AiConfig>('/api/ai/config'),

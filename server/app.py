@@ -3727,19 +3727,113 @@ def ai_limits():
 
 @app.post("/api/ai/limit")
 def ai_limit(body: dict = Body(...)):
-    """Set (or clear, when 0) a monthly token cap for a provider or a model.
-    Body: {"scope": "provider"|"model", "key": "<id>", "monthly_tokens": N}.
-    `key` may be ANY provider/model — it need not have been used yet."""
+    """Set (or clear) the caps for a provider or a model. Body:
+    {"scope":"provider"|"model", "key":"<id>", "caps":{total,usd,input,output}}.
+    Any subset of caps; all falsy = the row is removed. `usd` is stored in USD
+    (the UI converts from the display currency). `key` may be ANY provider/model."""
     body = body or {}
     scope = (body.get("scope") or "").strip()
     key = (body.get("key") or "").strip()
     if scope not in ("provider", "model") or not key:
         raise HTTPException(400, "scope must be provider|model and key required")
+    caps = body.get("caps")
+    if not isinstance(caps, dict):               # back-compat: {monthly_tokens: N}
+        caps = {"total": body.get("monthly_tokens")}
     try:
-        ai.set_limit(scope, key, int(body.get("monthly_tokens") or 0))
+        ai.set_limit(scope, key, caps)
     except (TypeError, ValueError):
-        raise HTTPException(400, "monthly_tokens must be a number")
+        raise HTTPException(400, "cap values must be numbers")
     return {"caps": ai.limits_list(), "usage": ai.usage_summary()}
+
+
+@app.get("/api/ai/prices")
+def ai_prices():
+    """The editable per-model price table (USD per 1M tokens) + display currency +
+    the OpenRouter source toggle + the daily auto-refresh schedule."""
+    return {"prices": ai.prices_list(), "currency": ai.currency_get(),
+            "openrouter": ai.prices_openrouter_enabled(),
+            "schedule": ai.price_schedule_get(), "last_update": ai.price_update_last()}
+
+
+@app.post("/api/ai/prices/source")
+def ai_prices_source(body: dict = Body(...)):
+    """Toggle the optional OpenRouter price fetch. Body: {openrouter: bool}."""
+    on = bool((body or {}).get("openrouter"))
+    return {"openrouter": ai.prices_openrouter_set(on)}
+
+
+@app.post("/api/ai/prices/schedule")
+def ai_prices_schedule(body: dict = Body(...)):
+    """Set the daily price auto-refresh. Body: {daily: bool, time: 'HH:MM'} (install
+    timezone). Runs only when the OpenRouter source is on and limits exist."""
+    b = body or {}
+    try:
+        return {"schedule": ai.price_schedule_set(b.get("daily"), b.get("time"))}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+def _price_scheduler():
+    """Fire the daily price auto-refresh once per day at the configured local time.
+    Polls every 5 min (uses `time.localtime`, so it honors the install's TZ) so
+    setting changes take effect and a restart catches up the same day."""
+    while True:
+        try:
+            sched = ai.price_schedule_get()
+            if sched.get("daily"):
+                lt = time.localtime()
+                hh, mm = (int(x) for x in sched["time"].split(":"))
+                today = time.strftime("%Y-%m-%d", lt)
+                if ai.price_update_last() != today and (lt.tm_hour, lt.tm_min) >= (hh, mm):
+                    try:
+                        ai.run_daily_price_update()
+                    finally:
+                        config.set_("price_update_last", today)
+        except Exception:                        # noqa: BLE001 — never kill the loop
+            pass
+        time.sleep(300)
+
+
+threading.Thread(target=_price_scheduler, daemon=True).start()
+
+
+@app.post("/api/ai/price")
+def ai_price_set(body: dict = Body(...)):
+    """Set a model's price (USD/1M). Body: {provider, model, in_usd, out_usd, cached_usd?}."""
+    b = body or {}
+    if not (b.get("provider") and b.get("model")):
+        raise HTTPException(400, "provider and model required")
+    try:
+        ai.price_set(b["provider"], b["model"], b.get("in_usd"), b.get("out_usd"),
+                     b.get("cached_usd"), source="manual")
+    except (TypeError, ValueError):
+        raise HTTPException(400, "prices must be numbers")
+    return {"prices": ai.prices_list()}
+
+
+@app.post("/api/ai/prices/refresh")
+def ai_prices_refresh():
+    """Pull current per-token pricing from OpenRouter (never overwrites manual rows).
+    Opt-in: only works when the OpenRouter source toggle is on."""
+    if not ai.prices_openrouter_enabled():
+        raise HTTPException(400, "OpenRouter price fetching is off — enable it in "
+                                 "Settings › AI › Budgets & limits first")
+    try:
+        res = ai.prices_refresh()
+    except Exception as e:
+        raise HTTPException(502, "price refresh failed: %s" % e)
+    return {**res, "prices": ai.prices_list()}
+
+
+@app.post("/api/ai/currency")
+def ai_currency(body: dict = Body(...)):
+    """Set the display currency for budgets. Body: {code, fx} — fx = units per USD
+    (ignored/forced to 1 for USD). Budgets stay stored in USD."""
+    b = body or {}
+    try:
+        return {"currency": ai.currency_set(b.get("code"), b.get("fx"))}
+    except (TypeError, ValueError):
+        raise HTTPException(400, "fx must be a number")
 
 
 @app.get("/api/ai/models/{provider}")

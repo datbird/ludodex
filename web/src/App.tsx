@@ -2,12 +2,12 @@ import { useEffect, useState, useRef, useCallback, useMemo, Fragment, type CSSPr
 import { api } from './api'
 import type {
   GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
-  AiUsageModel, AiUsageProvider, AiUsageDay,
+  AiUsageModel, AiUsageDay, AiUsageSummary, AiPrice, Currency, Caps,
   DedupeSuggestion, ArtPick, Service, ServiceConnect, Achievements as AchData,
   MediaLibrary, MediaAsset, MediaKind, BannedMedia,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
-  Device,
+  Device, LibraryManager,
   FileVariable, FileProfile, FilePlan, FileDetect, SourceModel,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
@@ -614,7 +614,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           <h1>ludo<span>dex</span></h1>
           {stats && (
             <div className="stats">
-              {(stats.identified ?? stats.games).toLocaleString()} games · {stats.media.games_with_art.toLocaleString()} with art ·{' '}
+              {(stats.identified ?? stats.games).toLocaleString()} identified games · {stats.media.games_with_art.toLocaleString()} with art ·{' '}
               {stats.cross_source} cross-source
             </div>
           )}
@@ -1057,7 +1057,7 @@ const SECTIONS = [
 ]
 const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
   ai: [{ id: 'usage', name: 'AI Usage' }, { id: 'keys', name: 'API Keys' },
-       { id: 'report', name: 'Usage report' }],
+       { id: 'budgets', name: 'Budgets & limits' }, { id: 'report', name: 'Usage report' }],
   connections: [{ id: 'devices', name: 'Devices' },
                 { id: 'credentials', name: 'Stores & providers' },
                 { id: 'dbsync', name: 'Database sync' },
@@ -1070,11 +1070,32 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
             { id: 'access', name: 'Cloudflare Access' }],
 }
 
+// Extra search terms per subtab so the Settings search matches the actual
+// controls inside each panel, not just the tab's name. Keyed by subtab id.
+const SETTINGS_KEYWORDS: Record<string, string> = {
+  usage: 'ai model provider default vision data badge function area prompt gemini anthropic openai limits',
+  keys: 'api key token credentials gemini openai anthropic openrouter',
+  budgets: 'budget cost price dollar currency usd token limit cap spend rate openrouter monthly input output',
+  report: 'usage report cost tokens spend',
+  devices: 'device library manager rom media path ssh host master edit folder connection',
+  credentials: 'stores providers steam gog epic itch screenscraper igdb ea nintendo login accounts credentials',
+  dbsync: 'database sync backup replicate',
+  limits: 'rate limit api throttle quota cooldown per minute per day',
+  preferences: 'media language ban file operations browse commander manifests apply mode preferences distribution',
+  banned: 'banned media unban hidden',
+  spotlight: 'spotlight rotation themes dashboard',
+  scan: 'metadata scan audit supplement ai',
+  review: 'metadata review findings accept apply',
+  users: 'users accounts password role admin login',
+  access: 'cloudflare access sso jwt auth',
+}
+
 function Settings({ onClose, onPrefsChanged, user }: {
   onClose: () => void; onPrefsChanged: () => void; user: AuthUser | null
 }) {
   const [section, setSection] = useState('ai')
   const [sub, setSub] = useState('usage')
+  const [q, setQ] = useState('')   // settings search
   const [cfg, setCfg] = useState<AiConfig | null>(null)
 
   const reload = () => api.aiConfig().then(setCfg).catch(() => {})
@@ -1088,9 +1109,22 @@ function Settings({ onClose, onPrefsChanged, user }: {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  // "Account & Users" is admin-only.
-  const sections = SECTIONS.filter((s) => s.id !== 'account' || user?.role === 'admin')
+  // "Account & Users" is admin-only. Sorted alphabetically by name so the list —
+  // and any future section — stays in order without manual bookkeeping.
+  const sections = SECTIONS
+    .filter((s) => s.id !== 'account' || user?.role === 'admin')
+    .sort((a, b) => a.name.localeCompare(b.name))
   const subs = SUBSECTIONS[section] ?? []
+
+  // Search across every section+subtab (by name + the keyword hints above).
+  // Non-null while a query is active; each hit jumps straight to its sub-panel.
+  const term = q.trim().toLowerCase()
+  const results = term
+    ? sections.flatMap((s) => (SUBSECTIONS[s.id] ?? [])
+        .filter((t) => (s.name + ' ' + t.name + ' ' + (SETTINGS_KEYWORDS[t.id] || ''))
+          .toLowerCase().includes(term))
+        .map((t) => ({ section: s.id, icon: s.icon, sectionName: s.name, sub: t.id, subName: t.name })))
+    : null
 
   return (
     <div className="overlay" onClick={onClose}>
@@ -1098,13 +1132,25 @@ function Settings({ onClose, onPrefsChanged, user }: {
         <button className="close" onClick={onClose} aria-label="Close settings">×</button>
         <nav className="settings-nav">
           <div className="settings-title">Settings</div>
-          {sections.map((s) => (
-            <button key={s.id}
-              className={'nav-item' + (section === s.id ? ' sel' : '')}
-              onClick={() => { setSection(s.id); setSub((SUBSECTIONS[s.id] ?? [])[0]?.id ?? '') }}>
-              <span className="nav-icon">{s.icon}</span>{s.name}
-            </button>
-          ))}
+          <input className="settings-search" type="search" placeholder="🔍 Search settings…"
+            value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
+          {results
+            ? (results.length
+                ? results.map((r) => (
+                    <button key={r.section + '/' + r.sub} className="nav-item nav-result"
+                      onClick={() => { setSection(r.section); setSub(r.sub); setQ('') }}>
+                      <span className="nav-icon">{r.icon}</span>
+                      <span className="nav-result-txt">{r.subName}
+                        <span className="nav-result-sec">{r.sectionName}</span></span>
+                    </button>))
+                : <div className="nav-none dim">No settings match “{q}”.</div>)
+            : sections.map((s) => (
+                <button key={s.id}
+                  className={'nav-item' + (section === s.id ? ' sel' : '')}
+                  onClick={() => { setSection(s.id); setSub((SUBSECTIONS[s.id] ?? [])[0]?.id ?? '') }}>
+                  <span className="nav-icon">{s.icon}</span>{s.name}
+                </button>
+              ))}
         </nav>
         <div className="settings-main">
           <div className="settings-tabs">
@@ -1131,6 +1177,7 @@ function Settings({ onClose, onPrefsChanged, user }: {
               : !cfg ? <div className="loading">Loading…</div>
               : sub === 'usage' ? <AiUsage cfg={cfg} onChange={reload} />
               : sub === 'keys' ? <ApiKeys cfg={cfg} onChange={reload} />
+              : sub === 'budgets' ? <AiBudgets />
               : sub === 'report' ? <AiUsageReport />
               : null}
           </div>
@@ -1901,7 +1948,10 @@ function AddFromImage({ sources, systems, onAdded }: {
         <button className="go primary" disabled={recognizing} onClick={recognize}>
           {recognizing ? 'Looking…' : `Recognize games in ${urls.length} image${urls.length === 1 ? '' : 's'}`}</button>
       )}
-      <div className="add-or-folder">or point to a folder of images on the server</div>
+      <div className="add-or-folder">
+        <div className="add-or-divider"><span className="add-or-word">OR</span></div>
+        <div className="add-or-copy">point to a folder of images on the server</div>
+      </div>
       <div className="add-name-row">
         <input value={folder} onChange={(e) => setFolder(e.target.value)}
           placeholder="/mnt/roms/box-art  (server path — mount network shares first)"
@@ -1967,6 +2017,31 @@ function fmtTok(n: number): string {
   return String(n)
 }
 
+// Budget currency helpers. Budgets are stored in USD; a chosen currency is a
+// display/entry layer converted at a stored FX rate (units of currency per USD).
+const CURRENCIES = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'INR', 'BRL', 'MXN']
+const CUR_SYMBOL: Record<string, string> = { USD: '$', EUR: '€', GBP: '£', CAD: 'C$',
+  AUD: 'A$', JPY: '¥', INR: '₹', BRL: 'R$', MXN: 'MX$' }
+const curSym = (c: Currency) => CUR_SYMBOL[c.code] || (c.code + ' ')
+const money = (usd: number, c: Currency) =>
+  curSym(c) + ((usd || 0) * (c.fx || 1)).toLocaleString(undefined,
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+// A $-budget input shown in the display currency; saves the USD equivalent.
+function MoneyInput({ usd, cur, onSave }: { usd: number; cur: Currency; onSave: (usd: number) => void }) {
+  const disp = usd ? (usd * (cur.fx || 1)).toFixed(2) : ''
+  const [v, setV] = useState(disp)
+  useEffect(() => { setV(disp) }, [disp])
+  const commit = () => {
+    const n = parseFloat((v || '').replace(/[^0-9.]/g, '') || '0')
+    const asUsd = n > 0 ? n / (cur.fx || 1) : 0
+    if (Math.abs(asUsd - usd) > 1e-9) onSave(asUsd)
+  }
+  return <input className="cap-input money" inputMode="decimal" placeholder="∞"
+    value={v} onChange={(e) => setV(e.target.value)} onBlur={commit}
+    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} />
+}
+
 // Monthly-cap input (blank = unlimited); commits on blur / Enter.
 function CapInput({ value, onSave }: { value: number; onSave: (v: number) => void }) {
   const [v, setV] = useState(value ? String(value) : '')
@@ -2005,79 +2080,28 @@ function UsageChart({ days }: { days: AiUsageDay[] }) {
 }
 
 function AiUsageReport() {
-  const [data, setData] = useState<{ models: AiUsageModel[]; providers: AiUsageProvider[] } | null>(null)
-  const [caps, setCaps] = useState<AiCap[]>([])
+  const [data, setData] = useState<AiUsageSummary | null>(null)
   const [sel, setSel] = useState<AiUsageModel | null>(null)
   const [series, setSeries] = useState<AiUsageDay[] | null>(null)
-  // add-a-cap form
-  const [capScope, setCapScope] = useState<'provider' | 'model'>('provider')
-  const [capProv, setCapProv] = useState('anthropic')
-  const [capModel, setCapModel] = useState('')
-  const [capVal, setCapVal] = useState('')
 
-  const load = () => {
-    api.aiUsage().then(setData).catch(() => setData({ models: [], providers: [] }))
-    api.aiLimits().then((d) => setCaps(d.caps)).catch(() => setCaps([]))
-  }
-  useEffect(() => { load() }, [])
+  useEffect(() => {
+    api.aiUsage().then(setData)
+      .catch(() => setData({ models: [], providers: [], currency: { code: 'USD', fx: 1 } }))
+  }, [])
 
   const openSeries = async (m: AiUsageModel) => {
     setSel(m); setSeries(null)
     try { setSeries((await api.aiUsageSeries(m.provider, m.model)).days) } catch { setSeries([]) }
   }
-  const setCap = async (scope: 'provider' | 'model', key: string, v: number) => {
-    const r = await api.setAiLimit(scope, key, v)
-    setData(r.usage); setCaps(r.caps)
-  }
-  const addCap = async () => {
-    const key = capScope === 'provider' ? capProv : capModel.trim()
-    const n = parseInt(capVal.replace(/[,_\s]/g, ''), 10)
-    if (!key || !n || n <= 0) return
-    await setCap(capScope, key, n)
-    setCapModel(''); setCapVal('')
-  }
 
   if (!data) return <div className="loading">Loading…</div>
+  const cur = data.currency
   return (
     <>
       <h2>Usage report</h2>
-      <p className="dim">Token usage per provider and model. Set a monthly cap (tokens)
-        to <b>stop calls</b> once a provider or model reaches it — leave blank for
-        unlimited. Click a model for its 30-day history.</p>
-
-      <div className="caps-panel">
-        <div className="caps-head">Usage caps</div>
-        <div className="caps-sub dim">Cap any provider or model — it doesn’t have to
-          have been used yet. Reaching a cap stops further calls that month.</div>
-        <div className="caps-list">
-          {caps.length === 0 && <div className="sync-note dim">No caps set.</div>}
-          {caps.map((c) => (
-            <div key={c.scope + '/' + c.key} className={'cap-row' + (c.cap > 0 && c.month >= c.cap ? ' over' : '')}>
-              <span className={'cap-scope ' + c.scope}>{c.scope}</span>
-              <span className="cap-key">{c.scope === 'provider' ? providerName(c.key) : c.key}</span>
-              <span className="cap-usage dim">{fmtTok(c.month)} / {fmtTok(c.cap)}</span>
-              <CapInput value={c.cap} onSave={(v) => setCap(c.scope, c.key, v)} />
-              <button className="emu-rm" title="Remove cap" onClick={() => setCap(c.scope, c.key, 0)}>×</button>
-            </div>
-          ))}
-        </div>
-        <div className="caps-add">
-          <select value={capScope} onChange={(e) => setCapScope(e.target.value as 'provider' | 'model')}>
-            <option value="provider">Provider</option>
-            <option value="model">Model</option>
-          </select>
-          {capScope === 'provider'
-            ? <select value={capProv} onChange={(e) => setCapProv(e.target.value)}>
-                {Object.keys(PROVIDER_LABELS).map((p) => <option key={p} value={p}>{providerName(p)}</option>)}
-              </select>
-            : <input placeholder="model id (e.g. claude-opus-4-8)" value={capModel}
-                onChange={(e) => setCapModel(e.target.value)} />}
-          <input className="cap-num" inputMode="numeric" placeholder="monthly tokens" value={capVal}
-            onChange={(e) => setCapVal(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') addCap() }} />
-          <button className="ops-btn" onClick={addCap}>＋ add cap</button>
-        </div>
-      </div>
+      <p className="dim">Tokens and estimated spend per provider and model — this month and
+        lifetime. Spend uses your actual token counts × the model prices; set budgets and
+        caps in <b>Budgets &amp; limits</b>. Click a model for its 30-day history.</p>
 
       {data.models.length === 0 ? (
         <div className="sync-note dim">No AI usage recorded yet — it appears here after
@@ -2086,34 +2110,33 @@ function AiUsageReport() {
         <>
           <div className="usage-providers">
             {data.providers.map((p) => (
-              <div key={p.provider} className={'usage-prov' + (p.cap > 0 && p.month >= p.cap ? ' over' : '')}>
+              <div key={p.provider} className="usage-prov">
                 <span className="up-name">{providerName(p.provider)}</span>
                 <span className="up-month">{fmtTok(p.month)}<span className="dim"> /mo</span></span>
-                <label className="up-cap">cap
-                  <CapInput value={p.cap} onSave={(v) => setCap('provider', p.provider, v)} /></label>
+                <span className="up-cost" title="estimated spend this month">
+                  {p.unpriced ? '≥' : ''}{money(p.month_usd, cur)}<span className="dim"> /mo</span></span>
               </div>
             ))}
           </div>
 
           <div className="usage-list">
             {data.models.map((m) => {
-              const over = m.model_cap > 0 && m.month >= m.model_cap
               const on = sel && sel.model === m.model && sel.provider === m.provider
               return (
                 <div key={m.provider + '/' + m.model}
-                  className={'usage-row' + (on ? ' sel' : '') + (over ? ' over' : '')}
+                  className={'usage-row' + (on ? ' sel' : '')}
                   onClick={() => openSeries(m)}>
                   <div className="ur-main">
                     <span className="ur-model">{m.model}</span>
-                    <span className="ur-prov">{providerName(m.provider)}</span>
+                    <span className="ur-prov">{providerName(m.provider)}
+                      {m.unpriced && <span className="tag soon" title="No price set — add it in Budgets & limits">no price</span>}</span>
                   </div>
                   <div className="ur-nums">
-                    <span title="this month">{fmtTok(m.month)}<span className="dim">/mo</span></span>
-                    <span className="dim" title="lifetime total">{fmtTok(m.total)}</span>
+                    <span title="tokens this month">{fmtTok(m.month)}<span className="dim">/mo</span></span>
+                    <span title="spend this month">{m.unpriced ? '—' : money(m.month_usd, cur)}</span>
+                    <span className="dim" title="lifetime tokens">{fmtTok(m.total)}</span>
                     <span className="dim" title="calls">{m.calls}×</span>
                   </div>
-                  <label className="ur-cap" onClick={(e) => e.stopPropagation()}>cap
-                    <CapInput value={m.model_cap} onSave={(v) => setCap('model', m.model, v)} /></label>
                 </div>
               )
             })}
@@ -2128,6 +2151,244 @@ function AiUsageReport() {
         </>
       )}
     </>
+  )
+}
+
+// Budgets & limits — dollar budgets (primary) with token caps (reliable fallback,
+// even if prices break), plus the editable price table + display currency.
+function AiBudgets() {
+  const [caps, setCaps] = useState<AiCap[] | null>(null)
+  const [cur, setCur] = useState<Currency>({ code: 'USD', fx: 1 })
+  const [prices, setPrices] = useState<AiPrice[]>([])
+  const [orEnabled, setOrEnabled] = useState(false)
+  const [sched, setSched] = useState<{ daily: boolean; time: string }>({ daily: true, time: '04:00' })
+  const [lastUpdate, setLastUpdate] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [fxInput, setFxInput] = useState('')
+  // add-a-limit form
+  const [scope, setScope] = useState<'provider' | 'model'>('provider')
+  const [prov, setProv] = useState('gemini')
+  const [modelKey, setModelKey] = useState('')
+  const [addUsd, setAddUsd] = useState('')
+  // add-a-price form
+  const [pProv, setPProv] = useState('gemini')
+  const [pModel, setPModel] = useState('')
+  const [pIn, setPIn] = useState('')
+  const [pOut, setPOut] = useState('')
+
+  const load = () => {
+    api.aiLimits().then((d) => setCaps(d.caps)).catch(() => setCaps([]))
+    api.aiPrices().then((d) => {
+      setPrices(d.prices); setCur(d.currency); setOrEnabled(d.openrouter)
+      setSched(d.schedule); setLastUpdate(d.last_update)
+    }).catch(() => {})
+  }
+  const toggleOpenRouter = async (on: boolean) => {
+    setOrEnabled(on)
+    try { await api.setPricesOpenRouter(on) } catch { setOrEnabled(!on) }
+  }
+  const saveSchedule = async (daily: boolean, timeStr?: string) => {
+    const prev = sched
+    setSched({ daily, time: timeStr ?? sched.time })
+    try { setSched((await api.setPriceSchedule(daily, timeStr)).schedule) } catch { setSched(prev) }
+  }
+  useEffect(() => { load() }, [])
+
+  const saveCaps = async (sc: 'provider' | 'model', key: string, next: Partial<Caps>) => {
+    try { setCaps((await api.setAiLimit(sc, key, next)).caps) }
+    catch (e) { setMsg(e instanceof Error ? e.message : 'failed') }
+  }
+  const addLimit = async () => {
+    const key = scope === 'provider' ? prov : modelKey.trim()
+    if (!key) return
+    const n = parseFloat(addUsd.replace(/[^0-9.]/g, '') || '0')
+    await saveCaps(scope, key, { usd: n > 0 ? n / (cur.fx || 1) : 0, total: n > 0 ? 0 : 1 })
+    setModelKey(''); setAddUsd('')
+  }
+  const savePrice = async (p: AiPrice, inUsd: number, outUsd: number, cached: number | null) => {
+    try { setPrices((await api.setAiPrice(p.provider, p.model, inUsd, outUsd, cached)).prices) }
+    catch (e) { setMsg(e instanceof Error ? e.message : 'failed') }
+  }
+  const addPrice = async () => {
+    if (!pModel.trim()) return
+    try {
+      setPrices((await api.setAiPrice(pProv, pModel.trim(),
+        parseFloat(pIn || '0'), parseFloat(pOut || '0'))).prices)
+      setPModel(''); setPIn(''); setPOut('')
+    } catch (e) { setMsg(e instanceof Error ? e.message : 'failed') }
+  }
+  const refresh = async () => {
+    setRefreshing(true); setMsg('')
+    try { const r = await api.refreshAiPrices(); setPrices(r.prices); setMsg(`Fetched ${r.updated} price(s) — provider-direct rates, no markup.`) }
+    catch (e) { setMsg('Refresh failed: ' + (e instanceof Error ? e.message : '')) }
+    finally { setRefreshing(false) }
+  }
+  const changeCurrency = async (code: string) => {
+    try { setCur((await api.setCurrency(code, code === 'USD' ? 1 : (cur.code === code ? cur.fx : undefined))).currency) }
+    catch { /* */ }
+  }
+  const saveFx = async () => {
+    const n = parseFloat(fxInput.replace(/[^0-9.]/g, '') || '0')
+    if (n > 0) { try { setCur((await api.setCurrency(cur.code, n)).currency); setFxInput('') } catch { /* */ } }
+  }
+
+  if (!caps) return <div className="loading">Loading…</div>
+  return (
+    <>
+      <h2>Budgets &amp; limits</h2>
+      <p className="dim">Set a <b>monthly $ budget</b> per provider or model — spend is your
+        real token counts (from each API response) × the prices below. Token caps are a
+        reliable fallback that keep working even if a price is missing. <b>Any</b> cap being
+        hit stops further calls that month.</p>
+
+      <div className="cur-row">
+        <span className="cur-label">Currency</span>
+        <select value={cur.code} onChange={(e) => changeCurrency(e.target.value)}>
+          {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        {cur.code !== 'USD' && (
+          <label className="cur-fx">1&nbsp;USD =
+            <input inputMode="decimal" placeholder={String(cur.fx)} value={fxInput}
+              onChange={(e) => setFxInput(e.target.value)} onBlur={saveFx}
+              onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} />
+            {cur.code}</label>
+        )}
+        {cur.code !== 'USD' && <span className="dim cur-note">≈ approx — you’re billed in USD.</span>}
+      </div>
+
+      <div className="budgets">
+        {caps.length === 0 && <div className="sync-note dim">No budgets or caps yet — add one below.</div>}
+        {caps.map((c) => (
+          <div key={c.scope + '/' + c.key} className="budget-row">
+            <div className="br-head">
+              <span className={'cap-scope ' + c.scope}>{c.scope}</span>
+              <span className="cap-key">{c.scope === 'provider' ? providerName(c.key) : c.key}</span>
+              <button className="emu-rm" title="Remove all caps for this"
+                onClick={() => saveCaps(c.scope, c.key, { total: 0, usd: 0, input: 0, output: 0 })}>×</button>
+            </div>
+            <div className="br-fields">
+              <label className="br-field"><span>Budget /mo ({curSym(cur).trim()})</span>
+                <MoneyInput usd={c.caps.usd} cur={cur} onSave={(usd) => saveCaps(c.scope, c.key, { ...c.caps, usd })} />
+                <span className="br-used dim">{c.used.unpriced ? '≥' : ''}{money(c.used.usd, cur)} used</span></label>
+              <label className="br-field"><span>Total tokens /mo</span>
+                <CapInput value={c.caps.total} onSave={(total) => saveCaps(c.scope, c.key, { ...c.caps, total })} />
+                <span className="br-used dim">{fmtTok(c.used.total)} used</span></label>
+              <label className="br-field"><span>Input tokens /mo</span>
+                <CapInput value={c.caps.input} onSave={(input) => saveCaps(c.scope, c.key, { ...c.caps, input })} />
+                <span className="br-used dim">{fmtTok(c.used.input)} used</span></label>
+              <label className="br-field"><span>Output tokens /mo</span>
+                <CapInput value={c.caps.output} onSave={(output) => saveCaps(c.scope, c.key, { ...c.caps, output })} />
+                <span className="br-used dim">{fmtTok(c.used.output)} used</span></label>
+            </div>
+            {c.caps.usd > 0 && c.used.unpriced &&
+              <div className="br-warn dim">⚠ Some usage here has no price set — the $ budget can’t be enforced, but the token caps still apply.</div>}
+          </div>
+        ))}
+        <div className="budget-add">
+          <select value={scope} onChange={(e) => setScope(e.target.value as 'provider' | 'model')}>
+            <option value="provider">Provider</option>
+            <option value="model">Model</option>
+          </select>
+          {scope === 'provider'
+            ? <select value={prov} onChange={(e) => setProv(e.target.value)}>
+                {Object.keys(PROVIDER_LABELS).map((p) => <option key={p} value={p}>{providerName(p)}</option>)}
+              </select>
+            : <input placeholder="model id (e.g. gemini-3.5-flash)" value={modelKey}
+                onChange={(e) => setModelKey(e.target.value)} />}
+          <input className="cap-num" inputMode="decimal" placeholder={`budget ${curSym(cur).trim()}/mo`}
+            value={addUsd} onChange={(e) => setAddUsd(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') addLimit() }} />
+          <button className="ops-btn" onClick={addLimit}>＋ add</button>
+        </div>
+      </div>
+
+      <div className="price-panel">
+        <div className="pp-head">Model prices <span className="dim">(USD per 1M tokens, per provider)</span>
+          {orEnabled && (
+            <button className="ops-btn" disabled={refreshing} onClick={refresh}
+              title="Looks up each model's current per-token price from the public OpenRouter model catalog — a pass-through of each provider's OWN published rates (no markup), so the numbers equal calling the provider directly. Never changes your manual edits or how your calls are routed.">
+              {refreshing ? '↻ Fetching…' : '↻ Fetch current prices'}</button>
+          )}
+        </div>
+        <div className="pp-note dim">Your calls go <b>direct to each provider</b> — these are just
+          the rates used to turn tokens into dollars. ludodex ships <b>native per-provider prices</b>
+          (from each provider’s own pricing page) marked <em>default</em>. Edit any rate to override
+          it (marked <em>manual</em>, never overwritten). A model with no price shows spend as “—”
+          and can’t enforce a $ budget — use a token cap there.</div>
+        <label className="switch pp-or">
+          <input type="checkbox" checked={orEnabled} onChange={(e) => toggleOpenRouter(e.target.checked)} />
+          <span className="track"><span className="knob" /></span>
+          <span className="switch-text pp-or-txt">Also allow fetching prices from the OpenRouter catalog
+            <span className="dim"> — off by default. It lists each provider’s own rates with no markup, but you don’t need it; native defaults + your edits already cover pricing.</span></span>
+        </label>
+        {orEnabled && (
+          <div className="pp-sched">
+            <label className="switch pp-sched-on">
+              <input type="checkbox" checked={sched.daily} onChange={(e) => saveSchedule(e.target.checked)} />
+              <span className="track"><span className="knob" /></span>
+              <span className="switch-text">Auto-update prices daily</span>
+            </label>
+            {sched.daily && (
+              <label className="pp-sched-time">at
+                <input type="time" value={sched.time} onChange={(e) => saveSchedule(true, e.target.value)} />
+                <span className="dim">server time{lastUpdate ? ` · last ran ${lastUpdate}` : ''}</span>
+              </label>
+            )}
+            <div className="pp-sched-note dim">Refreshes only when you have budgets/limits set — no point otherwise.</div>
+          </div>
+        )}
+        {msg && <div className="pp-msg dim">{msg}</div>}
+        <div className="price-list">
+          <div className="price-row phead"><span>Model</span><span>Input</span><span>Output</span><span>Cached</span><span>Src</span><span /></div>
+          {Object.entries(prices.reduce((g, p) => { (g[p.provider] ||= []).push(p); return g }, {} as Record<string, AiPrice[]>))
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([provider, rows]) => (
+              <Fragment key={provider}>
+                <div className="pr-provider">{providerName(provider)}</div>
+                {rows.map((p) => <PriceRow key={p.provider + '/' + p.model} p={p} onSave={savePrice} />)}
+              </Fragment>
+            ))}
+        </div>
+        <div className="price-add">
+          <select value={pProv} onChange={(e) => setPProv(e.target.value)}>
+            {Object.keys(PROVIDER_LABELS).map((p) => <option key={p} value={p}>{providerName(p)}</option>)}
+          </select>
+          <input placeholder="model id" value={pModel} onChange={(e) => setPModel(e.target.value)} />
+          <input className="price-num" inputMode="decimal" placeholder="in $/1M" value={pIn} onChange={(e) => setPIn(e.target.value)} />
+          <input className="price-num" inputMode="decimal" placeholder="out $/1M" value={pOut} onChange={(e) => setPOut(e.target.value)} />
+          <button className="ops-btn" onClick={addPrice}>＋ add price</button>
+        </div>
+      </div>
+    </>
+  )
+}
+
+function PriceRow({ p, onSave }: { p: AiPrice; onSave: (p: AiPrice, i: number, o: number, c: number | null) => void }) {
+  const [i, setI] = useState(p.in_usd != null ? String(p.in_usd) : '')
+  const [o, setO] = useState(p.out_usd != null ? String(p.out_usd) : '')
+  const [c, setC] = useState(p.cached_usd != null ? String(p.cached_usd) : '')
+  useEffect(() => {
+    setI(p.in_usd != null ? String(p.in_usd) : '')
+    setO(p.out_usd != null ? String(p.out_usd) : '')
+    setC(p.cached_usd != null ? String(p.cached_usd) : '')
+  }, [p.in_usd, p.out_usd, p.cached_usd])
+  const commit = () => {
+    const iv = parseFloat(i || '0'), ov = parseFloat(o || '0')
+    const cv = c.trim() === '' ? null : parseFloat(c)
+    if (iv !== (p.in_usd ?? 0) || ov !== (p.out_usd ?? 0) || cv !== (p.cached_usd ?? null)) onSave(p, iv, ov, cv)
+  }
+  const num = (val: string, set: (s: string) => void) =>
+    <input className="price-num" inputMode="decimal" value={val} onBlur={commit}
+      onChange={(e) => set(e.target.value)}
+      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} />
+  return (
+    <div className="price-row">
+      <span className="pr-model" title={p.provider}>{p.model}</span>
+      {num(i, setI)}{num(o, setO)}{num(c, setC)}
+      <span className={'pr-src ' + p.source} title={p.source === 'manual' ? 'your manual override' : p.source === 'openrouter' ? 'auto-fetched provider-direct rate' : 'shipped default'}>{p.source === 'manual' ? 'manual' : p.source === 'openrouter' ? 'auto' : p.source}</span>
+      <span />
+    </div>
   )
 }
 
@@ -2160,6 +2421,12 @@ function AreaPromptEditor({ area, onSave }: { area: AiArea; onSave: (prompt: str
     </div>
   )
 }
+
+// Modality badges shown on AI functions — vision (analyzes images) / data (works
+// over the catalog & text). Reused in the legend, the two default rows, and each
+// function row so the badge a user sees is literally the same component everywhere.
+const VisionBadge = () => <span className="tag vision">vision</span>
+const DataBadge = () => <span className="tag data">data</span>
 
 function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
   const [dedupeOpen, setDedupeOpen] = useState(false)
@@ -2225,9 +2492,14 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
         actual model. “Default” inherits the global default below. Subscriptions can’t
         power the app — use API keys (Gemini has a free tier). See <code>AI.md</code>.
       </p>
+      <p className="dim ai-badge-legend">
+        The badges tell you what a function does: <VisionBadge /> means it analyzes
+        images (so it uses the <em>Image analysis</em> default), <DataBadge /> means it
+        works over your catalog &amp; text. A function that does both shows both.
+      </p>
 
       <div className="default-row">
-        <span className="dr-label">Global default</span>
+        <span className="dr-label">Global default <span className="dr-paren">(<DataBadge />)</span></span>
         <select value={cfg.default.provider ?? ''} onChange={(e) => setDefaultProvider(e.target.value)}>
           {cfg.providers.map((p) => (
             <option key={p.id} value={p.id} disabled={!p.configured}>
@@ -2244,7 +2516,7 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
       </div>
 
       <div className="default-row">
-        <span className="dr-label">Image analysis <span className="dr-sub">(vision)</span></span>
+        <span className="dr-label">Image analysis <span className="dr-paren">(<VisionBadge />)</span></span>
         <select value={cfg.vision_default.assigned ?? ''}
           onChange={(e) => setVisionProvider(e.target.value)}>
           <option value="">Same as global default</option>
@@ -2293,7 +2565,8 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
               <div className="area-head" onClick={() => toggleArea(a.id)}>
                 <span className={'sync-chev' + (rowOpen ? ' open' : '')}>▸</span>
                 <span className="area-name">{a.name}
-                  {a.vision && <span className="tag vision">vision</span>}
+                  {a.vision && <VisionBadge />}
+                  {a.data && <DataBadge />}
                   {a.prompt && <span className="tag soon">custom prompt</span>}
                   {a.status !== 'live' && <span className="tag soon">{a.status}</span>}</span>
                 <span className="area-summary dim">{provLabel} · {modelLabel}</span>
@@ -2453,49 +2726,44 @@ function PathInput({ deviceId, value, onChange, placeholder }: {
   )
 }
 
-function AddManager({ deviceId, deviceName, kinds, onAdded }: {
+// Add OR edit a library manager (a rom/media folder on a device). `existing`
+// prefills the form and switches it to update-in-place (backend UPDATEs by id).
+function ManagerModal({ deviceId, deviceName, kinds, existing, onClose, onSaved }: {
   deviceId: number; deviceName: string; kinds: [string, [string, boolean, boolean]][]
-  onAdded: (d: { devices: Device[] }) => void
+  existing?: LibraryManager; onClose: () => void; onSaved: (d: { devices: Device[] }) => void
 }) {
-  const [open, setOpen] = useState(false)
-  useScrollLock(open)
-  const [kind, setKind] = useState(kinds[0]?.[0] || 'roms')
-  const [name, setName] = useState('')
-  const [rom, setRom] = useState('')
-  const [media, setMedia] = useState('')
+  useScrollLock()
+  const [kind, setKind] = useState(existing?.kind || kinds[0]?.[0] || 'roms')
+  const [name, setName] = useState(existing?.name || '')
+  const [rom, setRom] = useState(existing?.rom_path || '')
+  const [media, setMedia] = useState(existing?.media_path || '')
   const [mkinds, setMkinds] = useState<MediaKind[]>([])
-  const [pick, setPick] = useState<Set<string>>(new Set())   // empty = all types
+  const [pick, setPick] = useState<Set<string>>(new Set(existing?.media_kinds || []))   // empty = all types
   const [busy, setBusy] = useState(false)
-  useEffect(() => { if (open) api.mediaKinds().then((d) => setMkinds(d.kinds)).catch(() => {}) }, [open])
+  useEffect(() => { api.mediaKinds().then((d) => setMkinds(d.kinds)).catch(() => {}) }, [])
   const caps = kinds.find(([k]) => k === kind)?.[1]
   const doesRoms = caps ? caps[1] : true
   const doesMedia = caps ? caps[2] : false
   const kindLabel = caps ? caps[0] : kind
   const togglePick = (k: string) =>
     setPick((p) => { const n = new Set(p); n.has(k) ? n.delete(k) : n.add(k); return n })
-  const reset = () => { setName(''); setRom(''); setMedia(''); setPick(new Set()); setKind(kinds[0]?.[0] || 'roms') }
-  const close = () => { setOpen(false); reset() }
-  const add = async () => {
+  const save = async () => {
     setBusy(true)
     try {
-      onAdded(await api.setManager({
+      onSaved(await api.setManager({
+        ...(existing ? { id: existing.id } : {}),
         device_id: deviceId, kind, name,
         rom_path: doesRoms ? rom : '', media_path: doesMedia ? media : '',
         media_kinds: doesMedia ? Array.from(pick) : [],
       }))
-      close()
+      onClose()
     } finally { setBusy(false) }
   }
-  if (!open) return (
-    <button className="dm-add-btn" onClick={() => setOpen(true)} title="Add a library manager to this device">
-      ＋ Add library manager
-    </button>
-  )
   return (
-    <div className="overlay overlay-2" onClick={close}>
+    <div className="overlay overlay-2" onClick={onClose}>
       <div className="panel dm-panel" onClick={(e) => e.stopPropagation()}>
-        <button className="close" onClick={close}>×</button>
-        <h2>Add to {deviceName}</h2>
+        <button className="close" onClick={onClose}>×</button>
+        <h2>{existing ? `Edit ${existing.name || kindLabel}` : `Add to ${deviceName}`}</h2>
         <p className="dim">A <b>library manager</b> is a folder on this device that holds ROMs
           or downloaded media (RetroDECK/ES-DE, RetroBat, Playnite, LaunchBox, or a raw folder).</p>
         <div className="dm-form">
@@ -2542,12 +2810,25 @@ function AddManager({ deviceId, deviceName, kinds, onAdded }: {
           </div>
         )}
         <div className="dm-actions">
-          <button className="ops-btn" onClick={close}>Cancel</button>
-          <button className="go primary" disabled={busy} onClick={add}>{busy ? 'Adding…' : 'Add'}</button>
+          <button className="ops-btn" onClick={onClose}>Cancel</button>
+          <button className="go primary" disabled={busy} onClick={save}>
+            {busy ? 'Saving…' : existing ? 'Save changes' : 'Add'}</button>
         </div>
       </div>
     </div>
   )
+}
+
+function AddManager({ deviceId, deviceName, kinds, onAdded }: {
+  deviceId: number; deviceName: string; kinds: [string, [string, boolean, boolean]][]
+  onAdded: (d: { devices: Device[] }) => void
+}) {
+  const [open, setOpen] = useState(false)
+  return open
+    ? <ManagerModal deviceId={deviceId} deviceName={deviceName} kinds={kinds}
+        onClose={() => setOpen(false)} onSaved={onAdded} />
+    : <button className="dm-add-btn" onClick={() => setOpen(true)}
+        title="Add a library manager to this device">＋ Add library manager</button>
 }
 
 type DevForm = {
@@ -2616,6 +2897,7 @@ function DevicesPanel() {
   const [sync, setSync] = useState<Record<number, { device?: string; results?: { manager: string; ok: boolean; roms?: number; media?: string; error?: string }[]; error?: string }>>({})
   const [busy, setBusy] = useState<number | null>(null)
   const [editing, setEditing] = useState<number | null>(null)
+  const [editMgr, setEditMgr] = useState<number | null>(null)   // library-manager id being edited
   const [wantCounts, setWantCounts] = useState<Record<string, number>>({})
   const [wants, setWants] = useState<Record<number, GameRow[]>>({})
   const [wantsOpen, setWantsOpen] = useState<number | null>(null)
@@ -2699,7 +2981,12 @@ function DevicesPanel() {
                 <span className="dm-name">{m.name || m.kind}</span>
                 <code className="dm-path">{[m.rom_path && 'ROMs: ' + m.rom_path, m.media_path && 'Media: ' + m.media_path].filter(Boolean).join('   ·   ') || '(no paths set)'}</code>
                 {m.media_path && <span className="dm-mkinds">{m.media_kinds && m.media_kinds.length ? m.media_kinds.map((k) => k.replace(/_/g, ' ')).join(', ') : 'all media types'}</span>}
+                <button className="dm-edit" title="Edit paths / settings" onClick={() => setEditMgr(m.id)}>✎</button>
                 <button className="emu-rm" title="Remove" onClick={async () => apply(await api.removeManager(m.id))}>×</button>
+                {editMgr === m.id && (
+                  <ManagerModal existing={m} deviceId={d.id} deviceName={d.name} kinds={kinds}
+                    onClose={() => setEditMgr(null)} onSaved={(x) => { apply(x); setEditMgr(null) }} />
+                )}
               </div>
             ))}
             <AddManager deviceId={d.id} deviceName={d.name} kinds={kinds} onAdded={apply} />
