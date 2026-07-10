@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import time
 import urllib.request
+import urllib.parse
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", DIR)
@@ -36,8 +37,20 @@ META_CACHE = os.path.join(DATA, "metadata-cache.sqlite")
 # header.jpg (capsule/header banner), logo. Not every appid has every asset —
 # verified lazily when materialized.
 STEAM_CDN = "https://steamcdn-a.akamaihd.net/steam/apps/%s/%s"
-STEAM_ART = {"cover": "library_600x900.jpg", "hero": "library_hero.jpg",
-             "header": "header.jpg", "logo": "logo.png"}
+# Each kind lists every filename Steam is known to serve it under, tried in
+# order — prune_dead drops whichever 404s, so older/newer games both resolve.
+# The vertical cover capsule has two names: `library_600x900.jpg` (modern,
+# 2019+) and the legacy `portrait.png` — older titles (e.g. pre-2019 indies)
+# only have the latter, so requesting just the modern name silently loses them.
+STEAM_ART = {"cover": ["library_600x900.jpg", "portrait.png"],
+             "hero": ["library_hero.jpg"],
+             # older titles lack `library_hero.jpg`; Steam still serves a wide
+             # store background under these generated names (37/40 of hero-less
+             # games have `page_bg_generated_v6b.jpg`). Modeled as `background`
+             # so it fills the detail backdrop without shadowing a real hero.
+             "background": ["page_bg_generated_v6b.jpg",
+                            "page_bg_generated.jpg", "page.bg.jpg"],
+             "header": ["header.jpg"], "logo": ["logo.png"]}
 
 # IGDB image sizes per canonical kind (https://api-docs.igdb.com/#images).
 IGDB_SIZE = {"cover": "t_cover_big", "background": "t_1080p",
@@ -61,7 +74,9 @@ def con_index():
 
 
 def steam_games():
-    """{appid -> norm_key} for owned Steam games."""
+    """{appid -> norm_key} for Steam games — OWNED plus wishlist-WANTED. Both carry
+    a Steam appid (wanted ones live in the `wanted` table, with no owned source), so
+    both get free Steam-CDN cover art by appid."""
     lib = config.get("library_db")
     out = {}
     if not (lib and os.path.exists(lib)):
@@ -72,11 +87,36 @@ def steam_games():
             "ON s.game_id=g.id WHERE s.source='steam'"):
         if sid and str(sid).isdigit():
             out[str(sid)] = nk
+    try:                                    # wishlist-wanted Steam appids
+        for nk, sid in c.execute(
+                "SELECT g.norm_key, w.store_id FROM games g JOIN wanted w "
+                "ON w.game_id=g.id WHERE w.store='steam'"):
+            if sid and str(sid).isdigit():
+                out.setdefault(str(sid), nk)
+    except sqlite3.OperationalError:
+        pass                                # older catalog without the wanted table
     c.close()
     return out
 
 
+_BANNED = None
+
+
+def _banned():
+    """Cached set of banned (nk, kind, provider, ref) — never (re)download these."""
+    global _BANNED
+    if _BANNED is None:
+        try:
+            import mediaflags
+            _BANNED = mediaflags.banned_set()
+        except Exception:
+            _BANNED = set()
+    return _BANNED
+
+
 def put(con, nk, kind, provider, url, now, ext="jpg", system=None, meta=None):
+    if (nk, kind, provider, url) in _banned():
+        return                              # user banned this asset — don't re-add
     con.execute("INSERT OR REPLACE INTO media(norm_key,system,kind,provider,"
                 "ref_type,ref,ext,matched,meta,indexed_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -88,10 +128,11 @@ def fetch_steam(con, now):
     games = steam_games()
     n = 0
     for appid, nk in games.items():
-        for kind, leaf in STEAM_ART.items():
-            put(con, nk, kind, "steam", STEAM_CDN % (appid, leaf), now,
-                ext=leaf.rsplit(".", 1)[-1], meta=appid)
-            n += 1
+        for kind, leaves in STEAM_ART.items():
+            for leaf in leaves:
+                put(con, nk, kind, "steam", STEAM_CDN % (appid, leaf), now,
+                    ext=leaf.rsplit(".", 1)[-1], meta=appid)
+                n += 1
     con.commit()
     print("media_fetch: steam — %d candidate URLs for %d games"
           % (n, len(games)), file=sys.stderr)
@@ -157,30 +198,55 @@ def _sgdb_get(path, key):
         return json.load(r)
 
 
-def fetch_steamgriddb(con, now, limit=None):
-    key = config.steamgriddb_key()
-    if not key:
-        print("media_fetch: steamgriddb — no API key; skipping", file=sys.stderr)
-        return
-    # gap targets: owned steam games missing a chosen-eligible kind locally/remote
-    have = {(nk, k) for nk, k in con.execute(
-        "SELECT norm_key, kind FROM media WHERE kind IN "
-        "('cover','hero','logo','icon')")}
-    games = steam_games()
-    todo = [(a, nk) for a, nk in games.items()
-            if any((nk, k) not in have for k in ("cover", "hero", "logo"))]
-    if limit:
-        todo = todo[:limit]
-    KINDS = {"grids": ("cover", "600x900"), "heroes": ("hero", None),
-             "logos": ("logo", None), "icons": ("icon", None)}
-    n = 0
-    for appid, nk in todo:
+SGDB_KINDS = {"grids": ("cover", "600x900"), "heroes": ("hero", None),
+              "logos": ("logo", None), "icons": ("icon", None)}
+
+
+def _sgdb_game_id(key, appid=None, title=None):
+    """Resolve a SteamGridDB game id — by Steam appid (exact) when we have one,
+    else by name search (best autocomplete match). None if nothing matches."""
+    if appid:
         try:
             g = _sgdb_get("/games/steam/%s" % appid, key)
             gid = (g.get("data") or {}).get("id")
+            if gid:
+                return gid
+        except Exception:
+            pass
+    if title:
+        try:
+            d = _sgdb_get("/search/autocomplete/%s"
+                          % urllib.parse.quote(title.strip()), key)
+            items = d.get("data") or []
+            if items:
+                return items[0].get("id")
+        except Exception:
+            pass
+    return None
+
+
+def fetch_steamgriddb_targets(con, now, targets, limit=None):
+    """Gap-fill hero/logo/cover/icon from SteamGridDB for arbitrary identified
+    games — NOT just Steam. `targets` = [(norm_key, title, steam_appid_or_None)];
+    each resolves by appid or by title search. Returns the number of URLs added."""
+    key = config.steamgriddb_key()
+    if not key:
+        print("media_fetch: steamgriddb — no API key; skipping", file=sys.stderr)
+        return 0
+    have = {(nk, k) for nk, k in con.execute(
+        "SELECT norm_key, kind FROM media WHERE kind IN "
+        "('cover','hero','logo','icon')")}
+    todo = [t for t in targets
+            if any((t[0], k) not in have for k in ("cover", "hero", "logo"))]
+    if limit:
+        todo = todo[:limit]
+    n = 0
+    for nk, title, appid in todo:
+        try:
+            gid = _sgdb_game_id(key, appid, title)
             if not gid:
                 continue
-            for ep, (kind, dim) in KINDS.items():
+            for ep, (kind, dim) in SGDB_KINDS.items():
                 q = "/%s/game/%s" % (ep, gid) + ("?dimensions=%s" % dim if dim else "")
                 try:
                     d = _sgdb_get(q, key)
@@ -194,11 +260,62 @@ def fetch_steamgriddb(con, now, limit=None):
                     n += 1
                 time.sleep(0.2)
         except Exception as e:
-            print("media_fetch: steamgriddb appid %s: %s" % (appid, e),
-                  file=sys.stderr)
+            print("media_fetch: steamgriddb %r: %s" % (title or nk, e), file=sys.stderr)
         con.commit()
     print("media_fetch: steamgriddb — %d URLs across %d gap games"
           % (n, len(todo)), file=sys.stderr)
+    return n
+
+
+def fetch_steamgriddb(con, now, limit=None):
+    """CLI path: gap-fill SGDB art for all owned Steam games (resolved by appid)."""
+    return fetch_steamgriddb_targets(
+        con, now, [(nk, None, appid) for appid, nk in steam_games().items()], limit)
+
+
+# Games that DESERVE art from a name lookup: a provider match or a real store /
+# manual source — never a bare ROM file (its "title" is a filename; matched ROMs
+# already carry their real canonical_title and are included via metadata_links).
+_NONID_SRC = ("emulation", "archive", "physical", "rom", "digital")
+
+
+def identified_targets():
+    """[(norm_key, title, steam_appid_or_None)] for every IDENTIFIED game — used
+    to gap-fill art by name (or Steam appid) when the importing source shipped
+    none. This is what gets a non-Steam store game (Epic/GOG/PSN/Xbox) a cover
+    and backdrop even though its source has no art CDN we fetch."""
+    lib = config.get("library_db")
+    out = []
+    if not (lib and os.path.exists(lib)):
+        return out
+    c = sqlite3.connect(lib)
+    try:
+        rows = c.execute(
+            "SELECT g.norm_key, g.canonical_title, "
+            "  (SELECT s.source_id FROM sources s WHERE s.game_id=g.id "
+            "     AND s.source='steam' LIMIT 1) AS appid "
+            "FROM games g WHERE "
+            "  EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) "
+            "  OR EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
+            "     AND s.source NOT IN %s)" % (_NONID_SRC,)).fetchall()
+    finally:
+        c.close()
+    for nk, title, appid in rows:
+        aid = str(appid) if appid and str(appid).isdigit() else None
+        out.append((nk, title or "", aid))
+    return out
+
+
+def fetch_missing_art(con, now, limit=None):
+    """Built-in art gap-fill: for every identified game still missing a
+    cover/hero/logo, pull it from SteamGridDB by name (or Steam appid). The SGDB
+    fetch already skips games that have those kinds, so this is self-limiting —
+    after the first pass only newly-imported art-less games cost an API call."""
+    if not config.steamgriddb_key():
+        print("media_fetch: backfill-art — no SteamGridDB key; skipping",
+              file=sys.stderr)
+        return 0
+    return fetch_steamgriddb_targets(con, now, identified_targets(), limit)
 
 
 def fetch_screenscraper(con, now):
@@ -278,6 +395,13 @@ def main(argv):
     if argv and argv[0] == "prune":               # standalone cleanup pass
         prune_dead(con)
         con.close()
+        return
+    if "--backfill-art" in argv:                  # name-based art gap-fill
+        n = fetch_missing_art(con, now, limit)
+        prune_dead(con)
+        con.commit()
+        con.close()
+        print("media_fetch: backfill-art — added %d art URLs" % n, file=sys.stderr)
         return
     if only in (None, "steam") and config.media_enabled("steam"):
         con.execute("DELETE FROM media WHERE provider='steam'")
