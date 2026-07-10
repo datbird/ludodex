@@ -23,6 +23,9 @@ The engine is AI-free. The AI layer (``server/ai.py``) only *produces* profile /
 plan objects — which are fed straight into ``plan()`` here — so the deterministic
 path and the AI path share one auditable executor.
 """
+import base64
+import datetime
+import hashlib
 import json
 import os
 import posixpath
@@ -35,6 +38,8 @@ import time
 DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
+
+MANIFEST_NAME = ".ludodex.json"   # per-folder sidecar; invisible to every operation
 import config          # noqa: E402
 import devices         # noqa: E402  transport (_device/_ssh/_run/_wrap_pw/...)
 import romtags         # noqa: E402  parse_name()
@@ -94,6 +99,47 @@ ROLE_ESDE_FOLDER = {
     "fanart": "fanart", "background": "fanart",
     "video": "videos",
 }
+
+# Destination structure profiles for Extract-media. `folders` remaps the canonical
+# ES-DE folder (covers/screenshots/marquees/titlescreens/fanart/videos) to each
+# frontend's naming; `template` lays out the path (empty segments are collapsed).
+MEDIA_LAYOUTS = {
+    "esde": {
+        "name": "ES-DE / RetroDECK",
+        "template": "{dest}/{system}/{folder}/{game}.{ext}",
+        "folders": {},                     # identity (covers/screenshots/marquees/…)
+        "desc": "<dest>/<system>/covers·screenshots·marquees/<game> — ES-DE layout the "
+                "library also indexes.",
+    },
+    "retroarch": {
+        "name": "RetroArch thumbnails",
+        "template": "{dest}/{system}/{folder}/{game}.{ext}",
+        "folders": {"covers": "Named_Boxarts", "screenshots": "Named_Snaps",
+                    "marquees": "Named_Titles", "titlescreens": "Named_Titles",
+                    "fanart": "Named_Snaps", "videos": "Named_Videos"},
+        "desc": "<dest>/<system>/Named_Boxarts·Named_Snaps·Named_Titles/<game>",
+    },
+    "kind_first": {
+        "name": "By kind, then system",
+        "template": "{dest}/{folder}/{system}/{game}.{ext}",
+        "folders": {},
+        "desc": "<dest>/covers·screenshots·marquees/<system>/<game>",
+    },
+    "flat": {
+        "name": "Flat (kind in the filename)",
+        "template": "{dest}/{system}/{game}-{folder}.{ext}",
+        "folders": {"covers": "cover", "screenshots": "screenshot",
+                    "marquees": "marquee", "titlescreens": "title", "fanart": "fanart",
+                    "videos": "video"},
+        "desc": "<dest>/<system>/<game>-cover·screenshot·marquee.<ext>",
+    },
+}
+
+
+def media_layouts():
+    """List the media destination structures for the Extract-media picker."""
+    return [{"id": k, "name": v["name"], "desc": v["desc"]}
+            for k, v in MEDIA_LAYOUTS.items()]
 
 
 def _media_extract_target(rel):
@@ -356,10 +402,37 @@ class _Fs:
                 size_s, rel = line.split("\t", 1)
             except ValueError:
                 continue
-            if rel:
+            if rel and not _is_manifest(rel):
                 out.append({"rel": rel,
                             "size": int(size_s) if size_s.isdigit() else 0})
         return out
+
+    def listing_sampled(self, root, cap=20000):
+        """Like listing() but bounded to the first `cap` files — `head` closes the
+        pipe so `find` stops early (SIGPIPE) instead of walking a 500k-file tree.
+        For fast previews/scale checks; the order is find's (dir-major)."""
+        root = root.rstrip("/")
+        cmd = ("find %s -type f -printf '%%s\\t%%P\\n' 2>/dev/null | head -n %d"
+               % (shlex.quote(root), cap))
+        r = self.run(cmd, timeout=120)
+        out = []
+        for line in (r.stdout or "").splitlines():
+            try:
+                size_s, rel = line.split("\t", 1)
+            except ValueError:
+                continue
+            if rel and not _is_manifest(rel):
+                out.append({"rel": rel,
+                            "size": int(size_s) if size_s.isdigit() else 0})
+        return out
+
+    def top_dirs(self, root):
+        """Immediate child directories of root (the systems, for multi_system) —
+        one shallow, near-instant find regardless of how big the tree is."""
+        root = root.rstrip("/")
+        r = self.run("find %s -mindepth 1 -maxdepth 1 -type d -printf '%%P\\n' "
+                     "2>/dev/null | head -n 400" % shlex.quote(root), timeout=60)
+        return sorted(x for x in (r.stdout or "").splitlines() if x)
 
     def read_text(self, abspath, limit=65536):
         """Small text file (a .cue/.m3u) as str; '' if unreadable."""
@@ -398,7 +471,9 @@ class _Fs:
 
 
 def _abs(root, rel):
-    return posixpath.join(root.rstrip("/"), rel)
+    # keep a bare "/" root intact — rstrip would turn it into "" and drop the slash,
+    # yielding a relative path (Commander can produce a "/" common-ancestor root).
+    return posixpath.join("/" if root == "/" else root.rstrip("/"), rel)
 
 
 # ------------------------------------------------------------------ unit grouping
@@ -621,13 +696,17 @@ def plan(device_id, root, profile, scope="multi_system", system=None, max_files=
 
 
 def plan_extract(device_id, root, dest="downloaded_media", scope="multi_system",
-                 system=None, prune_empty=True, max_files=400000):
-    """Plan moving media tangled inside a ROM tree at `root` OUT into a clean ES-DE
-    media tree at `<dest>/<system>/<esde_folder>/<game>.<ext>` (dest is relative to
-    root, default 'downloaded_media/'). No ROM/game files are touched — only files
+                 system=None, prune_empty=True, max_files=400000, layout="esde",
+                 op="move"):
+    """Plan relocating media tangled inside a ROM tree at `root` OUT into a clean
+    media tree under `<dest>` (relative to root) using the chosen `layout` structure.
+    `op` is 'move' (default) or 'copy' — copy leaves the originals in place and never
+    prunes source dirs. No ROM/game files are touched — only files
     `_media_extract_target` recognizes as art. Same {ops,summary,warnings,sample}
     shape as plan(), so the preview/runbook/undo path is identical."""
     dest = (dest or "downloaded_media").strip("/")
+    lay = MEDIA_LAYOUTS.get(layout) or MEDIA_LAYOUTS["esde"]
+    op = "copy" if op == "copy" else "move"
     fs = _Fs(device_id)
     files = fs.listing(root)
     warnings = []
@@ -652,12 +731,15 @@ def plan_extract(device_id, root, dest="downloaded_media", scope="multi_system",
             sysname = segs[0] if len(segs) > 1 else (system or "")
         sysname = _sanitize(sysname) or "Unsorted"
         game = _sanitize(stem) or stem
-        dst = "/".join(p for p in (dest, sysname, folder, game + "." + ext) if p)
+        fname = lay["folders"].get(folder, folder)    # remap folder for this layout
+        dst = lay["template"].format(dest=dest, system=sysname, folder=fname,
+                                     game=game, ext=ext)
+        dst = "/".join(s for s in dst.split("/") if s)   # collapse empty segments
         if dst != rel:
-            ops.append({"op": "move", "src": rel, "dst": dst})
+            ops.append({"op": op, "src": rel, "dst": dst})
             src_dirs.add(posixpath.dirname(rel))
             extracted += 1
-    if prune_empty and ops:
+    if prune_empty and op == "move" and ops:              # copy leaves sources intact
         moved_srcs = {o["src"] for o in ops}
         moved_into = {posixpath.dirname(o["dst"]) for o in ops}
         kept = {posixpath.dirname(f["rel"]) for f in files if f["rel"] not in moved_srcs}
@@ -703,6 +785,10 @@ def _op_script(root, op, src, dst, payload):
         return ("if [ ! -e %s ] && [ -e %s ]; then true; else %s; fi"
                 % (shlex.quote(_abs(root, src)), shlex.quote(_abs(root, dst)),
                    _sh_move(root, src, dst)))
+    if op == "copy":
+        a, b = shlex.quote(_abs(root, src)), shlex.quote(_abs(root, dst))
+        d = shlex.quote(posixpath.dirname(_abs(root, dst)))
+        return "mkdir -p %s && cp -an %s %s" % (d, a, b)   # -a preserve+recursive, -n no-clobber
     if op == "write":
         path = shlex.quote(_abs(root, dst))
         d = shlex.quote(posixpath.dirname(_abs(root, dst)))
@@ -932,6 +1018,9 @@ def undo(run_id):
         if o["op"] == "move":
             inverse.append({"op": "move", "src": o["dst"], "dst": o["src"]})
             emptied.add(posixpath.dirname(o["dst"]))
+        elif o["op"] == "copy":                 # inverse of a copy = delete the copy
+            inverse.append({"op": "delete", "path": o["dst"]})
+            emptied.add(posixpath.dirname(o["dst"]))
         elif o["op"] == "write":
             inverse.append({"op": "delete", "path": o["dst"]})
             emptied.add(posixpath.dirname(o["dst"]))
@@ -946,7 +1035,8 @@ def undo(run_id):
         if o["op"] == "move":
             body = _sh_move(root, o["src"], o["dst"])
         elif o["op"] == "delete":
-            body = "rm -f %s" % shlex.quote(_abs(root, o["path"]))
+            # -r so undoing a copy of a *directory* removes it too (write-inverse is a file)
+            body = "rm -rf %s" % shlex.quote(_abs(root, o["path"]))
         elif o["op"] == "mkdir":
             body = "mkdir -p %s" % shlex.quote(_abs(root, o["path"]))
         elif o["op"] == "rmdir":
@@ -988,30 +1078,242 @@ def run_delete(run_id):
 
 
 # ------------------------------------------------------------------------- detect
-def detect(device_id, root, scope="multi_system", system=None, sample=400):
+def detect(device_id, root, scope="multi_system", system=None, sample=400, cap=12000):
     """Guess which layout the path currently uses + collect a listing sample the
-    AI/profile-inference can reason over. Returns {current, systems, sample, counts}."""
+    AI/profile-inference can reason over. Returns {current, systems, sample, counts,
+    capped}. Bounded: reads at most `cap` files (find stops early) + one shallow dir
+    scan for systems, so it's ~1s even on a 500k-file tree instead of minutes.
+    `capped` = the tree is bigger than `cap` (so counts.files is a floor, not exact)."""
     fs = _Fs(device_id)
-    files = fs.listing(root)[:sample * 4]
+
+    # Fast path: a fresh manifest already knows the answer — no walk at all.
+    m, fresh = _manifest_state(fs, root)
+    if m and fresh:
+        rels = m.get("sample") or []
+        fp = m.get("fingerprint") or {}
+        per_game = sum(1 for r in rels if r.count("/") >= 2) / (len(rels) or 1)
+        systems = [s for s in (fp.get("systems") or {}) if s != "(root)"][:80]
+        exts = {}
+        for r in rels:
+            exts[_ext(r)] = exts.get(_ext(r), 0) + 1
+        return {
+            "current": "folder" if per_game > 0.5 else "flat",
+            "systems": systems,
+            "counts": {"files": fp.get("files", len(rels)), "capped": False,
+                       "top_exts": sorted(exts.items(), key=lambda x: -x[1])[:15]},
+            "sample": rels[:sample],
+            "capped": False,
+            "manifest": _manifest_brief(m, fresh=True),
+        }
+
+    files = fs.listing_sampled(root, cap=cap)
     rels = [f["rel"] for f in files]
+    capped = len(files) >= cap
     # infer current shape from directory depth distribution
-    depths = [r.count("/") for r in rels]
     per_game = sum(1 for r in rels if r.count("/") >= 2) / (len(rels) or 1)
+    current = "folder" if per_game > 0.5 else "flat"
     if scope == "single_system":
-        current = "folder" if per_game > 0.5 else "flat"
+        systems = []
     else:
-        current = "folder" if per_game > 0.5 else "flat"
-    systems = sorted({r.split("/")[0] for r in rels if "/" in r})[:60]
+        systems = fs.top_dirs(root)[:80]                 # reliable, ~instant
+        if not systems:                                  # fallback from the sample
+            systems = sorted({r.split("/")[0] for r in rels if "/" in r})[:80]
     exts = {}
     for r in rels:
         exts[_ext(r)] = exts.get(_ext(r), 0) + 1
     return {
         "current": current,
         "systems": systems,
-        "counts": {"files": len(files),
+        "counts": {"files": len(files), "capped": capped,
                    "top_exts": sorted(exts.items(), key=lambda x: -x[1])[:15]},
         "sample": rels[:sample],
+        "capped": capped,
+        "manifest": _manifest_brief(m, fresh=False) if m else None,   # present but stale
     }
+
+
+def _manifest_brief(m, fresh):
+    """The manifest fields the UI cares about (not the whole fingerprint blob)."""
+    return {
+        "profile": m.get("profile"), "profile_name": m.get("profile_name"),
+        "conforms": m.get("conforms"), "written_at": m.get("written_at"),
+        "written_by": m.get("written_by"), "media": m.get("media") or [],
+        "role": m.get("role"), "fresh": fresh,
+        "files": (m.get("fingerprint") or {}).get("files"),
+    }
+
+
+# --------------------------------------------------------------------------- #
+#  `.ludodex.json` folder manifests — a small hidden sidecar recording what a
+#  folder is (layout it conforms to, size/shape, where its media lives). It
+#  travels WITH the folder (rsync/scp carry it), so any ludodex/device that sees
+#  the folder learns its state without re-scanning 500k files. It is a *validated
+#  hint* — a cheap token is re-checked on every read; if the folder changed
+#  underneath it, the manifest is treated as stale and ignored. Never authority.
+# --------------------------------------------------------------------------- #
+MANIFEST_V = 1
+
+
+def _is_manifest(rel):
+    return rel == MANIFEST_NAME or rel.endswith("/" + MANIFEST_NAME)
+
+
+def _now_iso():
+    return (datetime.datetime.now(datetime.timezone.utc)
+            .replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+
+
+def _cheap_token(fs, root):
+    """A fast change-detector: hash of the top-level entries' mtimes+names (one
+    shallow scan, ~instant even on huge trees). Changes when a system folder is
+    added/removed or its direct contents change. Deep in-game edits can slip past
+    it — acceptable, because the manifest is only ever a hint, never trusted blind."""
+    # -mindepth 1 skips root itself (whose mtime bumps when we write the manifest);
+    # exclude the manifest too, so writing it doesn't invalidate its own token.
+    r = fs.run("find %s -mindepth 1 -maxdepth 1 ! -name %s -printf '%%T@:%%f\\n' "
+               "2>/dev/null | sort"
+               % (shlex.quote(root.rstrip("/")), shlex.quote(MANIFEST_NAME)),
+               timeout=45)
+    return "d1:" + hashlib.sha1((r.stdout or "").encode()).hexdigest()[:16]
+
+
+def _manifest_abspath(root):
+    return (root.rstrip("/") or "") + "/" + MANIFEST_NAME
+
+
+def _read_manifest(fs, root):
+    txt = fs.read_text(_manifest_abspath(root), limit=1 << 20)
+    if not txt or not txt.strip():
+        return None
+    try:
+        m = json.loads(txt)
+        return m if isinstance(m, dict) and m.get("v") else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _manifest_state(fs, root):
+    """(manifest_or_None, fresh_bool) — fresh means its token still matches disk."""
+    m = _read_manifest(fs, root)
+    if not m:
+        return None, False
+    tok = (m.get("fingerprint") or {}).get("token")
+    return m, bool(tok) and tok == _cheap_token(fs, root)
+
+
+def _fingerprint(fs, root, sample_cap=300):
+    """Full (expensive) scan → true file count, bytes, per-system counts, a small
+    display sample, and a fresh cheap token. Run only after an operation or an
+    explicit refresh — this is exactly the walk the manifest lets everyone skip."""
+    files = fs.listing(root)                       # manifest itself already filtered out
+    per, total = {}, 0
+    for f in files:
+        total += f["size"]
+        top = f["rel"].split("/")[0] if "/" in f["rel"] else "(root)"
+        per[top] = per.get(top, 0) + 1
+    return {
+        "files": len(files),
+        "bytes": total,
+        "systems": dict(sorted(per.items(), key=lambda x: -x[1])),
+        "sample": [f["rel"] for f in files[:sample_cap]],
+        "token": _cheap_token(fs, root),
+    }
+
+
+def run_target(run_id):
+    """(device_id, root) for a runbook — so callers can act on the folder it touched."""
+    con = _con()
+    r = con.execute("SELECT device_id, root FROM runs WHERE id=?", (run_id,)).fetchone()
+    con.close()
+    return ((r["device_id"] or 0), r["root"]) if r else (0, None)
+
+
+def manifest_status(device_id, root):
+    """What ludodex knows about this folder from its manifest, if any.
+    Returns {present, fresh, manifest} — manifest is the raw dict (or None)."""
+    fs = _Fs(device_id)
+    m, fresh = _manifest_state(fs, root)
+    return {"present": bool(m), "fresh": fresh, "manifest": m}
+
+
+def manifest_write(device_id, root, profile=None, scope="multi_system",
+                   system=None, op="restructure", dest=None, run_id=None,
+                   instance="ludodex", kind="roms"):
+    """Scan the folder and (over)write its `.ludodex.json`. For a restructure the
+    tree now conforms to `profile`; for an extract we don't claim a ROM profile but
+    record a media pairing to `dest`. Preserves the folder's stable id + prior
+    media pairings across rewrites. Returns the manifest dict that was written."""
+    fs = _Fs(device_id)
+    prev = _read_manifest(fs, root) or {}
+    fp = _fingerprint(fs, root)
+    fp_sample = fp.pop("sample")
+
+    pname = None
+    if profile:
+        p = profile_get(profile) if isinstance(profile, str) else profile
+        pname = (p or {}).get("name") if p else (profile if isinstance(profile, str) else None)
+
+    media = list(prev.get("media") or [])
+    if op == "extract" and dest:
+        media = [x for x in media if x.get("where") != dest]      # de-dupe same target
+        media.append({"kinds": ["boxart", "screenshot", "logo"], "where": dest,
+                      "device": None, "layout": "esde", "for": "roms"})
+
+    data = {
+        "v": MANIFEST_V,
+        "id": prev.get("id") or ("lx_" + os.urandom(5).hex()),
+        "kind": kind or prev.get("kind", "roms"),
+        "written_by": instance,
+        "written_at": _now_iso(),
+        "profile": (profile if isinstance(profile, str) else None)
+                   if op == "restructure" else prev.get("profile"),
+        "profile_name": pname if op == "restructure" else prev.get("profile_name"),
+        "scope": scope if op == "restructure" else prev.get("scope", scope),
+        "system": system or prev.get("system"),
+        "conforms": True if op == "restructure" else prev.get("conforms", False),
+        "fingerprint": fp,
+        "sample": fp_sample,
+        "media": media,
+        "last_op": {"run_id": run_id, "kind": op, "at": _now_iso()},
+        "role": prev.get("role", "canonical"),
+    }
+    payload = json.dumps(data, indent=2)
+    b64 = base64.b64encode(payload.encode()).decode()
+    r = fs.run("printf %%s %s | base64 -d > %s"
+               % (shlex.quote(b64), shlex.quote(_manifest_abspath(root))), timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError("manifest write failed: " + (r.stderr or "")[:160])
+    return data
+
+
+def manifest_sync(device_id, root, enabled=True, kind="roms", profile=None,
+                  scope="multi_system", system=None, op="index", dest=None,
+                  run_id=None, instance="ludodex"):
+    """Self-healing manifest upkeep for scan/ingest flows. Setting OFF removes any
+    manifest (respects the user's choice); ON writes one when it's missing or stale,
+    but SKIPS the full walk when the existing manifest is still fresh — so routine
+    rescans of an unchanged folder cost only the ~instant token check."""
+    if not root:
+        return {"ok": False, "skipped": "no-root"}
+    if not enabled:
+        try:
+            manifest_delete(device_id, root)
+        except Exception:                       # noqa: BLE001 — best-effort cleanup
+            pass
+        return {"ok": True, "removed": True}
+    fs = _Fs(device_id)
+    m, fresh = _manifest_state(fs, root)
+    if m and fresh and op == "index":
+        return {"ok": True, "skipped": "fresh"}   # already accurate — nothing to do
+    manifest_write(device_id, root, profile=profile, scope=scope, system=system,
+                   op=op, dest=dest, run_id=run_id, instance=instance, kind=kind)
+    return {"ok": True, "written": True, "was": "stale" if m else "missing"}
+
+
+def manifest_delete(device_id, root):
+    fs = _Fs(device_id)
+    fs.run("rm -f %s" % shlex.quote(_manifest_abspath(root)), timeout=30)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- CLI

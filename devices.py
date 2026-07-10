@@ -138,17 +138,23 @@ def devices_list():
 
 
 def _mgr_rom_count(mgr_id):
-    """ROM files indexed for one manager (None if it hasn't been scanned yet)."""
+    """(files, games) indexed for one manager — files is the raw ROM-file count,
+    games is the distinct playable titles (multi-file/-disc games collapsed). Both
+    None if it hasn't been scanned yet."""
     p = os.path.join(DATA, "roms-index-mgr%d.sqlite" % mgr_id)
     if not os.path.exists(p):
-        return None
+        return None, None
     try:
         con = sqlite3.connect(p)
         n = con.execute("SELECT COUNT(*) FROM roms").fetchone()[0]
+        try:
+            g = con.execute("SELECT SUM(games) FROM systems").fetchone()[0]
+        except sqlite3.Error:
+            g = None
         con.close()
-        return int(n)
+        return int(n), (int(g) if g is not None else None)
     except sqlite3.Error:
-        return None
+        return None, None
 
 
 def rom_locations():
@@ -158,26 +164,28 @@ def rom_locations():
     out = []
     for d in devices_list():
         mgrs = []
-        count, scanned = 0, False
+        count, games, scanned = 0, 0, False
         for m in d.get("managers", []):
             if not m.get("enabled", 1):
                 continue
             if not (LM_KINDS.get(m["kind"], ("", False, False))[1] and m.get("rom_path")):
                 continue
-            c = _mgr_rom_count(m["id"])
+            c, g = _mgr_rom_count(m["id"])
             if c is not None:
                 scanned = True
                 count += c
+                games += (g or 0)
             mgrs.append({"id": m["id"], "kind": m["kind"],
                          "kind_label": m.get("kind_label")
                          or LM_KINDS.get(m["kind"], ("?",))[0],
                          "name": m.get("name") or "", "rom_path": m.get("rom_path") or "",
-                         "count": c})
+                         "count": c, "games": g})
         if not mgrs:
             continue
         out.append({"id": d["id"], "name": d["name"], "transport": d.get("transport") or "",
                     "host": d.get("host") or "", "enabled": bool(d.get("enabled", 1)),
-                    "managers": mgrs, "count": count if scanned else None})
+                    "managers": mgrs, "count": count if scanned else None,
+                    "games": games if scanned else None})
     return out
 
 
@@ -233,6 +241,104 @@ def device_rm(dev_id):
 # --------------------------------------------------------------------------- #
 #  Device wishlist — games the user wants ON a device (intent only, no transfer)
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+#  Commander file ops — arbitrary mkdir / delete / cross-device transfer.
+# --------------------------------------------------------------------------- #
+def _dev_run(dev_id, script, timeout=600):
+    """Run a bash script on a device (local host/container or SSH)."""
+    dev = dict(_device(dev_id)) if dev_id else None
+    if not dev or dev.get("transport") == "local":
+        return _run(["bash", "-c", script], timeout=timeout)
+    if dev.get("transport") == "smb":
+        raise RuntimeError("SMB transport is not supported — use SSH")
+    if dev.get("auth") == "password":
+        dev["password"] = _dev_password(dev["id"])
+    return _ssh(dev, script, timeout=timeout)
+
+
+def fs_mkdir(dev_id, path):
+    r = _dev_run(dev_id, "mkdir -p %s" % shlex.quote(path))
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "mkdir failed")[:200])
+
+
+def fs_delete(dev_id, paths):
+    safe = [p for p in (paths or []) if p and p.strip("/")]
+    if not safe:
+        return
+    r = _dev_run(dev_id, "rm -rf -- " + " ".join(shlex.quote(p) for p in safe))
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "delete failed")[:200])
+
+
+def _spec(dev, path):
+    """An rsync path spec: a plain local path, or 'user@host:path' for a device."""
+    return "%s:%s" % (_target(dev), path) if dev else path
+
+
+def _rsync(src_spec, dst_spec, ssh_dev, timeout=3600):
+    """One rsync hop. ssh_dev = the remote device (for -e/creds), or None if local↔local.
+    -s (protect-args) keeps spaces/parens in ROM names safe across the remote shell."""
+    argv = ["rsync", "-a", "-s"]
+    if ssh_dev:
+        argv += ["-e", _rsync_ssh_e(ssh_dev)]
+    argv += [src_spec, dst_spec]
+    if ssh_dev:
+        argv = _wrap_pw(ssh_dev, argv)
+    return _run(argv, timeout=timeout)
+
+
+def transfer_run(job, src_dev_id, src_dir, items, dst_dev_id, dst_dir, mode="copy",
+                 should_stop=None):
+    """Copy/move selected `items` from src_dir on one device into dst_dir on another,
+    via rsync. Handles local↔device and device↔device (2-hop through a server temp).
+    Updates job['prog']={done,total}; on move, removes each source after a good copy."""
+    src = dict(_device(src_dev_id)) if src_dev_id else None
+    dst = dict(_device(dst_dev_id)) if dst_dev_id else None
+    for d in (src, dst):
+        if d and d.get("auth") == "password":
+            d["password"] = _dev_password(d["id"])
+    src_dir = (src_dir or "").rstrip("/")
+    dst_dir = (dst_dir or "/").rstrip("/") or "/"
+    total = len(items)
+    job["prog"] = {"done": 0, "total": max(total, 1)}
+    errors = []
+    tmp = os.path.join(DATA, ".xfer", "j" + os.urandom(4).hex()) if (src and dst) else None
+    if tmp:
+        os.makedirs(tmp, exist_ok=True)
+    try:
+        fs_mkdir(dst_dev_id, dst_dir)
+        for i, it in enumerate(items, 1):
+            if should_stop and should_stop():
+                break
+            s_item = src_dir + "/" + it
+            try:
+                if src and dst:                              # device↔device: 2-hop
+                    r1 = _rsync(_spec(src, s_item), tmp + "/", src)
+                    if r1.returncode != 0:
+                        raise RuntimeError(r1.stderr or "pull failed")
+                    r2 = _rsync(tmp + "/" + it, _spec(dst, dst_dir + "/"), dst)
+                    if r2.returncode != 0:
+                        raise RuntimeError(r2.stderr or "push failed")
+                    _run(["rm", "-rf", tmp + "/" + it])
+                else:                                        # one side is local
+                    remote = src or dst
+                    r = _rsync(_spec(src, s_item), _spec(dst, dst_dir + "/"), remote)
+                    if r.returncode != 0:
+                        raise RuntimeError(r.stderr or "rsync failed")
+                if mode == "move":
+                    _dev_run(src_dev_id, "rm -rf -- %s" % shlex.quote(s_item))
+            except Exception as e:
+                errors.append("%s: %s" % (it, str(e)[:120]))
+            job["prog"] = {"done": i, "total": max(total, 1)}
+    finally:
+        if tmp:
+            _run(["rm", "-rf", tmp])
+    if errors:
+        job["error"] = "; ".join(errors[:5])
+    return {"done": total, "errors": errors}
+
+
 def rom_paths(dev_id):
     """Enabled ROM-manager paths on a device (for in-place art indexing)."""
     con = _con()
@@ -241,6 +347,21 @@ def rom_paths(dev_id):
         "AND rom_path IS NOT NULL AND rom_path!=''", (int(dev_id),))]
     con.close()
     return paths
+
+
+def all_managed_paths():
+    """(device_id, path) for every enabled ROM/media folder ludodex manages — used
+    to sweep manifests when the user disables them."""
+    con = _con()
+    rows = con.execute("SELECT device_id, rom_path, media_path FROM library_managers "
+                       "WHERE enabled=1").fetchall()
+    con.close()
+    out = []
+    for r in rows:
+        for p in (r["rom_path"], r["media_path"]):
+            if p and p.strip():
+                out.append((r["device_id"] or 0, p.strip()))
+    return out
 
 
 def wants_add(device_id, norm_keys):
@@ -502,6 +623,40 @@ def _rsync_ssh_e(dev):
     return e
 
 
+def fs_stat(dev_id, path):
+    """Basic stats for one file/folder on a device (the Commander's Inspect).
+    For a directory it also counts immediate children and totals bytes (du, capped
+    by a timeout so a huge tree can't hang the request)."""
+    q = shlex.quote(path)
+    script = (
+        'p=' + q + '\n'
+        'if [ ! -e "$p" ]; then echo MISSING; exit 0; fi\n'
+        'stat -c "TYPE=%F|SIZE=%s|MTIME=%Y|PERM=%A|OWNER=%U|GROUP=%G" "$p"\n'
+        'if [ -d "$p" ]; then\n'
+        '  echo "DIRS=$(find "$p" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"\n'
+        '  echo "FILES=$(find "$p" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l)"\n'
+        '  echo "TOTAL=$(timeout 8 du -sb "$p" 2>/dev/null | cut -f1)"\n'
+        'fi\n'
+    )
+    r = _dev_run(dev_id, script, timeout=20)
+    out = (r.stdout or "").strip()
+    if not out or out.splitlines()[0] == "MISSING":
+        return {"ok": False, "error": (r.stderr or "not found")[:200]}
+    info = {"ok": True, "path": path}
+    for ln in out.splitlines():
+        for part in ln.split("|"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                info[k.strip().lower()] = v.strip()
+    for k in ("size", "mtime", "dirs", "files", "total"):
+        if info.get(k) not in (None, ""):
+            try:
+                info[k] = int(info[k])
+            except ValueError:
+                info[k] = None
+    return info
+
+
 def _rom_index_path(lm):
     return os.path.join(DATA, "roms-index-mgr%d.sqlite" % lm["id"])
 
@@ -595,6 +750,18 @@ def sync_device(dev_id):
     report = []
     rebuild = False       # did any manager pull ROMs (→ catalog needs a rebuild)?
     reindex = False       # did any manager pull media (→ media index needs a refresh)?
+    import fileops        # lazy: avoid a circular import at module load
+    m_on = config.get_bool("manifests_enabled", True)
+    inst = config.get("instance_name") or "ludodex"
+
+    def _manifest(path, kind):
+        # self-healing: write/refresh when missing/stale, remove when disabled,
+        # skip the walk when already fresh. Never let it break a sync.
+        try:
+            fileops.manifest_sync(dev_id, path, enabled=m_on, kind=kind, instance=inst)
+        except Exception:
+            pass
+
     for lm in lms:
         prov = LM_KINDS.get(lm["kind"], ("", True, True))
         item = {"manager": lm["name"] or lm["kind"], "kind": lm["kind"]}
@@ -602,9 +769,11 @@ def sync_device(dev_id):
             if prov[1] and lm.get("rom_path"):
                 item["roms"] = pull_roms(dev, lm)
                 rebuild = True
+                _manifest(lm["rom_path"].strip(), "roms")
             if prov[2] and lm.get("media_path"):
                 item["media"] = pull_media(dev, lm)
                 reindex = True
+                _manifest(lm["media_path"].strip(), "media")
             item["ok"] = True
         except Exception as e:
             item["ok"] = False
