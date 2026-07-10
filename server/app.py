@@ -4539,7 +4539,7 @@ def _run_streaming(script, args, on_prog, timeout=3600):
     return (p.returncode == 0), ("" if p.returncode == 0 else (tail[-300:] or "exit %d" % p.returncode))
 
 
-def _sync_worker(job, services, media_ids=()):
+def _sync_worker(job, services, media_ids=(), full=False):
     prev = _lib_keys()
     any_ok = False
     # progress across ALL phases, not just the ownership pulls: each source, the
@@ -4621,9 +4621,11 @@ def _sync_worker(job, services, media_ids=()):
         # order as update.sh (igdb_enrich && build_library). Non-fatal: a failure
         # here never aborts the media pass. Runs for ALL stores, not just Steam.
         if not job.get("error") and config.metadata_enabled("igdb"):
-            job["step"] = "Enriching metadata (IGDB)…"
+            job["step"] = ("Re-checking all metadata (IGDB)…" if full
+                           else "Enriching new metadata (IGDB)…")
             _phase("meta", "running")
-            ok_e, err_e = _run_script("igdb_enrich.py", timeout=1800)
+            ok_e, err_e = _run_script(
+                "igdb_enrich.py", args=(["--all"] if full else []), timeout=1800)
             if ok_e:
                 ok_m, err_m = _run_script("build_library.py", timeout=900)
                 _phase("meta", "ok" if ok_m else "failed",
@@ -4639,9 +4641,12 @@ def _sync_worker(job, services, media_ids=()):
         # the unified Ludodex score. Self-limiting (7-day per-source freshness
         # skip); also non-fatal so the media pass always runs.
         if not job.get("error"):
-            job["step"] = "Fetching scores & ratings…"
+            job["step"] = ("Re-checking all scores & ratings…" if full
+                           else "Fetching new scores & ratings…")
             _phase("scores", "running")
-            ok_sc, err_sc = _run_script("scores_fetch.py", args=["all"], timeout=1800)
+            ok_sc, err_sc = _run_script(
+                "scores_fetch.py",
+                args=["all"] + (["--refresh"] if full else []), timeout=1800)
             _phase("scores", "ok" if ok_sc else "failed", None if ok_sc else err_sc)
         else:
             _phase("scores", "skipped")
@@ -4744,12 +4749,17 @@ def sync_run(body: dict = Body(default={})):
             raise HTTPException(400, "nothing ready to sync")
         media = [sid for sid in ((body or {}).get("media") or [])
                  if sid in MEDIA_SYNC_PROVIDER and sid in targets]
+        # full=True re-checks EVERY game for upstream changes (re-resolve + refetch
+        # IGDB metadata, re-fetch all scores), ignoring the freshness caches.
+        # Default (new-games) only enriches/scores games not yet done.
+        full = bool((body or {}).get("full"))
         job = {"running": True, "finished": False, "step": "Starting…",
-               "error": None, "added": None,
+               "error": None, "added": None, "full": full,
                "services": {sid: {"state": "pending", "count": None, "error": None}
                             for sid in targets}}
         _SYNC["job"] = job
-    threading.Thread(target=_sync_worker, args=(job, targets, media), daemon=True).start()
+    threading.Thread(target=_sync_worker, args=(job, targets, media, full),
+                     daemon=True).start()
     return job
 
 

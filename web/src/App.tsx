@@ -3461,6 +3461,7 @@ function SyncMenu() {
   const [svcs, setSvcs] = useState<SyncService[]>([])
   const [job, setJob] = useState<SyncJob | null>(null)
   const [msg, setMsg] = useState('')
+  const [full, setFull] = useState(false)                 // full refresh vs new-games only
   const [listOpen, setListOpen] = useState(true)          // main collapse
   const [expanded, setExpanded] = useState<Set<string>>(new Set())  // per-service
   const [media, setMedia] = useState<Set<string>>(new Set())        // "sync media" checks
@@ -3499,12 +3500,12 @@ function SyncMenu() {
     setMsg('')
     const readyIds = enabled.filter((s) => s.ready).map((s) => s.id)
     const mediaIds = readyIds.filter((id) => media.has(id))
-    try { setJob(await api.syncRun(['all'], mediaIds)) } catch (e) { setMsg((e as Error).message) }
+    try { setJob(await api.syncRun(['all'], mediaIds, full)) } catch (e) { setMsg((e as Error).message) }
     load()
   }
   const runOne = async (id: string) => {
     setMsg('')
-    try { setJob(await api.syncRun([id], media.has(id) ? [id] : [])) } catch (e) { setMsg((e as Error).message) }
+    try { setJob(await api.syncRun([id], media.has(id) ? [id] : [], full)) } catch (e) { setMsg((e as Error).message) }
     load()
   }
   // After a browser connect (Epic/EA) succeeds, sync that store — but only once any
@@ -3562,8 +3563,21 @@ function SyncMenu() {
             {running && job?.step && <span className="sync-step">{job.step}</span>}
             {romRunning && romJob?.step && <span className="sync-step">{romJob.step}</span>}
           </div>
+          <div className="sync-mode" role="radiogroup" aria-label="Sync depth">
+            <button className={'sync-mode-opt' + (!full ? ' on' : '')} role="radio"
+              aria-checked={!full} disabled={anyRunning} onClick={() => setFull(false)}>
+              <span className="sync-mode-name">New games</span>
+              <span className="sync-mode-hint">Fast — only pull data for games not yet enriched.</span>
+            </button>
+            <button className={'sync-mode-opt' + (full ? ' on' : '')} role="radio"
+              aria-checked={full} disabled={anyRunning} onClick={() => setFull(true)}>
+              <span className="sync-mode-name">Full refresh</span>
+              <span className="sync-mode-hint">Re-check every game for changed ratings, descriptions,
+                tags &amp; attributes. Slower.</span>
+            </button>
+          </div>
           <button className="go sync-all" disabled={anyRunning || !anyReady} onClick={runAll}>
-            {running ? 'Syncing…' : 'Sync all configured'}
+            {running ? 'Syncing…' : full ? 'Full refresh — all configured' : 'Sync new — all configured'}
           </button>
           {!anyReady && !running && (
             <div className="sync-note dim">Nothing ready yet — connect a store below.</div>
