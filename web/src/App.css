@@ -1144,7 +1144,7 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
   background: linear-gradient(180deg, rgba(0,0,0,0) 25%, rgba(0,0,0,0.35) 60%, rgba(0,0,0,0.85) 100%);
 }
 .hero-fg { position: relative; z-index: 2; padding: 20px 24px; width: 100%; }
-.hero-logo { max-height: 92px; max-width: 60%; filter: drop-shadow(0 3px 10px rgba(0,0,0,0.6)); }
+.hero-logo { max-height: 106px; max-width: 69%; filter: drop-shadow(0 3px 10px rgba(0,0,0,0.6)); }
 .hero-title {
   margin: 0; font-size: 34px; font-weight: 800; color: #fff; line-height: 1.05;
   text-shadow: 0 2px 12px rgba(0,0,0,0.7);
@@ -3206,7 +3206,7 @@ a.idchip:hover { background: var(--accent-bg); }
   .game-panel { padding: 0; }
   .game-panel .settings-content, .panel .settings-content { padding: 16px; }
   .hero-fg { padding: 16px; }
-  .hero-logo { max-height: 62px; max-width: 72%; }
+  .hero-logo { max-height: 71px; max-width: 83%; }
   .detail-actions { gap: 8px; }
   .job-overlay, .fo-runbook, .cmd-inspect, .dedupe-panel { border-radius: 0;
     min-height: 100vh; min-height: 100dvh; padding: 20px 16px 32px; }
