@@ -219,12 +219,24 @@ def main(argv):
               % (",".join(srcs), len(games)), file=sys.stderr)
     lib.close()
 
-    resolved = {}                       # norm_key -> igdb_id (>0 = found)
+    resolved = {}                       # norm_key -> igdb_id (found, >0)
+    failed_at = {}                      # norm_key -> when a name-search last failed (id=0)
     if not do_all:
-        for nk, iid in con.execute(
-                "SELECT norm_key, igdb_id FROM igdb_resolution"):
-            resolved[nk] = iid
-    todo = [nk for nk in games if nk not in resolved]
+        for nk, iid, rat in con.execute(
+                "SELECT norm_key, igdb_id, resolved_at FROM igdb_resolution"):
+            if iid and iid > 0:
+                resolved[nk] = iid
+            else:
+                failed_at[nk] = rat or 0
+    # Re-attempt previously-FAILED matches so a normal ("New") sync keeps trying
+    # to fill unmatched games — picking up titles IGDB has since added. Default 0
+    # = retry every run (a name search is one cheap request; failures are few);
+    # set igdb_fail_retry_days>0 to only retry misses older than N days if IGDB
+    # call volume ever matters. --all (Full) re-resolves everything regardless.
+    fail_ttl = int(config.get("igdb_fail_retry_days") or 0) * 86400
+    todo = [nk for nk in games
+            if nk not in resolved
+            and (nk not in failed_at or now - failed_at[nk] >= fail_ttl)]
     print("igdb: %d games | %d already resolved | %d to resolve"
           % (len(games), len(resolved), len(todo)), file=sys.stderr)
 

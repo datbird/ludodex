@@ -3578,13 +3578,15 @@ function SyncMenu() {
             <button className="sync-choice-opt" disabled={anyRunning || !anyReady}
               onClick={() => runAll(false)}>
               <span className="sync-choice-name">{running ? 'Syncing…' : 'New games'}</span>
-              <span className="sync-choice-hint">Fast — only pull data for games not yet enriched.</span>
+              <span className="sync-choice-hint">Fast — pull new games and fill in anything still
+                missing a match, attributes or art (retries earlier misses). Won't re-check what's
+                already complete.</span>
             </button>
             <button className="sync-choice-opt" disabled={anyRunning || !anyReady}
               onClick={() => runAll(true)}>
               <span className="sync-choice-name">Full refresh</span>
-              <span className="sync-choice-hint">Re-check every game for changed ratings, descriptions,
-                tags &amp; attributes. Slower.</span>
+              <span className="sync-choice-hint">Re-check EVERY game — re-match and refresh existing
+                ratings, descriptions, tags, attributes &amp; art. Slower.</span>
             </button>
           </div>
           {!anyReady && !running && (
@@ -3617,10 +3619,10 @@ function SyncMenu() {
                       </span>
                       {s.ready && js !== 'running' && (
                         <span className="sync-two" onClick={(e) => e.stopPropagation()}>
-                          <button className="ops-btn" title="New games — only pull data for games not yet enriched"
+                          <button className="ops-btn" title="New — pull new games and fill anything still missing a match, attributes or art (retries earlier misses)"
                             disabled={anyRunning}
                             onClick={(e) => { e.stopPropagation(); runOne(s.id, false) }}>New</button>
-                          <button className="ops-btn" title="Full refresh — re-check every game for changed ratings, descriptions & tags"
+                          <button className="ops-btn" title="Full — re-check every game: re-match and refresh existing ratings, descriptions, tags & art"
                             disabled={anyRunning}
                             onClick={(e) => { e.stopPropagation(); runOne(s.id, true) }}>Full</button>
                         </span>
