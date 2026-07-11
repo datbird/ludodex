@@ -187,6 +187,19 @@ def main(argv):
             "ON s.game_id=g.id WHERE s.source='steam'"):
         if nk in games and sid and str(sid).isdigit():
             games[nk]["appid"] = str(sid)
+    # --source <id> (repeatable): restrict the worklist to games owned via those
+    # store sources. A store's Full refresh scopes IGDB to that store's games
+    # instead of re-resolving the whole (ROM-dominated) catalog.
+    srcs = [argv[i + 1] for i, a in enumerate(argv)
+            if a == "--source" and i + 1 < len(argv)]
+    if srcs:
+        keep = {nk for (nk,) in lib.execute(
+            "SELECT DISTINCT g.norm_key FROM games g JOIN sources s "
+            "ON s.game_id=g.id WHERE s.source IN (%s)"
+            % ",".join("?" * len(srcs)), srcs)}
+        games = {nk: v for nk, v in games.items() if nk in keep}
+        print("igdb: scoped to sources %s -> %d games"
+              % (",".join(srcs), len(games)), file=sys.stderr)
     lib.close()
 
     resolved = {}                       # norm_key -> igdb_id (>0 = found)

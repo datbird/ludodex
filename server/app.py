@@ -4621,11 +4621,20 @@ def _sync_worker(job, services, media_ids=(), full=False):
         # order as update.sh (igdb_enrich && build_library). Non-fatal: a failure
         # here never aborts the media pass. Runs for ALL stores, not just Steam.
         if not job.get("error") and config.metadata_enabled("igdb"):
-            job["step"] = ("Re-checking all metadata (IGDB)…" if full
+            job["step"] = ("Re-checking metadata (IGDB)…" if full
                            else "Enriching new metadata (IGDB)…")
             _phase("meta", "running")
-            ok_e, err_e = _run_script(
-                "igdb_enrich.py", args=(["--all"] if full else []), timeout=1800)
+            # Full refresh re-resolves everything, but SCOPED to the store(s) just
+            # synced (via --source) so a Steam full refresh re-checks ~Steam games,
+            # not the whole ROM-dominated catalog. New-games stays whole-catalog
+            # (cheap — only unresolved games hit the network).
+            enrich_args = []
+            if full:
+                for sid in services:
+                    if job["services"].get(sid, {}).get("state") == "ok":
+                        enrich_args += ["--source", sid]
+                enrich_args.append("--all")
+            ok_e, err_e = _run_script("igdb_enrich.py", args=enrich_args, timeout=3600)
             if ok_e:
                 ok_m, err_m = _run_script("build_library.py", timeout=900)
                 _phase("meta", "ok" if ok_m else "failed",
@@ -4641,12 +4650,18 @@ def _sync_worker(job, services, media_ids=(), full=False):
         # the unified Ludodex score. Self-limiting (7-day per-source freshness
         # skip); also non-fatal so the media pass always runs.
         if not job.get("error"):
-            job["step"] = ("Re-checking all scores & ratings…" if full
+            job["step"] = ("Re-checking scores & ratings…" if full
                            else "Fetching new scores & ratings…")
             _phase("scores", "running")
-            ok_sc, err_sc = _run_script(
-                "scores_fetch.py",
-                args=["all"] + (["--refresh"] if full else []), timeout=1800)
+            if full:
+                # scope the refresh to the synced store(s) scores_fetch can fetch
+                # (steam/gog), plus igdb critic scores (cache-based, cheap)
+                sargs = [s for s in services if s in ("steam", "gog")
+                         and job["services"].get(s, {}).get("state") == "ok"]
+                sargs += ["igdb", "--refresh"]
+            else:
+                sargs = ["all"]
+            ok_sc, err_sc = _run_script("scores_fetch.py", args=sargs, timeout=1800)
             _phase("scores", "ok" if ok_sc else "failed", None if ok_sc else err_sc)
         else:
             _phase("scores", "skipped")
