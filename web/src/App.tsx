@@ -14,6 +14,7 @@ import type {
   AiFindingPayload, ProviderMatch, ScopeValue,
   AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState, DbSyncTest,
   Prefs, MediaMode, FileopsApplyMode, MediaLangMode, MediaLangResult, FsStat, OwnershipFact, Frame,
+  SpotlightTheme,
   GameRelease, SystemEntry,
 } from './api'
 import { providerColor, providerLabel } from './providers'
@@ -465,6 +466,10 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [wantMsg, setWantMsg] = useState('')
   const [showSettings, setShowSettings] = useState(false)
+  const [settingsTarget, setSettingsTarget] = useState<string | null>(null)
+  const openSettings = useCallback((section?: string) => {
+    setSettingsTarget(section ?? null); setShowSettings(true)
+  }, [])
   const [showProfile, setShowProfile] = useState(false)
   const [showAddGame, setShowAddGame] = useState(false)
   const [showWand, setShowWand] = useState(false)
@@ -642,7 +647,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
         <div className="header-actions">
           <JobMonitor />
           <SyncMenu />
-          <button className="icon-btn" title="Settings" onClick={() => setShowSettings(true)}>
+          <button className="icon-btn" title="Settings" onClick={() => openSettings()}>
             <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <circle cx="12" cy="12" r="3" />
@@ -697,7 +702,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       {tab === 'dashboard' && <Dashboard stats={stats} onBrowse={() => setTab('library')}
         onFilter={(f) => { setFilters(f); setTab('library') }} onOpen={setSelected}
-        prefsTick={prefsTick} />}
+        prefsTick={prefsTick} onOpenSettings={openSettings} />}
 
       {tab === 'library' && (<>
       {!!stats?.pending_meta && (
@@ -1058,7 +1063,8 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       {selected && <Detail nk={selected} onClose={() => { setSelected(null); refreshStats() }} />}
       {showSettings && <Settings onClose={() => setShowSettings(false)}
-        onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} user={user} />}
+        onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} user={user}
+        initialSection={settingsTarget} />}
       {showAddGame && <AddGame facets={facets} onClose={() => setShowAddGame(false)}
         onAdded={() => load(true)} />}
       {showWand && <MagicWandOverlay
@@ -1128,11 +1134,13 @@ const SETTINGS_KEYWORDS: Record<string, string> = {
   access: 'cloudflare access sso jwt auth',
 }
 
-function Settings({ onClose, onPrefsChanged, user }: {
+function Settings({ onClose, onPrefsChanged, user, initialSection }: {
   onClose: () => void; onPrefsChanged: () => void; user: AuthUser | null
+  initialSection?: string | null
 }) {
-  const [section, setSection] = useState('ai')
-  const [sub, setSub] = useState('usage')
+  const [section, setSection] = useState(initialSection || 'ai')
+  const [sub, setSub] = useState(
+    initialSection ? ((SUBSECTIONS[initialSection] ?? [])[0]?.id ?? '') : 'usage')
   const [q, setQ] = useState('')   // settings search
   const [cfg, setCfg] = useState<AiConfig | null>(null)
 
@@ -1792,7 +1800,13 @@ const SPOTLIGHT_PRESETS = [5, 8, 12, 20, 30, 45, 60]
 
 function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
   const [secs, setSecs] = useState<number | null>(null)
+  const [themes, setThemes] = useState<SpotlightTheme[] | null>(null)
+  const [themesOpen, setThemesOpen] = useState(false)
   useEffect(() => { api.prefs().then((p) => setSecs(p.spotlight_seconds)).catch(() => {}) }, [])
+  useEffect(() => {
+    if (themesOpen && themes === null)
+      api.spotlightThemes().then((r) => setThemes(r.themes)).catch(() => setThemes([]))
+  }, [themesOpen, themes])
 
   const commit = async (v: number) => {
     const clamped = Math.max(3, Math.min(300, Math.round(v)))
@@ -1800,6 +1814,15 @@ function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
     try { await api.setPrefs({ spotlight_seconds: clamped }); onChanged() }
     catch { /* keep optimistic value */ }
   }
+
+  const toggleTheme = async (id: string, enabled: boolean) => {
+    const next = (themes || []).map((t) => t.id === id ? { ...t, enabled } : t)
+    setThemes(next)
+    const disabled = next.filter((t) => !t.enabled).map((t) => t.id)
+    try { await api.setPrefs({ spotlight_disabled: disabled }); onChanged() }
+    catch { api.spotlightThemes().then((r) => setThemes(r.themes)).catch(() => {}) }
+  }
+  const nOff = (themes || []).filter((t) => !t.enabled).length
 
   if (secs === null) return <div className="loading">Loading…</div>
   return (
@@ -1826,6 +1849,36 @@ function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
               onClick={() => commit(p)}>{p}s</button>
           ))}
         </div>
+      </div>
+
+      <div className="pref-block">
+        <button type="button" className="pref-collapse"
+          onClick={() => setThemesOpen((o) => !o)}>
+          <span className={'caret' + (themesOpen ? ' open' : '')}>▸</span>
+          <span className="pref-name">Spotlight categories</span>
+          {nOff > 0 && <span className="pref-badge">{nOff} hidden</span>}
+        </button>
+        {themesOpen && (
+          <>
+            <div className="pref-hint">
+              Turn off any themes you never want on the dashboard (e.g. “Best of
+              Neo Geo”). Disabling every theme leaves “Top rated” as a fallback.
+            </div>
+            {themes === null ? <div className="loading">Loading…</div> : (
+              <div className="spot-themes">
+                {themes.map((t) => (
+                  <label key={t.id}
+                    className={'spot-theme' + (t.enabled ? '' : ' off')}>
+                    <input type="checkbox" checked={t.enabled}
+                      onChange={(e) => toggleTheme(t.id, e.target.checked)} />
+                    <span className="spot-theme-title">{t.title}</span>
+                    <span className="spot-theme-sub">{t.subtitle}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   )
@@ -5156,8 +5209,8 @@ function MediaKindCard({ nk, kind, assets, onChange, frames, onFrame }: {
 // A thin countdown bar depletes right→left over the (configurable) dwell time and
 // drives the rotation: when it finishes it loads the next theme. Hovering pauses
 // the bar — and therefore the rotation — so you can read/click without it moving.
-function SpotlightSection({ onOpen, prefsTick }: {
-  onOpen: (nk: string) => void; prefsTick: number
+function SpotlightSection({ onOpen, prefsTick, onOpenSettings }: {
+  onOpen: (nk: string) => void; prefsTick: number; onOpenSettings: (section?: string) => void
 }) {
   const [sp, setSp] = useState<SpotlightData | null>(null)
   const [loading, setLoading] = useState(false)
@@ -5187,6 +5240,12 @@ function SpotlightSection({ onOpen, prefsTick }: {
     const t = window.setTimeout(load, Math.max(3, seconds) * 1000)
     return () => window.clearTimeout(t)
   }, [paused, loading, sp, seconds, load])
+  // The rotate timeout resets to a full `seconds` whenever it (re)arms — e.g. on
+  // un-hover. Restart the CSS bar in lockstep so it never finishes early and sits
+  // empty while the (fresh, longer) timeout is still counting down.
+  useEffect(() => {
+    if (!paused && !loading && sp) setCycle((c) => c + 1)
+  }, [paused, seconds])   // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!sp || !sp.items.length) return null
   return (
@@ -5198,8 +5257,12 @@ function SpotlightSection({ onOpen, prefsTick }: {
           <span className="sl-theme">{sp.title}</span>
           <span className="sl-sub">{sp.subtitle}</span>
         </div>
-        <button className={'sl-shuffle' + (loading ? ' spin' : '')} title="Shuffle spotlight"
-          onClick={load} disabled={loading}>⟳</button>
+        <div className="sl-actions">
+          <button className={'sl-shuffle' + (loading ? ' spin' : '')} title="Shuffle spotlight"
+            onClick={load} disabled={loading}>⟳</button>
+          <button className="sl-shuffle" title="Spotlight settings"
+            onClick={() => onOpenSettings('dashboard')} aria-label="Spotlight settings">⚙</button>
+        </div>
       </div>
       <div className="sl-timer-track">
         <div key={cycle} className="sl-timer"
@@ -5220,9 +5283,9 @@ function SpotlightSection({ onOpen, prefsTick }: {
   )
 }
 
-function Dashboard({ stats, onBrowse, onFilter, onOpen, prefsTick }: {
+function Dashboard({ stats, onBrowse, onFilter, onOpen, prefsTick, onOpenSettings }: {
   stats: Stats | null; onBrowse: () => void; onFilter: (f: FilterState) => void
-  onOpen: (nk: string) => void; prefsTick: number
+  onOpen: (nk: string) => void; prefsTick: number; onOpenSettings: (section?: string) => void
 }) {
   if (!stats) return <div className="loading">Loading…</div>
   const artPct = stats.games ? Math.round((stats.media.games_with_art / stats.games) * 100) : 0
@@ -5231,7 +5294,7 @@ function Dashboard({ stats, onBrowse, onFilter, onOpen, prefsTick }: {
   const kinds = Object.entries(stats.media.by_kind).sort((a, b) => b[1] - a[1])
   return (
     <div className="dashboard">
-      <SpotlightSection onOpen={onOpen} prefsTick={prefsTick} />
+      <SpotlightSection onOpen={onOpen} prefsTick={prefsTick} onOpenSettings={onOpenSettings} />
       <div className="dash-cards">
         <div className="dash-card">
           <div className="dc-num">{(stats.identified ?? stats.games).toLocaleString()}</div>

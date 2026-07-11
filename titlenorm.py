@@ -53,4 +53,16 @@ def norm(t):
     toks = [ROMAN.get(w, w) for w in s.split()]
     while toks and toks[0] in ("the", "a", "an"):
         toks = toks[1:]
+    if strip_editions:
+        # Drop a bare marketing 'edition'/'editions' token when it's TRAILING (or
+        # only a year follows it) and isn't the leading word — e.g. "Mass Effect 2
+        # (2010) Edition" == "Mass Effect 2 (2010)". Left in place when it's part
+        # of the real title ("Special Edition Racing", "Editions of Chaos").
+        out = []
+        for i, w in enumerate(toks):
+            if w in ("edition", "editions") and i > 0 and \
+                    all(re.fullmatch(r"\d{4}", x) for x in toks[i + 1:]):
+                continue
+            out.append(w)
+        toks = out
     return " ".join(toks).strip()

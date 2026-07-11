@@ -889,10 +889,17 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
              "has_cover": bool(r["has_cover"])} for r in con.execute(sql, args + [limit])]
 
 
-def _spotlight_pool(con):
-    """All concrete spotlight ids worth showing. Platform/source/decade themes are
-    keyed off GAME count (not score count) so the pool stays varied even when few
-    games are scored — otherwise every theme collapses to 'overall' and repeats."""
+def _spotlight_disabled():
+    """Set of spotlight theme ids the user has switched off in settings."""
+    raw = config.get("spotlight_disabled") or ""
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+def _spotlight_all_ids(con):
+    """Every concrete spotlight id worth showing, BEFORE the user's on/off filter.
+    Platform/source/decade themes are keyed off GAME count (not score count) so the
+    pool stays varied even when few games are scored — otherwise every theme
+    collapses to 'overall' and repeats."""
     pool = ["overall", "emulation"]
     try:
         # score-only themes need a real sample of scored games, else they're thin
@@ -917,6 +924,25 @@ def _spotlight_pool(con):
     except sqlite3.OperationalError:
         pass
     return pool
+
+
+def _spotlight_pool(con):
+    """The rotation pool: all concrete ids minus the ones disabled in settings.
+    Never returns empty — if the user disabled everything, 'overall' still shows."""
+    off = _spotlight_disabled()
+    pool = [k for k in _spotlight_all_ids(con) if k not in off]
+    return pool or ["overall"]
+
+
+def _spotlight_catalog(con):
+    """[{id, title, enabled}] for every theme, for the settings on/off list."""
+    off = _spotlight_disabled()
+    out = []
+    for k in _spotlight_all_ids(con):
+        title, subtitle, _w, _a, _o = _resolve_spotlight(k)
+        out.append({"id": k, "title": title, "subtitle": subtitle,
+                    "enabled": k not in off})
+    return out
 
 
 def _resolve_spotlight(kind):
@@ -978,6 +1004,17 @@ def spotlight(kind: str = Query("random"), exclude: str = Query(None)):
             title, subtitle, where, args, order = _resolve_spotlight(kind)
             items = _spotlight_rows(con, where, args, order)
         return {"kind": kind, "title": title, "subtitle": subtitle, "items": items}
+    finally:
+        con.close()
+
+
+@app.get("/api/spotlight/themes")
+def spotlight_themes():
+    """The full list of dashboard Spotlight themes with their on/off state, so the
+    user can disable ones they never want to see (e.g. 'Best of Neo Geo')."""
+    con = lib()
+    try:
+        return {"themes": _spotlight_catalog(con)}
     finally:
         con.close()
 
@@ -1047,6 +1084,7 @@ def get_prefs():
     return {
         "hide_non_games": config.get_bool("hide_non_games", True),
         "spotlight_seconds": _spotlight_seconds(),
+        "spotlight_disabled": sorted(_spotlight_disabled()),
         "media_mode": config.get("media_mode") or "chosen",
         "media_language": config.get("media_language") or "",
         "media_languages": medialang.preferred(),
@@ -1093,6 +1131,12 @@ def set_prefs(body: dict = Body(...)):
             config.set_("spotlight_seconds", str(v))
         except (TypeError, ValueError):
             pass
+    if "spotlight_disabled" in body:            # ids the user switched off
+        ids = body["spotlight_disabled"] or []
+        if isinstance(ids, str):
+            ids = [ids]
+        clean = sorted({str(x).strip() for x in ids if str(x).strip()})
+        config.set_("spotlight_disabled", ",".join(clean))
     return get_prefs()
 
 

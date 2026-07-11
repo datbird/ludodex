@@ -282,9 +282,16 @@ export type MediaLangMode = 'off' | 'hide' | 'ban'
 export interface MediaLangResult {
   mode: MediaLangMode; scanned: number; hidden: number; banned: number; kept: number
 }
+export interface SpotlightTheme {
+  id: string
+  title: string
+  subtitle: string
+  enabled: boolean
+}
 export interface Prefs {
   hide_non_games: boolean
   spotlight_seconds: number
+  spotlight_disabled?: string[]
   media_mode: MediaMode
   media_language: string       // '' = any; else the preferred media language (legacy single)
   media_languages: string[]    // ordered 1st,2nd,3rd preferred media languages
@@ -801,6 +808,8 @@ export const api = {
     get<Spotlight>('/api/spotlight?kind=' + encodeURIComponent(kind)
       + (exclude ? '&exclude=' + encodeURIComponent(exclude) : '')),
   // Global preferences
+  spotlightThemes: () =>
+    get<{ themes: SpotlightTheme[] }>('/api/spotlight/themes'),
   prefs: () => get<Prefs>('/api/prefs'),
   setPrefs: async (p: Partial<Prefs>) => {
     const r = await fetch('/api/prefs', {
