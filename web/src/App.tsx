@@ -3832,6 +3832,7 @@ function ServerOps() {
   const [busy, setBusy] = useState('')          // db id or 'restart' or 'check'
   const [msg, setMsg] = useState('')
   const [restarting, setRestarting] = useState(false)
+  const [dbOpen, setDbOpen] = useState(false)   // Databases — collapsed by default
   // Stay open until an outside click; don't close mid-operation.
   const wrapRef = useClickOutside<HTMLDivElement>(open, () => { if (!busy) setOpen(false) })
 
@@ -3912,12 +3913,16 @@ function ServerOps() {
           ))}
 
           <div className="ops-section ops-section-row">
-            <span>Databases</span>
+            <button className="ops-section-toggle" onClick={() => setDbOpen((v) => !v)}>
+              <span className={'sync-chev' + (dbOpen ? ' open' : '')}>▸</span>
+              <span>Databases</span>
+              <span className="ops-db-count">{dbs.length}</span>
+            </button>
             <button className="ops-link" disabled={!!busy} onClick={checkAll}>
               {busy === 'check' ? 'checking…' : 'Check all'}
             </button>
           </div>
-          {dbs.map((d) => (
+          {dbOpen && dbs.map((d) => (
             <div key={d.id} className="ops-db">
               <span className={'ops-dot ' + statusDot(d.status)} />
               <div className="ops-db-main">
