@@ -117,6 +117,7 @@ def fetch_pairs(pairs, top=TOP_DEFAULT, refresh=False, limit=None, should_stop=N
             "VALUES(?,?,?,?)", [(nk, t, v, now) for t, v in chosen])
         con.commit()
         done += 1
+        print("PROG\t%d\t%d\t%s\ttags" % (done, len(todo), nk), flush=True)
         if done % 50 == 0:
             print("steam_tags: %d/%d…" % (done, len(todo)), file=sys.stderr)
         if i < len(todo) - 1:

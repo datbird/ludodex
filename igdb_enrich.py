@@ -261,6 +261,7 @@ def main(argv):
                     (nk, iid or 0, slug, "name" if iid else "none", now))
         if iid:
             resolved[nk] = iid
+        print("PROG\t%d\t%d\t%s\tresolve" % (n, len(remaining), nk), flush=True)
         if n % 50 == 0:
             con.commit()
             print("igdb: name-search %d/%d" % (n, len(remaining)), file=sys.stderr)
@@ -284,6 +285,7 @@ def main(argv):
                         "(igdb_id,payload_json,fetched_at) VALUES(?,?,?)",
                         (g["id"], json.dumps(g, ensure_ascii=False), now))
         con.commit()
+        print("PROG\t%d\t%d\t\tfetch" % (min(i + 200, len(need)), len(need)), flush=True)
         print("igdb: fetched %d/%d" % (min(i + 200, len(need)), len(need)),
               file=sys.stderr)
     con.close()

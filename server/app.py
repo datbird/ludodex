@@ -15,9 +15,11 @@ import json
 import os
 import random
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -2005,14 +2007,18 @@ def _jobs_list():
         prog = sj.get("prog") or {
             "done": sum(1 for s in sj.get("services", {}).values() if s["state"] == "ok"),
             "total": len(sj.get("services", {})) or 1}
+        _run = sj.get("running")
+        _pau = sj.get("paused")
         out.append({
             "id": "sync", "kind": "sync", "label": "Library sync",
-            "status": ("running" if sj.get("running") else
+            "status": ("paused" if _pau else "running" if _run else
                        "error" if sj.get("error") else "done"),
             "detail": sj.get("step", ""), "error": sj.get("error"),
             "progress": {"done": prog["done"], "total": prog["total"] or 1, "failed": 0},
-            "when": None, "cancelable": False, "restartable": False,
-            "deletable": not sj.get("running")})
+            "when": None,
+            "cancelable": bool(_run and not _pau),    # ⏸ pause
+            "restartable": bool(_pau),                 # ▶ resume
+            "deletable": True})                        # × stop (running) / dismiss
     rj = _ROMSYNC.get("job")
     if rj:
         devs = rj.get("devices", {})
@@ -2102,6 +2108,10 @@ def jobs_list():
 
 @app.post("/api/jobs/{jid:path}/pause")
 def jobs_pause(jid: str):
+    if jid == "sync":                       # freeze the running sync phase (SIGSTOP)
+        if not _sync_pause():
+            raise HTTPException(400, "no running sync to pause")
+        return {"paused": True, "id": jid}
     rec = _JOBS.get(jid)
     if not rec or not rec.get("cancelable"):
         raise HTTPException(400, "this job can't be paused")
@@ -2111,6 +2121,10 @@ def jobs_pause(jid: str):
 
 @app.post("/api/jobs/{jid:path}/restart")
 def jobs_restart(jid: str):
+    if jid == "sync":                       # ▶ on a paused sync = resume (SIGCONT)
+        if not _sync_resume():
+            raise HTTPException(400, "sync is not paused")
+        return {"restarted": True, "id": jid}
     if jid.startswith("run:"):
         _start_runbook_job(int(jid.split(":", 1)[1]))
         return {"restarted": True, "id": jid}
@@ -2135,7 +2149,11 @@ def jobs_restart(jid: str):
 @app.delete("/api/jobs/{jid:path}")
 def jobs_delete(jid: str):
     if jid == "sync":
-        _SYNC["job"] = None
+        sj = _SYNC.get("job")
+        if sj and sj.get("running"):        # × on a live sync = stop it (kill phase)
+            _sync_stop()
+        else:
+            _SYNC["job"] = None             # dismiss a finished/stopped job
         return {"deleted": True}
     if jid == "romsync":
         _ROMSYNC["job"] = None
@@ -4457,10 +4475,92 @@ def _sync_services():
     return out
 
 
-_SYNC = {"job": None}
+_SYNC = {"job": None, "proc": None}   # proc = the currently-running phase subprocess
 _SYNC_LOCK = threading.Lock()
 _ROMSYNC = {"job": None}          # ROM-location scans (Connections devices)
 _ROMSYNC_LOCK = threading.Lock()
+
+
+# ---- sync pause / resume / stop: signal the current phase's process GROUP ----
+def _sync_signal(sig):
+    """Send `sig` to the running sync subprocess's process group; True if sent."""
+    p = _SYNC.get("proc")
+    if not p or p.poll() is not None:
+        return False
+    try:
+        os.killpg(os.getpgid(p.pid), sig)
+        return True
+    except (ProcessLookupError, OSError):
+        return False
+
+
+def _kill_proc(p, group):
+    """Force-kill a subprocess (its whole group when `group`, i.e. a sync phase)."""
+    try:
+        if group:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        else:
+            p.kill()
+    except (ProcessLookupError, OSError):
+        try:
+            p.kill()
+        except OSError:
+            pass
+    try:
+        p.wait(timeout=5)
+    except Exception:                       # noqa: BLE001
+        pass
+
+
+def _sync_over_deadline(job, start, timeout):
+    """True if wall-time since `start` EXCLUDING paused stretches exceeds timeout —
+    so pausing a phase never triggers a spurious timeout-kill."""
+    paused = job.get("paused_total", 0.0) if job else 0.0
+    if job and job.get("paused") and job.get("paused_since"):
+        paused += time.time() - job["paused_since"]
+    return (time.time() - start - paused) > timeout
+
+
+def _sync_gate(job):
+    """Block while paused between phases (no live process to freeze). Returns
+    False if the job was cancelled while waiting."""
+    while job and job.get("paused") and not job.get("cancel"):
+        time.sleep(0.4)
+    return not (job and job.get("cancel"))
+
+
+def _sync_pause():
+    j = _SYNC.get("job")
+    if not j or not j.get("running") or j.get("paused"):
+        return False
+    j["paused"], j["paused_since"] = True, time.time()
+    _sync_signal(signal.SIGSTOP)
+    return True
+
+
+def _sync_resume():
+    j = _SYNC.get("job")
+    if not j or not j.get("paused"):
+        return False
+    _sync_signal(signal.SIGCONT)
+    j["paused_total"] = j.get("paused_total", 0.0) + (time.time() - (j.get("paused_since") or time.time()))
+    j["paused"], j["paused_since"] = False, None
+    return True
+
+
+def _sync_stop():
+    """Cancel the running sync: flag it, un-freeze if paused, kill the phase."""
+    j = _SYNC.get("job")
+    if not j:
+        return False
+    j["cancel"] = True
+    if j.get("paused"):                     # resume first so the kill lands + exits
+        _sync_signal(signal.SIGCONT)
+        j["paused"], j["paused_since"] = False, None
+    p = _SYNC.get("proc")
+    if p and p.poll() is None:
+        _kill_proc(p, True)
+    return True
 
 
 def _lib_keys():
@@ -4492,51 +4592,107 @@ def _n_identified_with_cover():
         return None
 
 
-def _run_script(script, out=None, capture=False, timeout=300, args=None):
-    """Run a pipeline script with the server's interpreter; return (ok, error_tail)."""
+def _run_script(script, out=None, capture=False, timeout=300, args=None, job=None):
+    """Run a pipeline script; return (ok, error_tail). When `job` is given the
+    child gets its own session (so it can be paused/stopped as a group), is
+    registered on _SYNC for the pause/stop endpoints, and the timeout excludes
+    paused time. stderr goes to a temp file (read for the failure tail) so a
+    chatty child can't deadlock on a full pipe."""
+    if job is not None and not _sync_gate(job):
+        return False, "cancelled"
     argv = [sys.executable, script] + list(args or [])
+    errf = tempfile.TemporaryFile()
+    outf = None
     try:
+        stdout_dest = subprocess.DEVNULL
         if capture and out:
-            with open(os.path.join(DIR, out), "w", encoding="utf-8") as f:
-                r = subprocess.run(argv, cwd=DIR, stdout=f, stderr=subprocess.PIPE,
-                                   text=True, timeout=timeout)
-        else:
-            r = subprocess.run(argv, cwd=DIR, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as e:
+            outf = open(os.path.join(DIR, out), "w", encoding="utf-8")
+            stdout_dest = outf
+        p = subprocess.Popen(argv, cwd=DIR, stdout=stdout_dest, stderr=errf,
+                             start_new_session=(job is not None))
+    except OSError as e:
+        errf.close()
+        if outf:
+            outf.close()
         return False, str(e)
-    if r.returncode != 0:
-        return False, ((r.stderr or "").strip()[-300:] or "exit %d" % r.returncode)
+    if job is not None:
+        _SYNC["proc"] = p
+    start, cancelled, timed_out = time.time(), False, False
+    while p.poll() is None:
+        if job is not None and job.get("cancel"):
+            _sync_signal(signal.SIGCONT); _kill_proc(p, True); cancelled = True; break
+        if _sync_over_deadline(job, start, timeout):
+            _kill_proc(p, job is not None); timed_out = True; break
+        time.sleep(0.3)
+    if job is not None:
+        _SYNC["proc"] = None
+    if outf:
+        outf.close()
+    if cancelled:
+        errf.close(); return False, "cancelled"
+    if timed_out:
+        errf.close(); return False, "timed out"
+    if p.returncode != 0:
+        errf.seek(0); tail = errf.read().decode("utf-8", "replace").strip()[-300:]
+        errf.close(); return False, (tail or "exit %d" % p.returncode)
+    errf.close()
     return True, ""
 
 
-def _run_streaming(script, args, on_prog, timeout=3600):
+def _run_streaming(script, args, on_prog, timeout=3600, job=None):
     """Run a pipeline script and stream its stdout, calling on_prog(i, n, key, kind)
-    for each `PROG\\t...` line so a live job can show what's being pulled. Returns
-    (ok, error_tail)."""
+    for each `PROG\\t...` line so a live job shows what's being pulled. When `job`
+    is given, the child is pause/stop-controllable (see _run_script)."""
+    if job is not None and not _sync_gate(job):
+        return False, "cancelled"
     argv = [sys.executable, os.path.join(DIR, script)] + list(args)
     try:
         p = subprocess.Popen(argv, cwd=DIR, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True, bufsize=1)
+                             stderr=subprocess.STDOUT, text=True, bufsize=1,
+                             start_new_session=(job is not None))
     except OSError as e:
         return False, str(e)
-    deadline = time.time() + timeout
-    tail = ""
-    for line in p.stdout:
+    if job is not None:
+        _SYNC["proc"] = p
+    start, tail, timed_out = time.time(), "", False
+    for line in p.stdout:                   # blocks (harmlessly) while SIGSTOP-paused
         if line.startswith("PROG\t"):
             parts = line.rstrip("\n").split("\t")
             if len(parts) >= 5:
                 try:
                     on_prog(int(parts[1]), int(parts[2]), parts[3], parts[4])
-                except Exception:
+                except Exception:           # noqa: BLE001
                     pass
         elif line.strip():
             tail = line.strip()
-        if time.time() > deadline:
-            p.kill()
-            return False, "timed out"
-    p.wait()
+        if job is not None and job.get("cancel"):
+            break
+        if _sync_over_deadline(job, start, timeout):
+            timed_out = True; break
+    cancelled = bool(job is not None and job.get("cancel"))
+    if cancelled or timed_out:
+        _sync_signal(signal.SIGCONT); _kill_proc(p, job is not None)
+    else:
+        p.wait()
+    if job is not None:
+        _SYNC["proc"] = None
+    if cancelled:
+        return False, "cancelled"
+    if timed_out:
+        return False, "timed out"
     return (p.returncode == 0), ("" if p.returncode == 0 else (tail[-300:] or "exit %d" % p.returncode))
+
+
+def _fmt_eta(sec):
+    """' · ~2m left'-style suffix for a job step; '' when unknown/near-zero."""
+    if not sec or sec < 1:
+        return ""
+    sec = int(sec)
+    if sec < 60:
+        return " · ~%ds left" % sec
+    if sec < 3600:
+        return " · ~%dm left" % (sec // 60)
+    return " · ~%dh%02dm left" % (sec // 3600, (sec % 3600) // 60)
 
 
 def _sync_worker(job, services, media_ids=(), full=False):
@@ -4576,36 +4732,72 @@ def _sync_worker(job, services, media_ids=(), full=False):
     def step():
         job["prog"]["done"] = min(job["prog"]["done"] + 1, job["prog"]["total"])
 
+    def _mk_prog(label, pid, base):
+        """Callback for a streamed phase: climb the bar within this step (base ->
+        base+1) and show a live 'i/n · ~ETA' on the step + phase detail."""
+        t0 = [None]
+        def cb(i, n, key, kind):
+            if t0[0] is None:
+                t0[0] = time.time()
+            if not n:
+                return
+            job["prog"]["done"] = min(base + i / n, job["prog"]["total"])
+            eta = (n - i) * ((time.time() - t0[0]) / i) if i > 0 else 0
+            det = "%d/%d%s" % (i, n, _fmt_eta(eta))
+            _phase(pid, "running", det)
+            job["step"] = "%s %s" % (label, det)
+        return cb
+
+    def _stopped():
+        """True + finalize the job as stopped if the user cancelled it."""
+        if job.get("cancel"):
+            for p in phases:
+                if p["state"] in ("running", "pending"):
+                    _phase(p["id"], "skipped")
+            job["step"] = "Stopped"
+            job["running"] = False
+            job["finished"] = True
+            job["stopped"] = True
+            return True
+        return False
+
     for sid in services:
         st = job["services"][sid]
         st["state"] = "running"
         job["step"] = "Syncing %s…" % _SVC_NAME.get(sid, sid)
         script, tsv, cap = SYNC_SPECS[sid]
-        ok, err = _run_script(script, tsv, cap, timeout=240)
+        ok, err = _run_script(script, tsv, cap, timeout=240, job=job)
         if ok:
             st["state"], st["count"], any_ok = "ok", _tsv_count(tsv), True
         else:
             st["state"], st["error"] = "failed", err
         step()
+        if _stopped():
+            return
     if any_ok:
         # Steam community tags (SteamSpy) at import time — read from the fresh
         # steam TSV so newly-imported games are covered, fetched BEFORE the
         # rebuild merges them into game_tags. Only when SteamSpy is enabled and
         # Steam actually synced this run.
+        _tags_base = job["prog"]["done"]
         if (config.metadata_enabled("steamspy")
                 and job["services"].get("steam", {}).get("state") == "ok"):
             job["step"] = "Fetching Steam tags…"
             _phase("tags", "running")
-            ok_t, _ = _run_script(
-                "steam_tags.py",
-                args=["--tsv", os.path.join(DIR, "steam_games.tsv")], timeout=3600)
-            _phase("tags", "ok" if ok_t else "failed")
+            ok_t, _ = _run_streaming(
+                "steam_tags.py", ["--tsv", os.path.join(DIR, "steam_games.tsv")],
+                _mk_prog("Fetching Steam tags…", "tags", _tags_base),
+                timeout=3600, job=job)
+            _phase("tags", "ok" if ok_t else "failed",
+                   "" if ok_t else None)
         else:
             _phase("tags", "skipped")
-        step()
+        job["prog"]["done"] = min(_tags_base + 1, job["prog"]["total"])
+        if _stopped():
+            return
         job["step"] = "Rebuilding catalog…"
         _phase("catalog", "running")
-        ok, err = _run_script("build_library.py", timeout=900)
+        ok, err = _run_script("build_library.py", timeout=900, job=job)
         if ok:
             job["added"] = len(_lib_keys() - prev)
             _phase("catalog", "ok", "+%d new" % job["added"] if job["added"] else "up to date")
@@ -4620,9 +4812,11 @@ def _sync_worker(job, services, media_ids=(), full=False):
         # rebuild so build_library merges the cache into game_attributes — same
         # order as update.sh (igdb_enrich && build_library). Non-fatal: a failure
         # here never aborts the media pass. Runs for ALL stores, not just Steam.
+        _meta_base = job["prog"]["done"]
         if not job.get("error") and config.metadata_enabled("igdb"):
-            job["step"] = ("Re-checking metadata (IGDB)…" if full
-                           else "Enriching new metadata (IGDB)…")
+            mlabel = ("Re-checking metadata (IGDB)…" if full
+                      else "Enriching new metadata (IGDB)…")
+            job["step"] = mlabel
             _phase("meta", "running")
             # Full refresh re-resolves everything, but SCOPED to the store(s) just
             # synced (via --source) so a Steam full refresh re-checks ~Steam games,
@@ -4634,16 +4828,21 @@ def _sync_worker(job, services, media_ids=(), full=False):
                     if job["services"].get(sid, {}).get("state") == "ok":
                         enrich_args += ["--source", sid]
                 enrich_args.append("--all")
-            ok_e, err_e = _run_script("igdb_enrich.py", args=enrich_args, timeout=3600)
-            if ok_e:
-                ok_m, err_m = _run_script("build_library.py", timeout=900)
+            ok_e, err_e = _run_streaming(
+                "igdb_enrich.py", enrich_args,
+                _mk_prog(mlabel, "meta", _meta_base), timeout=3600, job=job)
+            if ok_e and not job.get("cancel"):
+                job["step"] = "Merging metadata…"
+                ok_m, err_m = _run_script("build_library.py", timeout=900, job=job)
                 _phase("meta", "ok" if ok_m else "failed",
                        None if ok_m else "merge failed: " + err_m)
-            else:
+            elif not job.get("cancel"):
                 _phase("meta", "failed", err_e)
         else:
             _phase("meta", "skipped")
-        step()
+        job["prog"]["done"] = min(_meta_base + 1, job["prog"]["total"])
+        if _stopped():
+            return
 
         # Ratings from every source ludodex knows (IGDB critic+user, Steam
         # reviews, GOG user score, and the local ScreenScraper cache) rolled into
@@ -4661,11 +4860,13 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 sargs += ["igdb", "--refresh"]
             else:
                 sargs = ["all"]
-            ok_sc, err_sc = _run_script("scores_fetch.py", args=sargs, timeout=1800)
+            ok_sc, err_sc = _run_script("scores_fetch.py", args=sargs, timeout=1800, job=job)
             _phase("scores", "ok" if ok_sc else "failed", None if ok_sc else err_sc)
         else:
             _phase("scores", "skipped")
         step()
+        if _stopped():
+            return
     else:
         for p in phases:
             _phase(p["id"], "skipped")
@@ -4679,8 +4880,10 @@ def _sync_worker(job, services, media_ids=(), full=False):
         for sid in media_targets:
             job["step"] = "Fetching %s media…" % _SVC_NAME.get(sid, sid)
             _run_script("media_fetch.py",
-                        args=["--provider", MEDIA_SYNC_PROVIDER[sid]], timeout=1800)
+                        args=["--provider", MEDIA_SYNC_PROVIDER[sid]], timeout=1800, job=job)
             step()
+            if _stopped():
+                return
         # Built-in art gap-fill: any identified game whose source shipped no
         # cover/backdrop/logo (non-Steam stores, unresolved matches) gets it from
         # SteamGridDB by name/appid. Runs on EVERY successful sync — including
@@ -4689,9 +4892,11 @@ def _sync_worker(job, services, media_ids=(), full=False):
         # skips games that already have the art.
         job["step"] = "Fetching missing art…"
         _phase("art", "running")
-        _run_script("media_fetch.py", args=["--backfill-art"], timeout=3600)
+        _run_script("media_fetch.py", args=["--backfill-art"], timeout=3600, job=job)
         _phase("art", "ok")
         step()
+        if _stopped():
+            return
         # Language filter: hide or ban art whose confident single language isn't
         # among the user's preferred languages. Off by default (no-op); runs
         # BEFORE materialize so hidden/banned assets are never chosen/downloaded.
@@ -4720,9 +4925,9 @@ def _sync_worker(job, services, media_ids=(), full=False):
                     job["prog"]["done"] = base + i / n   # climb through this phase live
             _run_streaming("media_choose.py",
                            ["--materialize", "--progress"] + (["--all"] if mode == "all" else []),
-                           _mat_prog, timeout=3600)
+                           _mat_prog, timeout=3600, job=job)
         else:
-            _run_script("media_choose.py", timeout=900)
+            _run_script("media_choose.py", timeout=900, job=job)
         # report how much art coverage the run produced
         cover_after = _n_identified_with_cover()
         if cover_after is not None:
@@ -4770,9 +4975,12 @@ def sync_run(body: dict = Body(default={})):
         full = bool((body or {}).get("full"))
         job = {"running": True, "finished": False, "step": "Starting…",
                "error": None, "added": None, "full": full,
+               "paused": False, "paused_since": None, "paused_total": 0.0,
+               "cancel": False, "stopped": False,
                "services": {sid: {"state": "pending", "count": None, "error": None}
                             for sid in targets}}
         _SYNC["job"] = job
+        _SYNC["proc"] = None
     threading.Thread(target=_sync_worker, args=(job, targets, media, full),
                      daemon=True).start()
     return job
