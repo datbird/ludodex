@@ -3176,18 +3176,25 @@ a.idchip:hover { background: var(--accent-bg); }
 .detail-wand-note { font-size: 12.5px; color: var(--text); }
 .detail-wand-note b { color: var(--accent); }
 /* wand pinned to the hero's lower-right */
-.hero-wand { position: absolute; right: 16px; bottom: 16px; z-index: 6;
-  display: inline-flex; align-items: center; gap: 6px; padding: 8px 15px;
-  font-size: 13px; font-weight: 600; color: #fff; cursor: pointer;
-  background: linear-gradient(120deg, var(--accent), #a855f7); border: none; border-radius: 9px;
-  box-shadow: 0 3px 14px -2px rgba(0,0,0,0.5); transition: filter .12s, transform .06s; }
-.hero-wand:hover { filter: brightness(1.08); }
-.hero-wand:active { transform: translateY(1px); }
-.hero-fixdup { position: absolute; right: 16px; bottom: 58px; z-index: 6;
-  display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 12px;
-  font-weight: 600; color: var(--text-h); cursor: pointer; background: rgba(0,0,0,0.55);
-  border: 1px solid var(--border); border-radius: 9px; }
-.hero-fixdup:hover { border-color: var(--accent); color: #fff; }
+/* Game tools — a small toolbox to the LEFT of the close button that collects the
+   per-game actions (magic wand, fix duplication, peel apart) so they don't overlap. */
+.hero-tools { position: absolute; top: 10px; right: 54px; z-index: 11; }
+.hero-tools-btn {
+  width: 34px; height: 34px; border-radius: 50%; border: none; cursor: pointer;
+  background: rgba(0,0,0,0.45); color: #fff; font-size: 16px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center; transition: background .12s; }
+.hero-tools-btn:hover { background: rgba(0,0,0,0.7); }
+.hero-tools-menu {
+  position: absolute; top: 40px; right: 0; min-width: 220px; z-index: 12;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 8px 28px -6px rgba(0,0,0,0.55); padding: 5px; display: flex; flex-direction: column; }
+.hero-tools-menu button {
+  display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 10px;
+  padding: 8px 10px; background: none; border: none; border-radius: 7px; cursor: pointer;
+  text-align: left; color: var(--text-h); font-size: 13px; font-weight: 600; }
+.hero-tools-menu button:hover { background: var(--bg); }
+.hero-tools-menu .htm-ic { grid-row: span 2; font-size: 15px; width: 20px; text-align: center; }
+.hero-tools-menu .htm-sub { grid-column: 2; font-size: 11px; font-weight: 400; color: var(--text); opacity: 0.7; }
 .fixdup-overlay { z-index: 60; }
 .fixdup-panel { max-width: 460px; width: 92%; padding: 20px 22px; max-height: 82vh; overflow-y: auto; }
 .fixdup-panel h2 { margin: 0 0 12px; }

@@ -4886,6 +4886,9 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
   const [frames, setFrames] = useState<Record<string, Frame>>({})
   const [fixDup, setFixDup] = useState(false)
   const [peel, setPeel] = useState(false)
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const toolsRef = useClickOutside<HTMLDivElement>(toolsOpen, () => setToolsOpen(false))
+  useEffect(() => { setToolsOpen(false) }, [nk])
 
   const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
   useEffect(() => { reloadDetail() }, [reloadDetail])
@@ -4936,6 +4939,25 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
     <div className="overlay" onClick={onClose}>
       <div className="panel game-panel" onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={onClose}>×</button>
+        {d && (
+          <div className="hero-tools" ref={toolsRef}>
+            <button className="hero-tools-btn" title="Game tools"
+              aria-label="Game tools" onClick={() => setToolsOpen((o) => !o)}>🧰</button>
+            {toolsOpen && (
+              <div className="hero-tools-menu">
+                <button onClick={(e) => { runWand(e); setToolsOpen(false) }}>
+                  <span className="htm-ic">✨</span> Magic wand
+                  <span className="htm-sub">AI-enrich (review in Jobs)</span></button>
+                <button onClick={() => { setToolsOpen(false); setFixDup(true) }}>
+                  <span className="htm-ic">⧉</span> Fix duplication
+                  <span className="htm-sub">Merge a duplicate entry in</span></button>
+                <button onClick={() => { setToolsOpen(false); setPeel(true) }}>
+                  <span className="htm-ic">✂</span> Peel apart
+                  <span className="htm-sub">Split two same-named games</span></button>
+              </div>
+            )}
+          </div>
+        )}
         {fixDup && d && (
           <FixDupModal nk={nk} title={d.title} onClose={() => setFixDup(false)}
             onMerged={(canon) => { setFixDup(false); if (canon === nk) reloadDetail(); else onClose() }} />
@@ -4970,18 +4992,6 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
                   : <h2 className="hero-title">{d.title}</h2>}
                 <div className="hero-sub">{d.title}</div>
               </div>
-              <button className="wand-btn hero-wand" onClick={runWand}
-                title="Send this game to the AI enrichment queue — review & accept in the Jobs monitor">
-                <span className="wand-spark">✨</span> Magic wand
-              </button>
-              <button className="wand-btn hero-fixdup" onClick={() => setFixDup(true)}
-                title="This game is a duplicate of another entry — merge them into one">
-                ⧉ Fix duplication
-              </button>
-              <button className="wand-btn hero-fixdup" onClick={() => setPeel(true)}
-                title="This entry is actually two different same-named games (a remake / re-release) — peel one apart into its own entry">
-                ✂ Peel apart
-              </button>
               {(wandSent || wandErr) && (
                 <span className={'hero-wand-note' + (wandErr ? ' err' : '')}>
                   {wandErr || '✨ Sent to the job monitor — review & accept there'}</span>
