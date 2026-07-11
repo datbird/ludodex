@@ -18,6 +18,7 @@ export interface GameRow {
   has_cover: boolean
   ludodex_score: number | null
   tags: TagRef[]
+  attrs?: Record<string, string>   // attribute kind -> value(s), for the optional attribute columns
   wanted?: boolean         // a wishlist-only entry (you want it, don't own it)
   framing_cover?: Frame    // saved position+zoom for this game's cover, if any
 }

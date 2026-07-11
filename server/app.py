@@ -756,6 +756,8 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "        AND md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM "
         "  u.user_media um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, "
         + score + " AS ludodex_score, "
+        "(SELECT group_concat(ga.kind||char(31)||ga.value, char(30)) "
+        "   FROM game_attributes ga WHERE ga.game_id=g.id) AS attrs, "
         "%s"
         "(SELECT group_concat('ludodex:'||ut.tag, char(31)) FROM t.user_tags ut "
         "   WHERE ut.norm_key=g.norm_key) AS usr_tags "
@@ -783,6 +785,19 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         return [{"tag": t, "origins": sorted(o)}
                 for t, o in sorted(d.items(), key=lambda kv: kv[0].lower())]
 
+    def _attrs(r):
+        """Per-game {kind: 'v1, v2'} for the optional attribute columns. Free-text
+        'description' is dropped (too long for a table cell)."""
+        blob = r["attrs"] if "attrs" in r.keys() else None
+        d = {}
+        for pair in (blob or "").split("\x1e"):
+            if not pair:
+                continue
+            kind, _, val = pair.partition("\x1f")
+            if kind and kind != "description" and val:
+                d.setdefault(kind, []).append(val)
+        return {k: ", ".join(v) for k, v in d.items()}
+
     items = [{
         "norm_key": r["norm_key"],
         "title": r["canonical_title"],
@@ -796,6 +811,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "has_cover": bool(r["has_cover"]),
         "ludodex_score": round(r["ludodex_score"]) if r["ludodex_score"] is not None else None,
         "tags": _tags(r),
+        "attrs": _attrs(r),
         "wanted": bool(r["wanted"]) if "wanted" in r.keys() else False,
     } for r in rows]
     # attach any saved cover framing so the grid renders it (only where set)

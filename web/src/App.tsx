@@ -571,6 +571,13 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
   const activeFilters = Object.keys(filters).length
   const filterSections = buildFilterSections(facets)
+  // every categorical attribute is available as an optional table column (id
+  // 'attr:<kind>'); 'description' is excluded (too long for a cell).
+  const attrCols = useMemo(() => Object.keys(facets?.attributes || {})
+    .filter((k) => k !== 'description').sort()
+    .map((k) => ({ id: 'attr:' + k, kind: k, label: k.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase()) })),
+    [facets])
+  const visibleAttrCols = attrCols.filter((c) => cols.includes(c.id))
   const fq = filterQ.trim().toLowerCase()
   // Currently-applied filters, resolved to display names for the "Applied" chips.
   const filterNames = new Map<string, string>()
@@ -905,6 +912,14 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
                       {c.label}
                     </label>
                   ))}
+                  {attrCols.length > 0 && <div className="col-note col-sec">Attributes</div>}
+                  {attrCols.map((c) => (
+                    <label key={c.id} className="col-item">
+                      <input type="checkbox" checked={cols.includes(c.id)}
+                        onChange={() => toggleCol(c.id)} />
+                      {c.label}
+                    </label>
+                  ))}
                   <div className="col-note">Title always shown.</div>
                 </div>
               )}
@@ -965,6 +980,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
               {showCol('tags') && <th>Tags</th>}
               {showCol('n_kinds') && <th className="gt-num">Media</th>}
               {showCol('has_cover') && <th className="gt-num">Cover</th>}
+              {visibleAttrCols.map((c) => <th key={c.id} className="gt-attr">{c.label}</th>)}
             </tr>
           </thead>
           <tbody>
@@ -997,6 +1013,10 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
                 </td>}
                 {showCol('n_kinds') && <td className="gt-num">{g.n_kinds}</td>}
                 {showCol('has_cover') && <td className="gt-num">{g.has_cover ? '✓' : '—'}</td>}
+                {visibleAttrCols.map((c) => (
+                  <td key={c.id} className="gt-attr" title={g.attrs?.[c.kind] || ''}>
+                    {g.attrs?.[c.kind] || <span className="dim">—</span>}</td>
+                ))}
               </tr>
             ))}
           </tbody>
