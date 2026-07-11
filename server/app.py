@@ -4762,7 +4762,7 @@ def _sync_worker(job, services, media_ids=(), full=False):
     mode = config.get("media_mode") or "chosen"
     # + 4 fixed pipeline steps: Steam tags, catalog rebuild, IGDB enrich (with
     # its merge rebuild), and the multi-source scores pass.
-    total = len(services) + 4 + len(planned_media) + 1 + (1 if mode != "ondemand" else 0)
+    total = len(services) + 5 + len(planned_media) + 1 + (1 if mode != "ondemand" else 0)
     job["prog"] = {"done": 0, "total": max(total, 1)}
 
     # Post-source pipeline phases, shown as their own checkmark rows in the sync
@@ -4772,6 +4772,7 @@ def _sync_worker(job, services, media_ids=(), full=False):
         {"id": "catalog", "label": "Catalog rebuilt", "state": "pending", "detail": ""},
         {"id": "meta", "label": "Descriptions & attributes", "state": "pending", "detail": ""},
         {"id": "scores", "label": "Scores & ratings", "state": "pending", "detail": ""},
+        {"id": "os", "label": "OS / platform support", "state": "pending", "detail": ""},
         {"id": "art", "label": "Missing art", "state": "pending", "detail": ""},
         {"id": "language", "label": "Language filter", "state": "pending", "detail": ""},
         {"id": "media", "label": "Media downloaded" if mode != "ondemand" else "Media chosen",
@@ -4942,6 +4943,33 @@ def _sync_worker(job, services, media_ids=(), full=False):
         else:
             _phase("scores", "skipped")
         step()
+        if _stopped():
+            return
+
+        # OS / platform support (Windows/Mac/Linux) for PC store games — Steam &
+        # GOG expose it via their store APIs (fills the "OS" column, which is empty
+        # until this runs). Rate-limited (Steam ~1.5s/appid), so the FIRST run over
+        # a big library is slow; incremental after that (only new appids), and
+        # non-fatal + pausable. Scoped to the synced store(s) os_fetch supports.
+        _os_base = job["prog"]["done"]
+        os_stores = [s for s in services if s in ("steam", "gog")
+                     and job["services"].get(s, {}).get("state") == "ok"]
+        if os_stores:
+            job["step"] = "Fetching OS / platform support…"
+            _phase("os", "running")
+            ok_os = True
+            for s in os_stores:
+                ok_s, _ = _run_streaming(
+                    "os_fetch.py", [s],
+                    _mk_prog("Fetching %s OS support…" % _SVC_NAME.get(s, s), "os", _os_base),
+                    timeout=5400, job=job)
+                ok_os = ok_os and ok_s
+                if job.get("cancel"):
+                    break
+            _phase("os", "ok" if ok_os else "failed")
+        else:
+            _phase("os", "skipped")
+        job["prog"]["done"] = min(_os_base + 1, job["prog"]["total"])
         if _stopped():
             return
     else:

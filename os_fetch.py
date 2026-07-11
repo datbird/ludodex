@@ -96,7 +96,8 @@ def _fetch(source, resolver, cooldown, limit, refresh):
     print("fetching OS for %d %s entries…" % (len(ids), source))
     last = 0.0
     done = fail = 0
-    for sid in ids:
+    for n, sid in enumerate(ids, 1):
+        print("PROG\t%d\t%d\t%s\tos" % (n, len(ids), sid), flush=True)
         wait = last + cooldown - time.monotonic()
         if wait > 0:
             time.sleep(wait)
