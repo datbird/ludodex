@@ -946,9 +946,9 @@ def spotlight(kind: str = Query("random"), exclude: str = Query(None)):
         con.close()
 
 
-SPOTLIGHT_SECONDS_DEFAULT = 12
+SPOTLIGHT_SECONDS_DEFAULT = 90
 SPOTLIGHT_SECONDS_MIN = 3
-SPOTLIGHT_SECONDS_MAX = 120
+SPOTLIGHT_SECONDS_MAX = 300
 
 
 def _spotlight_seconds():

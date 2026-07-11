@@ -1757,7 +1757,7 @@ function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
   useEffect(() => { api.prefs().then((p) => setSecs(p.spotlight_seconds)).catch(() => {}) }, [])
 
   const commit = async (v: number) => {
-    const clamped = Math.max(3, Math.min(120, Math.round(v)))
+    const clamped = Math.max(3, Math.min(300, Math.round(v)))
     setSecs(clamped)
     try { await api.setPrefs({ spotlight_seconds: clamped }); onChanged() }
     catch { /* keep optimistic value */ }
@@ -1773,11 +1773,11 @@ function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
           theme. A thin bar counts this down; hovering the Spotlight pauses it.
         </div>
         <div className="pref-control">
-          <input type="range" min={3} max={60} step={1} value={secs}
+          <input type="range" min={3} max={300} step={1} value={secs}
             onChange={(e) => setSecs(Number(e.target.value))}
             onMouseUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
             onKeyUp={(e) => commit(Number((e.target as HTMLInputElement).value))} />
-          <input className="pref-num" type="number" min={3} max={120} value={secs}
+          <input className="pref-num" type="number" min={3} max={300} value={secs}
             onChange={(e) => commit(Number(e.target.value))} />
           <span className="pref-unit">seconds</span>
         </div>
