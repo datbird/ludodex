@@ -1629,20 +1629,21 @@ a.idchip:hover { background: var(--accent-bg); }
 /* --- library sync menu --- */
 .icon-btn.spin svg { animation: sync-spin 1.1s linear infinite; }
 @keyframes sync-spin { to { transform: rotate(360deg); } }
-.sync-menu { min-width: 320px; }
+.sync-menu { min-width: 320px; max-height: calc(100vh - 64px); overflow-y: auto;
+  overscroll-behavior: contain; }
 .sync-step { font-size: 12px; color: var(--accent); font-weight: 500; }
 .sync-all { width: 100%; justify-content: center; text-align: center; padding: 9px 12px; cursor: pointer; }
 .sync-all:disabled { opacity: 0.5; cursor: not-allowed; }
 .sync-choice-q { font-size: 12px; font-weight: 600; color: var(--text); opacity: 0.85; margin-bottom: 6px; }
 .sync-choice { display: flex; gap: 8px; }
-.sync-choice-opt { flex: 1 1 0; display: flex; flex-direction: column; gap: 3px; text-align: left;
-  padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel);
-  color: var(--text); cursor: pointer; }
+.sync-choice-opt { flex: 1 1 0; display: flex; flex-direction: column; gap: 2px; text-align: center;
+  align-items: center; padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel); color: var(--text); cursor: pointer; }
 .sync-choice-opt:hover:not(:disabled) { border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
 .sync-choice-opt:disabled { opacity: 0.5; cursor: not-allowed; }
 .sync-choice-name { font-size: 13px; font-weight: 600; color: var(--text-h); }
-.sync-choice-hint { font-size: 11px; line-height: 1.3; opacity: 0.8; }
+.sync-choice-sub { font-size: 10px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.03em; }
 .sync-two { display: inline-flex; gap: 4px; align-items: center; }
 .sync-note { font-size: 12px; margin-top: 8px; }
 .sync-note.dim { color: var(--text); opacity: 0.75; }

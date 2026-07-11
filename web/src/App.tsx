@@ -3545,12 +3545,12 @@ function SyncMenu() {
   const [svcs, setSvcs] = useState<SyncService[]>([])
   const [job, setJob] = useState<SyncJob | null>(null)
   const [msg, setMsg] = useState('')
-  const [listOpen, setListOpen] = useState(true)          // main collapse
+  const [listOpen, setListOpen] = useState(false)         // Sources — collapsed by default
   const [expanded, setExpanded] = useState<Set<string>>(new Set())  // per-service
   const [media, setMedia] = useState<Set<string>>(new Set())        // "sync media" checks
   const [romLocs, setRomLocs] = useState<RomLocation[]>([])
   const [romJob, setRomJob] = useState<RomJob | null>(null)
-  const [romListOpen, setRomListOpen] = useState(true)              // ROM section collapse
+  const [romListOpen, setRomListOpen] = useState(false)             // ROM repos — collapsed by default
   const [romExpanded, setRomExpanded] = useState<Set<number>>(new Set())
 
   const load = useCallback(async () => {
@@ -3649,17 +3649,16 @@ function SyncMenu() {
           <div className="sync-choice-q">Sync all configured:</div>
           <div className="sync-choice">
             <button className="sync-choice-opt" disabled={anyRunning || !anyReady}
-              onClick={() => runAll(false)}>
+              onClick={() => runAll(false)}
+              title="Fast — pull new games and fill in anything still missing a match, attributes or art (retries earlier misses). Won't re-check what's already complete.">
               <span className="sync-choice-name">{running ? 'Syncing…' : 'New games'}</span>
-              <span className="sync-choice-hint">Fast — pull new games and fill in anything still
-                missing a match, attributes or art (retries earlier misses). Won't re-check what's
-                already complete.</span>
+              <span className="sync-choice-sub">fast · fills gaps</span>
             </button>
             <button className="sync-choice-opt" disabled={anyRunning || !anyReady}
-              onClick={() => runAll(true)}>
+              onClick={() => runAll(true)}
+              title="Re-check EVERY game — re-match and refresh existing ratings, descriptions, tags, attributes & art. Slower.">
               <span className="sync-choice-name">Full refresh</span>
-              <span className="sync-choice-hint">Re-check EVERY game — re-match and refresh existing
-                ratings, descriptions, tags, attributes &amp; art. Slower.</span>
+              <span className="sync-choice-sub">slower · re-checks all</span>
             </button>
           </div>
           {!anyReady && !running && (
