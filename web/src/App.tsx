@@ -2237,7 +2237,7 @@ function AiBudgets() {
   }
   useEffect(() => { load() }, [])
 
-  const saveCaps = async (sc: 'provider' | 'model', key: string, next: Partial<Caps>) => {
+  const saveCaps = async (sc: 'global' | 'provider' | 'model', key: string, next: Partial<Caps>) => {
     try { setCaps((await api.setAiLimit(sc, key, next)).caps) }
     catch (e) { setMsg(e instanceof Error ? e.message : 'failed') }
   }
@@ -2279,10 +2279,11 @@ function AiBudgets() {
   return (
     <>
       <h2>Budgets &amp; limits</h2>
-      <p className="dim">Set a <b>monthly $ budget</b> per provider or model — spend is your
-        real token counts (from each API response) × the prices below. Token caps are a
-        reliable fallback that keep working even if a price is missing. <b>Any</b> cap being
-        hit stops further calls that month.</p>
+      <p className="dim">Set a <b>monthly $ budget</b> globally (all AI combined) and/or per
+        provider or model — spend is your real token counts (from each API response) × the
+        prices below. Token caps are a reliable fallback that keep working even if a price is
+        missing. <b>Any</b> cap being hit — global, provider, or model — stops further calls
+        that month.</p>
 
       <div className="cur-row">
         <span className="cur-label">Currency</span>
@@ -2300,8 +2301,38 @@ function AiBudgets() {
       </div>
 
       <div className="budgets">
-        {caps.length === 0 && <div className="sync-note dim">No budgets or caps yet — add one below.</div>}
-        {caps.map((c) => (
+        {(() => {
+          const g = caps.find((c) => c.scope === 'global')
+          const gc = g?.caps ?? { total: 0, usd: 0, input: 0, output: 0 }
+          const gu = g?.used ?? { total: 0, input: 0, output: 0, usd: 0, unpriced: false }
+          return (
+            <div className="budget-row global-budget">
+              <div className="br-head">
+                <span className="cap-scope global">global</span>
+                <span className="cap-key">All AI — every provider &amp; model combined</span>
+              </div>
+              <div className="br-fields">
+                <label className="br-field"><span>Budget /mo ({curSym(cur).trim()})</span>
+                  <MoneyInput usd={gc.usd} cur={cur} onSave={(usd) => saveCaps('global', 'all', { ...gc, usd })} />
+                  <span className="br-used dim">{gu.unpriced ? '≥' : ''}{money(gu.usd, cur)} used</span></label>
+                <label className="br-field"><span>Total tokens /mo</span>
+                  <CapInput value={gc.total} onSave={(total) => saveCaps('global', 'all', { ...gc, total })} />
+                  <span className="br-used dim">{fmtTok(gu.total)} used</span></label>
+                <label className="br-field"><span>Input tokens /mo</span>
+                  <CapInput value={gc.input} onSave={(input) => saveCaps('global', 'all', { ...gc, input })} />
+                  <span className="br-used dim">{fmtTok(gu.input)} used</span></label>
+                <label className="br-field"><span>Output tokens /mo</span>
+                  <CapInput value={gc.output} onSave={(output) => saveCaps('global', 'all', { ...gc, output })} />
+                  <span className="br-used dim">{fmtTok(gu.output)} used</span></label>
+              </div>
+              {gc.usd > 0 && gu.unpriced &&
+                <div className="br-warn dim">⚠ Some usage has no price set — the $ budget can’t be enforced, but token caps still apply.</div>}
+            </div>
+          )
+        })()}
+        <div className="budgets-sub dim">Per-provider &amp; per-model caps (optional — apply on top of the global budget)</div>
+        {caps.filter((c) => c.scope !== 'global').length === 0 && <div className="sync-note dim">No per-provider/model caps yet — add one below.</div>}
+        {caps.filter((c) => c.scope !== 'global').map((c) => (
           <div key={c.scope + '/' + c.key} className="budget-row">
             <div className="br-head">
               <span className={'cap-scope ' + c.scope}>{c.scope}</span>

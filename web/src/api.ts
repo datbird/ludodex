@@ -208,7 +208,7 @@ export interface Currency { code: string; fx: number }
 export interface AiUsageSummary {
   models: AiUsageModel[]; providers: AiUsageProvider[]; currency: Currency
 }
-export interface AiCap { scope: 'provider' | 'model'; key: string; caps: Caps; used: CapUsed }
+export interface AiCap { scope: 'global' | 'provider' | 'model'; key: string; caps: Caps; used: CapUsed }
 export interface AiPrice {
   provider: string; model: string
   in_usd: number | null; out_usd: number | null; cached_usd: number | null
@@ -927,7 +927,7 @@ export const api = {
     get<{ provider: string; model: string; days: AiUsageDay[] }>(
       `/api/ai/usage/series?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`),
   aiLimits: () => get<{ caps: AiCap[] }>('/api/ai/limits'),
-  setAiLimit: async (scope: 'provider' | 'model', key: string, caps: Partial<Caps>) => {
+  setAiLimit: async (scope: 'global' | 'provider' | 'model', key: string, caps: Partial<Caps>) => {
     const r = await fetch('/api/ai/limit', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ scope, key, caps }),

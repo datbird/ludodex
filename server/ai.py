@@ -327,7 +327,7 @@ def month_cost(provider, model=None):
 def limits_map():
     """{'provider': {id: capsdict}, 'model': {id: capsdict}} — each capsdict is
     {total, usd, input, output} (0/None where unset)."""
-    out = {"provider": {}, "model": {}}
+    out = {"provider": {}, "model": {}, "global": {}}
     try:
         con = _usage_con()
         for r in con.execute("SELECT scope, key, monthly_tokens, usd_budget, in_cap, "
@@ -356,8 +356,30 @@ def _month_tokens_model(model):
 
 
 def _month_usage(scope, key):
-    """(total, input, output, usd_cost, unpriced) used this month by a provider
-    or (across providers) a model."""
+    """(total, input, output, usd_cost, unpriced) used this month by a provider,
+    a model (across providers), or everything combined (scope='global')."""
+    if scope == "global":
+        try:
+            con = _usage_con()
+            rows = con.execute(
+                "SELECT provider, model, COALESCE(SUM(input_tokens),0) i, "
+                "COALESCE(SUM(output_tokens),0) o FROM usage WHERE day LIKE ? "
+                "GROUP BY provider, model", (_month_prefix() + "%",)).fetchall()
+            con.close()
+        except Exception:
+            return 0, 0, 0, 0.0, False
+        ti = to = 0
+        cost, unp = 0.0, False
+        for r in rows:
+            ti += r["i"]
+            to += r["o"]
+            c = cost_usd(r["i"], r["o"], r["provider"], r["model"])
+            if c is None:
+                if r["i"] or r["o"]:
+                    unp = True
+            else:
+                cost += c
+        return ti + to, ti, to, round(cost, 4), unp
     if scope == "provider":
         i, o = month_io(key)
         cost, unp = month_cost(key)
@@ -390,7 +412,7 @@ def limits_list():
     [{scope, key, caps:{total,usd,input,output}, used:{total,input,output,usd,unpriced}}]."""
     lm = limits_map()
     out = []
-    for scope in ("provider", "model"):
+    for scope in ("global", "provider", "model"):
         for k, caps in sorted(lm.get(scope, {}).items()):
             total, i, o, cost, unp = _month_usage(scope, k)
             out.append({"scope": scope, "key": k, "caps": caps,
@@ -403,7 +425,7 @@ def set_limit(scope, key, caps):
     """Set (or clear) a limit row for a provider/model. `caps` is a dict with any of
     {total, usd, input, output}; falsy dimensions are cleared, and a row with no
     active dimension is removed entirely."""
-    if scope not in ("provider", "model") or not key:
+    if scope not in ("provider", "model", "global") or not key:
         raise ValueError("bad limit scope/key")
     if not isinstance(caps, dict):               # back-compat: a bare number = total
         caps = {"total": caps}
@@ -449,6 +471,7 @@ def _enforce(scope, key, tag):
 def check_limit(provider, model):
     """Raise RuntimeError if this month's usage has hit any provider- or model-scoped
     cap (total / input / output tokens, or the $ budget)."""
+    _enforce("global", "all", "the global AI budget")
     _enforce("provider", provider, "provider %r" % provider)
     _enforce("model", model, "model %r" % model)
 

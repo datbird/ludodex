@@ -492,6 +492,11 @@ header h1 span { color: var(--accent); }
 .cap-row.over { border-color: var(--danger, #d9534f); }
 .cap-scope { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; padding: 2px 6px; border-radius: 4px; background: var(--bg); color: var(--text); }
 .cap-scope.provider { color: var(--accent); }
+.cap-scope.global { color: var(--panel); background: var(--accent); font-weight: 700; }
+.global-budget { border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+.budgets-sub { font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  margin: 6px 2px -2px; }
 .cap-key { font-weight: 600; color: var(--text-h); font-size: 13px; }
 .cap-usage { font-size: 12px; margin-left: auto; }
 .caps-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

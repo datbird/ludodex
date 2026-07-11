@@ -3784,8 +3784,8 @@ def ai_limit(body: dict = Body(...)):
     body = body or {}
     scope = (body.get("scope") or "").strip()
     key = (body.get("key") or "").strip()
-    if scope not in ("provider", "model") or not key:
-        raise HTTPException(400, "scope must be provider|model and key required")
+    if scope not in ("provider", "model", "global") or not key:
+        raise HTTPException(400, "scope must be global|provider|model and key required")
     caps = body.get("caps")
     if not isinstance(caps, dict):               # back-compat: {monthly_tokens: N}
         caps = {"total": body.get("monthly_tokens")}
