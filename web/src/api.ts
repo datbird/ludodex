@@ -76,6 +76,7 @@ export interface GameDetail {
   ai_meta?: AiFinding | null
   attribute_provenance?: Record<string, { value: string; origins: string[]; ai: boolean }[]>
   attribute_overrides?: Record<string, { value: string; origin: string }>
+  editable_kinds?: string[]
   ownership?: OwnershipFact[]
   framing?: Record<string, Frame>   // kind -> saved position+zoom
 }

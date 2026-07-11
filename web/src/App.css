@@ -2949,7 +2949,20 @@ a.idchip:hover { background: var(--accent-bg); }
 
 /* ---- attribute provenance + re-pointing ---- */
 .attr-prov { margin-top: 8px; }
-.ap-list { display: flex; flex-direction: column; gap: 4px; }
+.attr-prov-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 0;
+  background: none; border: none; cursor: pointer; text-align: left;
+}
+.attr-prov-toggle h3 { margin: 0; }
+.attr-prov-toggle .caret {
+  display: inline-block; transition: transform 0.14s; color: var(--text);
+  opacity: 0.7; font-size: 12px;
+}
+.attr-prov-toggle .caret.open { transform: rotate(90deg); }
+.ap-list { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.ap-row.blank { opacity: 0.72; }
+.ap-row.blank.open { opacity: 1; }
+.ap-empty { font-size: 12px; font-style: italic; }
 .ap-row { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
 .ap-row.open { border-color: var(--accent); }
 .ap-kind { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: none; padding: 8px 10px; cursor: pointer; text-align: left; color: var(--text-h); }

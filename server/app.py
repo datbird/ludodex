@@ -2809,6 +2809,18 @@ def aimeta_apply(body: dict = Body(default={})):
     return {"started": True, "selected": len(sels) if sels else None}
 
 
+# User-facing attribute kinds for the detail "view / edit all attributes" panel —
+# the catalog vocabulary minus internal plumbing (install paths, activity stamps,
+# app flags). Blank kinds are shown too, so the user can fill them in.
+_EDITABLE_ATTR_KINDS = [
+    "release_year", "release_date", "platforms", "genres", "themes",
+    "game_modes", "player_perspectives", "developers", "publishers", "series",
+    "features", "categories", "age_ratings", "regions", "os", "device",
+    "version", "completion_status", "user_score", "critic_score",
+    "community_score", "playtime", "description",
+]
+
+
 @app.get("/api/games/{norm_key}")
 def game_detail(norm_key: str):
     con = lib()
@@ -2839,6 +2851,11 @@ def game_detail(norm_key: str):
             prov.setdefault(r["kind"], []).append(
                 {"value": r["value"], "origins": origins, "ai": "ai" in origins})
         ov = overrides.overrides_for(norm_key)   # user's chosen canonical per kind
+        # Reflect the user's pinned / hand-typed canonical value in the DISPLAYED
+        # attributes so an edit (or a value added to a blank) actually shows in the
+        # detail view. The provenance block below still lists every source value.
+        for _k, _o in ov.items():
+            attrs[_k] = [_o["value"]]
         links = [dict(r) for r in con.execute(
             "SELECT provider, provider_id, slug, url FROM metadata_links "
             "WHERE game_id=?", (gid,))]
@@ -2852,6 +2869,7 @@ def game_detail(norm_key: str):
             "attributes": attrs,
             "attribute_provenance": prov,     # per-value origins (+ ai flag → ✨)
             "attribute_overrides": ov,        # user re-pointed canonical values
+            "editable_kinds": _EDITABLE_ATTR_KINDS,   # full vocab for the "all attributes" editor
             "tags": _game_tags(con, gid, norm_key),
             "scores": _score_breakdown(con, norm_key),
             "metadata_links": links,

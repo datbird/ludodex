@@ -4148,8 +4148,17 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
   const overrides = d.attribute_overrides || {}
   const [editing, setEditing] = useState<string | null>(null)
   const [manual, setManual] = useState('')
-  const kinds = Object.keys(prov).sort()
-  if (!kinds.length) return null
+  // Hidden by default when a game opens (per request); the header toggle reveals it.
+  const [show, setShow] = useState(false)
+  useEffect(() => { setShow(false); setEditing(null) }, [d.norm_key])
+
+  // Every editable attribute kind, blanks included, in the server's vocabulary order;
+  // any extra kind the game happens to have (that isn't in the vocab) is appended.
+  const vocab = d.editable_kinds && d.editable_kinds.length
+    ? d.editable_kinds : Object.keys(prov).sort()
+  const extra = Object.keys(prov).filter((k) => !vocab.includes(k)).sort()
+  const kinds = [...vocab, ...extra]
+  const filled = kinds.filter((k) => prov[k]?.length || overrides[k]).length
 
   const setOv = async (kind: string, value: string, origin: string) => {
     try { await api.setAttributeOverride(d.norm_key, kind, value, origin) } catch { /* ignore */ }
@@ -4162,22 +4171,29 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
 
   return (
     <section className="attr-prov">
-      <h3>Attribute sources
-        <span className="sec-help">where each value came from — ✨ = AI-derived. Click a row to set the canonical value.</span>
-      </h3>
+      <button className="attr-prov-toggle" onClick={() => setShow((s) => !s)}>
+        <span className={'caret' + (show ? ' open' : '')}>▸</span>
+        <h3>View / edit all attributes
+          <span className="sec-help">{filled} of {kinds.length} set · ✨ = AI-derived · click a row to change or fill it</span>
+        </h3>
+      </button>
+      {show && (
       <div className="ap-list">
         {kinds.map((kind) => {
-          const vals = prov[kind]
+          const vals = prov[kind] || []
           const ov = overrides[kind]
           const open = editing === kind
+          const blank = !vals.length && !ov
           return (
-            <div key={kind} className={'ap-row' + (open ? ' open' : '')}>
+            <div key={kind} className={'ap-row' + (open ? ' open' : '') + (blank ? ' blank' : '')}>
               <button className="ap-kind" onClick={() => { setEditing(open ? null : kind); setManual('') }}>
                 <span className="ap-kname">{kind.replace(/_/g, ' ')}</span>
                 <span className="ap-vals">
                   {ov ? (
                     <span className="ap-chip ap-chosen prov-badge" style={attrBadgeStyle([ov.origin])}>
                       {ov.value}<ProvTag origin={ov.origin} /></span>
+                  ) : blank ? (
+                    <span className="ap-empty dim">— add</span>
                   ) : vals.slice(0, 6).map((v, i) => (
                     <span key={i} className="ap-chip prov-badge" style={attrBadgeStyle(v.origins)}>
                       {v.ai && <span className="attr-sparkle" title="AI-derived">✨</span>}
@@ -4190,23 +4206,25 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
               </button>
               {open && (
                 <div className="attr-repoint">
-                  <div className="ar-h">Canonical value for “{kind.replace(/_/g, ' ')}”</div>
+                  <div className="ar-h">{blank ? 'Add a value for' : 'Canonical value for'} “{kind.replace(/_/g, ' ')}”</div>
                   {ov && (
                     <div className="ar-cur">Currently pinned: <b>{ov.value}</b>
                       <ProvTag origin={ov.origin} />
                       <button className="link-btn" onClick={() => clearOv(kind)}>revert to sources</button>
                     </div>
                   )}
-                  <div className="ar-opts">
-                    {vals.map((v, i) => (
-                      <button key={i} className="ar-opt" onClick={() => setOv(kind, v.value, v.origins[0] || 'provider')}>
-                        {v.ai && <span className="attr-sparkle">✨</span>}{v.value}
-                        {v.origins.map((o) => <ProvTag key={o} origin={o} />)}
-                      </button>
-                    ))}
-                  </div>
+                  {vals.length > 0 && (
+                    <div className="ar-opts">
+                      {vals.map((v, i) => (
+                        <button key={i} className="ar-opt" onClick={() => setOv(kind, v.value, v.origins[0] || 'provider')}>
+                          {v.ai && <span className="attr-sparkle">✨</span>}{v.value}
+                          {v.origins.map((o) => <ProvTag key={o} origin={o} />)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <div className="ar-manual">
-                    <input placeholder="or type a manual value…" value={manual}
+                    <input placeholder={vals.length ? 'or type a manual value…' : 'type a value…'} value={manual}
                       onChange={(e) => setManual(e.target.value)}
                       onKeyDown={(e) => { if (e.key === 'Enter' && manual.trim()) setOv(kind, manual.trim(), 'manual') }} />
                     <button className="ops-btn go" disabled={!manual.trim()}
@@ -4218,6 +4236,7 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
           )
         })}
       </div>
+      )}
     </section>
   )
 }
