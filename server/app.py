@@ -567,7 +567,11 @@ def _has_col(con, table, col):
 IDENTIFIED_SQL = (
     "(EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) "
     "OR EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id AND s.source NOT IN "
-    "('emulation','archive','physical','rom','digital')))")
+    "('emulation','archive','physical','rom','digital')) "
+    # a wishlist-wanted game is a known title from a real store (steam/gog), so it
+    # counts as identified even before IGDB matches it — else the Wanted view hides
+    # the whole wishlist behind "show unidentified".
+    "OR EXISTS(SELECT 1 FROM wanted w WHERE w.game_id=g.id))")
 
 
 # --- advanced "Query" search language -------------------------------------- #
