@@ -542,8 +542,15 @@ header h1 span { color: var(--accent); }
   border: 1px solid var(--border); border-radius: 6px; color: var(--text-h); font: inherit; }
 .pr-src { font-size: 10px; color: var(--text); }
 .pr-src.manual { color: var(--accent); }
-.pr-provider { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
-  font-weight: 700; color: var(--accent); margin-top: 10px; padding-top: 6px; }
+.pr-provider { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700;
+  color: var(--accent); margin-top: 8px; padding: 6px 4px; background: none;
+  border: none; border-top: 1px solid var(--border); cursor: pointer; }
+.pr-provider:hover { color: var(--text-h); }
+.pr-chev { display: inline-block; font-size: 10px; opacity: 0.7; transition: transform 0.12s ease; }
+.pr-chev.open { transform: rotate(90deg); }
+.pr-count { margin-left: auto; font-size: 10px; font-weight: 600; opacity: 0.6;
+  text-transform: none; letter-spacing: 0; }
 .pp-or { margin-top: 12px; align-items: flex-start; gap: 10px; }
 .pp-or-txt { font-size: 12px; line-height: 1.4; }
 .pp-sched { margin: 8px 0 0 44px; display: flex; flex-direction: column; gap: 6px; }

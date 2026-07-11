@@ -2199,6 +2199,9 @@ function AiBudgets() {
   const [caps, setCaps] = useState<AiCap[] | null>(null)
   const [cur, setCur] = useState<Currency>({ code: 'USD', fx: 1 })
   const [prices, setPrices] = useState<AiPrice[]>([])
+  const [openProv, setOpenProv] = useState<Set<string>>(new Set())  // providers expanded (collapsed by default)
+  const toggleProv = (p: string) =>
+    setOpenProv((s) => { const n = new Set(s); n.has(p) ? n.delete(p) : n.add(p); return n })
   const [orEnabled, setOrEnabled] = useState(false)
   const [sched, setSched] = useState<{ daily: boolean; time: string }>({ daily: true, time: '04:00' })
   const [lastUpdate, setLastUpdate] = useState<string | null>(null)
@@ -2382,12 +2385,20 @@ function AiBudgets() {
           <div className="price-row phead"><span>Model</span><span>Input</span><span>Output</span><span>Cached</span><span>Src</span><span /></div>
           {Object.entries(prices.reduce((g, p) => { (g[p.provider] ||= []).push(p); return g }, {} as Record<string, AiPrice[]>))
             .sort(([a], [b]) => a.localeCompare(b))
-            .map(([provider, rows]) => (
-              <Fragment key={provider}>
-                <div className="pr-provider">{providerName(provider)}</div>
-                {rows.map((p) => <PriceRow key={p.provider + '/' + p.model} p={p} onSave={savePrice} />)}
-              </Fragment>
-            ))}
+            .map(([provider, rows]) => {
+              const open = openProv.has(provider)
+              return (
+                <Fragment key={provider}>
+                  <button className={'pr-provider' + (open ? ' open' : '')}
+                    onClick={() => toggleProv(provider)}>
+                    <span className={'pr-chev' + (open ? ' open' : '')}>▸</span>
+                    <span className="pr-provider-name">{providerName(provider)}</span>
+                    <span className="pr-count">{rows.length}</span>
+                  </button>
+                  {open && rows.map((p) => <PriceRow key={p.provider + '/' + p.model} p={p} onSave={savePrice} />)}
+                </Fragment>
+              )
+            })}
         </div>
         <div className="price-add">
           <select value={pProv} onChange={(e) => setPProv(e.target.value)}>
