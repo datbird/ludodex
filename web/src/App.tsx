@@ -2277,9 +2277,11 @@ function AiBudgets() {
       const parts: string[] = []
       if (r.fetched) parts.push(`${r.fetched} from feed`)
       if (r.ai_resolved) parts.push(`${r.ai_resolved} by AI`)
-      setMsg(`Resolved ${parts.join(' + ') || '0'} price(s)`
-        + (r.still_missing ? ` — ${r.still_missing} still unpriced` : '')
-        + (r.ai_error ? ` · AI error: ${r.ai_error}` : ''))
+      let m = parts.length ? `Resolved ${parts.join(' + ')} price(s)` : 'No prices changed'
+      if (useAi && r.targeted === 0) m += ' — everything is already priced; name a specific model or provider in the note to re-price it'
+      if (r.still_missing) m += ` — ${r.still_missing} still unpriced`
+      if (r.ai_error) m += ` · AI error: ${r.ai_error}`
+      setMsg(m)
       setResolveNote('')
     } catch (e) { setMsg('Resolve failed: ' + (e instanceof Error ? e.message : '')) }
     finally { setResolving(false) }

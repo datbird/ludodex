@@ -3890,9 +3890,21 @@ def ai_prices_resolve(body: dict = Body(default={})):
             fetched = ai.prices_refresh().get("updated", 0)
         except Exception as e:                  # noqa: BLE001 — feed is best-effort
             fetch_err = str(e)[:140]
-    ai_set, ai_err = 0, None
+    ai_set, ai_err, targeted = 0, None, 0
     if use_ai:
-        targets = ai.prices_missing()
+        # Always resolve models with no price; plus any model/provider the user
+        # named in the note (so a specific "X is wrong" gets re-priced even if it
+        # already has a default).
+        targets = list(ai.prices_missing())
+        seen = set(targets)
+        nlow = note.lower()
+        if nlow.strip():
+            for r in ai.prices_list():
+                pm = (r["provider"], r["model"])
+                if pm not in seen and ((r["model"] and r["model"].lower() in nlow)
+                                       or (r["provider"] and r["provider"].lower() in nlow)):
+                    targets.append(pm); seen.add(pm)
+        targeted = len(targets)
         if targets:
             try:
                 for r in ai.resolve_prices_ai(targets, note=note):
@@ -3905,7 +3917,7 @@ def ai_prices_resolve(body: dict = Body(default={})):
             except Exception as e:
                 ai_err = str(e)[:200]
     return {"prices": ai.prices_list(), "fetched": fetched, "ai_resolved": ai_set,
-            "still_missing": len(ai.prices_missing()),
+            "targeted": targeted, "still_missing": len(ai.prices_missing()),
             "fetch_error": fetch_err, "ai_error": ai_err}
 
 
