@@ -483,7 +483,8 @@ def stats():
 
 @app.get("/api/facets")
 def facets():
-    """Distinct sources + platforms for the UI filter dropdowns."""
+    """Distinct sources + platforms + every categorical attribute value, for the
+    UI filter dropdown (so ANY attribute is filterable)."""
     con = lib()
     try:
         sources = [r["source"] for r in con.execute(
@@ -493,7 +494,20 @@ def facets():
             "AND platform!='' AND platform NOT IN (%s) "
             "GROUP BY platform ORDER BY c DESC"
             % ",".join("?" * len(NON_SYSTEM_PLATFORMS)), NON_SYSTEM_PLATFORMS)]
-        return {"sources": sources, "platforms": platforms}
+        # every categorical attribute kind -> its values (busiest first). Free-text
+        # kinds (description) aren't value-filterable, so they're skipped.
+        attributes = {}
+        kinds = [r["kind"] for r in con.execute(
+            "SELECT DISTINCT kind FROM game_attributes "
+            "WHERE kind NOT IN ('description') ORDER BY kind")]
+        for k in kinds:
+            vals = [r["value"] for r in con.execute(
+                "SELECT value, COUNT(*) c FROM game_attributes WHERE kind=? "
+                "AND value IS NOT NULL AND value!='' GROUP BY value "
+                "ORDER BY c DESC, value LIMIT 400", (k,))]
+            if vals:
+                attributes[k] = vals
+        return {"sources": sources, "platforms": platforms, "attributes": attributes}
     finally:
         con.close()
 
@@ -681,6 +695,12 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         if tok.startswith("system:"):
             return ("EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
                     "AND s.platform=?)", [tok[7:]])
+        if tok.startswith("attr:"):                  # attr:<kind>:<value>
+            rest = tok[5:]
+            if ":" in rest:
+                kind, val = rest.split(":", 1)
+                return ("EXISTS(SELECT 1 FROM game_attributes ga WHERE "
+                        "ga.game_id=g.id AND ga.kind=? AND ga.value=?)", [kind, val])
         if tok.startswith("wanted:"):
             # device wishlist lives in connections.sqlite; resolve its norm_keys here
             keys = devices.wants_keys(tok[7:]) if tok[7:].isdigit() else []

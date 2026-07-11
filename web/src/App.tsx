@@ -166,12 +166,22 @@ function buildFilterSections(facets: Facets | null): FilterSection[] {
     ].sort(byName) },
     { title: 'Systems', rows: (facets?.platforms || [])
       .map((p) => ({ id: 'system:' + p, name: p })).sort(byName) },
+    // one section per categorical attribute (genres, themes, developers, …)
+    ...Object.entries(facets?.attributes || {}).map(([kind, vals]) => ({
+      title: kind.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase()),
+      rows: vals.map((v) => ({ id: `attr:${kind}:${v}`, name: v })).sort(byName),
+    })),
   ]
 }
 
 // Human label for a filter token, falling back to a prettified id when the row
 // isn't in the current sections yet (e.g. facets still loading).
 function prettifyFilterId(id: string): string {
+  if (id.startsWith('attr:')) {                 // attr:<kind>:<value> -> just the value
+    const rest = id.slice(5)
+    const i = rest.indexOf(':')
+    return i >= 0 ? rest.slice(i + 1) : rest
+  }
   const bare = id.replace(/^(source|system):/, '')
   return bare.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
@@ -433,6 +443,9 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [filters, setFilters] = useState<FilterState>({})
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [filterQ, setFilterQ] = useState('')
+  const [openSecs, setOpenSecs] = useState<Set<string>>(new Set())   // filter sections expanded (collapsed by default)
+  const toggleSec = (t: string) =>
+    setOpenSecs((s) => { const n = new Set(s); n.has(t) ? n.delete(t) : n.add(t); return n })
   const [sort, setSort] = useState<SortState>({})
   const [sortOpen, setSortOpen] = useState(false)
   const [searchMode, setSearchMode] = useState<'basic' | 'ai' | 'query'>('basic')
@@ -772,10 +785,15 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
                       ? sec.rows.filter((r) => r.name.toLowerCase().includes(fq))
                       : sec.rows
                     if (!rows.length) return null
+                    const open = fq ? true : openSecs.has(sec.title)  // search auto-expands matches
                     return (
                       <Fragment key={sec.title}>
-                        <div className="fg-section">{sec.title}</div>
-                        {rows.map((r) => (
+                        <button className="fg-section fg-section-toggle" onClick={() => toggleSec(sec.title)}>
+                          <span className={'sync-chev' + (open ? ' open' : '')}>▸</span>
+                          <span>{sec.title}</span>
+                          <span className="fg-count">{sec.rows.length}</span>
+                        </button>
+                        {open && rows.map((r) => (
                           <FilterRow key={r.id} name={r.name} state={filters[r.id]}
                             onSet={(v) => setFlag(r.id, v)} />
                         ))}

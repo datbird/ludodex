@@ -266,6 +266,12 @@ header h1 span { color: var(--accent); }
   color: var(--accent);
   margin: 10px 0 3px;
 }
+.fg-section-toggle { display: flex; align-items: center; gap: 6px; width: 100%; background: none;
+  border: none; border-top: 1px solid var(--border); padding: 8px 2px 4px; cursor: pointer; }
+.fg-section-toggle:hover { color: var(--text-h); }
+.fg-section-toggle .sync-chev { font-size: 9px; opacity: 0.7; }
+.fg-count { margin-left: auto; font-size: 10px; font-weight: 600; opacity: 0.55;
+  text-transform: none; letter-spacing: 0; }
 .filter-grid {
   display: grid;
   grid-template-columns: 1fr 62px 62px;

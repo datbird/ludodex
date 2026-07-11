@@ -164,6 +164,7 @@ export interface Stats {
 export interface Facets {
   sources: string[]
   platforms: string[]
+  attributes?: Record<string, string[]>   // kind -> values (every categorical attribute)
 }
 
 export interface AiProvider {
