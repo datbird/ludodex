@@ -44,6 +44,7 @@ import igdb_enrich      # noqa: E402  IGDB cache resolvers (cross-platform relea
 import medialang        # noqa: E402  per-asset media language classification + filter
 import framing         # noqa: E402  per-game/per-kind image framing (position + zoom)
 import mediaflags      # noqa: E402  durable per-asset ban / not-redistributable flags
+import merges          # noqa: E402  durable game merges (fold duplicate entries)
 import auth            # noqa: E402  local username/password accounts + sessions
 import cf_access       # noqa: E402  Cloudflare Access SSO (verify the Access JWT)
 from . import ai       # noqa: E402  AI features (server package)
@@ -86,6 +87,7 @@ DATABASES = [
     ("fileops", "File operations", "file-profiles.sqlite", "durable"),
     ("aimeta", "AI metadata", "ai-metadata.sqlite", "durable"),
     ("overrides", "Attribute overrides", "attr-overrides.sqlite", "durable"),
+    ("merges", "Duplicate merges", "merges.sqlite", "durable"),
     ("ra", "RetroAchievements", "ra.sqlite", "durable"),
     ("library", "Game library", "game-library.sqlite", "output"),
     ("media", "Media index", "media-index.sqlite", "output"),
@@ -5409,6 +5411,53 @@ def ai_dedupe(body: dict = None):
         out.append({**c, "same": bool(v.get("same")),
                     "confidence": v.get("confidence"), "reason": v.get("reason", "")})
     return {"suggestions": out}
+
+
+@app.get("/api/games/dupes")
+def games_dupes(limit: int = Query(40)):
+    """Suspected duplicate pairs (fuzzy title similarity — no AI), for one-click
+    Fix-duplication review. `ratio` is the title similarity (0..1)."""
+    con = lib()
+    try:
+        return {"dupes": _dedupe_candidates(con, max(1, min(limit, 200)))}
+    finally:
+        con.close()
+
+
+@app.post("/api/games/{nk}/merge")
+def games_merge(nk: str, body: dict = Body(...)):
+    """Merge two duplicate catalog entries into one. Body:
+    {"other": "<norm_key>", "canonical": "this"|"other"}. The non-canonical entry
+    folds into the canonical one durably (survives every rebuild); its media /
+    tags / scores / ownership are re-keyed onto the survivor, while identity
+    (title + IGDB match) stays with the canonical. Returns the canonical norm_key."""
+    body = body or {}
+    other = (body.get("other") or "").strip()
+    which = body.get("canonical")
+    if not other or other == nk:
+        raise HTTPException(400, "need a different 'other' game to merge")
+    if which not in ("this", "other"):
+        raise HTTPException(400, "canonical must be 'this' or 'other'")
+    con = lib()
+    try:
+        titles = {r["norm_key"]: r["canonical_title"] for r in con.execute(
+            "SELECT norm_key, canonical_title FROM games WHERE norm_key IN (?,?)",
+            (nk, other))}
+    finally:
+        con.close()
+    if nk not in titles or other not in titles:
+        raise HTTPException(404, "one or both games not found")
+    to_key = nk if which == "this" else other
+    from_key = other if which == "this" else nk
+    try:
+        merges.add(from_key, to_key, titles.get(from_key, ""), titles.get(to_key, ""))
+        merges.rekey_user_data(from_key, to_key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    ok, err = _run_script("build_library.py", timeout=900)
+    if not ok:
+        raise HTTPException(502, "merged, but catalog rebuild failed: %s" % err)
+    return {"merged": True, "canonical": to_key, "from": from_key}
 
 
 # --------------------------------------------------------------------------- #

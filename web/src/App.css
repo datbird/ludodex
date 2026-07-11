@@ -3119,6 +3119,26 @@ a.idchip:hover { background: var(--accent-bg); }
   box-shadow: 0 3px 14px -2px rgba(0,0,0,0.5); transition: filter .12s, transform .06s; }
 .hero-wand:hover { filter: brightness(1.08); }
 .hero-wand:active { transform: translateY(1px); }
+.hero-fixdup { position: absolute; right: 16px; bottom: 58px; z-index: 6;
+  display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 12px;
+  font-weight: 600; color: var(--text-h); cursor: pointer; background: rgba(0,0,0,0.55);
+  border: 1px solid var(--border); border-radius: 9px; }
+.hero-fixdup:hover { border-color: var(--accent); color: #fff; }
+.fixdup-overlay { z-index: 60; }
+.fixdup-panel { max-width: 460px; width: 92%; padding: 20px 22px; max-height: 82vh; overflow-y: auto; }
+.fixdup-panel h2 { margin: 0 0 12px; }
+.fixdup-choice { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.fixdup-pick > p { margin-bottom: 10px; line-height: 1.4; }
+.fixdup-sub { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: .6; margin: 4px 0; }
+.fixdup-search { width: 100%; padding: 8px 10px; margin: 12px 0 4px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg); color: var(--text-h); font: inherit; font-size: 13px; }
+.fixdup-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px; border-bottom: 1px solid var(--border); }
+.fixdup-name { flex: 1; font-size: 13px; color: var(--text-h); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fixdup-suggest { border: 1px solid var(--accent); border-radius: 9px; padding: 4px 10px 8px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel)); margin-bottom: 4px; }
+.fixdup-back { background: none; border: none; color: var(--accent); cursor: pointer; margin-top: 12px; padding: 4px 0; }
+.fixdup-err { color: #e06c6c; margin-top: 8px; font-size: 13px; }
+.fixdup-busy { margin-top: 10px; }
 .hero-wand-note { position: absolute; right: 16px; bottom: 56px; z-index: 6; font-size: 12px;
   background: rgba(0,0,0,0.62); color: #fff; padding: 4px 9px; border-radius: 7px; max-width: 60%; }
 .hero-wand-note.err { background: rgba(239,68,68,0.88); }

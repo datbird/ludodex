@@ -241,6 +241,9 @@ export interface ArtPick {
   reason: string
 }
 
+export interface DupeCandidate {
+  a: string; b: string; a_nk: string; b_nk: string; a_src: string; b_src: string; ratio: number
+}
 export interface DedupeSuggestion {
   a: string; b: string; a_nk: string; b_nk: string
   a_src: string; b_src: string; ratio: number
@@ -640,6 +643,15 @@ export const api = {
     return get<GamesPage>('/api/games?' + p.toString())
   },
   detail: (nk: string) => get<GameDetail>('/api/games/' + encodeURIComponent(nk)),
+  suspectedDupes: (limit = 60) => get<{ dupes: DupeCandidate[] }>('/api/games/dupes?limit=' + limit),
+  mergeGame: async (nk: string, other: string, canonical: 'this' | 'other') => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/merge', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ other, canonical }),
+    })
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)
+    return r.json() as Promise<{ merged: boolean; canonical: string; from: string }>
+  },
   achievements: (nk: string) =>
     get<Achievements>('/api/games/' + encodeURIComponent(nk) + '/achievements'),
   gameTags: (nk: string) =>

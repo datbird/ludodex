@@ -19,6 +19,15 @@ DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 from titlenorm import norm      # shared dedupe normalizer (honors config prefs)
+import merges                   # durable user merges — fold duplicates into one
+_MERGE_ALIAS = merges.alias_map()
+
+
+def _mkey(title):
+    """Dedupe key for a title, with any user 'Fix duplication' merge applied so a
+    merged-away entry folds into its canonical one on every rebuild."""
+    k = norm(title)
+    return _MERGE_ALIAS.get(k, k)
 from playnite import LIST_KINDS, SCALAR_KINDS
 from igdb import map_record as igdb_map   # IGDB metadata-provider record mapping
 
@@ -71,7 +80,7 @@ OS_VALUES = {"windows", "win", "linux", "mac", "macos", "osx"}
 
 
 def add(title, source, platform, sid, detail="", state="have"):
-    key = norm(title)
+    key = _mkey(title)
     if not key:
         return key
     # Xbox: keep the store identity ('xbox') on the platform and carry the actual
@@ -336,7 +345,7 @@ def load_wishlist(path, store):
         title = parts[1] if len(parts) > 1 else ""
         if not title:
             continue
-        key = norm(title)
+        key = _mkey(title)
         if not key or key in games:          # already owned -> not "wanted"
             continue
         w = wanted.setdefault(key, {"title": title, "stores": []})
@@ -349,6 +358,7 @@ def carry_wishlist(store):
     # so a rebuild (e.g. after a container recreate wipes the ephemeral TSVs) doesn't
     # silently drop them — the same durability owned sources get via carry-over.
     for nk, title, sid in _prev_wanted.get(store, []):
+        nk = _MERGE_ALIAS.get(nk, nk)          # fold a merged-away wanted entry
         if not nk or nk in games:              # now owned -> no longer "wanted"
             continue
         w = wanted.setdefault(nk, {"title": title, "stores": []})

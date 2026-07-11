@@ -4558,6 +4558,90 @@ function showToast(msg: string) {
   }, 4200)
 }
 
+function FixDupModal({ nk, title, onClose, onMerged }: {
+  nk: string; title: string; onClose: () => void; onMerged: (canonical: string) => void
+}) {
+  const [canonical, setCanonical] = useState<'this' | 'other' | null>(null)
+  const [q, setQ] = useState('')
+  const [results, setResults] = useState<GameRow[]>([])
+  const [suggested, setSuggested] = useState<GameRow[]>([])
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  // Likely duplicates for THIS game, from the fuzzy similarity scan — so you
+  // usually don't have to search.
+  useEffect(() => {
+    api.suspectedDupes(80).then((r) => {
+      const rows = r.dupes
+        .filter((d) => d.a_nk === nk || d.b_nk === nk)
+        .map((d) => (d.a_nk === nk
+          ? { norm_key: d.b_nk, title: d.b } as GameRow
+          : { norm_key: d.a_nk, title: d.a } as GameRow))
+      setSuggested(rows)
+    }).catch(() => {})
+  }, [nk])
+
+  useEffect(() => {
+    if (!q.trim()) { setResults([]); return }
+    const t = setTimeout(() => {
+      api.games({ q, status: 'all' } as GamesQuery)
+        .then((p) => setResults(p.items.filter((g) => g.norm_key !== nk).slice(0, 25)))
+        .catch(() => {})
+    }, 250)
+    return () => clearTimeout(t)
+  }, [q, nk])
+
+  const doMerge = async (other: string) => {
+    if (!canonical || busy) return
+    setBusy(true); setErr('')
+    try { const r = await api.mergeGame(nk, other, canonical); onMerged(r.canonical) }
+    catch (e) { setErr(e instanceof Error ? e.message : 'merge failed'); setBusy(false) }
+  }
+
+  const row = (g: GameRow) => (
+    <div key={g.norm_key} className="fixdup-row">
+      <span className="fixdup-name">{g.title}</span>
+      <button className="ops-btn" disabled={busy} onClick={() => doMerge(g.norm_key)}>Merge</button>
+    </div>
+  )
+
+  return (
+    <div className="overlay fixdup-overlay" onClick={onClose}>
+      <div className="panel fixdup-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose}>×</button>
+        <h2>Fix duplication</h2>
+        {!canonical ? (
+          <div className="fixdup-ask">
+            <p>Is <b>{title}</b> the entry you want to keep — the source of truth?</p>
+            <div className="fixdup-choice">
+              <button className="go" onClick={() => setCanonical('this')}>Yes — keep this one</button>
+              <button className="ops-btn" onClick={() => setCanonical('other')}>No — another entry is correct</button>
+            </div>
+          </div>
+        ) : (
+          <div className="fixdup-pick">
+            <p className="dim">{canonical === 'this'
+              ? <>Pick the duplicate to fold <b>into</b> “{title}”. Its ownership, media &amp; tags move here; “{title}” keeps its title &amp; match.</>
+              : <>Pick the correct entry — “{title}” folds <b>into</b> it (that one keeps its title &amp; match).</>}</p>
+            {suggested.length > 0 && (
+              <div className="fixdup-suggest">
+                <div className="fixdup-sub">Likely duplicates</div>
+                {suggested.map(row)}
+              </div>
+            )}
+            <input className="fixdup-search" autoFocus placeholder="…or search all games" value={q}
+              onChange={(e) => setQ(e.target.value)} />
+            {results.map(row)}
+            <button className="fixdup-back" onClick={() => { setCanonical(null); setQ('') }}>← back</button>
+          </div>
+        )}
+        {busy && <div className="dim fixdup-busy">Merging + rebuilding catalog…</div>}
+        {err && <div className="fixdup-err">{err}</div>}
+      </div>
+    </div>
+  )
+}
+
 function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
   useScrollLock()
   const [d, setD] = useState<GameDetail | null>(null)
@@ -4566,6 +4650,7 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
   const [wandSent, setWandSent] = useState(false)
   const [wandErr, setWandErr] = useState('')
   const [frames, setFrames] = useState<Record<string, Frame>>({})
+  const [fixDup, setFixDup] = useState(false)
 
   const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
   useEffect(() => { reloadDetail() }, [reloadDetail])
@@ -4616,6 +4701,10 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
     <div className="overlay" onClick={onClose}>
       <div className="panel game-panel" onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={onClose}>×</button>
+        {fixDup && d && (
+          <FixDupModal nk={nk} title={d.title} onClose={() => setFixDup(false)}
+            onMerged={(canon) => { setFixDup(false); if (canon === nk) reloadDetail(); else onClose() }} />
+        )}
         {!d ? <div className="loading">Loading…</div> : (
           <>
             <div className={'hero' + (bg ? '' : marquee.length ? ' hero-marquee-mode' : ' hero-plain')}
@@ -4645,6 +4734,10 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
               <button className="wand-btn hero-wand" onClick={runWand}
                 title="Send this game to the AI enrichment queue — review & accept in the Jobs monitor">
                 <span className="wand-spark">✨</span> Magic wand
+              </button>
+              <button className="wand-btn hero-fixdup" onClick={() => setFixDup(true)}
+                title="This game is a duplicate of another entry — merge them into one">
+                ⧉ Fix duplication
               </button>
               {(wandSent || wandErr) && (
                 <span className={'hero-wand-note' + (wandErr ? ' err' : '')}>
