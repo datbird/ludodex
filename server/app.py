@@ -3231,7 +3231,7 @@ def game_media(norm_key: str):
             "ref_type": r["ref_type"], "ext": r["ext"],
             "width": r["width"], "height": r["height"],
             "is_image": is_img,
-            "pinned": rank is not None, "rank": rank,
+            "pinned": rank is not None, "rank": rank, "chosen": bool(r["chosen"]),
             "redistributable": (r["kind"], r["provider"], r["ref"]) not in noredist,
             "url": "/api/media-asset/%d" % r["id"],
             "thumb": "/api/media-asset/%d?size=thumb" % r["id"] if has_preview else None,
@@ -3253,7 +3253,8 @@ def game_media(norm_key: str):
             "id": r["id"], "kind": r["kind"], "provider": "user",
             "ref_type": "user", "ext": r["ext"],
             "width": r["width"], "height": r["height"],
-            "is_image": is_img, "pinned": True, "rank": None, "redistributable": True,
+            "is_image": is_img, "pinned": True, "rank": None, "chosen": False,
+            "redistributable": True,
             "url": "/api/user-media-asset/%d" % r["id"],
             "thumb": "/api/user-media-asset/%d?size=thumb" % r["id"] if has_preview else None,
             "user": True,
@@ -3291,6 +3292,18 @@ def set_pins(norm_key: str, body: dict = Body(...)):
         pc.commit()
     finally:
         pc.close()
+    # For a single-asset kind the #1 pin IS the used asset — reflect it in the media
+    # index NOW so the served cover/art follows the user's choice immediately (a
+    # later media_choose re-select honors the same pins, so it won't revert).
+    if kind in SCALAR_SET and ordered:
+        wc = sqlite3.connect(INDEX_DB, timeout=30)
+        try:
+            wc.execute("UPDATE media SET chosen=0 WHERE norm_key=? AND kind=?",
+                       (norm_key, kind))
+            wc.execute("UPDATE media SET chosen=1 WHERE id=?", (ordered[0],))
+            wc.commit()
+        finally:
+            wc.close()
     return game_media(norm_key)
 
 

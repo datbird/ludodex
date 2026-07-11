@@ -49,6 +49,25 @@ def con_index():
     return con
 
 
+def _load_pins():
+    """Durable user art pins: {(norm_key, kind, provider, ref): rank}. A pinned asset
+    is what the user dragged to a given priority in the media overlay; select() lets
+    it win over provider priority so the served art matches what they picked."""
+    p = os.path.join(DATA, "pins.sqlite")
+    if not os.path.exists(p):
+        return {}
+    out = {}
+    con = sqlite3.connect(p)
+    try:
+        for nk, kind, prov, ref, rk in con.execute(
+                "SELECT norm_key, kind, provider, ref, rank FROM pins"):
+            out[(nk, kind, prov, ref)] = rk
+    except sqlite3.OperationalError:
+        pass
+    con.close()
+    return out
+
+
 def select(con, kinds=None):
     """Set chosen=1 on the best asset per (norm_key, scalar kind); 0 elsewhere.
     `kinds` restricts the pass to a subset of scalar kinds (non-destructive — other
@@ -71,17 +90,22 @@ def select(con, kinds=None):
         if pn_wins and kind in ("cover", "background", "icon"):
             order = ["playnite"] + [p for p in order if p != "playnite"]
         rank[kind] = {p: i for i, p in enumerate(order)}
+    # User pins are AUTHORITATIVE: an explicitly-pinned asset (dragged to #1 in the
+    # media overlay) wins over provider priority, so the served art follows the user's
+    # choice on every re-select. Keyed by (norm_key, kind, provider, ref) -> pin rank.
+    pin_rank = _load_pins()
     rows = con.execute(
-        "SELECT id, norm_key, kind, provider, matched, ref_type FROM media "
+        "SELECT id, norm_key, kind, provider, ref, matched, ref_type FROM media "
         "WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
         % ",".join("'%s'" % k for k in scalar)
     ).fetchall()
     best = {}                       # (norm_key, kind) -> (sortkey, id)
     for r in rows:
         pr = rank[r["kind"]].get(r["provider"], 99)
-        # tie-breakers: prefer a catalog-matched asset, then a local file over a
-        # URL (faster, offline-safe), then lowest id (stable).
-        sk = (pr, 0 if r["matched"] else 1, 0 if r["ref_type"] == "file" else 1,
+        pin = pin_rank.get((r["norm_key"], r["kind"], r["provider"], r["ref"]), 1 << 30)
+        # pin rank first (a pinned asset beats any unpinned), THEN provider priority,
+        # then tie-breakers: catalog-matched, local file over URL, lowest id (stable).
+        sk = (pin, pr, 0 if r["matched"] else 1, 0 if r["ref_type"] == "file" else 1,
               r["id"])
         key = (r["norm_key"], r["kind"])
         if key not in best or sk < best[key][0]:

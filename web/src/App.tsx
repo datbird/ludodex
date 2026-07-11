@@ -4579,7 +4579,7 @@ function FrameEditor({ nk, kind, value, onChange, label, disabled }: {
   }
   if (disabled) {
     return <button className="frame-gear disabled" disabled
-      title="No position/zoom settings for this media type">⚙</button>
+      title="Position/zoom framing has moved — open the media (click the count) and use ⚙ on the #1 image. This gear is reserved for future per-category settings.">⚙</button>
   }
   return (
     <>
@@ -5102,7 +5102,8 @@ function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame }: {
       {openKind && (
         <MediaKindOverlay nk={nk} kind={openKind}
           assets={assets.filter((a) => a.kind === openKind.kind)}
-          onChange={onChange} onClose={() => setOpenKind(null)} />
+          onChange={onChange} onClose={() => setOpenKind(null)}
+          frames={frames} onFrame={onFrame} />
       )}
       {allOpen && (
         <div className="overlay" onClick={() => setAllOpen(false)}>
@@ -5129,7 +5130,7 @@ function AllMedia({ nk, kinds, assets, onChange, frames, onFrame }: {
   assets.forEach((a) => { (byKind[a.kind] ??= []).push(a) })
   return (
     <section className="all-media">
-      <h3>All Media <span className="am-note">every classification — the ⚙ frames position &amp; zoom (grayed where it doesn't apply)</span></h3>
+      <h3>All Media <span className="am-note">every classification — click a count to open its media; frame the #1 image's position &amp; zoom with ⚙ there</span></h3>
       <div className="am-grid">
         {kinds.map((k) => (
           <MediaKindCard key={k.kind} nk={nk} kind={k}
@@ -5143,13 +5144,19 @@ function AllMedia({ nk, kinds, assets, onChange, frames, onFrame }: {
 
 // Overlay gallery of every asset of ONE media kind: drag to set priority order,
 // click any item to view it enlarged (close returns here), videos play inline.
-function MediaKindOverlay({ nk, kind, assets, onClose, onChange }: {
+function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame }: {
   nk: string; kind: MediaKind; assets: MediaAsset[]; onClose: () => void
   onChange: (m: MediaLibrary) => void
+  frames?: Record<string, Frame>; onFrame?: (kind: string, f: Frame | undefined) => void
 }) {
   useScrollLock()
+  // Order = the priority actually used: pinned rank first; otherwise the chosen/used
+  // asset floats to the top, then the rest by id (stable). So position #1 is always
+  // what the game displays.
+  const sortKey = (a: MediaAsset) => a.rank != null ? a.rank : (a.chosen ? -1 : 1e9)
   const byRank = (list: MediaAsset[]) =>
-    [...list].sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9))
+    [...list].sort((a, b) => sortKey(a) - sortKey(b) || a.id - b.id)
+  const framable = FRAMABLE_KINDS.has(kind.kind) && !!onFrame
   const [order, setOrder] = useState<MediaAsset[]>(() => byRank(assets))
   const [viewing, setViewing] = useState<MediaAsset | null>(null)
   const [drag, setDrag] = useState<number | null>(null)
@@ -5191,8 +5198,9 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange }: {
         <h2 className="mko-title">{kind.kind.replace(/_/g, ' ')}
           <span className="dim"> · {order.length}</span>
           {busy && <span className="dim mko-saving"> · saving…</span>}</h2>
-        <p className="mko-desc dim">Drag to set priority (the order they're used)
-          · click to enlarge{kind.description ? ' · ' + kind.description : ''}</p>
+        <p className="mko-desc dim">Drag to set priority — <b>#1 is the one used</b>
+          · click to enlarge{framable ? ' · ⚙ on #1 frames its position & zoom' : ''}
+          {kind.description ? ' · ' + kind.description : ''}</p>
         {order.length === 0
           ? <div className="sync-note dim">No media of this type yet.</div>
           : (
@@ -5204,10 +5212,17 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange }: {
                   onDragEnd={() => setDrag(null)}>
                   <div className="mko-media" onClick={() => setViewing(a)} title="Click to enlarge">
                     {thumb(a)}
-                    <span className="mko-rank" title="Priority order">{i + 1}</span>
+                    <span className={'mko-rank' + (i === 0 ? ' used' : '')}
+                      title={i === 0 ? 'Used for this game' : 'Priority order'}>{i + 1}</span>
+                    {framable && i === 0 && (
+                      <div className="mko-frame-gear" onClick={(e) => e.stopPropagation()}>
+                        <FrameEditor nk={nk} kind={kind.kind} value={frames?.[kind.kind]}
+                          label={kind.kind} onChange={(fr) => onFrame!(kind.kind, fr)} />
+                      </div>
+                    )}
                   </div>
                   <figcaption className="mko-cap">
-                    <span>{a.provider}{a.user ? ' · yours' : ''}</span>
+                    <span>{a.provider}{a.user ? ' · yours' : ''}{i === 0 ? ' · used' : ''}</span>
                     {a.width ? <span className="dim">{a.width}×{a.height}</span> : null}
                   </figcaption>
                   <div className="mko-ctl">
@@ -5287,8 +5302,10 @@ function MediaKindCard({ nk, kind, assets, onChange, frames, onFrame }: {
             title={n ? 'View all' : undefined}
             onClick={() => { if (n) setGallery(true) }}>{n ? `×${n}` : '—'}</button>
           {onFrame && (
+            /* Position/zoom framing moved into the media overlay (⚙ on the #1 image).
+               The gear stays here, grayed, reserved for future per-category settings. */
             <FrameEditor nk={nk} kind={kind.kind} value={frames?.[kind.kind]} label={kind.kind}
-              onChange={(fr) => onFrame(kind.kind, fr)} disabled={!FRAMABLE_KINDS.has(kind.kind)} />
+              onChange={(fr) => onFrame(kind.kind, fr)} disabled />
           )}
           <button className={'am-up' + (open ? ' on' : '')} title="Add media"
             onClick={() => setOpen((v) => !v)}>+</button>
@@ -5332,7 +5349,8 @@ function MediaKindCard({ nk, kind, assets, onChange, frames, onFrame }: {
         </div>
       )}
       {gallery && <MediaKindOverlay nk={nk} kind={kind} assets={assets}
-        onChange={onChange} onClose={() => setGallery(false)} />}
+        onChange={onChange} onClose={() => setGallery(false)}
+        frames={frames} onFrame={onFrame} />}
     </div>
   )
 }

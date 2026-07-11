@@ -444,6 +444,7 @@ export interface MediaAsset {
   is_image: boolean
   pinned: boolean
   rank: number | null
+  chosen?: boolean            // true = the asset actually used/displayed for this kind
   redistributable?: boolean   // false = keep locally, don't copy to other machines
   url: string
   thumb: string | null
