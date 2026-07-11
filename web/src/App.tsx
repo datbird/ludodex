@@ -3461,7 +3461,6 @@ function SyncMenu() {
   const [svcs, setSvcs] = useState<SyncService[]>([])
   const [job, setJob] = useState<SyncJob | null>(null)
   const [msg, setMsg] = useState('')
-  const [askTarget, setAskTarget] = useState<string | null>(null)  // sync click → ask New/Full
   const [listOpen, setListOpen] = useState(true)          // main collapse
   const [expanded, setExpanded] = useState<Set<string>>(new Set())  // per-service
   const [media, setMedia] = useState<Set<string>>(new Set())        // "sync media" checks
@@ -3497,14 +3496,14 @@ function SyncMenu() {
     setMedia((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n })
 
   const runAll = async (fullMode: boolean) => {
-    setMsg(''); setAskTarget(null)
+    setMsg('')
     const readyIds = enabled.filter((s) => s.ready).map((s) => s.id)
     const mediaIds = readyIds.filter((id) => media.has(id))
     try { setJob(await api.syncRun(['all'], mediaIds, fullMode)) } catch (e) { setMsg((e as Error).message) }
     load()
   }
   const runOne = async (id: string, fullMode: boolean) => {
-    setMsg(''); setAskTarget(null)
+    setMsg('')
     try { setJob(await api.syncRun([id], media.has(id) ? [id] : [], fullMode)) } catch (e) { setMsg((e as Error).message) }
     load()
   }
@@ -3563,26 +3562,20 @@ function SyncMenu() {
             {running && job?.step && <span className="sync-step">{job.step}</span>}
             {romRunning && romJob?.step && <span className="sync-step">{romJob.step}</span>}
           </div>
-          {askTarget === 'all' ? (
-            <div className="sync-choice">
-              <div className="sync-choice-q">Sync all configured — how deep?</div>
-              <button className="sync-choice-opt" disabled={anyRunning} onClick={() => runAll(false)}>
-                <span className="sync-choice-name">New games</span>
-                <span className="sync-choice-hint">Fast — only pull data for games not yet enriched.</span>
-              </button>
-              <button className="sync-choice-opt" disabled={anyRunning} onClick={() => runAll(true)}>
-                <span className="sync-choice-name">Full refresh</span>
-                <span className="sync-choice-hint">Re-check every game for changed ratings, descriptions,
-                  tags &amp; attributes. Slower.</span>
-              </button>
-              <button className="sync-choice-cancel" onClick={() => setAskTarget(null)}>Cancel</button>
-            </div>
-          ) : (
-            <button className="go sync-all" disabled={anyRunning || !anyReady}
-              onClick={() => setAskTarget('all')}>
-              {running ? 'Syncing…' : 'Sync all configured'}
+          <div className="sync-choice-q">Sync all configured:</div>
+          <div className="sync-choice">
+            <button className="sync-choice-opt" disabled={anyRunning || !anyReady}
+              onClick={() => runAll(false)}>
+              <span className="sync-choice-name">{running ? 'Syncing…' : 'New games'}</span>
+              <span className="sync-choice-hint">Fast — only pull data for games not yet enriched.</span>
             </button>
-          )}
+            <button className="sync-choice-opt" disabled={anyRunning || !anyReady}
+              onClick={() => runAll(true)}>
+              <span className="sync-choice-name">Full refresh</span>
+              <span className="sync-choice-hint">Re-check every game for changed ratings, descriptions,
+                tags &amp; attributes. Slower.</span>
+            </button>
+          </div>
           {!anyReady && !running && (
             <div className="sync-note dim">Nothing ready yet — connect a store below.</div>
           )}
@@ -3612,19 +3605,14 @@ function SyncMenu() {
                           : s.ready ? 'ready' : s.needs_auth ? 'sign in' : 'not set'}
                       </span>
                       {s.ready && js !== 'running' && (
-                        askTarget === s.id ? (
-                          <span className="sync-choice-inline" onClick={(e) => e.stopPropagation()}>
-                            <button className="ops-btn" title="Only games not yet enriched" disabled={anyRunning}
-                              onClick={(e) => { e.stopPropagation(); runOne(s.id, false) }}>New</button>
-                            <button className="ops-btn" title="Re-check every game for changed data" disabled={anyRunning}
-                              onClick={(e) => { e.stopPropagation(); runOne(s.id, true) }}>Full</button>
-                            <button className="sync-choice-x" title="Cancel"
-                              onClick={(e) => { e.stopPropagation(); setAskTarget(null) }}>×</button>
-                          </span>
-                        ) : (
-                          <button className="ops-btn" disabled={anyRunning}
-                            onClick={(e) => { e.stopPropagation(); setAskTarget(s.id) }}>Sync</button>
-                        )
+                        <span className="sync-two" onClick={(e) => e.stopPropagation()}>
+                          <button className="ops-btn" title="New games — only pull data for games not yet enriched"
+                            disabled={anyRunning}
+                            onClick={(e) => { e.stopPropagation(); runOne(s.id, false) }}>New</button>
+                          <button className="ops-btn" title="Full refresh — re-check every game for changed ratings, descriptions & tags"
+                            disabled={anyRunning}
+                            onClick={(e) => { e.stopPropagation(); runOne(s.id, true) }}>Full</button>
+                        </span>
                       )}
                     </div>
                     {isOpen && (
