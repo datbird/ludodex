@@ -187,18 +187,35 @@ def main(argv):
             "ON s.game_id=g.id WHERE s.source='steam'"):
         if nk in games and sid and str(sid).isdigit():
             games[nk]["appid"] = str(sid)
-    # --source <id> (repeatable): restrict the worklist to games owned via those
-    # store sources. A store's Full refresh scopes IGDB to that store's games
-    # instead of re-resolving the whole (ROM-dominated) catalog.
+    # Wishlist-WANTED Steam games carry their appid in the `wanted` table (they
+    # have no owned source row) — use it so wanted items resolve by appid too,
+    # not just by name-search.
+    try:
+        for nk, sid in lib.execute(
+                "SELECT g.norm_key, w.store_id FROM games g JOIN wanted w "
+                "ON w.game_id=g.id WHERE w.store='steam'"):
+            if nk in games and sid and str(sid).isdigit() and not games[nk]["appid"]:
+                games[nk]["appid"] = str(sid)
+    except sqlite3.OperationalError:
+        pass                                # older catalog without a wanted table
+    # --source <id> (repeatable): restrict the worklist to games owned OR wanted
+    # via those store sources. A store's Full refresh scopes IGDB to that store's
+    # games instead of re-resolving the whole (ROM-dominated) catalog.
     srcs = [argv[i + 1] for i, a in enumerate(argv)
             if a == "--source" and i + 1 < len(argv)]
     if srcs:
+        ph = ",".join("?" * len(srcs))
         keep = {nk for (nk,) in lib.execute(
             "SELECT DISTINCT g.norm_key FROM games g JOIN sources s "
-            "ON s.game_id=g.id WHERE s.source IN (%s)"
-            % ",".join("?" * len(srcs)), srcs)}
+            "ON s.game_id=g.id WHERE s.source IN (%s)" % ph, srcs)}
+        try:                                # include wishlist-wanted games for the store
+            keep |= {nk for (nk,) in lib.execute(
+                "SELECT DISTINCT g.norm_key FROM games g JOIN wanted w "
+                "ON w.game_id=g.id WHERE w.store IN (%s)" % ph, srcs)}
+        except sqlite3.OperationalError:
+            pass
         games = {nk: v for nk, v in games.items() if nk in keep}
-        print("igdb: scoped to sources %s -> %d games"
+        print("igdb: scoped to %s (owned+wanted) -> %d games"
               % (",".join(srcs), len(games)), file=sys.stderr)
     lib.close()
 

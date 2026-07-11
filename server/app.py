@@ -4414,6 +4414,14 @@ SYNC_SPECS = {
     "nintendo": ("nintendo_owned.py", "nintendo_games.tsv", True),
 }
 
+# Stores that also expose a WISHLIST (Discover "Wanted"). Pulled alongside owned
+# during a sync so new wanted items enter the catalog and get identified +
+# enriched (build_library merges *_wishlist.tsv into wanted/games).
+WISHLIST_SPECS = {
+    "steam": ("steam_wishlist.py", "steam_wishlist.tsv"),
+    "gog":   ("gog_wishlist.py",   "gog_wishlist.tsv"),
+}
+
 # Sources that are also art providers (role='both') → the media_fetch provider to
 # run when "also sync media" is checked. Only Steam qualifies today.
 MEDIA_SYNC_PROVIDER = {"steam": "steam"}
@@ -4748,6 +4756,16 @@ def _sync_worker(job, services, media_ids=(), full=False):
             job["step"] = "%s %s" % (label, det)
         return cb
 
+    def _count_prog(label, pid):
+        """Like _mk_prog but text-only: batch/CPU work (catalog rebuild) isn't a
+        steady per-item clock, so show a live 'N/total games' count without a
+        (misleading) ETA or a per-phase bar climb."""
+        def cb(i, n, key, kind):
+            det = ("%s/%s games" % (f"{i:,}", f"{n:,}")) if n else ""
+            _phase(pid, "running", det)
+            job["step"] = "%s %s" % (label, det)
+        return cb
+
     def _stopped():
         """True + finalize the job as stopped if the user cancelled it."""
         if job.get("cancel"):
@@ -4771,6 +4789,13 @@ def _sync_worker(job, services, media_ids=(), full=False):
             st["state"], st["count"], any_ok = "ok", _tsv_count(tsv), True
         else:
             st["state"], st["error"] = "failed", err
+        # Also pull this store's wishlist (Wanted) if it has one, so new wanted
+        # items enter the catalog and get identified/enriched alongside owned.
+        # Best-effort — a wishlist failure never fails the store's sync.
+        if ok and sid in WISHLIST_SPECS:
+            wscript, wtsv = WISHLIST_SPECS[sid]
+            job["step"] = "Fetching %s wishlist…" % _SVC_NAME.get(sid, sid)
+            _run_script(wscript, wtsv, True, timeout=240, job=job)
         step()
         if _stopped():
             return
@@ -4797,7 +4822,9 @@ def _sync_worker(job, services, media_ids=(), full=False):
             return
         job["step"] = "Rebuilding catalog…"
         _phase("catalog", "running")
-        ok, err = _run_script("build_library.py", timeout=900, job=job)
+        ok, err = _run_streaming("build_library.py", [],
+                                 _count_prog("Rebuilding catalog…", "catalog"),
+                                 timeout=900, job=job)
         if ok:
             job["added"] = len(_lib_keys() - prev)
             _phase("catalog", "ok", "+%d new" % job["added"] if job["added"] else "up to date")

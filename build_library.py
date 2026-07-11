@@ -393,6 +393,8 @@ CREATE TABLE game_tags (game_id INTEGER, tag TEXT, origin TEXT);  -- origin: pla
 """)
 
 key_to_gid = {}
+_wtotal = len(games) + len(wanted)      # for the sync UI's live "N/total games" count
+_wrote = 0
 for key, g in games.items():
     canonical = g["store_title"] or g["title"]
     srcs = g["sources"]
@@ -426,6 +428,9 @@ for key, g in games.items():
     cur.executemany(
         "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,state)"
         " VALUES(?,?,?,?,?,?,?)", [(gid,) + s for s in srcs])
+    _wrote += 1
+    if _wrote % 200 == 0:
+        print("PROG\t%d\t%d\t%s\tcatalog" % (_wrote, _wtotal, key), flush=True)
 
 # ---- wanted (wishlist-only) games: catalog rows with no owned source, wanted=1 ----
 for key, w in wanted.items():
@@ -439,6 +444,9 @@ for key, w in wanted.items():
     key_to_gid[key] = gid
     cur.executemany("INSERT INTO wanted(game_id,store,store_id,title_raw) "
                     "VALUES(?,?,?,?)", [(gid,) + s for s in w["stores"]])
+    _wrote += 1
+    if _wrote % 200 == 0:
+        print("PROG\t%d\t%d\t%s\tcatalog" % (_wrote, _wtotal, key), flush=True)
 
 # ---- attribute tables (Playnite parity) ----
 # Tags are handled apart from other attribute kinds: we keep each tag's ORIGIN
