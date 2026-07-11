@@ -14,7 +14,7 @@ import type {
   AiFindingPayload, ProviderMatch, ScopeValue,
   AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState, DbSyncTest,
   Prefs, MediaMode, FileopsApplyMode, MediaLangMode, MediaLangResult, FsStat, OwnershipFact, Frame,
-  SpotlightTheme,
+  SpotlightTheme, SourceRow, SplitSuggestion,
   GameRelease, SystemEntry,
 } from './api'
 import { providerColor, providerLabel } from './providers'
@@ -4658,6 +4658,7 @@ function FixDupModal({ nk, title, onClose, onMerged }: {
   const [suggested, setSuggested] = useState<GameRow[]>([])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [confirm, setConfirm] = useState<{ other: string; msg: string } | null>(null)
 
   // Likely duplicates for THIS game, from the fuzzy similarity scan — so you
   // usually don't have to search.
@@ -4682,11 +4683,15 @@ function FixDupModal({ nk, title, onClose, onMerged }: {
     return () => clearTimeout(t)
   }, [q, nk])
 
-  const doMerge = async (other: string) => {
+  const doMerge = async (other: string, force = false) => {
     if (!canonical || busy) return
-    setBusy(true); setErr('')
-    try { const r = await api.mergeGame(nk, other, canonical); onMerged(r.canonical) }
-    catch (e) { setErr(e instanceof Error ? e.message : 'merge failed'); setBusy(false) }
+    setBusy(true); setErr(''); setConfirm(null)
+    try { const r = await api.mergeGame(nk, other, canonical, force); onMerged(r.canonical) }
+    catch (e) {
+      if (e instanceof Error && e.name === 'ConfirmRequired') {
+        setConfirm({ other, msg: e.message }); setBusy(false)
+      } else { setErr(e instanceof Error ? e.message : 'merge failed'); setBusy(false) }
+    }
   }
 
   const row = (g: GameRow) => (
@@ -4726,7 +4731,126 @@ function FixDupModal({ nk, title, onClose, onMerged }: {
             <button className="fixdup-back" onClick={() => { setCanonical(null); setQ('') }}>← back</button>
           </div>
         )}
+        {confirm && (
+          <div className="fixdup-confirm">
+            <p>⚠️ {confirm.msg}</p>
+            <div className="fixdup-choice">
+              <button className="go" disabled={busy}
+                onClick={() => doMerge(confirm.other, true)}>Merge anyway</button>
+              <button className="ops-btn" disabled={busy}
+                onClick={() => setConfirm(null)}>Cancel</button>
+            </div>
+          </div>
+        )}
         {busy && <div className="dim fixdup-busy">Merging + rebuilding catalog…</div>}
+        {err && <div className="fixdup-err">{err}</div>}
+      </div>
+    </div>
+  )
+}
+
+// "Peel apart": one entry actually holds two different same-named games (a remake /
+// re-release). Pick the source rows that belong to the OTHER game, name it (with a
+// year so it's distinct), and split them into their own entry. ✨ asks the AI to
+// work out the grouping for you.
+function PeelModal({ nk, title, onClose, onPeeled }: {
+  nk: string; title: string; onClose: () => void; onPeeled: () => void
+}) {
+  useScrollLock()
+  const [srcs, setSrcs] = useState<SourceRow[] | null>(null)
+  const [picked, setPicked] = useState<Set<number>>(new Set())
+  const [newTitle, setNewTitle] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [ai, setAi] = useState<SplitSuggestion | null>(null)
+  const [aiBusy, setAiBusy] = useState(false)
+
+  useEffect(() => { api.gameSources(nk).then((r) => setSrcs(r.sources)).catch(() => setSrcs([])) }, [nk])
+
+  const key = (s: SourceRow) => s.source + '' + s.source_id
+  const toggle = (i: number) => setPicked((p) => {
+    const n = new Set(p); n.has(i) ? n.delete(i) : n.add(i); return n
+  })
+
+  const askAi = async () => {
+    setAiBusy(true); setErr('')
+    try {
+      const r = await api.splitSuggest(nk)
+      setAi(r)
+      if (!r.multiple) setErr('AI thinks this is really one game — nothing to peel.')
+    } catch (e) { setErr(e instanceof Error ? e.message : 'AI split failed') }
+    finally { setAiBusy(false) }
+  }
+
+  // Apply an AI-proposed game (index >=1, i.e. NOT the canonical first one): select
+  // its rows and prefill the title.
+  const applySuggestion = (gi: number) => {
+    if (!ai) return
+    const g = ai.games[gi]
+    setPicked(new Set((g.rows || []).map((n) => n - 1).filter((i) => i >= 0 && i < (srcs?.length || 0))))
+    setNewTitle(g.title || '')
+  }
+
+  const doPeel = async () => {
+    if (!srcs || !picked.size || !newTitle.trim() || busy) return
+    setBusy(true); setErr('')
+    const rows = [...picked].map((i) => ({ source: srcs[i].source, source_id: srcs[i].source_id }))
+    try { await api.splitGame(nk, rows, newTitle.trim()); onPeeled() }
+    catch (e) { setErr(e instanceof Error ? e.message : 'peel failed'); setBusy(false) }
+  }
+
+  return (
+    <div className="overlay fixdup-overlay" onClick={onClose}>
+      <div className="panel fixdup-panel peel-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose}>×</button>
+        <h2>Peel apart</h2>
+        <p className="dim">“{title}” may be <b>two different games with the same name</b> (a
+          remake / re-release). Tick the source(s) that belong to the <b>other</b> game,
+          give it a distinct name (include a year), and it splits into its own entry.</p>
+
+        <div className="peel-ai">
+          <button className="ops-btn" onClick={askAi} disabled={aiBusy || !srcs}>
+            {aiBusy ? '✨ Thinking…' : '✨ Ask AI to work it out'}</button>
+          {ai && ai.reason && <span className="dim peel-ai-reason">{ai.reason}</span>}
+        </div>
+        {ai && ai.multiple && ai.games.length > 1 && (
+          <div className="peel-suggest">
+            {ai.games.map((g, gi) => (
+              <div key={gi} className="peel-sug-row">
+                <span className="peel-sug-name">{g.title}
+                  <span className="dim"> · {(g.rows || []).length} source(s)</span></span>
+                {gi === 0
+                  ? <span className="peel-sug-keep">keeps this entry</span>
+                  : <button className="ops-btn" onClick={() => applySuggestion(gi)}>Select these</button>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {srcs === null ? <div className="loading">Loading sources…</div> : (
+          <div className="peel-sources">
+            {srcs.map((s, i) => (
+              <label key={key(s)} className={'peel-src' + (picked.has(i) ? ' on' : '')}>
+                <input type="checkbox" checked={picked.has(i)} onChange={() => toggle(i)} />
+                <span className="peel-src-name">{s.title_raw || '(untitled)'}</span>
+                <span className="peel-src-meta">{s.source}{s.platform && s.platform !== s.source ? ' · ' + s.platform : ''}
+                  {s.year ? ' · ' + s.year : ''}</span>
+              </label>
+            ))}
+          </div>
+        )}
+
+        <div className="peel-name">
+          <label>Name the peeled-off game</label>
+          <input autoFocus placeholder="e.g. Uno (2006)" value={newTitle}
+            onChange={(e) => setNewTitle(e.target.value)} />
+        </div>
+        <div className="fixdup-choice">
+          <button className="go" disabled={busy || !picked.size || !newTitle.trim()}
+            onClick={doPeel}>Peel {picked.size || ''} off into a new entry</button>
+          <button className="ops-btn" disabled={busy} onClick={onClose}>Cancel</button>
+        </div>
+        {busy && <div className="dim fixdup-busy">Peeling + rebuilding catalog…</div>}
         {err && <div className="fixdup-err">{err}</div>}
       </div>
     </div>
@@ -4742,6 +4866,7 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
   const [wandErr, setWandErr] = useState('')
   const [frames, setFrames] = useState<Record<string, Frame>>({})
   const [fixDup, setFixDup] = useState(false)
+  const [peel, setPeel] = useState(false)
 
   const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
   useEffect(() => { reloadDetail() }, [reloadDetail])
@@ -4796,6 +4921,10 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
           <FixDupModal nk={nk} title={d.title} onClose={() => setFixDup(false)}
             onMerged={(canon) => { setFixDup(false); if (canon === nk) reloadDetail(); else onClose() }} />
         )}
+        {peel && d && (
+          <PeelModal nk={nk} title={d.title} onClose={() => setPeel(false)}
+            onPeeled={() => { setPeel(false); reloadDetail() }} />
+        )}
         {!d ? <div className="loading">Loading…</div> : (
           <>
             <div className={'hero' + (bg ? '' : marquee.length ? ' hero-marquee-mode' : ' hero-plain')}
@@ -4829,6 +4958,10 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
               <button className="wand-btn hero-fixdup" onClick={() => setFixDup(true)}
                 title="This game is a duplicate of another entry — merge them into one">
                 ⧉ Fix duplication
+              </button>
+              <button className="wand-btn hero-fixdup" onClick={() => setPeel(true)}
+                title="This entry is actually two different same-named games (a remake / re-release) — peel one apart into its own entry">
+                ✂ Peel apart
               </button>
               {(wandSent || wandErr) && (
                 <span className={'hero-wand-note' + (wandErr ? ' err' : '')}>

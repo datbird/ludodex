@@ -10,6 +10,7 @@ Output: game-library.sqlite
   sources(game_id, source, platform, source_id, title_raw, detail)
 """
 import os
+import re
 import sys
 import json
 import sqlite3
@@ -20,7 +21,9 @@ sys.path.insert(0, DIR)
 import config
 from titlenorm import norm      # shared dedupe normalizer (honors config prefs)
 import merges                   # durable user merges — fold duplicates into one
+import splits                   # durable "peel apart" — split a merged-away game out
 _MERGE_ALIAS = merges.alias_map()
+_PEEL = splits.overrides()      # {(source, source_id): (to_key, to_title)}
 
 
 def _mkey(title):
@@ -80,7 +83,15 @@ OS_VALUES = {"windows", "win", "linux", "mac", "macos", "osx"}
 
 
 def add(title, source, platform, sid, detail="", state="have"):
-    key = _mkey(title)
+    # "Peel apart": a specific source row the user split off a merged entry goes to
+    # its OWN key + title, overriding the natural title-derived key. Applied first so
+    # the row lands on the peeled-off game on every rebuild.
+    peel = _PEEL.get((source, str(sid)))
+    if peel:
+        title = peel[1] or title
+        key = _MERGE_ALIAS.get(peel[0], peel[0])
+    else:
+        key = _mkey(title)
     if not key:
         return key
     # Xbox: keep the store identity ('xbox') on the platform and carry the actual
@@ -692,6 +703,40 @@ except Exception as e:                             # never let AI supplements br
     print("# AI supplement merge skipped: %s" % e)
 if ai_attr:
     print("# AI supplement       attrs: %d (accepted findings, fill-gaps)" % ai_attr)
+
+# ---- (year) disambiguation: when 2+ games share a title but are DIFFERENT release
+# years (remakes / re-releases — Uno 2006 vs 2016, Tomb Raider 1996 vs 2013), append
+# "(year)" to each so they read distinctly, the way stores do. Same-title/same-year
+# is left untouched (those are true duplicates, folded by dedupe elsewhere). Runs on
+# the post-enrichment build, so store games (year only known from IGDB) get labeled;
+# idempotent — an existing trailing "(YYYY)" is stripped before re-deriving.
+_YR_SUFFIX = re.compile(r"\s*\(\d{4}\)\s*$")
+_title_year = {}                    # gid -> release year (release_year, else release_date)
+for _gid, _val in cur.execute(
+        "SELECT game_id, value FROM game_attributes "
+        "WHERE kind IN ('release_year', 'release_date')"):
+    _m = re.search(r"\d{4}", str(_val or ""))
+    if _m:
+        _title_year.setdefault(_gid, int(_m.group()))
+_by_title = {}                      # base title (casefold) -> [(gid, base_title)]
+for _gid, _title in cur.execute("SELECT id, canonical_title FROM games"):
+    _base = _YR_SUFFIX.sub("", _title or "").strip()
+    if _base:
+        _by_title.setdefault(_base.casefold(), []).append((_gid, _base))
+_relabel = []
+for _members in _by_title.values():
+    if len(_members) < 2:
+        continue
+    _years = {_title_year.get(g) for g, _ in _members if _title_year.get(g)}
+    if len(_years) < 2:             # all one year, or unknown — not a remake split
+        continue
+    for _gid, _base in _members:
+        _y = _title_year.get(_gid)
+        if _y:
+            _relabel.append(("%s (%d)" % (_base, _y), _gid))
+if _relabel:
+    cur.executemany("UPDATE games SET canonical_title=? WHERE id=?", _relabel)
+    print("# (year) disambiguation: relabeled %d remake title(s)" % len(_relabel))
 
 cur.executescript("""
 CREATE INDEX ix_norm ON games(norm_key);

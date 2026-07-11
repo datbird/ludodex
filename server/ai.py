@@ -634,6 +634,10 @@ AREAS = [
                     "Add-game flow. Needs a vision-capable model."},
     {"id": "dedupe", "name": "Dedupe assist", "status": "live",
      "description": "Flags likely same-game duplicates that title-matching missed."},
+    {"id": "split", "name": "Split assist (peel apart)", "status": "live",
+     "description": "Looks at one catalog entry that merged two same-named but DIFFERENT "
+                    "games (a remake / re-release — Uno 2006 vs 2016) and works out which "
+                    "source rows belong to which game, so they can be peeled apart."},
     {"id": "fileprofile", "name": "File-layout inference", "status": "live",
      "description": "Crawls a ROM directory and proposes a file-organization profile "
                     "(target layout) for the file-operations engine."},
@@ -696,6 +700,19 @@ DEFAULT_PROMPTS = {
         "Different = sequels, remakes, unrelated games that share words. "
         "For each numbered pair, decide. Respond ONLY with a JSON array: "
         '[{"n": <num>, "same": true|false, "confidence": <0-1>, "reason": "<short>"}].'
+    ),
+    "split": (
+        "One catalog entry titled \"<<title>>\" may have merged TWO OR MORE genuinely "
+        "different games that happen to share a name — a remake or re-release, not a "
+        "port or edition of one game (e.g. Uno 2006 vs Uno 2016; Tomb Raider 1996 vs "
+        "2013). Below are its source rows (each an owned copy on some platform/store, "
+        "with its listed title and any year hint). Use your knowledge of these games' "
+        "release years and platforms to group the rows by which DISTINCT game each "
+        "belongs to. If they are all really one game, say so.\n"
+        "Respond ONLY with JSON: {\"multiple\": true|false, \"reason\": \"<short>\", "
+        "\"games\": [{\"title\": \"<name with (year)>\", \"year\": <int|null>, "
+        "\"rows\": [<row numbers>]}]}. Put the MOST-canonical/original game first. "
+        "Every row number must appear in exactly one game."
     ),
     "fileprofile": (
         "You design a file-organization profile for a ROM/game library. You are given "
@@ -794,7 +811,7 @@ DEFAULT_PROMPTS = {
 PROMPT_VARS = {
     "search": ["sources", "platforms"],
     "art": ["kind", "title", "count"],
-    "identify": [], "dedupe": [],
+    "identify": [], "dedupe": [], "split": ["title"],
     "fileprofile": ["variables", "systems", "current"],
     "filecmd": ["profiles", "variables", "systems", "current"],
     "filesource": ["systems", "current"],
@@ -1366,6 +1383,24 @@ def dedupe_pairs(pairs, provider=None, model=None):
     text = _complete_text(provider, key, model, system, "Pairs:\n" + listing)
     obj = _json(text)
     return obj if isinstance(obj, list) else obj.get("results", [])
+
+
+def split_adjudicate(title, rows, provider=None, model=None):
+    """Given one entry's source rows, decide whether it's really 2+ different games
+    (a remake merged by name) and how the rows split. `rows`=[{source, platform,
+    title_raw, year}]. Returns {multiple, reason, games:[{title, year, rows:[idx]}]}
+    where row indices are 1-based into `rows`. Raises on error."""
+    provider, key, model = _resolve(provider, model)
+    listing = "\n".join(
+        '%d. %s / %s — listed as "%s"%s'
+        % (i + 1, r.get("source", "?"), r.get("platform", "?"),
+           r.get("title_raw", ""),
+           ("  (year hint: %s)" % r["year"]) if r.get("year") else "")
+        for i, r in enumerate(rows))
+    system = area_prompt("split", title=title)
+    text = _complete_text(provider, key, model, system, "Source rows:\n" + listing)
+    obj = _json(text)
+    return obj if isinstance(obj, dict) else {"multiple": False, "games": []}
 
 
 # ------------------------------------------------------------- file-ops (text AI)

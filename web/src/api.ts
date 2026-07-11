@@ -53,6 +53,17 @@ export interface GamesPage {
   items: GameRow[]
 }
 
+export interface SourceRow {
+  source: string; platform: string; source_id: string
+  title_raw: string; detail: string; os?: string[] | null; state?: 'have' | 'want'
+  year?: number | null
+}
+export interface SplitSuggestion {
+  multiple: boolean
+  reason?: string
+  games: { title: string; year: number | null; rows: number[] }[]
+  sources: SourceRow[]
+}
 export interface GameDetail {
   norm_key: string
   title: string
@@ -653,13 +664,37 @@ export const api = {
   },
   detail: (nk: string) => get<GameDetail>('/api/games/' + encodeURIComponent(nk)),
   suspectedDupes: (limit = 60) => get<{ dupes: DupeCandidate[] }>('/api/games/dupes?limit=' + limit),
-  mergeGame: async (nk: string, other: string, canonical: 'this' | 'other') => {
+  mergeGame: async (nk: string, other: string, canonical: 'this' | 'other',
+                    force = false) => {
     const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/merge', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ other, canonical }),
+      body: JSON.stringify({ other, canonical, force }),
     })
+    if (r.status === 409) {                     // different-year remake — needs confirm
+      let msg = 'These look like different games — confirm to merge.'
+      try { msg = (await r.json()).detail || msg } catch { /* keep default */ }
+      const e = new Error(msg); e.name = 'ConfirmRequired'; throw e
+    }
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)
     return r.json() as Promise<{ merged: boolean; canonical: string; from: string }>
+  },
+  gameSources: (nk: string) =>
+    get<{ norm_key: string; title: string; sources: SourceRow[] }>(
+      '/api/games/' + encodeURIComponent(nk) + '/sources'),
+  splitSuggest: async (nk: string) => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/split-suggest',
+      { method: 'POST' })
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)
+    return r.json() as Promise<SplitSuggestion>
+  },
+  splitGame: async (nk: string, rows: { source: string; source_id: string }[],
+                    title: string) => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/split', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ rows, title }),
+    })
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 180)}`)
+    return r.json() as Promise<{ split: boolean; to_key: string; title: string; peeled: number }>
   },
   achievements: (nk: string) =>
     get<Achievements>('/api/games/' + encodeURIComponent(nk) + '/achievements'),

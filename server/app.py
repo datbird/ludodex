@@ -45,6 +45,7 @@ import medialang        # noqa: E402  per-asset media language classification + 
 import framing         # noqa: E402  per-game/per-kind image framing (position + zoom)
 import mediaflags      # noqa: E402  durable per-asset ban / not-redistributable flags
 import merges          # noqa: E402  durable game merges (fold duplicate entries)
+import splits          # noqa: E402  durable "peel apart" (split a merged entry out)
 import auth            # noqa: E402  local username/password accounts + sessions
 import cf_access       # noqa: E402  Cloudflare Access SSO (verify the Access JWT)
 from . import ai       # noqa: E402  AI features (server package)
@@ -88,6 +89,7 @@ DATABASES = [
     ("aimeta", "AI metadata", "ai-metadata.sqlite", "durable"),
     ("overrides", "Attribute overrides", "attr-overrides.sqlite", "durable"),
     ("merges", "Duplicate merges", "merges.sqlite", "durable"),
+    ("splits", "Peeled-apart games", "splits.sqlite", "durable"),
     ("ra", "RetroAchievements", "ra.sqlite", "durable"),
     ("library", "Game library", "game-library.sqlite", "output"),
     ("media", "Media index", "media-index.sqlite", "output"),
@@ -5422,11 +5424,36 @@ def art_apply(body: dict):
     return {"ok": True}
 
 
+def _dupe_year(v):
+    """Parse a release_year/release_date attribute value to a 4-digit int, else None."""
+    m = re.search(r"\d{4}", str(v or ""))
+    return int(m.group()) if m else None
+
+
+def _different_games(a, b):
+    """True when two similarly-titled entries are almost certainly DIFFERENT games —
+    a remake / re-release, not a duplicate — so dedupe must NOT fold them together.
+    The discriminator is release year (Uno 2006 vs 2016, Tomb Raider 1996 vs 2013);
+    a distinct IGDB match is a secondary signal when neither carries a year."""
+    ya, yb = _dupe_year(a["yr"]), _dupe_year(b["yr"])
+    if ya and yb:
+        return abs(ya - yb) >= 2            # both years known & meaningfully apart
+    ida, idb = a["igdb_id"], b["igdb_id"]
+    return bool(ida and idb and ida != idb)  # no years, but distinct IGDB games
+
+
 def _dedupe_candidates(con, limit=15):
-    """Find likely same-game pairs norm_key missed (blocked similarity scan)."""
+    """Find likely same-game pairs norm_key missed (blocked similarity scan). Pairs
+    that are really different-year remakes are excluded (see _different_games)."""
     import difflib
-    rows = con.execute("SELECT norm_key, canonical_title, sources_summary "
-                       "FROM games").fetchall()
+    rows = con.execute(
+        "SELECT g.norm_key, g.canonical_title, g.sources_summary, "
+        "(SELECT value FROM game_attributes ga WHERE ga.game_id=g.id "
+        " AND ga.kind IN ('release_year','release_date') "
+        " ORDER BY ga.kind DESC LIMIT 1) AS yr, "
+        "(SELECT provider_id FROM metadata_links ml WHERE ml.game_id=g.id "
+        " AND ml.provider='igdb' LIMIT 1) AS igdb_id "
+        "FROM games g").fetchall()
 
     def loose(t):
         return re.sub(r"[^a-z0-9]", "", (t or "").lower())
@@ -5442,6 +5469,8 @@ def _dedupe_candidates(con, limit=15):
             for j in range(i + 1, len(grp)):
                 a, b = grp[i], grp[j]
                 if a["norm_key"] == b["norm_key"]:
+                    continue
+                if _different_games(a, b):       # remake, not a duplicate — skip
                     continue
                 ratio = difflib.SequenceMatcher(
                     None, loose(a["canonical_title"]), loose(b["canonical_title"])).ratio()
@@ -5520,13 +5549,28 @@ def games_merge(nk: str, body: dict = Body(...)):
         raise HTTPException(400, "canonical must be 'this' or 'other'")
     con = lib()
     try:
-        titles = {r["norm_key"]: r["canonical_title"] for r in con.execute(
-            "SELECT norm_key, canonical_title FROM games WHERE norm_key IN (?,?)",
-            (nk, other))}
+        info = {r["norm_key"]: r for r in con.execute(
+            "SELECT g.norm_key, g.canonical_title, "
+            "(SELECT value FROM game_attributes ga WHERE ga.game_id=g.id "
+            " AND ga.kind IN ('release_year','release_date') "
+            " ORDER BY ga.kind DESC LIMIT 1) AS yr, "
+            "(SELECT provider_id FROM metadata_links ml WHERE ml.game_id=g.id "
+            " AND ml.provider='igdb' LIMIT 1) AS igdb_id "
+            "FROM games g WHERE g.norm_key IN (?,?)", (nk, other))}
     finally:
         con.close()
-    if nk not in titles or other not in titles:
+    if nk not in info or other not in info:
         raise HTTPException(404, "one or both games not found")
+    titles = {k: r["canonical_title"] for k, r in info.items()}
+    # Warn-but-allow: merging across different release years usually means folding a
+    # remake into its predecessor (Uno 2006 into 2016) — destructive. Surface it and
+    # require an explicit confirm (force) rather than silently merging.
+    if not body.get("force") and _different_games(info[nk], info[other]):
+        ya, yb = _dupe_year(info[nk]["yr"]), _dupe_year(info[other]["yr"])
+        detail = ("These look like DIFFERENT games, not duplicates"
+                  + (" (%s vs %s)" % (ya, yb) if ya and yb else "")
+                  + " — merging will fold one into the other. Confirm to proceed.")
+        raise HTTPException(409, detail)
     to_key = nk if which == "this" else other
     from_key = other if which == "this" else nk
     try:
@@ -5538,6 +5582,107 @@ def games_merge(nk: str, body: dict = Body(...)):
     if not ok:
         raise HTTPException(502, "merged, but catalog rebuild failed: %s" % err)
     return {"merged": True, "canonical": to_key, "from": from_key}
+
+
+@app.get("/api/games/{nk}/sources")
+def game_sources(nk: str):
+    """Per-source rows of a game, for the 'Peel apart' picker (which source belongs
+    to the OTHER same-named game)."""
+    con = lib()
+    try:
+        g = con.execute("SELECT id, canonical_title FROM games WHERE norm_key=?",
+                        (nk,)).fetchone()
+        if not g:
+            raise HTTPException(404, "game not found")
+        rows = [dict(r) for r in con.execute(
+            "SELECT source, platform, source_id, title_raw, detail, state "
+            "FROM sources WHERE game_id=? ORDER BY source, platform, title_raw",
+            (g["id"],))]
+        return {"norm_key": nk, "title": g["canonical_title"], "sources": rows}
+    finally:
+        con.close()
+
+
+@app.post("/api/games/{nk}/split")
+def games_split(nk: str, body: dict = Body(...)):
+    """Peel selected source rows off a merged entry into a NEW, separately-identified
+    game (the inverse of merge). Body: {"rows":[{"source","source_id"}],
+    "title":"Uno (2006)"}. The peeled rows get their own norm_key on every rebuild;
+    identify the new entry (title/IGDB) afterward like any game."""
+    body = body or {}
+    rows = body.get("rows") or []
+    title = (body.get("title") or "").strip()
+    if not rows:
+        raise HTTPException(400, "select at least one source to peel off")
+    if not title:
+        raise HTTPException(400, "name the peeled-off game — include a year "
+                                 "(e.g. \"Uno (2006)\") so it's a distinct entry")
+    to_key = titlenorm.norm(title)
+    if not to_key:
+        raise HTTPException(400, "that title normalizes to nothing")
+    if to_key == nk:
+        raise HTTPException(409, "That title maps to the SAME entry — add a year "
+                                 "(e.g. \"Uno (2006)\") so the peeled game is distinct.")
+    con = lib()
+    try:
+        g = con.execute("SELECT id FROM games WHERE norm_key=?", (nk,)).fetchone()
+        if not g:
+            raise HTTPException(404, "game not found")
+        owned = {(r["source"], str(r["source_id"])) for r in con.execute(
+            "SELECT source, source_id FROM sources WHERE game_id=?", (g["id"],))}
+    finally:
+        con.close()
+    picked = [(r.get("source"), str(r.get("source_id"))) for r in rows]
+    if any(p not in owned for p in picked):
+        raise HTTPException(400, "some selected rows aren't part of this game")
+    if len(set(picked)) >= len(owned):
+        raise HTTPException(400, "can't peel off EVERY source — leave at least one "
+                                 "on the original (otherwise just rename it)")
+    try:
+        splits.add_many(picked, to_key, title, nk)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    ok, err = _run_script("build_library.py", timeout=900)
+    if not ok:
+        raise HTTPException(502, "peeled, but catalog rebuild failed: %s" % err)
+    return {"split": True, "to_key": to_key, "title": title, "peeled": len(picked)}
+
+
+@app.post("/api/games/{nk}/split-suggest")
+def games_split_suggest(nk: str):
+    """Agentic 'peel apart': ask the model whether this entry is really 2+ different
+    same-named games and how its source rows split. Returns the suggested grouping
+    (row indices are 1-based into the returned `sources`) for the user to confirm."""
+    if not ai.area_available("split"):
+        raise HTTPException(503, "split assist not configured (set a provider + API key)")
+    con = lib()
+    try:
+        g = con.execute("SELECT id, canonical_title FROM games WHERE norm_key=?",
+                        (nk,)).fetchone()
+        if not g:
+            raise HTTPException(404, "game not found")
+        srcs = [dict(r) for r in con.execute(
+            "SELECT source, platform, source_id, title_raw, detail "
+            "FROM sources WHERE game_id=? ORDER BY source, platform, title_raw",
+            (g["id"],))]
+    finally:
+        con.close()
+    if len(srcs) < 2:
+        return {"multiple": False, "reason": "only one source — nothing to peel",
+                "games": [], "sources": srcs}
+    # per-row year hint = any 4-digit year embedded in the listed title / detail
+    for r in srcs:
+        m = re.search(r"\b(19|20)\d{2}\b", "%s %s" % (r.get("title_raw") or "",
+                                                      r.get("detail") or ""))
+        r["year"] = int(m.group()) if m else None
+    try:
+        res = ai.split_adjudicate(g["canonical_title"], srcs,
+                                  provider=ai.provider_for_area("split"),
+                                  model=ai.model_for_area("split"))
+    except Exception as e:                                  # noqa: BLE001
+        raise HTTPException(502, "split assist failed: %s" % str(e)[:200])
+    res["sources"] = srcs
+    return res
 
 
 # --------------------------------------------------------------------------- #
