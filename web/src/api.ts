@@ -966,6 +966,15 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
     return r.json() as Promise<{ updated: number; checked: number; prices: AiPrice[] }>
   },
+  resolveAiPrices: async (use_ai: boolean, note?: string) => {
+    const r = await fetch('/api/ai/prices/resolve', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ use_ai, note: note || '' }),
+    })
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
+    return r.json() as Promise<{ prices: AiPrice[]; fetched: number; ai_resolved: number;
+      still_missing: number; fetch_error: string | null; ai_error: string | null }>
+  },
   setCurrency: async (code: string, fx?: number) => {
     const r = await fetch('/api/ai/currency', {
       method: 'POST', headers: { 'content-type': 'application/json' },

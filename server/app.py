@@ -3875,6 +3875,40 @@ def ai_prices_refresh():
     return {**res, "prices": ai.prices_list()}
 
 
+@app.post("/api/ai/prices/resolve")
+def ai_prices_resolve(body: dict = Body(default={})):
+    """Auto-resolve model prices. Body: {use_ai: bool, note: str}. First pulls the
+    OpenRouter feed (when enabled); with use_ai, asks the configured 'prices' AI
+    area to price any model the feed still couldn't (renamed/deprecated/new),
+    weaving the user's `note` into the area prompt. Returns counts + fresh prices."""
+    body = body or {}
+    use_ai = bool(body.get("use_ai"))
+    note = str(body.get("note") or "")
+    fetched, fetch_err = 0, None
+    if ai.prices_openrouter_enabled():
+        try:
+            fetched = ai.prices_refresh().get("updated", 0)
+        except Exception as e:                  # noqa: BLE001 — feed is best-effort
+            fetch_err = str(e)[:140]
+    ai_set, ai_err = 0, None
+    if use_ai:
+        targets = ai.prices_missing()
+        if targets:
+            try:
+                for r in ai.resolve_prices_ai(targets, note=note):
+                    prov = r.get("provider") or ""
+                    if not prov or not r.get("model"):
+                        continue
+                    ai.price_set(prov, r["model"], r["input"], r["output"],
+                                 r.get("cached"), source="ai")
+                    ai_set += 1
+            except Exception as e:
+                ai_err = str(e)[:200]
+    return {"prices": ai.prices_list(), "fetched": fetched, "ai_resolved": ai_set,
+            "still_missing": len(ai.prices_missing()),
+            "fetch_error": fetch_err, "ai_error": ai_err}
+
+
 @app.post("/api/ai/currency")
 def ai_currency(body: dict = Body(...)):
     """Set the display currency for budgets. Body: {code, fx} — fx = units per USD

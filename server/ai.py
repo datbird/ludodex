@@ -231,6 +231,68 @@ def prices_refresh():
     return {"updated": updated, "checked": len(by_name)}
 
 
+def prices_missing():
+    """[(provider, model)] for known models that have no usable price yet — both
+    input and output are 0/NULL, plus any used model with no price row at all."""
+    con = _usage_con()
+    _seed_prices(con)
+    con.commit()
+    have = {(r["provider"], r["model"]) for r in con.execute(
+        "SELECT provider, model FROM prices")}
+    miss = {(r["provider"], r["model"]) for r in con.execute(
+        "SELECT provider, model FROM prices "
+        "WHERE COALESCE(in_usd,0)=0 AND COALESCE(out_usd,0)=0")}
+    for r in con.execute("SELECT DISTINCT provider, model FROM usage"):
+        if (r["provider"], r["model"]) not in have:
+            miss.add((r["provider"], r["model"]))
+    con.close()
+    return sorted(miss)
+
+
+def resolve_prices_ai(targets, note=None, provider=None, model=None):
+    """Ask the configured 'prices' AI area to look up current per-1M-token prices
+    for the given [(provider, model_id)] pairs — for models the price feed can't
+    resolve (renamed / deprecated / brand-new). Honors the area's prompt + model
+    override like every other AI call. `note` is the user's free-text description
+    of the specific issue, appended to the area prompt so the model addresses it.
+    Returns [{provider, model, input, output, cached, note}] for what it priced."""
+    if not targets:
+        return []
+    provider, key, model = _resolve(provider or provider_for_area("prices"),
+                                    model or model_for_area("prices"))
+    system = area_prompt("prices")
+    if note and str(note).strip():
+        system += ("\n\nThe user is specifically having this issue — make sure your "
+                   "answer addresses it:\n" + str(note).strip())
+    tgt_prov = {m: p for p, m in targets}
+    listing = "\n".join("%s / %s" % (p, m) for p, m in targets)
+    text = _complete_text(provider, key, model, system, "Models:\n" + listing)
+    obj = _json(text)
+    items = obj if isinstance(obj, list) else (
+        (obj.get("prices") or obj.get("results") or []) if isinstance(obj, dict) else [])
+    out = []
+    for it in items or []:
+        if not isinstance(it, dict) or not it.get("model"):
+            continue
+        try:
+            i = float(it.get("input") or 0)
+            o = float(it.get("output") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not (i or o):
+            continue
+        c = it.get("cached")
+        try:
+            c = float(c) if c not in (None, "") else None
+        except (TypeError, ValueError):
+            c = None
+        mdl = str(it["model"]).strip()
+        out.append({"provider": str(it.get("provider") or tgt_prov.get(mdl) or "").strip(),
+                    "model": mdl, "input": i, "output": o, "cached": c,
+                    "note": str(it.get("note") or "").strip()})
+    return out
+
+
 def cost_usd(in_tok, out_tok, provider, model):
     """USD cost of one (in,out) token pair for a model, or None if unpriced."""
     p = price_get(provider, model)
@@ -586,6 +648,10 @@ AREAS = [
      "description": "Audits provider matches (catches wrong ones like a remake "
                     "matched to the original), identifies games no provider matched, "
                     "and fills attribute gaps from the model's game knowledge."},
+    {"id": "prices", "name": "Model price lookup", "status": "live",
+     "description": "Resolves current per-token prices for AI models the price feed "
+                    "can't (renamed, deprecated, or brand-new) — used by the Auto-"
+                    "resolve button in Model prices."},
 ]
 AREA_IDS = {a["id"] for a in AREAS}
 VISION_AREAS = {a["id"] for a in AREAS if a.get("vision")}
@@ -707,6 +773,22 @@ DEFAULT_PROMPTS = {
         "player_perspectives/developers/publishers=arrays of strings; "
         "description=one paragraph string."
     ),
+    "prices": (
+        "You are a pricing expert for large-language-model APIs. You are given a "
+        "list of AI models (each as 'provider / model-id'). For EACH one, give its "
+        "CURRENT public list price in US dollars PER 1,000,000 TOKENS: input "
+        "(prompt), output (completion), and cached-input if the provider offers a "
+        "cached/prompt-caching rate.\n"
+        "If a model id is renamed, deprecated, or an alias, price the model it now "
+        "resolves to (the closest current equivalent) and say which in \"note\". "
+        "Use official provider pricing pages as your basis. If you genuinely do not "
+        "know a model's price, OMIT it rather than guessing.\n"
+        "Respond with ONLY a JSON array (no prose, no code fence), one object per "
+        "model you can price:\n"
+        '[{"provider": "<provider>", "model": "<model-id>", "input": <usd_per_1M>, '
+        '"output": <usd_per_1M>, "cached": <usd_per_1M or null>, '
+        '"note": "<short note if renamed/deprecated, else empty>"}]'
+    ),
 }
 # <<token>> placeholders each area's prompt fills in (surfaced in the editor).
 PROMPT_VARS = {
@@ -717,6 +799,7 @@ PROMPT_VARS = {
     "filecmd": ["profiles", "variables", "systems", "current"],
     "filesource": ["systems", "current"],
     "metadata": [],
+    "prices": [],
 }
 
 

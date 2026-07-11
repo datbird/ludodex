@@ -534,7 +534,16 @@ header h1 span { color: var(--accent); }
 
 .price-panel { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; background: var(--panel); }
 .pp-head { display: flex; align-items: center; gap: 12px; font-weight: 700; color: var(--text-h); margin-bottom: 6px; }
-.pp-head .ops-btn { margin-left: auto; }
+.pp-head .ops-btn:first-of-type { margin-left: auto; }
+.pp-resolve { border: 1px solid var(--accent); border-radius: 10px; padding: 12px;
+  margin-bottom: 12px; background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+  display: flex; flex-direction: column; gap: 8px; }
+.ppr-q { font-size: 12px; color: var(--text-h); }
+.ppr-note { width: 100%; resize: vertical; font: inherit; font-size: 12px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text-h); }
+.ppr-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ppr-cancel { margin-left: auto; }
+.ppr-hint { font-size: 11px; line-height: 1.35; }
 .pp-note { font-size: 12px; margin-bottom: 10px; }
 .pp-msg { font-size: 12px; margin-bottom: 8px; color: var(--accent); }
 .price-list { display: flex; flex-direction: column; gap: 2px; }
@@ -547,6 +556,7 @@ header h1 span { color: var(--accent); }
   border: 1px solid var(--border); border-radius: 6px; color: var(--text-h); font: inherit; }
 .pr-src { font-size: 10px; color: var(--text); }
 .pr-src.manual { color: var(--accent); }
+.pr-src.ai { color: #d08a2c; font-weight: 600; }
 .pr-provider { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700;
   color: var(--accent); margin-top: 8px; padding: 6px 4px; background: none;

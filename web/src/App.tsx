@@ -2206,6 +2206,9 @@ function AiBudgets() {
   const [sched, setSched] = useState<{ daily: boolean; time: string }>({ daily: true, time: '04:00' })
   const [lastUpdate, setLastUpdate] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [resolving, setResolving] = useState(false)
+  const [askResolve, setAskResolve] = useState(false)   // Auto-resolve prompt open
+  const [resolveNote, setResolveNote] = useState('')    // user's "what's wrong" note
   const [msg, setMsg] = useState('')
   const [fxInput, setFxInput] = useState('')
   // add-a-limit form
@@ -2265,6 +2268,21 @@ function AiBudgets() {
     try { const r = await api.refreshAiPrices(); setPrices(r.prices); setMsg(`Fetched ${r.updated} price(s) — provider-direct rates, no markup.`) }
     catch (e) { setMsg('Refresh failed: ' + (e instanceof Error ? e.message : '')) }
     finally { setRefreshing(false) }
+  }
+  const doResolve = async (useAi: boolean) => {
+    setResolving(true); setMsg(''); setAskResolve(false)
+    try {
+      const r = await api.resolveAiPrices(useAi, resolveNote)
+      setPrices(r.prices)
+      const parts: string[] = []
+      if (r.fetched) parts.push(`${r.fetched} from feed`)
+      if (r.ai_resolved) parts.push(`${r.ai_resolved} by AI`)
+      setMsg(`Resolved ${parts.join(' + ') || '0'} price(s)`
+        + (r.still_missing ? ` — ${r.still_missing} still unpriced` : '')
+        + (r.ai_error ? ` · AI error: ${r.ai_error}` : ''))
+      setResolveNote('')
+    } catch (e) { setMsg('Resolve failed: ' + (e instanceof Error ? e.message : '')) }
+    finally { setResolving(false) }
   }
   const changeCurrency = async (code: string) => {
     try { setCur((await api.setCurrency(code, code === 'USD' ? 1 : (cur.code === code ? cur.fx : undefined))).currency) }
@@ -2379,11 +2397,33 @@ function AiBudgets() {
       <div className="price-panel">
         <div className="pp-head">Model prices <span className="dim">(USD per 1M tokens, per provider)</span>
           {orEnabled && (
-            <button className="ops-btn" disabled={refreshing} onClick={refresh}
+            <button className="ops-btn" disabled={refreshing || resolving} onClick={refresh}
               title="Looks up each model's current per-token price from the public OpenRouter model catalog — a pass-through of each provider's OWN published rates (no markup), so the numbers equal calling the provider directly. Never changes your manual edits or how your calls are routed.">
               {refreshing ? '↻ Fetching…' : '↻ Fetch current prices'}</button>
           )}
+          <button className="ops-btn" disabled={refreshing || resolving}
+            onClick={() => setAskResolve((v) => !v)}
+            title="Auto-resolve prices — pulls the price feed, and can ask your AI to price models the feed can't (renamed, deprecated or brand-new).">
+            {resolving ? '✨ Resolving…' : '✨ Auto-resolve'}</button>
         </div>
+        {askResolve && (
+          <div className="pp-resolve">
+            <div className="ppr-q">Auto-resolve model prices. Optionally tell the AI what's wrong so it
+              focuses on it — this is added to the model-price prompt.</div>
+            <textarea className="ppr-note" rows={2} value={resolveNote}
+              onChange={(e) => setResolveNote(e.target.value)}
+              placeholder="Optional — e.g. “gemini-3.1-pro shows no price” or “claude-opus-4-8 looks deprecated, use its current rate”" />
+            <div className="ppr-actions">
+              <button className="go" disabled={resolving} onClick={() => doResolve(true)}
+                title="Pull the feed, then have your AI price whatever's still missing (uses your configured AI + the note above).">✨ Resolve with AI</button>
+              <button className="ops-btn" disabled={resolving || !orEnabled} onClick={() => doResolve(false)}
+                title={orEnabled ? 'Pull the OpenRouter feed only — no AI.' : 'Enable the OpenRouter feed below to use feed-only.'}>Feed only</button>
+              <button className="ops-btn ppr-cancel" disabled={resolving} onClick={() => setAskResolve(false)}>Cancel</button>
+            </div>
+            <div className="dim ppr-hint">AI-set prices are best-effort (a model may not know exact rates) and
+              are marked <em>ai</em> — review them, and edit any to lock it as <em>manual</em>.</div>
+          </div>
+        )}
         <div className="pp-note dim">Your calls go <b>direct to each provider</b> — these are just
           the rates used to turn tokens into dollars. ludodex ships <b>native per-provider prices</b>
           (from each provider’s own pricing page) marked <em>default</em>. Edit any rate to override
@@ -2467,7 +2507,7 @@ function PriceRow({ p, onSave }: { p: AiPrice; onSave: (p: AiPrice, i: number, o
     <div className="price-row">
       <span className="pr-model" title={p.provider}>{p.model}</span>
       {num(i, setI)}{num(o, setO)}{num(c, setC)}
-      <span className={'pr-src ' + p.source} title={p.source === 'manual' ? 'your manual override' : p.source === 'openrouter' ? 'auto-fetched provider-direct rate' : 'shipped default'}>{p.source === 'manual' ? 'manual' : p.source === 'openrouter' ? 'auto' : p.source}</span>
+      <span className={'pr-src ' + p.source} title={p.source === 'manual' ? 'your manual override' : p.source === 'openrouter' ? 'auto-fetched provider-direct rate' : p.source === 'ai' ? 'resolved by AI — best-effort, review it' : 'shipped default'}>{p.source === 'manual' ? 'manual' : p.source === 'openrouter' ? 'auto' : p.source}</span>
       <span />
     </div>
   )
