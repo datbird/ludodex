@@ -29,12 +29,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 # OS tools the app shells out to:
 #   openssh-client, rsync            → device sync (ssh / scp / rsync)
+#   sshpass                          → password-auth SSH devices (e.g. Steam Deck)
 #   p7zip-full, zip, unzip           → fileops archive engine
 #   cifs-utils, nfs-common, smbclient→ mount SMB / NFS shares
 #   ca-certificates                  → TLS to providers
 #   bash, findutils                  → scan scripts
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        openssh-client rsync \
+        openssh-client rsync sshpass \
         p7zip-full zip unzip \
         cifs-utils nfs-common smbclient \
         ca-certificates bash findutils tzdata \
