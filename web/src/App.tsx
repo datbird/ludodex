@@ -5467,14 +5467,27 @@ function Dashboard({ stats, onBrowse, onFilter, onOpen, prefsTick, onOpenSetting
   stats: Stats | null; onBrowse: () => void; onFilter: (f: FilterState) => void
   onOpen: (nk: string) => void; prefsTick: number; onOpenSettings: (section?: string) => void
 }) {
-  if (!stats) return <div className="loading">Loading…</div>
+  // Spotlight fetches its own (fast) data, so render it immediately — don't hide it
+  // behind the slower stats() call that gates the rest of the dashboard.
+  return (
+    <div className="dashboard">
+      <SpotlightSection onOpen={onOpen} prefsTick={prefsTick} onOpenSettings={onOpenSettings} />
+      {!stats
+        ? <div className="loading">Loading…</div>
+        : <DashStats stats={stats} onBrowse={onBrowse} onFilter={onFilter} />}
+    </div>
+  )
+}
+
+function DashStats({ stats, onBrowse, onFilter }: {
+  stats: Stats; onBrowse: () => void; onFilter: (f: FilterState) => void
+}) {
   const artPct = stats.games ? Math.round((stats.media.games_with_art / stats.games) * 100) : 0
   const pct = (n: number) => stats.games ? Math.round((n / stats.games) * 100) : 0
   const sources = Object.entries(stats.by_source).sort((a, b) => b[1] - a[1])
   const kinds = Object.entries(stats.media.by_kind).sort((a, b) => b[1] - a[1])
   return (
-    <div className="dashboard">
-      <SpotlightSection onOpen={onOpen} prefsTick={prefsTick} onOpenSettings={onOpenSettings} />
+    <>
       <div className="dash-cards">
         <div className="dash-card">
           <div className="dc-num">{(stats.identified ?? stats.games).toLocaleString()}</div>
@@ -5541,7 +5554,7 @@ function Dashboard({ stats, onBrowse, onFilter, onOpen, prefsTick, onOpenSetting
       </div>
 
       <button className="more" onClick={onBrowse}>Browse the library →</button>
-    </div>
+    </>
   )
 }
 

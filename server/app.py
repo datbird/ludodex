@@ -897,11 +897,30 @@ def _spotlight_disabled():
     return {x.strip() for x in raw.split(",") if x.strip()}
 
 
+_SPOTLIGHT_POOL_CACHE = {"key": None, "ids": None}
+
+
 def _spotlight_all_ids(con):
     """Every concrete spotlight id worth showing, BEFORE the user's on/off filter.
     Platform/source/decade themes are keyed off GAME count (not score count) so the
     pool stays varied even when few games are scored — otherwise every theme
-    collapses to 'overall' and repeats."""
+    collapses to 'overall' and repeats.
+
+    Cached and invalidated by the library DB's mtime: the pool only changes when the
+    catalog is rebuilt, so we don't re-run these GROUP-BY scans on every spotlight
+    load / shuffle (they cost ~0.25s each otherwise)."""
+    try:
+        key = os.path.getmtime(LIBRARY_DB)
+    except OSError:
+        key = None
+    if key is not None and _SPOTLIGHT_POOL_CACHE["key"] == key:
+        return list(_SPOTLIGHT_POOL_CACHE["ids"])
+    ids = _compute_spotlight_all_ids(con)
+    _SPOTLIGHT_POOL_CACHE.update(key=key, ids=list(ids))
+    return ids
+
+
+def _compute_spotlight_all_ids(con):
     pool = ["overall", "emulation"]
     try:
         # score-only themes need a real sample of scored games, else they're thin
