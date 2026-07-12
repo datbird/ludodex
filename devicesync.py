@@ -124,7 +124,7 @@ def resolve_roms(mgr_id, system, game_name):
     con = sqlite3.connect(idx)
     con.row_factory = sqlite3.Row
     try:
-        cols = "fullpath, relpath, filename, ext, disc, region"
+        cols = "fullpath, relpath, filename, ext, disc, region, flags, name, game"
         rows = con.execute(
             "SELECT %s FROM roms WHERE lower(system)=lower(?) AND lower(game)=lower(?) "
             "ORDER BY disc, filename" % cols, (system, game_name)).fetchall()
@@ -221,3 +221,152 @@ def _indent(elem, level=0):
                 child.tail = tail_pad
     if level and not (elem.tail or "").strip():
         elem.tail = pad
+
+
+# --------------------------------------------------------------------------- #
+#  Push planning — pick which file(s) to send, and where they land
+# --------------------------------------------------------------------------- #
+def esde_gamelists_path(media_path):
+    """RetroDECK's gamelists dir sits beside downloaded_media — derive it so we don't
+    need a separate config field: …/ES-DE/downloaded_media → …/ES-DE/gamelists."""
+    mp = (media_path or "").rstrip("/")
+    if mp.endswith("/downloaded_media"):
+        return mp[:-len("/downloaded_media")] + "/gamelists"
+    return os.path.join(os.path.dirname(mp), "gamelists")
+
+
+# CD entry-point extensions (one per disc); the rest are member tracks pulled along.
+_DISC_ENTRY = {"cue", "gdi", "chd", "iso", "pbp", "ccd", "toc", "m3u"}
+_REGION_RANK = {"usa": 0, "world": 1, "us": 0, "u": 0, "w": 1, "europe": 2, "e": 2,
+                "eur": 2, "japan": 3, "j": 3, "jpn": 3}
+
+
+def _variant_key(h):
+    """Sort key to pick the BEST cart dump among duplicates: verified first, then
+    preferred region, no bad/hack flags, then shortest filename (cleanest)."""
+    flags = (h.get("flags") or "").lower()
+    region = (h.get("region") or "").strip().lower()
+    verified = 0 if "verified" in flags or "[!]" in (h.get("filename") or "") else 1
+    bad = 1 if any(b in flags for b in ("dump:b", "bad", "hack", "pirate", "proto",
+                                        "beta", "demo")) else 0
+    return (bad, verified, _REGION_RANK.get(region, 5), len(h.get("filename") or ""))
+
+
+def pick_rom_files(hits, esde_sys):
+    """From a game's resolved files, choose what to actually push. Returns a list of
+    'discs': [{files:[fullpath…], entry:fullpath, disc:int|None, basename:str}].
+    Cart game → one disc, one best-variant file. CD game → one entry per disc (with
+    its member tracks), so a multi-disc set becomes N discs (+ an .m3u later)."""
+    if not hits:
+        return []
+    is_cd = esde_sys in _CD_SYSTEMS or any(
+        (h.get("ext") or "").lower() in _DISC_ENTRY for h in hits)
+    if not is_cd:
+        best = sorted(hits, key=_variant_key)[0]
+        base = os.path.splitext(best["filename"])[0]
+        return [{"files": [best["fullpath"]], "entry": best["fullpath"],
+                 "disc": None, "basename": base}]
+    # CD: group by disc; the entry point is the .cue/.gdi/.chd, tracks ride along.
+    discs = {}
+    for h in hits:
+        d = h.get("disc") or 0
+        discs.setdefault(d, []).append(h)
+    out = []
+    for d in sorted(discs):
+        grp = discs[d]
+        entries = [h for h in grp if (h.get("ext") or "").lower() in _DISC_ENTRY]
+        entry = sorted(entries, key=_variant_key)[0] if entries else sorted(grp, key=_variant_key)[0]
+        base = os.path.splitext(entry["filename"])[0]
+        out.append({"files": [h["fullpath"] for h in grp], "entry": entry["fullpath"],
+                    "disc": (d or None), "basename": base})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+#  Chosen media → local repo files (to push into ES-DE downloaded_media)
+# --------------------------------------------------------------------------- #
+def chosen_media_files(media_index_db, repo_dir, norm_key):
+    """{esde_folder: (local_repo_path, ext)} for a game's chosen, materialized media —
+    only kinds ES-DE has a folder for, only assets already pulled into the repo."""
+    if not os.path.exists(media_index_db):
+        return {}
+    con = sqlite3.connect(media_index_db)
+    con.row_factory = sqlite3.Row
+    out = {}
+    try:
+        for r in con.execute(
+                "SELECT kind, sha1, ext FROM media WHERE norm_key=? AND chosen=1 "
+                "AND sha1 IS NOT NULL AND sha1!=''", (norm_key,)):
+            folder = KIND_TO_ESDE_FOLDER.get(r["kind"])
+            if not folder:
+                continue
+            ext = (r["ext"] or "jpg").split("?")[0].lstrip(".")
+            p = os.path.join(repo_dir, "%s.%s" % (r["sha1"], ext))
+            if os.path.exists(p):
+                out[folder] = (p, ext)
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        con.close()
+    return out
+
+
+# --------------------------------------------------------------------------- #
+#  Ingest diff — files on a device that the master archive doesn't have
+# --------------------------------------------------------------------------- #
+def diff_ingest(device_mgr_id, archive_mgr_id, limit=None):
+    """Games present in a device's ROM index but NOT in the archive's, matched by
+    (system, game) case-insensitively. Returns [{system, game, files:[…], n_files}]
+    — candidates to pull back into the master archive."""
+    dev, arch = _rom_index(device_mgr_id), _rom_index(archive_mgr_id)
+    if not dev or not arch:
+        return []
+    ac = sqlite3.connect(arch)
+    have = set()
+    try:
+        for s, g in ac.execute("SELECT DISTINCT lower(system), lower(game) FROM roms"):
+            have.add((s, g))
+    finally:
+        ac.close()
+    dc = sqlite3.connect(dev)
+    dc.row_factory = sqlite3.Row
+    games, order = {}, []
+    try:
+        for r in dc.execute("SELECT system, game, relpath, filename, ext, disc "
+                            "FROM roms ORDER BY system, game, disc, filename"):
+            key = (r["system"].lower(), (r["game"] or "").lower())
+            if key in have:
+                continue
+            if key not in games:
+                games[key] = {"system": r["system"], "game": r["game"], "files": []}
+                order.append(key)
+            games[key]["files"].append({"relpath": r["relpath"], "filename": r["filename"],
+                                        "ext": r["ext"], "disc": r["disc"]})
+            if limit and len(order) >= limit and key == order[-1]:
+                pass
+    finally:
+        dc.close()
+    out = [{"system": games[k]["system"], "game": games[k]["game"],
+            "files": games[k]["files"], "n_files": len(games[k]["files"])} for k in order]
+    return out[:limit] if limit else out
+
+
+def device_free_bytes(dev, path):
+    """Free bytes at `path` on a device (via `df`), or None. dev is a device dict;
+    None/local uses the local df."""
+    import subprocess
+    cmd = "df -PB1 %s 2>/dev/null | awk 'NR==2{print $4}'" % _shq(path)
+    try:
+        if not dev or dev.get("transport") == "local":
+            out = subprocess.run(["bash", "-lc", cmd], capture_output=True,
+                                 text=True, timeout=20).stdout
+        else:
+            import devices
+            out = devices._ssh(dev, cmd, timeout=20)
+        return int((out or "").strip() or 0) or None
+    except Exception:
+        return None
+
+
+def _shq(s):
+    return "'" + str(s).replace("'", "'\\''") + "'"

@@ -46,6 +46,7 @@ import framing         # noqa: E402  per-game/per-kind image framing (position +
 import mediaflags      # noqa: E402  durable per-asset ban / not-redistributable flags
 import merges          # noqa: E402  durable game merges (fold duplicate entries)
 import splits          # noqa: E402  durable "peel apart" (split a merged entry out)
+import devicesync      # noqa: E402  outbound push (ROM+media+gamelist) to RetroDECK/ES-DE
 import auth            # noqa: E402  local username/password accounts + sessions
 import cf_access       # noqa: E402  Cloudflare Access SSO (verify the Access JWT)
 from . import ai       # noqa: E402  AI features (server package)
@@ -1607,6 +1608,154 @@ def device_wants_add(dev_id: int, body: dict = Body(...)):
 def device_wants_remove(dev_id: int, norm_key: str):
     devices.wants_remove(dev_id, norm_key)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+#  Device SYNC — two-way file sync (Files → Sync tab)
+#    push:   master archive ─▶ device (queued "wants")
+#    ingest: device ─▶ master archive (ROMs the archive doesn't have)
+#  These endpoints PREVIEW the work (read-only); the run endpoints execute it.
+# --------------------------------------------------------------------------- #
+def _archive_manager():
+    """The master ROM repo = a 'roms' manager on the local host. Returns (device, mgr)
+    or (None, None). This is where pushes pull FROM and ingests copy INTO."""
+    for d in devices.devices_list():
+        if d.get("transport") != "local":
+            continue
+        for m in d.get("managers", []):
+            if m.get("kind") in ("roms", "retrodeck", "esde", "retrobat") and m.get("rom_path"):
+                return d, m
+    return None, None
+
+
+def _game_gamelist_meta(con, norm_key):
+    """Catalog metadata for a game, shaped for an ES-DE gamelist entry."""
+    g = con.execute("SELECT id, canonical_title FROM games WHERE norm_key=?",
+                    (norm_key,)).fetchone()
+    if not g:
+        return None
+    attrs = {}
+    for r in con.execute("SELECT kind, value FROM game_attributes WHERE game_id=?",
+                         (g["id"],)):
+        attrs.setdefault(r["kind"], []).append(r["value"])
+    ov = overrides.overrides_for(norm_key)
+    for k, o in ov.items():
+        attrs[k] = [o["value"]]
+    first = lambda k: (attrs.get(k) or [None])[0]
+    plats = attrs.get("platforms") or []
+    return {
+        "title": g["canonical_title"],
+        "desc": first("description"),
+        "developer": ", ".join(attrs.get("developers") or [])[:200] or None,
+        "publisher": ", ".join(attrs.get("publishers") or [])[:200] or None,
+        "genre": ", ".join(attrs.get("genres") or [])[:120] or None,
+        "release_year": first("release_year"), "release_date": first("release_date"),
+        "players": first("player_count") or first("players"),
+        "platform": plats[0] if plats else None,
+    }
+
+
+def _game_systems(con, norm_key):
+    """The emulation platform(s) a wanted game is on (source='emulation')."""
+    return [r["platform"] for r in con.execute(
+        "SELECT DISTINCT s.platform FROM sources s JOIN games g ON g.id=s.game_id "
+        "WHERE g.norm_key=? AND s.source='emulation' AND s.platform!=''", (norm_key,))]
+
+
+@app.get("/api/devices/{dev_id}/sync/push-plan")
+def sync_push_plan(dev_id: int):
+    """Preview what pushing this device's queued games would do: per game the chosen
+    ROM file(s), format conversion, media, and gamelist entry — plus free space."""
+    devs = {d["id"]: d for d in devices.devices_list()}
+    dev = devs.get(dev_id)
+    if not dev:
+        raise HTTPException(404, "no such device")
+    mgr = next((m for m in dev.get("managers", [])
+                if m.get("kind") in ("retrodeck", "esde", "retrobat")), None)
+    if not mgr:
+        raise HTTPException(400, "this device has no RetroDECK/ES-DE library manager")
+    _adev, amgr = _archive_manager()
+    if not amgr:
+        raise HTTPException(400, "no master ROM archive configured (a local 'roms' manager)")
+    keys = devices.wants_keys(dev_id)
+    con = lib()
+    items, missing = [], []
+    try:
+        for nk in keys:
+            meta = _game_gamelist_meta(con, nk)
+            systems = _game_systems(con, nk)
+            placed = False
+            for platform in systems:
+                es = devicesync.esde_system(platform)
+                hits = devicesync.resolve_roms(amgr["id"], platform, _emu_game_name(con, nk, platform))
+                if not hits:
+                    continue
+                discs = devicesync.pick_rom_files(hits, es)
+                conv = [devicesync.convert_plan(es, d["entry"].rsplit(".", 1)[-1]) for d in discs]
+                media = devicesync.chosen_media_files(INDEX_DB, REPO, nk)
+                items.append({
+                    "norm_key": nk, "title": meta["title"] if meta else nk,
+                    "system": es, "n_discs": len(discs),
+                    "rom_files": [os.path.basename(d["entry"]) for d in discs],
+                    "conversions": [t for _, t in conv],
+                    "multi_disc": len(discs) > 1,
+                    "media": sorted(media.keys()),
+                    "has_gamelist_meta": bool(meta and meta.get("desc")),
+                })
+                placed = True
+                break
+            if not placed:
+                missing.append({"norm_key": nk, "title": meta["title"] if meta else nk,
+                                "reason": "no ROM found in the archive for its system"})
+    finally:
+        con.close()
+    free = devicesync.device_free_bytes(dev, mgr.get("rom_path"))
+    return {"device": dev["name"], "target": mgr.get("rom_path"),
+            "queued": len(keys), "ready": len(items), "missing": missing,
+            "free_bytes": free, "items": items}
+
+
+def _emu_game_name(con, norm_key, platform):
+    """The emulation source's title_raw for a game on a platform (what the ROM index
+    grouped it under), falling back to the canonical title."""
+    r = con.execute(
+        "SELECT s.title_raw FROM sources s JOIN games g ON g.id=s.game_id "
+        "WHERE g.norm_key=? AND s.source='emulation' AND s.platform=? LIMIT 1",
+        (norm_key, platform)).fetchone()
+    if r and r["title_raw"]:
+        return r["title_raw"]
+    g = con.execute("SELECT canonical_title FROM games WHERE norm_key=?",
+                    (norm_key,)).fetchone()
+    return g["canonical_title"] if g else norm_key
+
+
+@app.get("/api/devices/{dev_id}/sync/ingest-plan")
+def sync_ingest_plan(dev_id: int):
+    """Preview the reverse: ROMs on this device that the master archive doesn't have
+    yet — candidates to pull back into the archive."""
+    devs = {d["id"]: d for d in devices.devices_list()}
+    dev = devs.get(dev_id)
+    if not dev:
+        raise HTTPException(404, "no such device")
+    mgr = next((m for m in dev.get("managers", []) if m.get("rom_path")), None)
+    if not mgr:
+        raise HTTPException(400, "this device has no ROM library manager")
+    _adev, amgr = _archive_manager()
+    if not amgr:
+        raise HTTPException(400, "no master ROM archive configured")
+    if mgr["id"] == amgr["id"]:
+        raise HTTPException(400, "this device IS the archive")
+    if not os.path.exists(os.path.join(DATA, "roms-index-mgr%d.sqlite" % mgr["id"])):
+        raise HTTPException(409, "sync this device first so its ROMs are indexed")
+    games = devicesync.diff_ingest(mgr["id"], amgr["id"], limit=500)
+    n_files = sum(g["n_files"] for g in games)
+    by_system = {}
+    for g in games:
+        by_system[g["system"]] = by_system.get(g["system"], 0) + 1
+    return {"device": dev["name"], "archive": amgr.get("rom_path"),
+            "new_games": len(games), "new_files": n_files,
+            "by_system": sorted(by_system.items(), key=lambda x: -x[1]),
+            "games": games[:200]}
 
 
 @app.post("/api/media/scan-local")
