@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-OWN = os.path.dirname(os.path.abspath(__file__))
+OWN = os.environ.get("LUDODEX_DATA") or os.path.dirname(os.path.abspath(__file__))
 leg = shutil.which("legendary") or os.path.expanduser("~/.local/bin/legendary")
 try:
     out = subprocess.run([leg, "list", "--json"], capture_output=True, text=True,

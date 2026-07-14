@@ -4784,7 +4784,9 @@ def _sync_ready(sid):
 
 def _tsv_count(out):
     """Games recorded in a fetcher's output TSV (None if it doesn't exist yet)."""
-    p = os.path.join(DIR, out)
+    p = os.path.join(DATA, out)
+    if not os.path.exists(p):                     # fall back to the legacy /app path
+        p = os.path.join(DIR, out)
     if not os.path.exists(p):
         return None
     try:
@@ -4947,7 +4949,9 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None, job=Non
     try:
         stdout_dest = subprocess.DEVNULL
         if capture and out:
-            outf = open(os.path.join(DIR, out), "w", encoding="utf-8")
+            # ownership/wishlist TSVs go in the DURABLE data dir, not the ephemeral
+            # image layer — so store games survive a redeploy / catalog rebuild.
+            outf = open(os.path.join(DATA, out), "w", encoding="utf-8")
             stdout_dest = outf
         p = subprocess.Popen(argv, cwd=DIR, stdout=stdout_dest, stderr=errf,
                              start_new_session=(job is not None))
@@ -5143,8 +5147,11 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 and job["services"].get("steam", {}).get("state") == "ok"):
             job["step"] = "Fetching Steam tags…"
             _phase("tags", "running")
+            _steam_tsv = os.path.join(DATA, "steam_games.tsv")
+            if not os.path.exists(_steam_tsv):
+                _steam_tsv = os.path.join(DIR, "steam_games.tsv")
             ok_t, _ = _run_streaming(
-                "steam_tags.py", ["--tsv", os.path.join(DIR, "steam_games.tsv")],
+                "steam_tags.py", ["--tsv", _steam_tsv],
                 _mk_prog("Fetching Steam tags…", "tags", _tags_base),
                 timeout=3600, job=job)
             _phase("tags", "ok" if ok_t else "failed",

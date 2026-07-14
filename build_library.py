@@ -35,7 +35,16 @@ def _mkey(title):
 from playnite import LIST_KINDS, SCALAR_KINDS
 from igdb import map_record as igdb_map   # IGDB metadata-provider record mapping
 
-OWN = DIR                                   # store TSVs live next to the scripts
+# Store ownership TSVs live in the DURABLE data dir (not next to the scripts, which
+# is an ephemeral image layer): otherwise store ownership only survives via catalog
+# carry-over and a rebuild-from-scratch silently drops every store's games. Fall back
+# to the legacy /app location if that's the only place TSVs exist (e.g. update.sh,
+# which writes beside the scripts) — migrated to /data on the next in-app sync.
+_STORE_SRCS = ("steam", "gog", "epic", "itch", "ea", "psn", "xbox", "nintendo")
+OWN = DATA
+if not any(os.path.exists(os.path.join(DATA, "%s_games.tsv" % s)) for s in _STORE_SRCS) \
+        and any(os.path.exists(os.path.join(DIR, "%s_games.tsv" % s)) for s in _STORE_SRCS):
+    OWN = DIR
 ROM_DB = config.get("roms_index_db")
 OUT = config.get("library_db")
 
@@ -705,6 +714,12 @@ except Exception as e:                             # never let AI supplements br
 if ai_attr:
     print("# AI supplement       attrs: %d (accepted findings, fill-gaps)" % ai_attr)
 
+# Indexes the split + (year) passes below depend on — the full set is (re)created
+# after them, but these per-game lookups would full-scan sources/game_attributes
+# (573k+ rows) without them, so build them first.
+cur.execute("CREATE INDEX IF NOT EXISTS ix_src_game ON sources(game_id)")
+cur.execute("CREATE INDEX IF NOT EXISTS ix_gattr_game ON game_attributes(game_id)")
+
 # ---- platform-era split: a modern store game can't be on old hardware ----
 # When an entry has a store/IGDB identity dated year Y AND an emulation ROM on a
 # console whose production era can't contain Y, that ROM is a DIFFERENT game that only
@@ -810,15 +825,15 @@ if _relabel:
     print("# (year) disambiguation: relabeled %d remake title(s)" % len(_relabel))
 
 cur.executescript("""
-CREATE INDEX ix_norm ON games(norm_key);
-CREATE INDEX ix_title ON games(canonical_title);
-CREATE INDEX ix_src_game ON sources(game_id);
-CREATE INDEX ix_src_plat ON sources(platform);
-CREATE INDEX ix_sattr_game ON source_attrs(game_id);
-CREATE INDEX ix_gattr_game ON game_attributes(game_id);
-CREATE INDEX ix_gattr_kv ON game_attributes(kind, value);
-CREATE INDEX ix_mlink_game ON metadata_links(game_id);
-CREATE INDEX ix_gtag_game ON game_tags(game_id);
+CREATE INDEX IF NOT EXISTS ix_norm ON games(norm_key);
+CREATE INDEX IF NOT EXISTS ix_title ON games(canonical_title);
+CREATE INDEX IF NOT EXISTS ix_src_game ON sources(game_id);
+CREATE INDEX IF NOT EXISTS ix_src_plat ON sources(platform);
+CREATE INDEX IF NOT EXISTS ix_sattr_game ON source_attrs(game_id);
+CREATE INDEX IF NOT EXISTS ix_gattr_game ON game_attributes(game_id);
+CREATE INDEX IF NOT EXISTS ix_gattr_kv ON game_attributes(kind, value);
+CREATE INDEX IF NOT EXISTS ix_mlink_game ON metadata_links(game_id);
+CREATE INDEX IF NOT EXISTS ix_gtag_game ON game_tags(game_id);
 """)
 con.commit()
 
