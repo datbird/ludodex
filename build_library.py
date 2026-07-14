@@ -22,6 +22,7 @@ import config
 from titlenorm import norm      # shared dedupe normalizer (honors config prefs)
 import merges                   # durable user merges — fold duplicates into one
 import splits                   # durable "peel apart" — split a merged-away game out
+import console_eras             # hardware timelines — catch era-impossible merges
 _MERGE_ALIAS = merges.alias_map()
 _PEEL = splits.overrides()      # {(source, source_id): (to_key, to_title)}
 
@@ -703,6 +704,67 @@ except Exception as e:                             # never let AI supplements br
     print("# AI supplement merge skipped: %s" % e)
 if ai_attr:
     print("# AI supplement       attrs: %d (accepted findings, fill-gaps)" % ai_attr)
+
+# ---- platform-era split: a modern store game can't be on old hardware ----
+# When an entry has a store/IGDB identity dated year Y AND an emulation ROM on a
+# console whose production era can't contain Y, that ROM is a DIFFERENT game that only
+# merged because the titles normalize the same (a ~1994 Game Boy "Uno" folded into the
+# 2016 Steam "UNO"). Peel those ROM rows onto their own entry. Uses first-release year,
+# so a legitimately re-released old game (Sonic 1991 on Genesis + Steam) stays merged.
+def _recompute_game(c, gid):
+    srcs = c.execute("SELECT source, platform, state FROM sources WHERE game_id=?",
+                     (gid,)).fetchall()
+    kinds = {}
+    for source, platform, _state in srcs:
+        kinds.setdefault(source, set())
+        if source in ("emulation", "archive"):
+            kinds[source].add(platform)
+    parts = [g + ":" + ",".join(sorted(x for x in kinds[g] if x))
+             for g in ("emulation", "archive") if g in kinds]
+    parts += sorted(k for k in kinds if k not in ("emulation", "archive"))
+    owned = any(s[2] == "have" for s in srcs)
+    c.execute("UPDATE games SET n_sources=?, n_kinds=?, sources_summary=?, "
+              "has_emulation=?, has_steam=?, has_gog=?, has_epic=?, has_itch=?, "
+              "has_archive=?, wanted=? WHERE id=?",
+              (len(srcs), len(kinds), "; ".join(parts),
+               int("emulation" in kinds), int("steam" in kinds), int("gog" in kinds),
+               int("epic" in kinds), int("itch" in kinds), int("archive" in kinds),
+               0 if owned else 1, gid))
+
+
+_era_splits = 0
+for _gid, _nk, _title in cur.execute(
+        "SELECT id, norm_key, canonical_title FROM games WHERE has_emulation=1").fetchall():
+    _yr = cur.execute("SELECT value FROM game_attributes WHERE game_id=? AND "
+                      "kind='release_year' LIMIT 1", (_gid,)).fetchone()
+    if not _yr:
+        continue
+    # the year must belong to a STORE identity (else it's the ROM's own year — no split)
+    if not cur.execute("SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
+                       "('emulation','archive') LIMIT 1", (_gid,)).fetchone():
+        continue
+    _bad = [rid for rid, plat in cur.execute(
+            "SELECT rowid, platform FROM sources WHERE game_id=? AND source='emulation'",
+            (_gid,)).fetchall() if console_eras.impossible(plat, _yr[0])]
+    if not _bad:
+        continue
+    _new_key = _nk + "\x1femu"                      # deterministic, collision-free
+    _new_gid = key_to_gid.get(_new_key)
+    if _new_gid is None:
+        cur.execute("INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,"
+                    "sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
+                    "has_archive,in_playnite,in_launchbox,wanted) "
+                    "VALUES(?,?,0,0,'',1,0,0,0,0,0,0,0,0)", (_title, _new_key))
+        _new_gid = cur.lastrowid
+        key_to_gid[_new_key] = _new_gid
+    cur.executemany("UPDATE sources SET game_id=? WHERE rowid=?",
+                    [(_new_gid, rid) for rid in _bad])
+    _recompute_game(cur, _gid)
+    _recompute_game(cur, _new_gid)
+    _era_splits += 1
+if _era_splits:
+    print("# platform-era split: peeled era-impossible ROMs off %d store entr(y/ies)"
+          % _era_splits)
 
 # ---- (year) disambiguation: when 2+ games share a title but are DIFFERENT release
 # years (remakes / re-releases — Uno 2006 vs 2016, Tomb Raider 1996 vs 2013), append
