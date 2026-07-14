@@ -48,6 +48,27 @@ ERAS = {
 LOW_BUFFER = 2
 HIGH_BUFFER = 4
 
+# Retro handhelds: in the 8/16-bit era, a portable version of a console game was
+# almost always a SEPARATE, downgraded, differently-built game. So a title that also
+# lives on a home console / PC is a different game on one of these → peel it off.
+HANDHELD_RETRO = {
+    "gameboy", "gameboy color", "gba", "gamegear", "lynx", "neogeopocketcolor",
+    "neogeo pocket", "ngp", "ngpc", "supervision", "wonderswan", "wonderswan color",
+    "pokemon mini", "gizmondo", "ngage",
+}
+# Modern handhelds are often the SAME game as (or the lead platform for) a console
+# release — too ambiguous to auto-split. Left to the AI-assist tier.
+HANDHELD_MODERN = {"nds", "3ds", "psp", "psvita", "psp minis"}
+
+
+def is_retro_handheld(platform):
+    return (platform or "").strip().lower() in HANDHELD_RETRO
+
+
+def is_handheld(platform):
+    p = (platform or "").strip().lower()
+    return p in HANDHELD_RETRO or p in HANDHELD_MODERN
+
 
 def era(platform):
     return ERAS.get((platform or "").strip().lower())

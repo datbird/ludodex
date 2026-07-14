@@ -735,17 +735,26 @@ def _recompute_game(c, gid):
 _era_splits = 0
 for _gid, _nk, _title in cur.execute(
         "SELECT id, norm_key, canonical_title FROM games WHERE has_emulation=1").fetchall():
+    _all = cur.execute("SELECT rowid, source, platform FROM sources WHERE game_id=?",
+                       (_gid,)).fetchall()
+    _has_store = any(s not in ("emulation", "archive") for _r, s, _p in _all)
+    # a "home" sibling = a store source, or an emulation/archive ROM on non-handheld
+    # hardware. Its presence means a retro-handheld ROM here is a separate portable port.
+    _has_home = _has_store or any(
+        s in ("emulation", "archive") and not console_eras.is_handheld(p)
+        for _r, s, p in _all)
     _yr = cur.execute("SELECT value FROM game_attributes WHERE game_id=? AND "
                       "kind='release_year' LIMIT 1", (_gid,)).fetchone()
-    if not _yr:
-        continue
-    # the year must belong to a STORE identity (else it's the ROM's own year — no split)
-    if not cur.execute("SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
-                       "('emulation','archive') LIMIT 1", (_gid,)).fetchone():
-        continue
-    _bad = [rid for rid, plat in cur.execute(
-            "SELECT rowid, platform FROM sources WHERE game_id=? AND source='emulation'",
-            (_gid,)).fetchall() if console_eras.impossible(plat, _yr[0])]
+    _y = _yr[0] if _yr else None
+    _bad = []
+    for _rid, _src, _plat in _all:
+        if _src != "emulation":
+            continue
+        # (a) a modern store year that can't exist on this console, or
+        # (b) a retro handheld sitting alongside a home-console/PC version.
+        if (_has_store and _y and console_eras.impossible(_plat, _y)) or \
+                (_has_home and console_eras.is_retro_handheld(_plat)):
+            _bad.append(_rid)
     if not _bad:
         continue
     _new_key = _nk + "\x1femu"                      # deterministic, collision-free
