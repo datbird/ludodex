@@ -3753,10 +3753,13 @@ function SyncMenu() {
     <div className="sync-wrap filter-wrap" ref={wrapRef}>
       <button className={'icon-btn' + (anyRunning ? ' spin' : '')} title="Sync library"
         onClick={() => setOpen((v) => !v)}>
-        <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
           strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
-          <path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+          {/* single circular arrow (Feather rotate-cw): the circle is centered at
+              (12,12), so spinning looks like just the arrow turning — not the whole
+              square sweeping corner-to-corner like refresh-cw did. */}
+          <path d="M23 4v6h-6" />
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
         </svg>
       </button>
       {open && (
