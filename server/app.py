@@ -783,7 +783,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
         "        AND md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM "
         "  u.user_media um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, "
-        + cover_v +
+        + cover_v
         + score + " AS ludodex_score, "
         "(SELECT group_concat(ga.kind||char(31)||ga.value, char(30)) "
         "   FROM game_attributes ga WHERE ga.game_id=g.id) AS attrs, "
