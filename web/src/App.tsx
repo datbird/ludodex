@@ -5512,7 +5512,14 @@ function SpotlightSection({ onOpen, prefsTick, onOpenSettings }: {
         <div className="sl-actions">
           <button className="sl-shuffle" title="Shuffle spotlight"
             onClick={load} disabled={loading}>
-            <span className={'sl-ico' + (loading ? ' spin' : '')}>⟳</span></button>
+            {/* SVG (circle centered at viewBox 12,12) so it spins around its true
+                center — a text ⟳ glyph is off-center in its box and wobbles. */}
+            <svg className={'sl-ico' + (loading ? ' spin' : '')} viewBox="0 0 24 24"
+              width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.2"
+              strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M23 4v6h-6" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg></button>
           <button className="sl-shuffle" title="Spotlight settings"
             onClick={() => onOpenSettings('dashboard')} aria-label="Spotlight settings">⚙</button>
         </div>
