@@ -293,7 +293,7 @@ function NoArt({ title, compact, unmatched }: {
 // fails to load (e.g. a Deck-local file that 404s on this host), render the
 // generated name-placeholder instead.
 function Cover({ g, compact }: {
-  g: { norm_key: string; title: string; has_cover: boolean; identified?: boolean; framing_cover?: Frame; cover_v?: string | null }
+  g: { norm_key: string; entry_key?: string; title: string; has_cover: boolean; identified?: boolean; framing_cover?: Frame; cover_v?: string | null }
   compact?: boolean
 }) {
   const [failed, setFailed] = useState(false)
@@ -306,7 +306,7 @@ function Cover({ g, compact }: {
   const fs = compact ? undefined : frameStyle(g.framing_cover)
   // key/src carry cover_v so a re-pinned cover swaps in without a hard refresh.
   const img = <img key={g.cover_v || 'c'} loading="lazy"
-    src={api.mediaUrl(g.norm_key, 'cover', true, g.cover_v)} alt=""
+    src={api.mediaUrl(g.entry_key ?? g.norm_key, 'cover', true, g.cover_v)} alt=""
     onError={() => setFailed(true)} />
   return fs ? <div className="frame-box" style={fs}>{img}</div> : img
 }
@@ -564,7 +564,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const togglePick = (nk: string) =>
     setPicked((p) => { const n = new Set(p); n.has(nk) ? n.delete(nk) : n.add(nk); return n })
   const onCard = (g: GameRow) => {
-    if (!selectMode) { setSelected(g.norm_key); return }
+    if (!selectMode) { setSelected(g.entry_key ?? g.norm_key); return }
     if (g.emulation) togglePick(g.norm_key)   // emulation-only for the wishlist (for now)
   }
   const addPickedTo = async (deviceId: number, deviceName: string) => {
@@ -1064,7 +1064,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       {tab === 'files' && <FilesTab />}
 
       {selected && <Detail nk={selected} onClose={() => { setSelected(null); refreshStats() }}
-        onMediaChanged={() => load(true)} />}
+        onMediaChanged={() => load(true)} onNavigate={setSelected} />}
       {showSettings && <Settings onClose={() => setShowSettings(false)}
         onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} user={user}
         initialSection={settingsTarget} />}
@@ -4892,9 +4892,14 @@ function PeelModal({ nk, title, onClose, onPeeled }: {
   )
 }
 
-function Detail({ nk, onClose, onMediaChanged }: {
+function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   nk: string; onClose: () => void; onMediaChanged?: () => void
+  onNavigate?: (key: string) => void   // jump to a sibling platform entry ("also owned on")
 }) {
+  // `nk` is this platform entry's id (base_key@platform). The DETAIL is fetched by it
+  // (per-platform view), but media candidates + title-level mutations key off the
+  // base title key, so derive it for those.
+  const base = nk.includes('@') ? nk.slice(0, nk.lastIndexOf('@')) : nk
   const [mediaDirty, setMediaDirty] = useState(false)
   // close, but first refresh the grid/spotlight if the media (e.g. chosen cover)
   // changed here — so a re-pinned cover shows without a hard refresh.
@@ -4915,7 +4920,7 @@ function Detail({ nk, onClose, onMediaChanged }: {
   const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
   useEffect(() => { reloadDetail() }, [reloadDetail])
   useEffect(() => { setFrames(d?.framing ?? {}) }, [d?.framing])
-  useEffect(() => { setMedia(null); api.mediaLibrary(nk).then(setMedia).catch(() => {}) }, [nk])
+  useEffect(() => { setMedia(null); api.mediaLibrary(base).then(setMedia).catch(() => {}) }, [base])
   useEffect(() => {
     api.mediaKinds().then((r) => {
       setKinds(r.kinds)
@@ -4981,11 +4986,11 @@ function Detail({ nk, onClose, onMediaChanged }: {
           </div>
         )}
         {fixDup && d && (
-          <FixDupModal nk={nk} title={d.title} onClose={() => setFixDup(false)}
+          <FixDupModal nk={base} title={d.title} onClose={() => setFixDup(false)}
             onMerged={(canon) => { setFixDup(false); if (canon === nk) reloadDetail(); else onClose() }} />
         )}
         {peel && d && (
-          <PeelModal nk={nk} title={d.title} onClose={() => setPeel(false)}
+          <PeelModal nk={base} title={d.title} onClose={() => setPeel(false)}
             onPeeled={() => { setPeel(false); reloadDetail() }} />
         )}
         {!d ? <div className="loading">Loading…</div> : (
@@ -5013,6 +5018,21 @@ function Detail({ nk, onClose, onMediaChanged }: {
                   ? <img className="hero-logo" src={logo.url} alt={d.title} />
                   : <h2 className="hero-title">{d.title}</h2>}
                 <div className="hero-sub">{d.title}</div>
+                {(d.platform || (d.also_owned_on && d.also_owned_on.length > 0)) && (
+                  <div className="also-on">
+                    {d.platform && <span className="also-on-cur">{d.platform}</span>}
+                    {d.also_owned_on && d.also_owned_on.length > 0 && (
+                      <>
+                        <span className="also-on-label">also owned on</span>
+                        {d.also_owned_on.map((s) => (
+                          <button key={s.entry_key} className="also-on-chip" type="button"
+                            onClick={() => onNavigate?.(s.entry_key)}
+                            title={`View ${s.title} on ${s.platform}`}>{s.platform}</button>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
               {(wandSent || wandErr) && (
                 <span className={'hero-wand-note' + (wandErr ? ' err' : '')}>
@@ -5020,7 +5040,7 @@ function Detail({ nk, onClose, onMediaChanged }: {
               )}
             </div>
 
-            <ArtStrip nk={nk} assets={assets} loading={!media}
+            <ArtStrip nk={base} assets={assets} loading={!media}
               kinds={kinds} onChange={(m) => { setMedia(m); setMediaDirty(true) }}
               frames={frames} onFrame={(k, fr) => setFrames((p) => {
                 const n = { ...p }; if (fr) n[k] = fr; else delete n[k]; return n

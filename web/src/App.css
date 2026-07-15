@@ -1183,6 +1183,14 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
   text-shadow: 0 2px 12px rgba(0,0,0,0.7);
 }
 .hero-sub { margin-top: 6px; font-size: 12px; color: rgba(255,255,255,0.75); }
+.also-on { margin-top: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.also-on-cur { font-size: 11px; font-weight: 600; text-transform: capitalize; color: #fff;
+  background: rgba(255,255,255,0.18); border-radius: 5px; padding: 2px 8px; }
+.also-on-label { font-size: 11px; color: rgba(255,255,255,0.6); }
+.also-on-chip { font-size: 11px; text-transform: capitalize; color: #fff; cursor: pointer;
+  background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 5px; padding: 2px 8px; transition: background 0.12s; }
+.also-on-chip:hover { background: rgba(255,255,255,0.22); }
 
 /* fallback header for games with no wide hero art: every image floats by
    right-to-left in a seamless loop (2 copies of the list, translate -50%). */

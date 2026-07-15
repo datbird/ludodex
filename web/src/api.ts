@@ -7,6 +7,8 @@ export interface TagRef {
 
 export interface GameRow {
   norm_key: string
+  entry_key?: string       // per-platform entry id (base_key@platform) — the addressable id
+  platform?: string | null // this entry's platform (pc / genesis / ps4 / …)
   title: string
   n_sources: number
   n_kinds: number
@@ -66,7 +68,10 @@ export interface SplitSuggestion {
   sources: SourceRow[]
 }
 export interface GameDetail {
-  norm_key: string
+  norm_key: string          // base title key (used for title-level mutations)
+  entry_key?: string        // this platform entry's id (base_key@platform)
+  platform?: string | null  // this entry's platform
+  also_owned_on?: { entry_key: string; platform: string; title: string }[]
   title: string
   sources: { source: string; platform: string; source_id: string; title_raw: string; detail: string; os: string[] | null; state?: 'have' | 'want' }[]
   attributes: Record<string, string[]>
