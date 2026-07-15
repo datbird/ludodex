@@ -278,12 +278,17 @@ def main(argv):
                               % title, cid, tok)
         except Exception:               # one bad title shouldn't abort the run
             hits = []
-        for h in hits:                  # prefer an exact normalized-title match
+        # Accept ONLY an exact normalized-title match. We used to fall back to IGDB's
+        # top fuzzy hit when nothing matched, but `search` ranks by relevance and would
+        # bind e.g. "gods" (Bitmap Bros, 1991) -> "God of War Ragnarök", renaming the
+        # ROM and poisoning its score/metadata. norm() already folds case, punctuation,
+        # articles, roman numerals, &/+, and editions, so an exact match still catches
+        # real spelling variants; a genuine miss stays unmatched (keeps its filename
+        # title) rather than adopting a wrong game. (User decision 2026-07-15.)
+        for h in hits:
             if norm(h.get("name", "")) == nk:
                 iid, slug = h["id"], h.get("slug")
                 break
-        if not iid and hits:            # else fall back to IGDB's top hit
-            iid, slug = hits[0]["id"], hits[0].get("slug")
         con.execute("INSERT OR REPLACE INTO igdb_resolution"
                     "(norm_key,igdb_id,slug,matched_by,resolved_at) "
                     "VALUES(?,?,?,?,?)",
