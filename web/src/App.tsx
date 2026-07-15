@@ -1125,7 +1125,7 @@ const SETTINGS_KEYWORDS: Record<string, string> = {
   budgets: 'budget cost price dollar currency usd token limit cap spend rate openrouter monthly input output',
   report: 'usage report cost tokens spend',
   devices: 'device library manager rom media path ssh host master edit folder connection',
-  credentials: 'stores providers steam gog epic itch screenscraper igdb ea nintendo login accounts credentials',
+  credentials: 'stores providers steam gog epic itch screenscraper igdb ea login accounts credentials',
   dbsync: 'database sync backup replicate',
   limits: 'rate limit api throttle quota cooldown per minute per day',
   preferences: 'media language ban file operations browse commander manifests apply mode preferences distribution',

@@ -948,7 +948,7 @@ def _compute_spotlight_all_ids(con):
             pool.append("platform:" + plat)
         for (src,) in con.execute(
             "SELECT DISTINCT s.source FROM sources s "
-            "WHERE s.source IN ('steam','gog','epic','xbox','psn','ea','itch','nintendo')"):
+            "WHERE s.source IN ('steam','gog','epic','xbox','psn','ea','itch')"):
             pool.append("source:" + src)
         for (dec,) in con.execute(
             "SELECT (CAST(ga.value AS INT)/10)*10 d FROM game_attributes ga "
@@ -4339,28 +4339,11 @@ SERVICES = [
                          "it up the moment you approve. The code is good for 15 minutes.",
                  "post": "/api/services/xbox/code"},
      "limits": _limits("xbox", cooldown="500")},
-    {"id": "nintendo", "name": "Nintendo Account", "role": "source",
-     "hint": "How it works: Nintendo has no owned-games/purchases API that a server "
-             "can read (purchase history is locked to the console itself). So ludodex "
-             "reads the games you've PLAYED — via the Nintendo Switch Online play "
-             "activity — as your Nintendo library. That path needs a small third-party "
-             "helper (imink) to sign Nintendo's security token; when that helper is "
-             "down or Nintendo bumps its app version, Nintendo may show 0 games until "
-             "it recovers. Games you own but never played, and physical carts, won't "
-             "appear. To connect: click Get Nintendo code, sign in, then RIGHT-CLICK "
-             "the red 'Select this account' button, Copy Link Address, and paste it "
-             "below. One-time login — it refreshes automatically.",
-     "creds": [],
-     "connect": {"url": "", "action_label": "Get Nintendo code",
-                 "start": "/api/services/nintendo/authorize",
-                 "field_label": "Paste the copied link",
-                 "note": "Get Nintendo code opens the sign-in in a new tab. After you "
-                         "sign in, don't just click 'Select this account' — RIGHT-CLICK "
-                         "it and 'Copy Link Address', then paste that whole link here. "
-                         "(It points at an npf…:// link the browser can't open itself.) "
-                         "The code is short-lived, so paste it promptly.",
-                 "post": "/api/services/nintendo/login"},
-     "limits": _limits("nintendo", cooldown="500")},
+    # Nintendo Account source REMOVED (2026-07-15): Nintendo exposes no owned-games
+    # API a server can read (purchase history is console-locked), so the connector
+    # never worked reliably. Switch ownership now comes via manual per-platform
+    # ownership. NB the Nintendo *console* platform maps (switch/gameboy/snes/… in
+    # console_eras/media/launchbox/igdb) stay — they classify emulation ROMs.
     {"id": "igdb", "name": "IGDB", "role": "provider",
      "hint": "IGDB authenticates via Twitch (≈4 req/sec). Create a free app to get a "
              "Client ID + Secret (OAuth Redirect URL can be http://localhost).",
@@ -4417,8 +4400,7 @@ def _svc_state(s):
         out["enabled"] = config.source_enabled(s["id"])
     if s.get("connect"):
         checker = {"ea": _ea_connected, "epic": _epic_connected,
-                   "psn": _psn_connected, "xbox": _xbox_connected,
-                   "nintendo": _nintendo_connected}.get(s["id"])
+                   "psn": _psn_connected, "xbox": _xbox_connected}.get(s["id"])
         out["connect"] = dict(s["connect"], connected=bool(checker and checker()))
     return out
 
@@ -4639,62 +4621,6 @@ def xbox_connect(body: dict = Body(...)):
     return {"ok": True, "account": None}
 
 
-def _nintendo_connected():
-    """(bool) True if a Nintendo session_token has been cached (.nintendo/tokens.json)."""
-    tokf = os.path.join(DATA, ".nintendo", "tokens.json")
-    if not os.path.exists(tokf):
-        return False
-    try:
-        import json as _json
-        return bool(_json.load(open(tokf)).get("session_token"))
-    except Exception:                            # noqa: BLE001
-        return False
-
-
-@app.post("/api/services/nintendo/authorize")
-def nintendo_authorize():
-    """Start Nintendo's PKCE login: nintendo_owned.py --authorize mints the sign-in
-    URL and stashes the matching verifier server-side. The UI opens the returned URL."""
-    try:
-        r = subprocess.run([sys.executable, os.path.join(DIR, "nintendo_owned.py"),
-                            "--authorize"], capture_output=True, text=True,
-                           timeout=30, cwd=DIR)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return {"ok": False, "error": "Couldn't start Nintendo login: %s" % e}
-    url = (r.stdout or "").strip().splitlines()[-1:] or [""]
-    if not url[0].startswith("https://"):
-        return {"ok": False, "error": (r.stderr or "no URL produced").strip()[-200:]}
-    return {"ok": True, "url": url[0]}
-
-
-@app.post("/api/services/nintendo/login")
-def nintendo_connect(body: dict = Body(...)):
-    """Accept the copied 'Select this account' link (or the bare session_token_code)
-    and hand it to nintendo_owned.py --login, which exchanges it for a durable
-    session token that refreshes automatically from then on."""
-    pasted = ((body or {}).get("value") or "").strip()
-    if not pasted:
-        raise HTTPException(400, "paste the link you copied from the Nintendo page")
-    try:
-        r = subprocess.run([sys.executable, os.path.join(DIR, "nintendo_owned.py"),
-                            "--login", pasted],
-                           capture_output=True, text=True, timeout=60, cwd=DIR)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return {"ok": False, "account": None, "error": "Couldn't reach Nintendo: %s" % e}
-    if r.returncode != 0 or not _nintendo_connected():
-        detail = (r.stderr or "").strip().splitlines()[-1:] or [""]
-        return {"ok": False, "account": None,
-                "error": "That didn't work — the code is short-lived, so click Get "
-                         "Nintendo code again for a fresh sign-in and re-copy the link. "
-                         "(%s)" % detail[0]}
-    # pull the nickname out of "# nintendo: logged in as <name> ✓" if present
-    acct = None
-    for ln in (r.stderr or "").splitlines():
-        if "logged in as" in ln:
-            acct = ln.split("logged in as", 1)[1].replace("✓", "").strip()
-    return {"ok": True, "account": acct}
-
-
 # Device-code flow — the reliable Xbox connect: no address-bar code to race. We
 # hold the (secret) device_code server-side; the UI only ever sees the short
 # user_code and polls /poll until Microsoft reports the sign-in is complete.
@@ -4756,7 +4682,6 @@ SYNC_SPECS = {
     "ea":    ("ea_owned.py",    "ea_games.tsv",    True),
     "psn":   ("psn_owned.py",   "psn_games.tsv",   True),
     "xbox":  ("xbox_owned.py",  "xbox_games.tsv",  True),
-    "nintendo": ("nintendo_owned.py", "nintendo_games.tsv", True),
 }
 
 # Stores that also expose a WISHLIST (Discover "Wanted"). Pulled alongside owned
@@ -4789,8 +4714,6 @@ def _sync_ready(sid):
         return _psn_connected()
     if sid == "xbox":
         return _xbox_connected()
-    if sid == "nintendo":
-        return _nintendo_connected()
     return False
 
 

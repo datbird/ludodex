@@ -11,7 +11,6 @@ export const PROVIDER_COLORS: Record<string, string> = {
   epic: '#9aa0a6',
   xbox: '#107c10',
   psn: '#0070d1',
-  nintendo: '#e60012',
   ea: '#ff5252',
   itch: '#fa5c5c',
   ubisoft: '#1f9fe0',
