@@ -768,10 +768,16 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
            "AND md.chosen=1 AND md.kind='cover'%s LIMIT 1)")
     if has_ek:
         _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
-        _neutral = " AND COALESCE(md.system,'')=''"
+        # neutral (platform-agnostic store/IGDB) art belongs to the IGDB-resolved game.
+        # An era-separated entry (base_key != norm_key) is a DIFFERENT game that merely
+        # shares the title-key, so it must NOT borrow the modern game's neutral cover —
+        # it acts as zero media unless it has its own console art. (g.* outer refs are
+        # legal in a subquery WHERE; only ORDER BY forbids them.)
+        _sep_ok = (" AND g.base_key=g.norm_key" if _has_col(con, "games", "base_key") else "")
+        _neutral = " AND COALESCE(md.system,'')=''" + _sep_ok
         cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ") AS cover_v, ")
-        # has_cover reflects SERVABLE art (own console or neutral), so a card with only
-        # another console's art shows the placeholder, not a broken/foreign image.
+        # has_cover reflects SERVABLE art (own console or gated neutral), so a card with
+        # only another console's art shows the placeholder, not a broken/foreign image.
         has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
                    "md.chosen=1 AND md.kind='cover'" + _own + ") OR EXISTS(SELECT 1 FROM "
                    "m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 AND "
@@ -921,9 +927,12 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
            "AND md.chosen=1 AND md.kind='cover'%s LIMIT 1)")
     _um = ("(SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE um.norm_key=g.norm_key "
            "AND um.kind='cover' ORDER BY um.created DESC LIMIT 1)")
-    # own console art or platform-neutral store art only — never another console's cover
+    # own console art or platform-neutral store art only — never another console's cover.
+    # Era-separated entries (base_key != norm_key) forfeit the neutral cover too: it
+    # belongs to the modern IGDB-resolved game, not the retro title sharing its key.
     _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
-    _neutral = " AND COALESCE(md.system,'')=''"
+    _neutral = (" AND COALESCE(md.system,'')=''"
+                + (" AND g.base_key=g.norm_key" if _has_col(con, "games", "base_key") else ""))
     if has_ek:
         cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ") AS cover_v ")
         has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
@@ -3107,10 +3116,15 @@ def game_detail(norm_key: str):
         links = [dict(r) for r in con.execute(
             "SELECT provider, provider_id, slug, url FROM metadata_links "
             "WHERE game_id=?", (gid,))]
-        # media kinds available to THIS entry: its own console's chosen art + neutral
+        # media kinds available to THIS entry: its own console's chosen art, plus
+        # platform-neutral store/IGDB art — UNLESS this is an era-separated entry
+        # (base_key != norm_key), which forfeits the neutral art (it belongs to the
+        # modern game sharing the key) and acts as zero media without its own console art.
+        _sep = ("base_key" in _keys and g["base_key"] and g["base_key"] != base)
+        _neu = "" if _sep else " OR COALESCE(system,'')=''"
         media_kinds = [r["kind"] for r in con.execute(
             "SELECT DISTINCT kind FROM m.media WHERE norm_key=? AND chosen=1 "
-            "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') ORDER BY kind",
+            "AND (COALESCE(system,'')=?" + _neu + ") ORDER BY kind",
             (base, platform or ""))]
         return {
             "norm_key": base,
@@ -4052,15 +4066,39 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
     rcon = ro(INDEX_DB)
     try:
         if platform:
-            # serve ONLY this entry's own console art, or platform-neutral store/IGDB
-            # art (system NULL/'') — never another console's cover. No match → 404 →
-            # the UI shows a placeholder rather than e.g. a SNES box on a 32X entry.
-            r = rcon.execute(
-                "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
-                "WHERE norm_key=? AND kind=? AND chosen=1 "
-                "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') "
-                "ORDER BY (COALESCE(system,'')=?) DESC LIMIT 1",
-                (base, kind, platform, platform)).fetchone()
+            # Era-separated entries (base_key != norm_key) forfeit platform-neutral art:
+            # it belongs to the modern IGDB-resolved game sharing this norm_key, so a
+            # retro title (e.g. Portal/Amiga vs Valve's Portal) must show only its OWN
+            # console art or nothing — never borrow the modern cover. base_key lives in
+            # the catalog db, not the media index, so a tiny separate ro lookup decides.
+            separated = False
+            try:
+                lcon = ro(LIBRARY_DB)
+                try:
+                    separated = lcon.execute(
+                        "SELECT 1 FROM games WHERE norm_key=? AND platform=? "
+                        "AND base_key IS NOT NULL AND base_key<>norm_key LIMIT 1",
+                        (base, platform)).fetchone() is not None
+                finally:
+                    lcon.close()
+            except sqlite3.OperationalError:
+                separated = False   # pre-rebuild catalog without base_key column
+            if separated:
+                # own console art ONLY (no neutral fallback)
+                r = rcon.execute(
+                    "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
+                    "WHERE norm_key=? AND kind=? AND chosen=1 AND COALESCE(system,'')=? "
+                    "LIMIT 1", (base, kind, platform)).fetchone()
+            else:
+                # serve ONLY this entry's own console art, or platform-neutral store/IGDB
+                # art (system NULL/'') — never another console's cover. No match → 404 →
+                # the UI shows a placeholder rather than e.g. a SNES box on a 32X entry.
+                r = rcon.execute(
+                    "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
+                    "WHERE norm_key=? AND kind=? AND chosen=1 "
+                    "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') "
+                    "ORDER BY (COALESCE(system,'')=?) DESC LIMIT 1",
+                    (base, kind, platform, platform)).fetchone()
         else:
             # bare norm_key (legacy callers / exporters): no platform context
             r = rcon.execute(
