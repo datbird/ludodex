@@ -479,10 +479,15 @@ for _b, _ents in _by_base.items():
     _y = _years.get(_b)
     # a "home" sibling = a store/PC entry or an emulation entry on non-handheld hardware
     _has_home = any(_st or not console_eras.is_handheld(_p) for _p, _st in _ents)
+    # a real OWNED store/PC sibling anchors the modern release year. Without one, `_y`
+    # is just a bare IGDB name-match (often to a modern same-named game you don't own),
+    # which must NOT split legit same-era console ports apart (e.g. Gods on Genesis +
+    # SNES + Amiga all normalize to "gods" — one game, three platforms, not three games).
+    _has_store = any(_st for _p, _st in _ents)
     for _p, _st in _ents:
         if _st:
             continue            # store entries are authoritative, never separated
-        _impossible = bool(_y and console_eras.impossible(_p, _y))
+        _impossible = bool(_y and _has_store and console_eras.impossible(_p, _y))
         _stray = _has_home and console_eras.is_retro_handheld(_p)
         # only separate when a DIFFERENT home sibling exists (so this really is a
         # distinct game, not just the game's own platform)
