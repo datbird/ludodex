@@ -769,13 +769,11 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     if has_ek:
         _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
         _neutral = " AND COALESCE(md.system,'')=''"
-        cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ") AS cover_v, ")
-        # has_cover reflects SERVABLE art (own console or neutral), so a card with only
-        # another console's art shows the placeholder, not a broken/foreign image.
-        has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
-                   "md.chosen=1 AND md.kind='cover'" + _own + ") OR EXISTS(SELECT 1 FROM "
-                   "m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 AND "
-                   "md.kind='cover'" + _neutral + ")) OR EXISTS(SELECT 1 FROM u.user_media "
+        # own console art, then neutral store art, then any (last resort, no placeholder)
+        cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ","
+                   + _mc % "" + ") AS cover_v, ")
+        has_cov = ("(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
+                   "md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media "
                    "um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
     else:
         cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v, "
@@ -925,12 +923,11 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
     _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
     _neutral = " AND COALESCE(md.system,'')=''"
     if has_ek:
-        cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ") AS cover_v ")
-        has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
-                   "md.chosen=1 AND md.kind='cover'" + _own + ") OR EXISTS(SELECT 1 FROM "
-                   "m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 AND md.kind='cover'"
-                   + _neutral + ")) OR EXISTS(SELECT 1 FROM u.user_media um WHERE "
-                   "um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
+        cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ","
+                   + _mc % "" + ") AS cover_v ")
+        has_cov = ("(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
+                   "md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media "
+                   "um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
     else:
         cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v "
         has_cov = ("(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
@@ -3107,11 +3104,9 @@ def game_detail(norm_key: str):
         links = [dict(r) for r in con.execute(
             "SELECT provider, provider_id, slug, url FROM metadata_links "
             "WHERE game_id=?", (gid,))]
-        # media kinds available to THIS entry: its own console's chosen art + neutral
         media_kinds = [r["kind"] for r in con.execute(
             "SELECT DISTINCT kind FROM m.media WHERE norm_key=? AND chosen=1 "
-            "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') ORDER BY kind",
-            (base, platform or ""))]
+            "ORDER BY kind", (base,))]
         return {
             "norm_key": base,
             "entry_key": g["entry_key"] if "entry_key" in _keys else base,
@@ -3474,23 +3469,16 @@ def media_kinds():
 
 @app.get("/api/games/{norm_key}/media")
 def game_media(norm_key: str):
-    """Every media asset THIS entry has, grouped by kind, annotated with pin state.
-    Filtered to the entry's own console + platform-neutral art (never another
-    console's), so the detail hero/candidates match the platform. `pinned`/`rank`
-    come from the durable (title-level) pin store."""
-    base, platform = _split_entry_key(norm_key)
+    """Every media asset a game has, grouped by kind, annotated with pin state.
+    Keyed by the base title so the detail can fall back to a sibling platform's art
+    when this entry has none of its own. `pinned`/`rank` come from the durable pin
+    store; unpinned assets are excluded from exports downstream."""
+    base, _platform = _split_entry_key(norm_key)
     con = lib()
     try:
-        if platform:
-            rows = con.execute(
-                "SELECT id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1 "
-                "FROM m.media WHERE norm_key=? "
-                "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') ORDER BY kind",
-                (base, platform)).fetchall()
-        else:
-            rows = con.execute(
-                "SELECT id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1 "
-                "FROM m.media WHERE norm_key=? ORDER BY kind", (base,)).fetchall()
+        rows = con.execute(
+            "SELECT id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1 "
+            "FROM m.media WHERE norm_key=? ORDER BY kind", (base,)).fetchall()
     finally:
         con.close()
     pins = _pin_map(base)
@@ -4051,22 +4039,15 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
         return _serve(up[0], up[1], size)
     rcon = ro(INDEX_DB)
     try:
-        if platform:
-            # serve ONLY this entry's own console art, or platform-neutral store/IGDB
-            # art (system NULL/'') — never another console's cover. No match → 404 →
-            # the UI shows a placeholder rather than e.g. a SNES box on a 32X entry.
-            r = rcon.execute(
-                "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
-                "WHERE norm_key=? AND kind=? AND chosen=1 "
-                "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') "
-                "ORDER BY (COALESCE(system,'')=?) DESC LIMIT 1",
-                (base, kind, platform, platform)).fetchone()
-        else:
-            # bare norm_key (legacy callers / exporters): no platform context
-            r = rcon.execute(
-                "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
-                "WHERE norm_key=? AND kind=? AND chosen=1 LIMIT 1",
-                (base, kind)).fetchone()
+        # prefer this entry's own console art, then platform-neutral store art, then
+        # any chosen art as a last resort — a per-platform entry with no art of its own
+        # borrows a sibling's rather than showing a blank placeholder (rare; usually a
+        # data quirk like a ROM indexed under a console it has no scraped art for).
+        r = rcon.execute(
+            "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
+            "WHERE norm_key=? AND kind=? AND chosen=1 "
+            "ORDER BY (COALESCE(system,'')=?) DESC, (COALESCE(system,'')='') DESC LIMIT 1",
+            (base, kind, platform or "")).fetchone()
     finally:
         rcon.close()
     if not r:
