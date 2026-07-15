@@ -759,20 +759,29 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     eksel = ("g.entry_key AS entry_key, g.platform AS platform, " if has_ek
              else "g.norm_key AS entry_key, NULL AS platform, ")
     # cover_v: content hash of the cover THIS entry serves — user upload, then the
-    # entry's own console art, then platform-neutral store art, then any (COALESCE of
-    # WHERE-correlated subqueries; SQLite forbids an outer column ref in a subquery
-    # ORDER BY, so the system preference is expressed as ordered fallbacks, not a sort).
+    # entry's own console art, then platform-neutral store art. NEVER another console's
+    # art (COALESCE of WHERE-correlated subqueries; SQLite forbids an outer column ref
+    # in a subquery ORDER BY, so system preference is ordered fallbacks, not a sort).
     _um = ("(SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE um.norm_key=g.norm_key "
            "AND um.kind='cover' ORDER BY um.created DESC LIMIT 1)")
     _mc = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.norm_key=g.norm_key "
            "AND md.chosen=1 AND md.kind='cover'%s LIMIT 1)")
     if has_ek:
-        cover_v = ("COALESCE(" + _um + "," +
-                   _mc % " AND COALESCE(md.system,'')=COALESCE(g.platform,'')" + "," +
-                   _mc % " AND COALESCE(md.system,'')=''" + "," +
-                   _mc % "" + ") AS cover_v, ")
+        _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
+        _neutral = " AND COALESCE(md.system,'')=''"
+        cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ") AS cover_v, ")
+        # has_cover reflects SERVABLE art (own console or neutral), so a card with only
+        # another console's art shows the placeholder, not a broken/foreign image.
+        has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
+                   "md.chosen=1 AND md.kind='cover'" + _own + ") OR EXISTS(SELECT 1 FROM "
+                   "m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 AND "
+                   "md.kind='cover'" + _neutral + ")) OR EXISTS(SELECT 1 FROM u.user_media "
+                   "um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
     else:
         cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v, "
+        has_cov = ("(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
+                   "md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media "
+                   "um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
     base = (
         "SELECT g.norm_key, " + eksel + "g.canonical_title, g.n_sources, g.n_kinds, "
         "g.sources_summary, g.has_emulation AS is_emulation, " + wsel +
@@ -780,9 +789,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "   WHERE s.game_id=g.id AND s.platform IS NOT NULL AND s.platform!='') AS platforms, "
         "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
         + IDENTIFIED_SQL + " AS identified, "
-        "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
-        "        AND md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM "
-        "  u.user_media um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, "
+        + has_cov
         + cover_v
         + score + " AS ludodex_score, "
         "(SELECT group_concat(ga.kind||char(31)||ga.value, char(30)) "
@@ -914,10 +921,21 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
            "AND md.chosen=1 AND md.kind='cover'%s LIMIT 1)")
     _um = ("(SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE um.norm_key=g.norm_key "
            "AND um.kind='cover' ORDER BY um.created DESC LIMIT 1)")
-    cover_v = ("COALESCE(" + _um + "," +
-               (_mc % " AND COALESCE(md.system,'')=COALESCE(g.platform,'')" + "," +
-                _mc % " AND COALESCE(md.system,'')=''" + "," if has_ek else "") +
-               _mc % "" + ") AS cover_v ")
+    # own console art or platform-neutral store art only — never another console's cover
+    _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
+    _neutral = " AND COALESCE(md.system,'')=''"
+    if has_ek:
+        cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ") AS cover_v ")
+        has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
+                   "md.chosen=1 AND md.kind='cover'" + _own + ") OR EXISTS(SELECT 1 FROM "
+                   "m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 AND md.kind='cover'"
+                   + _neutral + ")) OR EXISTS(SELECT 1 FROM u.user_media um WHERE "
+                   "um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
+    else:
+        cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v "
+        has_cov = ("(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
+                   "md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media "
+                   "um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
     # one showcase row per game (a title shouldn't repeat once per platform); GROUP BY
     # the cross-ref base_key picks a representative entry, its platform driving the cover.
     grp = ("GROUP BY g.base_key " if _has_col(con, "games", "base_key")
@@ -925,9 +943,7 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
     sql = ("SELECT g.norm_key, " + eksel + "g.canonical_title AS title, gs.universal AS score, "
            "g.sources_summary AS sources, "
            "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
-           "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 "
-           "        AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media um "
-           "        WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, "
+           + has_cov
            + cover_v +
            "FROM games g LEFT JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
            + clause + grp
@@ -3172,6 +3188,7 @@ def _game_title(norm_key):
 def set_framing(norm_key: str, body: dict = Body(...)):
     """Position + zoom for one image kind inside its viewport (e.g. the hero
     'background' or a 'cover'). Applied at render time, keyed by norm_key."""
+    norm_key = _split_entry_key(norm_key)[0]
     body = body or {}
     kind = (body.get("kind") or "").strip()
     if not kind:
@@ -3185,7 +3202,7 @@ def set_framing(norm_key: str, body: dict = Body(...)):
 
 @app.delete("/api/games/{norm_key}/framing")
 def clear_framing(norm_key: str, kind: str):
-    framing.clear(DATA, norm_key, kind)
+    framing.clear(DATA, _split_entry_key(norm_key)[0], kind)
     return {"ok": True}
 
 
@@ -3457,18 +3474,27 @@ def media_kinds():
 
 @app.get("/api/games/{norm_key}/media")
 def game_media(norm_key: str):
-    """Every media asset a game has, grouped by kind, annotated with pin state.
-    `pinned`/`rank` come from the durable pin store; unpinned assets are excluded
-    from exports downstream."""
+    """Every media asset THIS entry has, grouped by kind, annotated with pin state.
+    Filtered to the entry's own console + platform-neutral art (never another
+    console's), so the detail hero/candidates match the platform. `pinned`/`rank`
+    come from the durable (title-level) pin store."""
+    base, platform = _split_entry_key(norm_key)
     con = lib()
     try:
-        rows = con.execute(
-            "SELECT id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1 "
-            "FROM m.media WHERE norm_key=? ORDER BY kind", (norm_key,)).fetchall()
+        if platform:
+            rows = con.execute(
+                "SELECT id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1 "
+                "FROM m.media WHERE norm_key=? "
+                "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') ORDER BY kind",
+                (base, platform)).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1 "
+                "FROM m.media WHERE norm_key=? ORDER BY kind", (base,)).fetchall()
     finally:
         con.close()
-    pins = _pin_map(norm_key)
-    noredist = mediaflags.no_redist_for(norm_key)   # (kind,provider,ref) not-shareable
+    pins = _pin_map(base)
+    noredist = mediaflags.no_redist_for(base)   # (kind,provider,ref) not-shareable
     assets = []
     for r in rows:
         # Don't surface assets that can't actually be served on THIS host, or they
@@ -3497,7 +3523,7 @@ def game_media(norm_key: str):
     try:
         urows = uc.execute(
             "SELECT id, kind, sha1, ext, width, height, origin FROM user_media "
-            "WHERE norm_key=? ORDER BY created DESC", (norm_key,)).fetchall()
+            "WHERE norm_key=? ORDER BY created DESC", (base,)).fetchall()
     finally:
         uc.close()
     for r in urows:
@@ -3523,6 +3549,8 @@ def set_pins(norm_key: str, body: dict = Body(...)):
     """Set the pinned assets (and their order) for one kind of a game. Send the
     full ordered list of asset ids you want pinned — this replaces the prior set.
     Scalar kinds keep at most 1; other kinds keep up to MULTI_CAP, in order."""
+    _ekey = norm_key                              # keep entry id for the filtered return
+    norm_key = _split_entry_key(norm_key)[0]      # media/pins are keyed by base title
     kind = body.get("kind")
     ids = body.get("ids") or []
     if not kind:
@@ -3559,7 +3587,7 @@ def set_pins(norm_key: str, body: dict = Body(...)):
             wc.commit()
         finally:
             wc.close()
-    return game_media(norm_key)
+    return game_media(_ekey)
 
 
 def _asset_identity(norm_key, aid):
@@ -3577,6 +3605,8 @@ def _asset_identity(norm_key, aid):
 def ban_media(norm_key: str, aid: int):
     """Ban a provider asset: delete it from the index AND remember never to
     re-download it (media_fetch skips banned refs). Unban later in Settings."""
+    _ekey = norm_key
+    norm_key = _split_entry_key(norm_key)[0]
     ident = _asset_identity(norm_key, aid)
     if not ident:
         raise HTTPException(404, "no such asset")
@@ -3597,20 +3627,22 @@ def ban_media(norm_key: str, aid: int):
         pc.commit()
     finally:
         pc.close()
-    return game_media(norm_key)
+    return game_media(_ekey)
 
 
 @app.post("/api/games/{norm_key}/media/{aid}/redist")
 def set_media_redist(norm_key: str, aid: int, body: dict = Body(default={})):
     """Toggle whether a provider asset is redistributable (copied to other machines
     when games are sent to them). Default is redistributable; this stores the 'no'."""
+    _ekey = norm_key
+    norm_key = _split_entry_key(norm_key)[0]
     ident = _asset_identity(norm_key, aid)
     if not ident:
         raise HTTPException(404, "no such asset")
     kind, provider, ref = ident
     mediaflags.set_redist(norm_key, kind, provider, ref,
                           bool((body or {}).get("redistributable", True)))
-    return game_media(norm_key)
+    return game_media(_ekey)
 
 
 @app.get("/api/media/banned")
@@ -3684,6 +3716,8 @@ def _umedia_path(norm_key, kind):
 
 def _store_upload(norm_key, kind, data, ext, origin):
     """Write bytes into the content-addressed REPO and index them as a user upload."""
+    _ekey = norm_key
+    norm_key = _split_entry_key(norm_key)[0]
     if kind not in media.KINDS:
         raise HTTPException(400, "unknown media kind %r" % kind)
     ext = _norm_ext(ext)
@@ -3723,17 +3757,20 @@ async def upload_media(norm_key: str, kind: str, request: Request,
                        filename: str = Query("")):
     """Upload a media file from the device. The file is sent as the raw request
     body (no multipart); `filename` (or the Content-Type) sets the extension."""
+    _ekey = norm_key                    # _store_upload splits to base internally
     data = await request.body()
     ext = _ext_from(filename, request.headers.get("content-type"))
     if not ext:
         raise HTTPException(400, "couldn't determine file type — include a filename")
     _store_upload(norm_key, kind, data, ext, "upload:" + (filename or ""))
-    return game_media(norm_key)
+    return game_media(_ekey)
 
 
 @app.post("/api/games/{norm_key}/media/{kind}/url")
 def add_media_from_url(norm_key: str, kind: str, body: dict = Body(...)):
     """Download media from a direct URL and store it as a user upload."""
+    _ekey = norm_key
+    norm_key = _split_entry_key(norm_key)[0]
     url = (body or {}).get("url", "").strip()
     if not url or not re.match(r"^https?://", url, re.I):
         raise HTTPException(400, "a valid http(s) URL is required")
@@ -3752,12 +3789,14 @@ def add_media_from_url(norm_key: str, kind: str, body: dict = Body(...)):
     if not ext:
         raise HTTPException(400, "couldn't tell the media type from that URL")
     _store_upload(norm_key, kind, data, ext, url)
-    return game_media(norm_key)
+    return game_media(_ekey)
 
 
 @app.delete("/api/games/{norm_key}/media/user/{asset_id}")
 def delete_user_media(norm_key: str, asset_id: int):
     """Remove a user-uploaded asset (leaves shared repo bytes; they're content-addressed)."""
+    _ekey = norm_key
+    norm_key = _split_entry_key(norm_key)[0]
     uc = _umedia_con()
     try:
         uc.execute("DELETE FROM user_media WHERE id=? AND norm_key=?",
@@ -3765,7 +3804,7 @@ def delete_user_media(norm_key: str, asset_id: int):
         uc.commit()
     finally:
         uc.close()
-    return game_media(norm_key)
+    return game_media(_ekey)
 
 
 @app.get("/api/user-media-asset/{asset_id}")
@@ -4012,13 +4051,22 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
         return _serve(up[0], up[1], size)
     rcon = ro(INDEX_DB)
     try:
-        # chosen is per-system; prefer the entry's platform, then neutral, then any.
-        r = rcon.execute(
-            "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
-            "WHERE norm_key=? AND kind=? AND chosen=1 "
-            "ORDER BY (COALESCE(system,'')=?) DESC, "
-            "         (COALESCE(system,'')='') DESC LIMIT 1",
-            (base, kind, platform or "")).fetchone()
+        if platform:
+            # serve ONLY this entry's own console art, or platform-neutral store/IGDB
+            # art (system NULL/'') — never another console's cover. No match → 404 →
+            # the UI shows a placeholder rather than e.g. a SNES box on a 32X entry.
+            r = rcon.execute(
+                "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
+                "WHERE norm_key=? AND kind=? AND chosen=1 "
+                "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') "
+                "ORDER BY (COALESCE(system,'')=?) DESC LIMIT 1",
+                (base, kind, platform, platform)).fetchone()
+        else:
+            # bare norm_key (legacy callers / exporters): no platform context
+            r = rcon.execute(
+                "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
+                "WHERE norm_key=? AND kind=? AND chosen=1 LIMIT 1",
+                (base, kind)).fetchone()
     finally:
         rcon.close()
     if not r:
@@ -5618,6 +5666,7 @@ def media_asset_by_id(asset_id: int, size: str = Query(None, pattern="^thumb$"))
 @app.post("/api/ai/art-pick/{norm_key}")
 def art_pick(norm_key: str, kind: str = Query("cover")):
     """AI picks the best candidate asset for (norm_key, kind) among providers."""
+    norm_key = _split_entry_key(norm_key)[0]
     if not ai.area_available("art"):
         raise HTTPException(503, "art-pick not configured (set a provider + API key)")
     lcon = ro(LIBRARY_DB)

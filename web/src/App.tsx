@@ -4949,7 +4949,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
   useEffect(() => { reloadDetail() }, [reloadDetail])
   useEffect(() => { setFrames(d?.framing ?? {}) }, [d?.framing])
-  useEffect(() => { setMedia(null); api.mediaLibrary(base).then(setMedia).catch(() => {}) }, [base])
+  useEffect(() => { setMedia(null); api.mediaLibrary(nk).then(setMedia).catch(() => {}) }, [nk])
   useEffect(() => {
     api.mediaKinds().then((r) => {
       setKinds(r.kinds)
@@ -5069,7 +5069,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
               )}
             </div>
 
-            <ArtStrip nk={base} assets={assets} loading={!media}
+            <ArtStrip nk={nk} assets={assets} loading={!media}
               kinds={kinds} onChange={(m) => { setMedia(m); setMediaDirty(true) }}
               frames={frames} onFrame={(k, fr) => setFrames((p) => {
                 const n = { ...p }; if (fr) n[k] = fr; else delete n[k]; return n
