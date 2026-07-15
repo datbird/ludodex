@@ -95,11 +95,15 @@ def select(con, kinds=None):
     # choice on every re-select. Keyed by (norm_key, kind, provider, ref) -> pin rank.
     pin_rank = _load_pins()
     rows = con.execute(
-        "SELECT id, norm_key, kind, provider, ref, matched, ref_type FROM media "
+        "SELECT id, norm_key, system, kind, provider, ref, matched, ref_type FROM media "
         "WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
         % ",".join("'%s'" % k for k in scalar)
     ).fetchall()
-    best = {}                       # (norm_key, kind) -> (sortkey, id)
+    # chosen is per (norm_key, SYSTEM, kind): each console gets its own best asset, and
+    # platform-neutral store art (system NULL/'') is its own bucket — so a per-platform
+    # library entry serves its own console's art (DESIGN §11.4), the serve resolver
+    # falling back to the neutral bucket when a console has none.
+    best = {}                       # (norm_key, system, kind) -> (sortkey, id)
     for r in rows:
         pr = rank[r["kind"]].get(r["provider"], 99)
         pin = pin_rank.get((r["norm_key"], r["kind"], r["provider"], r["ref"]), 1 << 30)
@@ -107,7 +111,7 @@ def select(con, kinds=None):
         # then tie-breakers: catalog-matched, local file over URL, lowest id (stable).
         sk = (pin, pr, 0 if r["matched"] else 1, 0 if r["ref_type"] == "file" else 1,
               r["id"])
-        key = (r["norm_key"], r["kind"])
+        key = (r["norm_key"], r["system"] or "", r["kind"])
         if key not in best or sk < best[key][0]:
             best[key] = (sk, r["id"])
     ids = [i for _, i in best.values()]
@@ -174,7 +178,7 @@ def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
         else:
             # dead reference: drop it from contention and promote the next best
             con.execute("DELETE FROM media WHERE id=?", (r["id"],))
-            _repick(con, r["norm_key"], r["kind"])
+            _repick(con, r["norm_key"], r["kind"], r["system"])
             dead += 1
         if progress:
             sys.stdout.write("PROG\t%d\t%d\t%s\t%s\n" % (i, n, r["norm_key"], r["kind"]))
@@ -187,12 +191,14 @@ def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
     return ok, dead
 
 
-def _repick(con, norm_key, kind):
-    """After a dead asset is removed, choose the next-best for this game+kind."""
+def _repick(con, norm_key, kind, system=None):
+    """After a dead asset is removed, choose the next-best for this game+kind within
+    the SAME system bucket (per-platform siloing, DESIGN §11.4)."""
     rank = {p: i for i, p in enumerate(media.priority(kind))}
     cands = con.execute("SELECT id, provider, matched, ref_type FROM media "
-                        "WHERE norm_key=? AND kind=? AND COALESCE(hidden,0)=0",
-                        (norm_key, kind)).fetchall()
+                        "WHERE norm_key=? AND kind=? AND COALESCE(system,'')=? "
+                        "AND COALESCE(hidden,0)=0",
+                        (norm_key, kind, system or "")).fetchall()
     if not cands:
         return
     best = min(cands, key=lambda r: (rank.get(r["provider"], 99),

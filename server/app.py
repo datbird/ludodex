@@ -672,6 +672,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     identified: 'only' (default, hide bare unidentified ROMs) | 'all' | 'unidentified'."""
     where, args = [], []
     has_w = _has_col(con, "games", "wanted")
+    has_ek = _has_col(con, "games", "entry_key")   # per-platform entries (DESIGN §11)
     if status == "wanted":
         where.append("g.wanted=1" if has_w else "0")
     elif status != "all" and has_w:            # 'owned' (default): hide wishlist-only
@@ -748,8 +749,27 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     # unified Ludodex score is precomputed per game (scores_fetch.py -> sco.game_scores)
     score = "(SELECT gs.universal FROM sco.game_scores gs WHERE gs.norm_key=g.norm_key)"
     wsel = "g.wanted AS wanted, " if has_w else ""
+    # per-platform entry id + platform (fall back to base norm_key on an un-rebuilt
+    # catalog so the server survives a deploy before the first rebuild)
+    eksel = ("g.entry_key AS entry_key, g.platform AS platform, " if has_ek
+             else "g.norm_key AS entry_key, NULL AS platform, ")
+    # cover_v: content hash of the cover THIS entry serves — user upload, then the
+    # entry's own console art, then platform-neutral store art, then any (COALESCE of
+    # WHERE-correlated subqueries; SQLite forbids an outer column ref in a subquery
+    # ORDER BY, so the system preference is expressed as ordered fallbacks, not a sort).
+    _um = ("(SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE um.norm_key=g.norm_key "
+           "AND um.kind='cover' ORDER BY um.created DESC LIMIT 1)")
+    _mc = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.norm_key=g.norm_key "
+           "AND md.chosen=1 AND md.kind='cover'%s LIMIT 1)")
+    if has_ek:
+        cover_v = ("COALESCE(" + _um + "," +
+                   _mc % " AND COALESCE(md.system,'')=COALESCE(g.platform,'')" + "," +
+                   _mc % " AND COALESCE(md.system,'')=''" + "," +
+                   _mc % "" + ") AS cover_v, ")
+    else:
+        cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v, "
     base = (
-        "SELECT g.norm_key, g.canonical_title, g.n_sources, g.n_kinds, "
+        "SELECT g.norm_key, " + eksel + "g.canonical_title, g.n_sources, g.n_kinds, "
         "g.sources_summary, g.has_emulation AS is_emulation, " + wsel +
         "(SELECT group_concat(DISTINCT s.platform) FROM sources s "
         "   WHERE s.game_id=g.id AND s.platform IS NOT NULL AND s.platform!='') AS platforms, "
@@ -758,12 +778,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
         "        AND md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM "
         "  u.user_media um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, "
-        # cover_v = the chosen cover's content hash — a cache-buster so the grid picks
-        # up a re-pinned / newly-chosen cover without a hard refresh (user upload wins).
-        "COALESCE((SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE "
-        "  um.norm_key=g.norm_key AND um.kind='cover' ORDER BY um.created DESC LIMIT 1), "
-        " (SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.norm_key=g.norm_key "
-        "  AND md.chosen=1 AND md.kind='cover' LIMIT 1)) AS cover_v, "
+        + cover_v +
         + score + " AS ludodex_score, "
         "(SELECT group_concat(ga.kind||char(31)||ga.value, char(30)) "
         "   FROM game_attributes ga WHERE ga.game_id=g.id) AS attrs, "
@@ -809,6 +824,8 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
 
     items = [{
         "norm_key": r["norm_key"],
+        "entry_key": r["entry_key"],
+        "platform": r["platform"],
         "title": r["canonical_title"],
         "n_sources": r["n_sources"],
         "n_kinds": r["n_kinds"],
@@ -3005,10 +3022,20 @@ _EDITABLE_ATTR_KINDS = [
 def game_detail(norm_key: str):
     con = lib()
     try:
-        g = con.execute("SELECT * FROM games WHERE norm_key=?", (norm_key,)).fetchone()
+        g, base, platform = _resolve_entry(con, norm_key)
         if not g:
             raise HTTPException(404, "no such game")
         gid = g["id"]
+        _keys = g.keys()
+        # sibling platform entries of the same base game → "also owned on"
+        also = []
+        if "entry_key" in _keys and platform is not None:
+            for row in con.execute(
+                    "SELECT entry_key, platform, canonical_title FROM games "
+                    "WHERE norm_key=? AND entry_key<>? ORDER BY platform",
+                    (base, g["entry_key"])):
+                also.append({"entry_key": row["entry_key"], "platform": row["platform"],
+                             "title": row["canonical_title"]})
         _st = ", state" if _has_col(con, "sources", "state") else ""
         sources = [dict(r) for r in con.execute(
             "SELECT source, platform, source_id, title_raw, detail" + _st +
@@ -3030,7 +3057,7 @@ def game_detail(norm_key: str):
             origins = [o for o in (r["origin"] or "").split(",") if o]
             prov.setdefault(r["kind"], []).append(
                 {"value": r["value"], "origins": origins, "ai": "ai" in origins})
-        ov = overrides.overrides_for(norm_key)   # user's chosen canonical per kind
+        ov = overrides.overrides_for(base)   # user's chosen canonical per kind
         # Reflect the user's pinned / hand-typed canonical value in the DISPLAYED
         # attributes so an edit (or a value added to a blank) actually shows in the
         # detail view. The provenance block below still lists every source value.
@@ -3039,24 +3066,29 @@ def game_detail(norm_key: str):
         links = [dict(r) for r in con.execute(
             "SELECT provider, provider_id, slug, url FROM metadata_links "
             "WHERE game_id=?", (gid,))]
+        # media kinds available to THIS entry: its own console's chosen art + neutral
         media_kinds = [r["kind"] for r in con.execute(
             "SELECT DISTINCT kind FROM m.media WHERE norm_key=? AND chosen=1 "
-            "ORDER BY kind", (norm_key,))]
+            "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') ORDER BY kind",
+            (base, platform or ""))]
         return {
-            "norm_key": norm_key,
+            "norm_key": base,
+            "entry_key": g["entry_key"] if "entry_key" in _keys else base,
+            "platform": platform,
+            "also_owned_on": also,             # sibling platform entries (cross-ref)
             "title": g["canonical_title"],
             "sources": sources,
             "attributes": attrs,
             "attribute_provenance": prov,     # per-value origins (+ ai flag → ✨)
             "attribute_overrides": ov,        # user re-pointed canonical values
             "editable_kinds": _EDITABLE_ATTR_KINDS,   # full vocab for the "all attributes" editor
-            "tags": _game_tags(con, gid, norm_key),
-            "scores": _score_breakdown(con, norm_key),
+            "tags": _game_tags(con, gid, base),
+            "scores": _score_breakdown(con, base),
             "metadata_links": links,
             "media_kinds": media_kinds,
-            "ai_meta": aimeta.finding_for(norm_key),   # AI audit/supplement, if any
-            "ownership": ownership.list_for(DATA, norm_key),  # manual physical/want facts
-            "framing": framing.get_all(DATA, norm_key),       # per-kind image position+zoom
+            "ai_meta": aimeta.finding_for(base),   # AI audit/supplement, if any
+            "ownership": ownership.list_for(DATA, base),  # manual physical/want facts
+            "framing": framing.get_all(DATA, base),       # per-kind image position+zoom
         }
     finally:
         con.close()
@@ -3862,6 +3894,33 @@ def ops_db_fix(body: dict = Body(...)):
     raise HTTPException(400, "unknown action %r (optimize | recover)" % action)
 
 
+# A games entry id is `base_key@platform` (per-platform library entry, DESIGN §11).
+# Split on the LAST '@' — a base norm_key never contains '@', a platform never does.
+# A bare key (no '@') is treated as a base norm_key with no platform preference, so
+# old callers / exporters keep working.
+def _split_entry_key(key):
+    if "@" in key:
+        b, p = key.rsplit("@", 1)
+        return b, p
+    return key, None
+
+
+def _resolve_entry(con, key):
+    """Resolve a URL key to (games row, base norm_key, platform). Accepts an entry_key
+    `base@platform` or a bare base norm_key (legacy → the first/only entry for it).
+    Tolerant of an un-rebuilt catalog with no entry_key column."""
+    base, platform = _split_entry_key(key)
+    if _has_col(con, "games", "entry_key"):
+        row = con.execute("SELECT * FROM games WHERE entry_key=?", (key,)).fetchone()
+        if row:
+            return row, row["norm_key"], row["platform"]
+        row = con.execute("SELECT * FROM games WHERE norm_key=? LIMIT 1",
+                          (base,)).fetchone()
+        return row, base, (row["platform"] if row else platform)
+    row = con.execute("SELECT * FROM games WHERE norm_key=? LIMIT 1", (key,)).fetchone()
+    return row, key, None
+
+
 # ------------------------------------------------------------------- media resolver
 def _render_pdf_thumb(src, dst, px=400):
     """Render page 1 of a PDF to a JPEG thumbnail at `dst` (PyMuPDF, no system deps)
@@ -3908,7 +3967,12 @@ def _serve(path, ext, size):
 
 @app.get("/api/media/{norm_key}/{kind}")
 def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thumb$")):
-    """Resolve + stream the chosen asset for (norm_key, kind).
+    """Resolve + stream the chosen asset for a library entry + kind.
+
+    `norm_key` may be an entry id `base@platform` (per-platform library entry) or a
+    bare base norm_key. Media is siloed by system: an entry serves its own console's
+    chosen art, falling back to platform-neutral store art (system NULL) — so a
+    TurboGrafx entry never shows a Game Boy cover (DESIGN §11.4).
 
     1. chosen row with sha1 + repo file present     -> stream it.
     2. chosen URL ref not yet materialized          -> fetch, cache, backfill, stream.
@@ -3917,15 +3981,19 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
     A user upload for this kind always wins (most recent), so uploads take effect
     immediately without a pipeline re-run.
     """
-    up = _umedia_path(norm_key, kind)
+    base, platform = _split_entry_key(norm_key)
+    up = _umedia_path(base, kind)
     if up:
         return _serve(up[0], up[1], size)
     rcon = ro(INDEX_DB)
     try:
+        # chosen is per-system; prefer the entry's platform, then neutral, then any.
         r = rcon.execute(
             "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
-            "WHERE norm_key=? AND kind=? AND chosen=1 LIMIT 1",
-            (norm_key, kind)).fetchone()
+            "WHERE norm_key=? AND kind=? AND chosen=1 "
+            "ORDER BY (COALESCE(system,'')=?) DESC, "
+            "         (COALESCE(system,'')='') DESC LIMIT 1",
+            (base, kind, platform or "")).fetchone()
     finally:
         rcon.close()
     if not r:
