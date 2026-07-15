@@ -391,6 +391,18 @@ fan-out) → `media_choose.py` + media resolver (key on system) → `server/app.
 schema → exporters / PocketBase sync (`entry_key`) → UI (Xbox setting, "also owned on"
 strip). Verified end-to-end via a rebuild against real data.
 
+### 11.8 Rebuild concurrency — build-to-temp, atomic-swap (invariant)
+
+`build_library` is a full catalog regeneration and runs while the server keeps serving
+reads. **It must never write `game-library.sqlite` in place.** Doing so held the db locked
+for the entire rebuild (~10 min on the array) and every concurrent `/api` read threw
+`database is locked`. The rule: **build into `game-library.sqlite.building`, then
+`os.replace()` it in atomically at the very end** — readers always see a complete catalog
+(the old one until the swap, the new one after), and a crashed rebuild leaves the old
+catalog intact. Any large SQLite writer added here follows the same pattern. Server read
+connections (`ro()`) also carry `busy_timeout` so a brief lock from another pipeline
+writer (scores / media backfill) waits rather than erroring.
+
 ---
 
 ## 12. Roadmap / docket
