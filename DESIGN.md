@@ -303,7 +303,97 @@ Two axes run through all of it: **`origin`** (detected vs manual) and **`actor`*
 
 ---
 
-## 11. Roadmap / docket
+## 11. Per-platform library entries — the ports model
+
+**Decision (2026-07-15).** The library unit is **one entry per `(game, platform)`**, not
+one entry per game. Bubsy on Genesis, SNES, Game Boy, TurboGrafx and PC is **five
+entries**, cross-linked. This is the KISS fix for platform-blind media (a TurboGrafx
+entry can only ever hold TurboGrafx art) and matches what collectors expect — each
+platform is its own thing.
+
+### 11.1 Identity — platform is the axis, source and OS are not
+
+Three axes, only one is identity:
+
+| Axis | Field | Role | Cardinality per entry |
+|------|-------|------|-----------------------|
+| **Platform** | `sources.platform` (derived) | **identity** — one entry per value | 1 |
+| **Source** | `sources.source` | provenance ("owned via") | many |
+| **OS** | `os.sqlite` (win/mac/linux) | support metadata | many, attribute only |
+
+- Two sources on the **same** platform **dedupe** into one entry (Steam **and** GOG of
+  the same PC game → one `pc` entry with two source rows).
+- OS never splits an entry (a PC game on Windows+Linux is still one `pc` entry).
+
+### 11.2 Platform derivation — inherent to the source
+
+The store *is* the platform; only Xbox needed a judgment call. `build_library.add()`
+derives the entry platform (replacing the old `else source` default):
+
+| source | → entry platform |
+|--------|------------------|
+| steam, gog, epic, itch, ea | **`pc`** |
+| xbox | **`xbox`** (default) or `pc` — per the `xbox_platform` setting |
+| psn | as emitted (`ps4` / `ps5`) |
+| emulation / archive | as emitted (per console) |
+
+`PC_STORES = {steam, gog, epic, itch, ea}` → always `pc`. Nintendo-account source is
+**removed** (§11.6); Switch ownership comes via manual per-platform ownership.
+
+### 11.3 Entry key & cross-reference
+
+`norm_key` splits into two roles:
+
+- **`base_key`** — the old title `norm_key`. Retained on every entry. **Groups
+  ports:** "also owned on" = *other entries sharing `base_key`*.
+- **`entry_key = f"{base_key}@{platform}"`** — the per-entry identity used everywhere a
+  single opaque id is passed (API routes, media/ownership/pin/framing keys). Split on
+  the **last** `@` (base_key is normalised without `@`; platform has no `@`).
+
+**Shared vs per-entry.** Title-level metadata (IGDB description/genre/attributes) is the
+same across platforms → keyed by **`base_key`** and fanned across its entries at merge
+time. Ownership, installs, pins, framing and **media choice** are **per-entry**
+(platform-specific).
+
+### 11.4 Media siloing (fixes the wrong-cover bug)
+
+`media` already carries `system`. An entry's media = `media WHERE norm_key=base_key AND
+system ⇔ platform`; the chooser/`_repick` key on **`(base_key, system, kind)`** and the
+`/api/media/{entry_key}/{kind}` resolver serves that entry's system only, falling back
+to platform-neutral store art (`system IS NULL`) when a console has none.
+
+### 11.5 Xbox platform setting
+
+Config **`xbox_platform`** = `xbox` (default) | `pc`, surfaced at **Settings → Stores →
+Xbox**. It only sets the **bulk-inbound** bucket for the Xbox sync. Independent of it,
+**manual per-platform ownership can mark a game owned on Xbox AND PC** (or either) — the
+setting is the default, manual is unconstrained.
+
+### 11.6 Migration & consequences
+
+- `build_library` regenerates the catalog from `sources` every run → the split happens
+  on the next rebuild; no catalog data migration. **`ownership.sqlite` re-keys** from
+  `norm_key` → `(base_key, platform)` (one-time).
+- **Game count rises** (multi-platform titles multiply; ROM-count grouping shifts) —
+  expected, not a bug.
+- By this rule a game owned on **PS4 and PS5 becomes two entries** (same logic as PC,
+  applied to console generations). Foldable later via a one-row change to §11.2 if
+  desired.
+- The **Uno/Bubsy era-split** logic (peeling platforms *within* an entry) largely
+  retires — platforms are separate entries now; it degrades to optional cross-ref
+  hygiene.
+
+### 11.7 Implementation surface
+
+`build_library.py` (derivation, entry key, write-out, `has_*`/summary per entry, attr
+fan-out) → `media_choose.py` + media resolver (key on system) → `server/app.py` (queries
++ routes on `entry_key`, "also owned on" grouped by `base_key`) → `ownership.sqlite`
+schema → exporters / PocketBase sync (`entry_key`) → UI (Xbox setting, "also owned on"
+strip). Verified end-to-end via a rebuild against real data.
+
+---
+
+## 12. Roadmap / docket
 
 ### ✅ Built (foundation)
 - Canonical deduped catalog (`norm_key`); sources steam·gog·epic·itch·**ea**·emulation.
