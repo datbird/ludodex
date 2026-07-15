@@ -314,8 +314,13 @@ def cf_access_unmap(request: Request, body: dict = Body(...)):
 
 # ----------------------------------------------------------------------------- db
 def ro(path):
-    """Open a SQLite db read-only (one connection per request — cheap, thread-safe)."""
-    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    """Open a SQLite db read-only (one connection per request — cheap, thread-safe).
+    busy_timeout: if a writer briefly holds the db (a pipeline pass mid-write), wait a
+    few seconds rather than throwing 'database is locked' at the caller. The catalog
+    rebuild itself no longer locks (build_library swaps a temp db in atomically), but
+    this covers the other stores (scores, media backfill, etc.) writing concurrently."""
+    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=10)
+    con.execute("PRAGMA busy_timeout=8000")
     con.row_factory = sqlite3.Row
     return con
 

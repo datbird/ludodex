@@ -497,9 +497,17 @@ if _sep:
 
 
 # ---- write ----
-if os.path.exists(OUT):
-    os.remove(OUT)
-con = sqlite3.connect(OUT)
+# Build into a TEMP db and atomically swap it in at the very end, so a reader (the
+# server serving the library while a sync rebuilds) always sees a COMPLETE catalog —
+# the old one until the swap, the new one after — and never a locked or half-built
+# file. A single in-place transaction here held game-library.sqlite locked for the
+# whole rebuild (~10 min on the array), throwing "database is locked" at every
+# concurrent /api read. The swap also makes a crashed rebuild non-destructive (the
+# old catalog survives). Same directory as OUT => os.replace is atomic.
+TMP = OUT + ".building"
+if os.path.exists(TMP):
+    os.remove(TMP)
+con = sqlite3.connect(TMP)
 cur = con.cursor()
 cur.executescript("""
 CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
@@ -911,3 +919,6 @@ if n_attr:
 print("# total unique games: %d (%d available from >1 source KIND)" % (tot, multi),
       file=sys.stderr)
 con.close()
+# atomic swap: readers see the OLD catalog until this instant, then the NEW one —
+# no lock window, no half-built reads (see the TMP note above).
+os.replace(TMP, OUT)
