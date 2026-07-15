@@ -430,6 +430,72 @@ for _ws in ("steam", "gog"):
         carry_wishlist(_ws)                    # keep prior wanted alive
 
 
+# ---- era / handheld separation (DESIGN §11.6) ----
+# Two DIFFERENT games that normalize to the same title (a ~1994 Game Boy "Uno" vs the
+# 2016 Steam "UNO"; a retro-handheld port vs the home version) are already SEPARATE
+# per-platform entries, but they still share a base norm_key — so title-level metadata
+# (IGDB) would bleed across them and they'd cross-ref as "also owned on". Give the
+# retro / era-impossible EMULATION entry a distinct CROSS-REF base_key (a private
+# suffix) so it neither shares metadata nor cross-refs. norm_key stays the real title
+# key (media is indexed by it, siloed by system), so only the grouping key changes.
+def _igdb_years():
+    """base norm_key -> earliest IGDB release year (for the era check)."""
+    ry = {}
+    _cache = os.path.join(DATA, "metadata-cache.sqlite")
+    if not os.path.exists(_cache):
+        return ry
+    _c = sqlite3.connect(_cache)
+    try:
+        rows = _c.execute("SELECT r.norm_key, m.payload_json FROM igdb_resolution r "
+                          "JOIN igdb_meta m ON m.igdb_id=r.igdb_id WHERE r.igdb_id>0")
+        for _nk, _payload in rows:
+            try:
+                _rec = igdb_map(json.loads(_payload))
+            except Exception:
+                continue
+            _y = _rec.get("release_year") or str(_rec.get("release_date") or "")[:4]
+            try:
+                _y = int(str(_y)[:4])
+            except (TypeError, ValueError):
+                continue
+            if _y and (_nk not in ry or _y < ry[_nk]):
+                ry[_nk] = _y
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        _c.close()
+    return ry
+
+
+_years = _igdb_years()
+_by_base = {}
+for (_b, _p), _g in games.items():
+    _is_store = any(s[0] not in ("emulation", "archive") for s in _g["sources"])
+    _by_base.setdefault(_b, []).append((_p, _is_store))
+_sep = []                       # (old_ekey, new_base)
+for _b, _ents in _by_base.items():
+    if len(_ents) < 2:
+        continue                # a single-platform game is never "two games"
+    _y = _years.get(_b)
+    # a "home" sibling = a store/PC entry or an emulation entry on non-handheld hardware
+    _has_home = any(_st or not console_eras.is_handheld(_p) for _p, _st in _ents)
+    for _p, _st in _ents:
+        if _st:
+            continue            # store entries are authoritative, never separated
+        _impossible = bool(_y and console_eras.impossible(_p, _y))
+        _stray = _has_home and console_eras.is_retro_handheld(_p)
+        # only separate when a DIFFERENT home sibling exists (so this really is a
+        # distinct game, not just the game's own platform)
+        _other_home = any((_op != _p) and (_os or not console_eras.is_handheld(_op))
+                          for _op, _os in _ents)
+        if (_impossible or _stray) and _other_home:
+            _sep.append(((_b, _p), _b + "\x1f" + _p))
+sep_base = {ekey: newbase for ekey, newbase in _sep}   # (norm_key, plat) -> cross-ref base_key
+if _sep:
+    print("# era/handheld separation: split %d era-mismatched entr(y/ies) off their "
+          "shared cross-ref key" % len(_sep), file=sys.stderr)
+
+
 # ---- write ----
 if os.path.exists(OUT):
     os.remove(OUT)
@@ -438,6 +504,7 @@ cur = con.cursor()
 cur.executescript("""
 CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
   platform TEXT, entry_key TEXT,   -- one entry per (norm_key, platform); entry_key = norm_key@platform
+  base_key TEXT,                   -- cross-ref group ("also owned on" + metadata fan-out); = norm_key unless era-separated
   n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
   has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
   has_archive INT, in_playnite INT, in_launchbox INT,
@@ -480,18 +547,22 @@ for (base, plat), g in games.items():
     # a game is owned if ANY source is 'have'; a pure want-only game (e.g. only a
     # manual "want the ROM" fact) is wanted=1 so it lands in the Wanted view.
     owned = any(s[5] == "have" for s in srcs)
+    bkey = sep_base.get((base, plat), base)     # cross-ref/metadata key (usually = base)
     cur.execute(
-        "INSERT INTO games(canonical_title,norm_key,platform,entry_key,n_sources,n_kinds,"
-        "sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive,"
-        "in_playnite,in_launchbox,wanted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (canonical, base, plat, "%s@%s" % (base, plat), len(srcs), len(kinds), summary,
+        "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,n_sources,"
+        "n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
+        "has_archive,in_playnite,in_launchbox,wanted) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (canonical, base, plat, "%s@%s" % (base, plat), bkey, len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
          int("archive" in kinds), int(base in playnite_keys),
          int(base in launchbox_keys), 0 if owned else 1))
     gid = cur.lastrowid
     key_to_gid[(base, plat)] = gid
-    base_to_gids.setdefault(base, []).append(gid)
+    # metadata/tags fan out by the CROSS-REF key, so era-separated entries don't get
+    # the shared title's metadata (an era-separated bkey != any provider norm_key).
+    base_to_gids.setdefault(bkey, []).append(gid)
     cur.executemany(
         "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,state)"
         " VALUES(?,?,?,?,?,?,?)", [(gid,) + s for s in srcs])
@@ -504,10 +575,11 @@ for key, w in wanted.items():
     stores = sorted({s[0] for s in w["stores"]})
     plat = "pc"                              # store wishlists (steam/gog) are PC
     cur.execute(
-        "INSERT INTO games(canonical_title,norm_key,platform,entry_key,n_sources,n_kinds,"
-        "sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive,"
-        "in_playnite,in_launchbox,wanted) VALUES(?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
-        (w["title"], key, plat, "%s@%s" % (key, plat),
+        "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,n_sources,"
+        "n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
+        "has_archive,in_playnite,in_launchbox,wanted) "
+        "VALUES(?,?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
+        (w["title"], key, plat, "%s@%s" % (key, plat), key,
          "wishlist:" + ",".join(stores)))
     gid = cur.lastrowid
     key_to_gid[(key, plat)] = gid

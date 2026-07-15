@@ -913,9 +913,10 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
                (_mc % " AND COALESCE(md.system,'')=COALESCE(g.platform,'')" + "," +
                 _mc % " AND COALESCE(md.system,'')=''" + "," if has_ek else "") +
                _mc % "" + ") AS cover_v ")
-    # one showcase row per BASE game (a title shouldn't repeat once per platform);
-    # GROUP BY picks a representative entry, its own platform driving the cover.
-    grp = "GROUP BY g.norm_key " if has_ek else ""
+    # one showcase row per game (a title shouldn't repeat once per platform); GROUP BY
+    # the cross-ref base_key picks a representative entry, its platform driving the cover.
+    grp = ("GROUP BY g.base_key " if _has_col(con, "games", "base_key")
+           else "GROUP BY g.norm_key " if has_ek else "")
     sql = ("SELECT g.norm_key, " + eksel + "g.canonical_title AS title, gs.universal AS score, "
            "g.sources_summary AS sources, "
            "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
@@ -3042,13 +3043,17 @@ def game_detail(norm_key: str):
             raise HTTPException(404, "no such game")
         gid = g["id"]
         _keys = g.keys()
-        # sibling platform entries of the same base game → "also owned on"
+        # sibling platform entries of the same game → "also owned on", grouped by the
+        # cross-ref base_key (so an era-separated retro title isn't grouped with the
+        # modern game that happens to share a norm_key).
         also = []
         if "entry_key" in _keys and platform is not None:
+            _grp = g["base_key"] if "base_key" in _keys and g["base_key"] else base
             for row in con.execute(
                     "SELECT entry_key, platform, canonical_title FROM games "
-                    "WHERE norm_key=? AND entry_key<>? ORDER BY platform",
-                    (base, g["entry_key"])):
+                    "WHERE %s=? AND entry_key<>? ORDER BY platform"
+                    % ("base_key" if "base_key" in _keys else "norm_key"),
+                    (_grp, g["entry_key"])):
                 also.append({"entry_key": row["entry_key"], "platform": row["platform"],
                              "title": row["canonical_title"]})
         _st = ", state" if _has_col(con, "sources", "state") else ""
