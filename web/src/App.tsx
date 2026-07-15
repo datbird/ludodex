@@ -1671,6 +1671,10 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
     setPrefs({ ...prefs, manifests_enabled: v })
     try { await api.setPrefs({ manifests_enabled: v }) } catch { load() }
   }
+  const setXbox = async (v: 'xbox' | 'pc') => {
+    setPrefs({ ...prefs, xbox_platform: v })
+    try { await api.setPrefs({ xbox_platform: v }) } catch { load() }
+  }
 
   return (
     <div className="lib-prefs">
@@ -1714,6 +1718,28 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
               : job.ok ? `Downloaded ${job.downloaded} asset${job.downloaded === 1 ? '' : 's'}${job.dead ? `, dropped ${job.dead} dead ref${job.dead === 1 ? '' : 's'}` : ''} ✓`
               : job.finished ? `Failed: ${job.error || 'see server log'}` : ''}</span>}
           <span className="pref-hint media-actions-hint">Applies the setting above to your existing library right now.</span>
+        </div>
+      </div>
+
+      <div className="pref-section">
+        <div className="pref-name">Xbox games — platform</div>
+        <span className="pref-hint">Xbox is the one store that spans PC and console. Choose which
+          platform inbound Xbox games are bucketed as. This only sets the default for a sync — you
+          can always mark a game owned on Xbox <em>and</em> PC by hand. Takes effect on the next sync.</span>
+        <div className="media-modes">
+          {(['xbox', 'pc'] as const).map((v) => (
+            <label key={v} className={'media-mode' + (prefs.xbox_platform === v ? ' on' : '')}>
+              <input type="radio" name="xbox_platform" checked={prefs.xbox_platform === v}
+                onChange={() => setXbox(v)} />
+              <div className="media-mode-body">
+                <div className="media-mode-name">{v === 'xbox' ? 'Xbox' : 'PC'}
+                  {v === 'xbox' && <span className="media-mode-tag">default</span>}</div>
+                <div className="media-mode-hint">{v === 'xbox'
+                  ? 'Its own Xbox platform entry (keeps Xbox separate from your PC library).'
+                  : 'Fold into your PC library (Game Pass / Xbox-app PC titles alongside Steam/GOG).'}</div>
+              </div>
+            </label>
+          ))}
         </div>
       </div>
 

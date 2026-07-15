@@ -1154,6 +1154,7 @@ def get_prefs():
         "media_lang_mode": medialang.mode(),
         "fileops_apply_mode": config.get("fileops_apply_mode") or "preview",
         "manifests_enabled": config.get_bool("manifests_enabled", True),
+        "xbox_platform": config.get("xbox_platform") or "xbox",
         "media_job": _MEDIA_JOB["job"],
     }
 
@@ -1163,6 +1164,8 @@ def set_prefs(body: dict = Body(...)):
     body = body or {}
     if body.get("media_mode") in ("ondemand", "chosen", "all"):
         config.set_("media_mode", body["media_mode"])
+    if body.get("xbox_platform") in ("xbox", "pc"):   # bucket for inbound Xbox games
+        config.set_("xbox_platform", body["xbox_platform"])
     if "media_language" in body:                # "" = no preference (any language)
         config.set_("media_language", str(body["media_language"] or "")[:40])
     if "media_languages" in body:               # ordered 1st,2nd,3rd preference

@@ -316,6 +316,7 @@ export interface Prefs {
   media_lang_mode: MediaLangMode
   fileops_apply_mode: FileopsApplyMode
   manifests_enabled: boolean
+  xbox_platform: 'xbox' | 'pc'   // which platform inbound Xbox games are bucketed as
   media_job: MediaJob | null
 }
 export interface IdentifyCandidate {
