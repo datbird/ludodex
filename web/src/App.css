@@ -1874,7 +1874,9 @@ a.idchip:hover { background: var(--accent-bg); }
 }
 .sl-shuffle:hover { background: var(--accent-bg); color: var(--accent); }
 .sl-shuffle:disabled { cursor: default; opacity: 0.6; }
-.sl-shuffle.spin { animation: sl-spin 0.7s linear infinite; }
+/* spin only the glyph, not the whole rounded-square button */
+.sl-ico { display: inline-block; line-height: 1; }
+.sl-ico.spin { animation: sl-spin 0.7s linear infinite; }
 @keyframes sl-spin { to { transform: rotate(360deg); } }
 .sl-row {
   display: grid; grid-auto-flow: column; grid-auto-columns: 118px;

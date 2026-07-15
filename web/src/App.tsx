@@ -5510,8 +5510,9 @@ function SpotlightSection({ onOpen, prefsTick, onOpenSettings }: {
           <span className="sl-sub">{sp.subtitle}</span>
         </div>
         <div className="sl-actions">
-          <button className={'sl-shuffle' + (loading ? ' spin' : '')} title="Shuffle spotlight"
-            onClick={load} disabled={loading}>⟳</button>
+          <button className="sl-shuffle" title="Shuffle spotlight"
+            onClick={load} disabled={loading}>
+            <span className={'sl-ico' + (loading ? ' spin' : '')}>⟳</span></button>
           <button className="sl-shuffle" title="Spotlight settings"
             onClick={() => onOpenSettings('dashboard')} aria-label="Spotlight settings">⚙</button>
         </div>
