@@ -4808,6 +4808,21 @@ def _tsv_count(out):
         return None
 
 
+# Signatures in a fetcher's error meaning "the stored login died — the user just
+# needs to reconnect" (vs. a transient/network/code failure). When matched, the
+# Sync menu offers the store's connect flow inline instead of a raw stack trace.
+_REAUTH_SIGNS = (
+    "invalid_grant", "invalid refresh token", "session expired", "reconnect",
+    "not connected", "npsso", "re-run --npsso", "sign in again",
+    "token expired", "unauthorized", "http error 401", "http error 403",
+)
+
+
+def _needs_reauth(err):
+    e = (err or "").lower()
+    return any(sig in e for sig in _REAUTH_SIGNS)
+
+
 def _sync_services():
     """Per-source sync metadata for the Sync menu."""
     out = []
@@ -5139,6 +5154,7 @@ def _sync_worker(job, services, media_ids=(), full=False):
             st["state"], st["count"], any_ok = "ok", _tsv_count(tsv), True
         else:
             st["state"], st["error"] = "failed", err
+            st["reauth"] = _needs_reauth(err)
         # Also pull this store's wishlist (Wanted) if it has one, so new wanted
         # items enter the catalog and get identified/enriched alongside owned.
         # Best-effort — a wishlist failure never fails the store's sync.
@@ -5384,7 +5400,8 @@ def sync_run(body: dict = Body(default={})):
                "error": None, "added": None, "full": full,
                "paused": False, "paused_since": None, "paused_total": 0.0,
                "cancel": False, "stopped": False,
-               "services": {sid: {"state": "pending", "count": None, "error": None}
+               "services": {sid: {"state": "pending", "count": None, "error": None,
+                                  "reauth": False}
                             for sid in targets}}
         _SYNC["job"] = job
         _SYNC["proc"] = None

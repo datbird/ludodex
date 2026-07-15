@@ -164,12 +164,27 @@ def access_token():
         env = os.environ.get("PSN_NPSSO")
         if env:
             return connect(env)["access_token"]
-        raise SystemExit("PSN: not connected — run --npsso <token> first")
+        raise SystemExit("PSN not connected — reconnect: paste a fresh npsso token.")
     tok = json.load(open(TOKFILE))
     age = int(time.time()) - tok.get("_saved_at", 0)
     if age < tok.get("expires_in", 3600) - 120:
         return tok["access_token"]
-    tok = refresh_tokens(tok["refresh_token"])   # transparent refresh
+    try:
+        tok = refresh_tokens(tok["refresh_token"])   # transparent refresh
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            pass
+        # Sony revokes refresh tokens early (signing in elsewhere, session
+        # rotation) → invalid_grant. Non-interactive refresh can't recover; the
+        # user must re-paste a fresh npsso. Surface a clean, actionable message
+        # (the Sync menu keys off "reconnect"/"npsso" to offer the connect flow).
+        if e.code in (400, 401) or "invalid_grant" in body:
+            raise SystemExit("PSN session expired — reconnect: paste a fresh npsso "
+                             "token (Sony revoked the old sign-in).")
+        raise
     _save(tok)
     return tok["access_token"]
 

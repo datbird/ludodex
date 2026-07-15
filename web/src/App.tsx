@@ -3803,8 +3803,21 @@ function SyncMenu() {
                             <span>Also sync <b>media</b> (cover art & screenshots), not just titles &amp; metadata</span>
                           </label>
                         )}
-                        {js === 'failed' && job?.services?.[s.id]?.error && (
-                          <div className="sync-err">{job.services[s.id].error}</div>
+                        {js === 'failed' && (
+                          job?.services?.[s.id]?.reauth && s.connect ? (
+                            <div className="sync-auth">
+                              <div className="sync-auth-label">Your {s.name} sign-in expired — reconnect to sync</div>
+                              <ConnectFlow connect={s.connect} onDone={connectThenSync(s.id)} />
+                              {job?.services?.[s.id]?.error && (
+                                <details className="sync-err-details">
+                                  <summary>Details</summary>
+                                  <div className="sync-err">{job.services[s.id].error}</div>
+                                </details>
+                              )}
+                            </div>
+                          ) : job?.services?.[s.id]?.error ? (
+                            <div className="sync-err">{job.services[s.id].error}</div>
+                          ) : null
                         )}
                         {s.needs_auth && s.connect && js !== 'running' && (
                           <div className="sync-auth">

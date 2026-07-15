@@ -381,6 +381,7 @@ export interface SyncJobService {
   state: 'pending' | 'running' | 'ok' | 'failed' | 'skipped'
   count: number | null
   error: string | null
+  reauth?: boolean
 }
 export interface SyncPhase {
   id: string
