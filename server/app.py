@@ -902,20 +902,32 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
                        "WHERE type IN (%s))" % ",".join("?" * len(NON_GAME_TYPES)))
         args += list(NON_GAME_TYPES)
     clause = ("WHERE " + " AND ".join("(%s)" % c for c in clauses) + " ") if clauses else ""
-    sql = ("SELECT g.norm_key, g.canonical_title AS title, gs.universal AS score, "
+    has_ek = _has_col(con, "games", "entry_key")
+    eksel = ("g.entry_key AS entry_key, g.platform AS platform, " if has_ek
+             else "g.norm_key AS entry_key, NULL AS platform, ")
+    _mc = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.norm_key=g.norm_key "
+           "AND md.chosen=1 AND md.kind='cover'%s LIMIT 1)")
+    _um = ("(SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE um.norm_key=g.norm_key "
+           "AND um.kind='cover' ORDER BY um.created DESC LIMIT 1)")
+    cover_v = ("COALESCE(" + _um + "," +
+               (_mc % " AND COALESCE(md.system,'')=COALESCE(g.platform,'')" + "," +
+                _mc % " AND COALESCE(md.system,'')=''" + "," if has_ek else "") +
+               _mc % "" + ") AS cover_v ")
+    # one showcase row per BASE game (a title shouldn't repeat once per platform);
+    # GROUP BY picks a representative entry, its own platform driving the cover.
+    grp = "GROUP BY g.norm_key " if has_ek else ""
+    sql = ("SELECT g.norm_key, " + eksel + "g.canonical_title AS title, gs.universal AS score, "
            "g.sources_summary AS sources, "
            "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
            "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 "
            "        AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media um "
            "        WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, "
-           "COALESCE((SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE "
-           "  um.norm_key=g.norm_key AND um.kind='cover' ORDER BY um.created DESC LIMIT 1), "
-           " (SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.norm_key=g.norm_key "
-           "  AND md.chosen=1 AND md.kind='cover' LIMIT 1)) AS cover_v "
+           + cover_v +
            "FROM games g LEFT JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
-           + clause
+           + clause + grp
            + "ORDER BY " + order + ", g.canonical_title LIMIT ?")
-    return [{"norm_key": r["norm_key"], "title": r["title"], "score": r["score"],
+    return [{"norm_key": r["norm_key"], "entry_key": r["entry_key"],
+             "platform": r["platform"], "title": r["title"], "score": r["score"],
              "sources": r["sources"], "matched": bool(r["matched"]),
              "has_cover": bool(r["has_cover"]), "cover_v": r["cover_v"] or None}
             for r in con.execute(sql, args + [limit])]
