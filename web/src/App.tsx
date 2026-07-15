@@ -956,7 +956,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       {view === 'poster' ? (
         <div className={'grid' + (selectMode ? ' selecting' : '')}>
           {items.map((g) => (
-            <button key={g.norm_key} onClick={() => onCard(g)}
+            <button key={g.entry_key ?? g.norm_key} onClick={() => onCard(g)}
               className={'card'
                 + (selectMode && picked.has(g.norm_key) ? ' picked' : '')
                 + (selectMode && !g.emulation ? ' unselectable' : '')}>
@@ -992,7 +992,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           </thead>
           <tbody>
             {items.map((g) => (
-              <tr key={g.norm_key} onClick={() => onCard(g)}
+              <tr key={g.entry_key ?? g.norm_key} onClick={() => onCard(g)}
                 className={(selectMode && picked.has(g.norm_key) ? 'picked ' : '')
                   + (selectMode && !g.emulation ? 'unselectable' : '')}>
                 {showCol('art') && <td className="gt-art"><Cover g={g} compact /></td>}
@@ -5523,8 +5523,8 @@ function SpotlightSection({ onOpen, prefsTick, onOpenSettings }: {
       </div>
       <div className={'sl-row' + (loading ? ' fading' : '')}>
         {sp.items.map((g, i) => (
-          <button key={g.norm_key} className="sl-card" onClick={() => onOpen(g.norm_key)}
-            title={g.title}>
+          <button key={g.entry_key ?? g.norm_key} className="sl-card"
+            onClick={() => onOpen(g.entry_key ?? g.norm_key)} title={g.title}>
             <span className="sl-rank">{i + 1}</span>
             <div className="sl-art"><Cover g={g} compact /></div>
             {g.score != null && <span className={'sl-score ' + scoreClass(g.score)}>{g.score}</span>}

@@ -489,6 +489,8 @@ export interface OpsStatus { services: OpsService[]; databases: OpsDatabase[] }
 
 export interface SpotlightItem {
   norm_key: string
+  entry_key?: string        // per-platform entry id — the unique, addressable key
+  platform?: string | null
   title: string
   score: number | null
   sources: string
