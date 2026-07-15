@@ -34,6 +34,7 @@ def _mkey(title):
     return _MERGE_ALIAS.get(k, k)
 from playnite import LIST_KINDS, SCALAR_KINDS
 from igdb import map_record as igdb_map   # IGDB metadata-provider record mapping
+from media import norm_system             # canonical console labels (gb->gameboy, …)
 
 # Store ownership TSVs live in the DURABLE data dir (not next to the scripts, which
 # is an ephemeral image layer): otherwise store ownership only survives via catalog
@@ -91,6 +92,33 @@ launchbox_keys = set()  # norm_keys present in the LaunchBox library (provenance
 # (PC operating systems) and `device` (consoles) attributes at write time.
 OS_VALUES = {"windows", "win", "linux", "mac", "macos", "osx"}
 
+# ---- per-platform library entries (DESIGN §11) ----
+# The library unit is one entry per (game, PLATFORM). The platform is inherent to
+# the source: every PC storefront folds to a single 'pc' platform (so Steam + GOG
+# of the same game dedupe into one entry), while console networks / emulation keep
+# their distinct platform (so a game splits per console). Xbox is the only judgment
+# call — user setting `xbox_platform` picks 'xbox' (default) or 'pc'.
+PC_STORES = {"steam", "gog", "epic", "itch", "ea"}
+
+
+def _entry_platform(source, platform):
+    """The platform bucket an owned/wanted row lands in — the entry identity axis."""
+    if source in PC_STORES:
+        return "pc"
+    if source == "xbox":
+        return "pc" if config.get("xbox_platform") == "pc" else "xbox"
+    if source in ("emulation", "archive") and platform:
+        # canonicalize console labels so the same console under different ROM-manager
+        # names (genesis/sega genesis, gb/gameboy, tg16/turbo gfx) is ONE platform,
+        # not several — same normalizer the media index uses, so entry.platform lines
+        # up with media.system for siloing.
+        return norm_system(platform)
+    return platform or source
+
+
+base_present = set()   # every base norm_key that has an owned/wanted entry (for the
+                       # wishlist "already owned?" check, which is title-level)
+
 
 def add(title, source, platform, sid, detail="", state="have"):
     # "Peel apart": a specific source row the user split off a merged entry goes to
@@ -109,37 +137,42 @@ def add(title, source, platform, sid, detail="", state="have"):
     # in `detail` — durable across carry-over rebuilds, later split into os/device
     # attributes. The device arrives as the platform (fresh per-device TSV row) or
     # already in detail (a carried-over, already-normalised source).
+    # entry platform = the identity axis; the row's stored platform becomes it too
+    # (every row in an entry shares one platform). Xbox still carries its device
+    # list in `detail`, split into os/device attributes at write time.
+    ep = _entry_platform(source, platform)
     xbox_devs = set()
     if source == "xbox":
         raw = detail if platform in ("", "xbox") else platform
         xbox_devs = {d.strip() for d in str(raw).split(",")
                      if d.strip() and d.strip() != "xbox"}
-        platform, detail = "xbox", ",".join(sorted(xbox_devs))
-    g = games.get(key)
+        detail = ",".join(sorted(xbox_devs))
+    ekey = (key, ep)                     # one library entry per (game, platform)
+    base_present.add(key)
+    g = games.get(ekey)
     if g is None:
         g = {"title": title, "store_title": None, "sources": []}
-        games[key] = g
+        games[ekey] = g
     # prefer a store title as the canonical (cleaner than tagged ROM names). Only
     # a *have* store source names the game — a want shouldn't rename an owned one.
     if source not in ("emulation", "archive") and state == "have" and not g["store_title"]:
         g["store_title"] = title
-    # dedup source rows by (source, id, platform): a Playnite Steam entry enriches
-    # the Steam pull instead of duplicating it, and — crucially for emulation —
-    # carry-over + ROM-index re-read on every rebuild would otherwise append an
-    # identical (emulation, <system>, <system>) row each time. Distinct consoles
-    # still survive (different platform), so "every console a title is on" is kept
-    # (e.g. Xbox on xbox one + xbox series; a ROM on gamecube + n64).
-    dk = (source, str(sid), platform)
+    # dedup source rows by (source, id) WITHIN the entry — the platform is the
+    # entry's, so a Playnite Steam entry enriches the Steam pull instead of
+    # duplicating it, and a ROM-index re-read won't append an identical row.
+    # Distinct platforms are now distinct ENTRIES, so "every platform a title is
+    # on" is preserved as separate entries sharing the base norm_key.
+    dk = (source, str(sid))
     for i, s in enumerate(g["sources"]):
-        if (s[0], s[2], s[1]) == dk:
+        if (s[0], s[2]) == dk:
             if xbox_devs:                            # union devices into detail
-                have = {d.strip() for d in (s[4] or "").split(",") if d.strip()}
-                g["sources"][i] = s = s[:4] + (",".join(sorted(have | xbox_devs)),) + s[5:]
+                had = {d.strip() for d in (s[4] or "").split(",") if d.strip()}
+                g["sources"][i] = s = s[:4] + (",".join(sorted(had | xbox_devs)),) + s[5:]
             if state == "have" and s[5] != "have":   # have wins over want
                 g["sources"][i] = s[:5] + ("have",)
-            return key
-    g["sources"].append((source, platform, str(sid), title, detail, state))
-    return key
+            return ekey
+    g["sources"].append((source, ep, str(sid), title, detail, state))
+    return ekey
 
 
 def add_attrs(key, source, sid, record, origin=None):
@@ -319,7 +352,7 @@ if config.source_enabled("playnite") and PN_JSON and os.path.exists(PN_JSON):
         detail = " | ".join(str(x) for x in (yr, comp) if x)
         key = add(title, provider, platform, sid, detail)
         if key:
-            playnite_keys.add(key)
+            playnite_keys.add(key[0])       # in_playnite is title-level provenance
             add_attrs(key, provider, sid, rec, "playnite")
 
 
@@ -343,7 +376,7 @@ if config.source_enabled("launchbox") and LB_JSON and os.path.exists(LB_JSON):
         detail = str(rec.get("release_year") or "")
         key = add(title, provider, platform, sid, detail)
         if key:
-            launchbox_keys.add(key)
+            launchbox_keys.add(key[0])      # in_launchbox is title-level provenance
             add_attrs(key, provider, sid, rec, "launchbox")
 
 
@@ -367,7 +400,7 @@ def load_wishlist(path, store):
         if not title:
             continue
         key = _mkey(title)
-        if not key or key in games:          # already owned -> not "wanted"
+        if not key or key in base_present:    # already owned -> not "wanted"
             continue
         w = wanted.setdefault(key, {"title": title, "stores": []})
         if (store, str(sid)) not in {(s[0], s[1]) for s in w["stores"]}:
@@ -380,7 +413,7 @@ def carry_wishlist(store):
     # silently drop them — the same durability owned sources get via carry-over.
     for nk, title, sid in _prev_wanted.get(store, []):
         nk = _MERGE_ALIAS.get(nk, nk)          # fold a merged-away wanted entry
-        if not nk or nk in games:              # now owned -> no longer "wanted"
+        if not nk or nk in base_present:        # now owned -> no longer "wanted"
             continue
         w = wanted.setdefault(nk, {"title": title, "stores": []})
         if (store, str(sid)) not in {(s[0], s[1]) for s in w["stores"]}:
@@ -404,6 +437,7 @@ con = sqlite3.connect(OUT)
 cur = con.cursor()
 cur.executescript("""
 CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
+  platform TEXT, entry_key TEXT,   -- one entry per (norm_key, platform); entry_key = norm_key@platform
   n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
   has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
   has_archive INT, in_playnite INT, in_launchbox INT,
@@ -423,10 +457,11 @@ CREATE TABLE metadata_links (game_id INTEGER, provider TEXT, provider_id TEXT,
 CREATE TABLE game_tags (game_id INTEGER, tag TEXT, origin TEXT);  -- origin: playnite/ludodex/…
 """)
 
-key_to_gid = {}
+key_to_gid = {}                 # (base_key, platform) -> gid   (per-entry attrs)
+base_to_gids = {}               # base_key -> [gid,...]         (title-level metadata fan-out)
 _wtotal = len(games) + len(wanted)      # for the sync UI's live "N/total games" count
 _wrote = 0
-for key, g in games.items():
+for (base, plat), g in games.items():
     canonical = g["store_title"] or g["title"]
     srcs = g["sources"]
     kinds = {}
@@ -446,33 +481,37 @@ for key, g in games.items():
     # manual "want the ROM" fact) is wanted=1 so it lands in the Wanted view.
     owned = any(s[5] == "have" for s in srcs)
     cur.execute(
-        "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,sources_summary,"
-        "has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive,in_playnite,"
-        "in_launchbox,wanted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (canonical, key, len(srcs), len(kinds), summary,
+        "INSERT INTO games(canonical_title,norm_key,platform,entry_key,n_sources,n_kinds,"
+        "sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive,"
+        "in_playnite,in_launchbox,wanted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (canonical, base, plat, "%s@%s" % (base, plat), len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
-         int("archive" in kinds), int(key in playnite_keys),
-         int(key in launchbox_keys), 0 if owned else 1))
+         int("archive" in kinds), int(base in playnite_keys),
+         int(base in launchbox_keys), 0 if owned else 1))
     gid = cur.lastrowid
-    key_to_gid[key] = gid
+    key_to_gid[(base, plat)] = gid
+    base_to_gids.setdefault(base, []).append(gid)
     cur.executemany(
         "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,state)"
         " VALUES(?,?,?,?,?,?,?)", [(gid,) + s for s in srcs])
     _wrote += 1
     if _wrote % 200 == 0:
-        print("PROG\t%d\t%d\t%s\tcatalog" % (_wrote, _wtotal, key), flush=True)
+        print("PROG\t%d\t%d\t%s\tcatalog" % (_wrote, _wtotal, base), flush=True)
 
 # ---- wanted (wishlist-only) games: catalog rows with no owned source, wanted=1 ----
 for key, w in wanted.items():
     stores = sorted({s[0] for s in w["stores"]})
+    plat = "pc"                              # store wishlists (steam/gog) are PC
     cur.execute(
-        "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,sources_summary,"
-        "has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive,in_playnite,"
-        "in_launchbox,wanted) VALUES(?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
-        (w["title"], key, "wishlist:" + ",".join(stores)))
+        "INSERT INTO games(canonical_title,norm_key,platform,entry_key,n_sources,n_kinds,"
+        "sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,has_archive,"
+        "in_playnite,in_launchbox,wanted) VALUES(?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
+        (w["title"], key, plat, "%s@%s" % (key, plat),
+         "wishlist:" + ",".join(stores)))
     gid = cur.lastrowid
-    key_to_gid[key] = gid
+    key_to_gid[(key, plat)] = gid
+    base_to_gids.setdefault(key, []).append(gid)
     cur.executemany("INSERT INTO wanted(game_id,store,store_id,title_raw) "
                     "VALUES(?,?,?,?)", [(gid,) + s for s in w["stores"]])
     _wrote += 1
@@ -533,8 +572,9 @@ if os.path.exists(TAGS_DB):
     tc = sqlite3.connect(TAGS_DB)
     try:
         for nk, tag in tc.execute("SELECT norm_key, tag FROM user_tags"):
-            gid = key_to_gid.get(nk)
-            if gid is not None and tag:
+            if not tag:
+                continue
+            for gid in base_to_gids.get(nk, ()):   # applies to every platform entry
                 tag_map.setdefault(gid, {}).setdefault(str(tag), set()).add("ludodex")
     except sqlite3.OperationalError:
         pass
@@ -546,8 +586,9 @@ if config.metadata_enabled("steamspy") and os.path.exists(STEAM_TAGS_DB):
     stc = sqlite3.connect(STEAM_TAGS_DB)
     try:
         for nk, tag in stc.execute("SELECT norm_key, tag FROM steam_tags"):
-            gid = key_to_gid.get(nk)
-            if gid is not None and tag:
+            if not tag:
+                continue
+            for gid in base_to_gids.get(nk, ()):   # applies to every platform entry
                 tag_map.setdefault(gid, {}).setdefault(str(tag), set()).add("steam")
     except sqlite3.OperationalError:
         pass
@@ -607,30 +648,32 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
         rows = []                   # cache exists but enrich hasn't populated it
     mc.close()
     for nk, iid, slug, payload in rows:
-        gid = key_to_gid.get(nk)
-        if gid is None:
+        gids = base_to_gids.get(nk)          # metadata is title-level → every platform entry
+        if not gids:
             continue
-        url = "https://www.igdb.com/games/%s" % slug if slug else None
-        cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
-                    "slug,url) VALUES(?,?,?,?,?)",
-                    (gid, "igdb", str(iid), slug, url))
-        n_link += 1
         try:
             rec = json.loads(payload)
         except ValueError:
             continue
-        # rename-on-match: adopt the provider's official title for ROM/archive-only
-        # games (their title is just the filename, e.g. "0001 - F-Zero"). Store-owned
-        # games already have clean titles, so leave those alone. norm_key is unchanged
-        # (stays the dedupe key), and the ROM filename stays in the source's title_raw.
+        url = "https://www.igdb.com/games/%s" % slug if slug else None
         name = (rec.get("name") or "").strip()
-        if name:
-            cur.execute(
-                "UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
-                "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
-                "('emulation','archive'))", (name, gid, gid))
-        for kind, val in igdb_map(rec).items():
-            _accum(gid, kind, val, "igdb")
+        mapped = igdb_map(rec)
+        for gid in gids:
+            cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
+                        "slug,url) VALUES(?,?,?,?,?)",
+                        (gid, "igdb", str(iid), slug, url))
+            n_link += 1
+            # rename-on-match: adopt the provider's official title for ROM/archive-only
+            # games (their title is just the filename, e.g. "0001 - F-Zero"). Store-owned
+            # games already have clean titles, so leave those alone. norm_key is unchanged
+            # (stays the dedupe key), and the ROM filename stays in the source's title_raw.
+            if name:
+                cur.execute(
+                    "UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
+                    "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
+                    "('emulation','archive'))", (name, gid, gid))
+            for kind, val in mapped.items():
+                _accum(gid, kind, val, "igdb")
 
 # ScreenScraper (emulation metadata; one scrape yields metadata + media, media is
 # indexed separately). Unioned with IGDB per the merge above.
@@ -647,24 +690,26 @@ if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
     sc.close()
     linked = set()
     for nk, ss_id, payload in ss_rows:
-        gid = key_to_gid.get(nk)
-        if gid is None or not payload:
+        gids = base_to_gids.get(nk)          # metadata is title-level → every platform entry
+        if not gids or not payload:
             continue
-        if ss_id and (gid, ss_id) not in linked:
-            cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
-                        "slug,url) VALUES(?,?,?,?,?)",
-                        (gid, "screenscraper", str(ss_id), None,
-                         "https://www.screenscraper.fr/gameinfos.php?gameid=%s"
-                         % ss_id))
-            linked.add((gid, ss_id))
-            ss_link += 1
         try:
             jeu = json.loads(payload)
         except ValueError:
             continue
-        for kind, val in ss_map(jeu).items():
-            if kind != "name":                      # 'name' isn't an attribute
-                _accum(gid, kind, val, "screenscraper")
+        mapped = ss_map(jeu)
+        for gid in gids:
+            if ss_id and (gid, ss_id) not in linked:
+                cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
+                            "slug,url) VALUES(?,?,?,?,?)",
+                            (gid, "screenscraper", str(ss_id), None,
+                             "https://www.screenscraper.fr/gameinfos.php?gameid=%s"
+                             % ss_id))
+                linked.add((gid, ss_id))
+                ss_link += 1
+            for kind, val in mapped.items():
+                if kind != "name":                  # 'name' isn't an attribute
+                    _accum(gid, kind, val, "screenscraper")
 
 # insert unioned provider attributes — skip any kind an owned source already filled
 _prov_rows = []
@@ -693,22 +738,20 @@ ai_attr = 0
 try:
     import aimeta
     for nk, attrs in aimeta.accepted_supplements().items():
-        gid = key_to_gid.get(nk)
-        if gid is None:
-            continue
-        existing = have.setdefault(gid, set())
-        new_rows = []
-        for kind, val in attrs.items():
-            if kind in existing:
-                continue
-            for v in (val if isinstance(val, list) else [val]):
-                if v not in (None, ""):
-                    new_rows.append((gid, kind, str(v), "ai"))
-            existing.add(kind)
-        if new_rows:
-            cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
-                            "VALUES(?,?,?,?)", new_rows)
-            ai_attr += len(new_rows)
+        for gid in base_to_gids.get(nk, ()):   # title-level → every platform entry
+            existing = have.setdefault(gid, set())
+            new_rows = []
+            for kind, val in attrs.items():
+                if kind in existing:
+                    continue
+                for v in (val if isinstance(val, list) else [val]):
+                    if v not in (None, ""):
+                        new_rows.append((gid, kind, str(v), "ai"))
+                existing.add(kind)
+            if new_rows:
+                cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                                "VALUES(?,?,?,?)", new_rows)
+                ai_attr += len(new_rows)
 except Exception as e:                             # never let AI supplements break a build
     print("# AI supplement merge skipped: %s" % e)
 if ai_attr:
@@ -720,75 +763,13 @@ if ai_attr:
 cur.execute("CREATE INDEX IF NOT EXISTS ix_src_game ON sources(game_id)")
 cur.execute("CREATE INDEX IF NOT EXISTS ix_gattr_game ON game_attributes(game_id)")
 
-# ---- platform-era split: a modern store game can't be on old hardware ----
-# When an entry has a store/IGDB identity dated year Y AND an emulation ROM on a
-# console whose production era can't contain Y, that ROM is a DIFFERENT game that only
-# merged because the titles normalize the same (a ~1994 Game Boy "Uno" folded into the
-# 2016 Steam "UNO"). Peel those ROM rows onto their own entry. Uses first-release year,
-# so a legitimately re-released old game (Sonic 1991 on Genesis + Steam) stays merged.
-def _recompute_game(c, gid):
-    srcs = c.execute("SELECT source, platform, state FROM sources WHERE game_id=?",
-                     (gid,)).fetchall()
-    kinds = {}
-    for source, platform, _state in srcs:
-        kinds.setdefault(source, set())
-        if source in ("emulation", "archive"):
-            kinds[source].add(platform)
-    parts = [g + ":" + ",".join(sorted(x for x in kinds[g] if x))
-             for g in ("emulation", "archive") if g in kinds]
-    parts += sorted(k for k in kinds if k not in ("emulation", "archive"))
-    owned = any(s[2] == "have" for s in srcs)
-    c.execute("UPDATE games SET n_sources=?, n_kinds=?, sources_summary=?, "
-              "has_emulation=?, has_steam=?, has_gog=?, has_epic=?, has_itch=?, "
-              "has_archive=?, wanted=? WHERE id=?",
-              (len(srcs), len(kinds), "; ".join(parts),
-               int("emulation" in kinds), int("steam" in kinds), int("gog" in kinds),
-               int("epic" in kinds), int("itch" in kinds), int("archive" in kinds),
-               0 if owned else 1, gid))
-
-
-_era_splits = 0
-for _gid, _nk, _title in cur.execute(
-        "SELECT id, norm_key, canonical_title FROM games WHERE has_emulation=1").fetchall():
-    _all = cur.execute("SELECT rowid, source, platform FROM sources WHERE game_id=?",
-                       (_gid,)).fetchall()
-    _has_store = any(s not in ("emulation", "archive") for _r, s, _p in _all)
-    # a "home" sibling = a store source, or an emulation/archive ROM on non-handheld
-    # hardware. Its presence means a retro-handheld ROM here is a separate portable port.
-    _has_home = _has_store or any(
-        s in ("emulation", "archive") and not console_eras.is_handheld(p)
-        for _r, s, p in _all)
-    _yr = cur.execute("SELECT value FROM game_attributes WHERE game_id=? AND "
-                      "kind='release_year' LIMIT 1", (_gid,)).fetchone()
-    _y = _yr[0] if _yr else None
-    _bad = []
-    for _rid, _src, _plat in _all:
-        if _src != "emulation":
-            continue
-        # (a) a modern store year that can't exist on this console, or
-        # (b) a retro handheld sitting alongside a home-console/PC version.
-        if (_has_store and _y and console_eras.impossible(_plat, _y)) or \
-                (_has_home and console_eras.is_retro_handheld(_plat)):
-            _bad.append(_rid)
-    if not _bad:
-        continue
-    _new_key = _nk + "\x1femu"                      # deterministic, collision-free
-    _new_gid = key_to_gid.get(_new_key)
-    if _new_gid is None:
-        cur.execute("INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,"
-                    "sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
-                    "has_archive,in_playnite,in_launchbox,wanted) "
-                    "VALUES(?,?,0,0,'',1,0,0,0,0,0,0,0,0)", (_title, _new_key))
-        _new_gid = cur.lastrowid
-        key_to_gid[_new_key] = _new_gid
-    cur.executemany("UPDATE sources SET game_id=? WHERE rowid=?",
-                    [(_new_gid, rid) for rid in _bad])
-    _recompute_game(cur, _gid)
-    _recompute_game(cur, _new_gid)
-    _era_splits += 1
-if _era_splits:
-    print("# platform-era split: peeled era-impossible ROMs off %d store entr(y/ies)"
-          % _era_splits)
+# ---- platform-era split: SUPERSEDED by the per-platform entry model (DESIGN §11).
+# A modern store game and an era-impossible ROM now land in DIFFERENT entries (pc vs
+# the console) by construction, so there's nothing to peel within an entry. What
+# remains — two genuinely different games that share a norm_key (a ~1994 Game Boy
+# "Uno" vs the 2016 Steam "UNO") still share a base_key and thus title-level metadata
+# — is handled by reassigning the retro entry a distinct base_key (follow-up task);
+# tracked so the Uno/Bubsy separation is preserved under the new model.
 
 # ---- (year) disambiguation: when 2+ games share a title but are DIFFERENT release
 # years (remakes / re-releases — Uno 2006 vs 2016, Tomb Raider 1996 vs 2013), append
