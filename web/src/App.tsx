@@ -293,7 +293,7 @@ function NoArt({ title, compact, unmatched }: {
 // fails to load (e.g. a Deck-local file that 404s on this host), render the
 // generated name-placeholder instead.
 function Cover({ g, compact }: {
-  g: { norm_key: string; title: string; has_cover: boolean; identified?: boolean; framing_cover?: Frame }
+  g: { norm_key: string; title: string; has_cover: boolean; identified?: boolean; framing_cover?: Frame; cover_v?: string | null }
   compact?: boolean
 }) {
   const [failed, setFailed] = useState(false)
@@ -304,7 +304,9 @@ function Cover({ g, compact }: {
   // .frame-box would escape to the viewport — and framing a ~40px thumb is
   // pointless anyway — so only apply framing in the full (non-compact) cover.
   const fs = compact ? undefined : frameStyle(g.framing_cover)
-  const img = <img loading="lazy" src={api.mediaUrl(g.norm_key, 'cover', true)} alt=""
+  // key/src carry cover_v so a re-pinned cover swaps in without a hard refresh.
+  const img = <img key={g.cover_v || 'c'} loading="lazy"
+    src={api.mediaUrl(g.norm_key, 'cover', true, g.cover_v)} alt=""
     onError={() => setFailed(true)} />
   return fs ? <div className="frame-box" style={fs}>{img}</div> : img
 }
@@ -1061,7 +1063,8 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       {tab === 'files' && <FilesTab />}
 
-      {selected && <Detail nk={selected} onClose={() => { setSelected(null); refreshStats() }} />}
+      {selected && <Detail nk={selected} onClose={() => { setSelected(null); refreshStats() }}
+        onMediaChanged={() => load(true)} />}
       {showSettings && <Settings onClose={() => setShowSettings(false)}
         onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} user={user}
         initialSection={settingsTarget} />}
@@ -4876,7 +4879,13 @@ function PeelModal({ nk, title, onClose, onPeeled }: {
   )
 }
 
-function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
+function Detail({ nk, onClose, onMediaChanged }: {
+  nk: string; onClose: () => void; onMediaChanged?: () => void
+}) {
+  const [mediaDirty, setMediaDirty] = useState(false)
+  // close, but first refresh the grid/spotlight if the media (e.g. chosen cover)
+  // changed here — so a re-pinned cover shows without a hard refresh.
+  const close = () => { if (mediaDirty) onMediaChanged?.(); onClose() }
   useScrollLock()
   const [d, setD] = useState<GameDetail | null>(null)
   const [media, setMedia] = useState<MediaLibrary | null>(null)
@@ -4936,9 +4945,9 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
   const marquee = bg ? [] : assets.filter((a) => a.is_image && a.kind !== 'logo')
 
   return (
-    <div className="overlay" onClick={onClose}>
+    <div className="overlay" onClick={close}>
       <div className="panel game-panel" onClick={(e) => e.stopPropagation()}>
-        <button className="close" onClick={onClose}>×</button>
+        <button className="close" onClick={close}>×</button>
         {d && (
           <div className="hero-tools" ref={toolsRef}>
             <button className="hero-tools-btn" title="Game tools"
@@ -4998,7 +5007,8 @@ function Detail({ nk, onClose }: { nk: string; onClose: () => void }) {
               )}
             </div>
 
-            <ArtStrip nk={nk} assets={assets} loading={!media} kinds={kinds} onChange={setMedia}
+            <ArtStrip nk={nk} assets={assets} loading={!media}
+              kinds={kinds} onChange={(m) => { setMedia(m); setMediaDirty(true) }}
               frames={frames} onFrame={(k, fr) => setFrames((p) => {
                 const n = { ...p }; if (fr) n[k] = fr; else delete n[k]; return n
               })} />

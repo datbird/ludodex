@@ -16,6 +16,7 @@ export interface GameRow {
   matched: boolean         // cross-referenced to a metadata provider (IGDB/ScreenScraper)
   identified: boolean      // a known title: matched OR from a real store/manual source
   has_cover: boolean
+  cover_v?: string | null  // chosen cover's content hash — cache-buster so a re-pinned cover shows live
   ludodex_score: number | null
   tags: TagRef[]
   attrs?: Record<string, string>   // attribute kind -> value(s), for the optional attribute columns
@@ -486,6 +487,7 @@ export interface SpotlightItem {
   sources: string
   matched: boolean
   has_cover: boolean
+  cover_v?: string | null
 }
 export interface Spotlight {
   kind: string
@@ -813,9 +815,10 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} unban`)
     return r.json() as Promise<{ ok: boolean }>
   },
-  mediaUrl: (nk: string, kind: string, thumb = false) =>
+  mediaUrl: (nk: string, kind: string, thumb = false, v?: string | null) =>
     `/api/media/${encodeURIComponent(nk)}/${encodeURIComponent(kind)}` +
-    (thumb ? '?size=thumb' : ''),
+    (thumb ? '?size=thumb' : '') +
+    (v ? (thumb ? '&' : '?') + 'v=' + encodeURIComponent(v) : ''),
   assetUrl: (id: number, thumb = false) =>
     `/api/media-asset/${id}` + (thumb ? '?size=thumb' : ''),
   artPick: async (nk: string, kind = 'cover') => {

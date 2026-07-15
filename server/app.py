@@ -758,6 +758,12 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
         "        AND md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM "
         "  u.user_media um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, "
+        # cover_v = the chosen cover's content hash — a cache-buster so the grid picks
+        # up a re-pinned / newly-chosen cover without a hard refresh (user upload wins).
+        "COALESCE((SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE "
+        "  um.norm_key=g.norm_key AND um.kind='cover' ORDER BY um.created DESC LIMIT 1), "
+        " (SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.norm_key=g.norm_key "
+        "  AND md.chosen=1 AND md.kind='cover' LIMIT 1)) AS cover_v, "
         + score + " AS ludodex_score, "
         "(SELECT group_concat(ga.kind||char(31)||ga.value, char(30)) "
         "   FROM game_attributes ga WHERE ga.game_id=g.id) AS attrs, "
@@ -812,6 +818,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "matched": bool(r["matched"]),
         "identified": bool(r["identified"]),
         "has_cover": bool(r["has_cover"]),
+        "cover_v": r["cover_v"] or None,
         "ludodex_score": round(r["ludodex_score"]) if r["ludodex_score"] is not None else None,
         "tags": _tags(r),
         "attrs": _attrs(r),
@@ -883,13 +890,18 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
            "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
            "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 "
            "        AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media um "
-           "        WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover "
+           "        WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, "
+           "COALESCE((SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE "
+           "  um.norm_key=g.norm_key AND um.kind='cover' ORDER BY um.created DESC LIMIT 1), "
+           " (SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.norm_key=g.norm_key "
+           "  AND md.chosen=1 AND md.kind='cover' LIMIT 1)) AS cover_v "
            "FROM games g LEFT JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
            + clause
            + "ORDER BY " + order + ", g.canonical_title LIMIT ?")
     return [{"norm_key": r["norm_key"], "title": r["title"], "score": r["score"],
              "sources": r["sources"], "matched": bool(r["matched"]),
-             "has_cover": bool(r["has_cover"])} for r in con.execute(sql, args + [limit])]
+             "has_cover": bool(r["has_cover"]), "cover_v": r["cover_v"] or None}
+            for r in con.execute(sql, args + [limit])]
 
 
 def _spotlight_disabled():
