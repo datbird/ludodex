@@ -510,6 +510,11 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   useEffect(() => {
     refreshStats()
     api.facets().then(setFacets).catch(() => {})
+    // Poll gently so a pending-apply (accepted-not-applied) count surfaces on its own,
+    // rather than only after the user happens to open/close a game — pairs with the
+    // JobMonitor's own poll, which now also scoops up orphaned pending reviews.
+    const t = setInterval(refreshStats, 20000)
+    return () => clearInterval(t)
   }, [refreshStats])
 
   const load = useCallback(async (reset: boolean) => {

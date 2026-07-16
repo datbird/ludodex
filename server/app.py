@@ -2457,7 +2457,9 @@ def _jobs_list():
             ("paused", "partial", "planned") or r["pending"] > 0,
             "deletable": not live})
     _proposed = aimeta.proposed_counts()
+    _shown_runs = set()
     for s in aimeta.scans_list(limit=20):
+        _shown_runs.add(s["id"])
         jid = "aimeta:%d" % s["id"]
         rec = _JOBS.get(jid)
         live = bool(rec and rec["thread"] and rec["thread"].is_alive())
@@ -2486,6 +2488,20 @@ def _jobs_list():
             "when": s["finished"] or s["created"],
             "cancelable": live, "restartable": not live and s["done"] < s["total"],
             "deletable": not live})
+    # Orphaned reviews: proposed findings whose scan_run was deleted / aged past the
+    # listed window still need reviewing, but nothing above points to them — so they'd
+    # stay invisible until some new job jogged the feed. Surface each as a reviewable
+    # entry so the monitor's poll scoops them out on its own (DESIGN: no pending review
+    # is ever stranded). run_id survives on the findings, so Review still opens them.
+    for _rid, _n in _proposed.items():
+        if _rid in _shown_runs or not _n:
+            continue
+        out.append({
+            "id": "aimeta:%d" % _rid, "kind": "aimeta", "run_id": _rid,
+            "label": "Metadata scan — pending review",
+            "status": "done", "detail": "%d to review" % _n, "error": None,
+            "findings": _n, "progress": {"done": 0, "total": 0, "failed": 0},
+            "when": None, "cancelable": False, "restartable": False, "deletable": True})
     # generic one-shot jobs (apply, undo…) not represented above, while live/errored
     shown = {j["id"] for j in out}
     for jid, rec in list(_JOBS.items()):
