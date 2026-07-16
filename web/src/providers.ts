@@ -42,3 +42,14 @@ export function providerLabel(id: string): string {
   const k = (id || '').toLowerCase()
   return LABELS[k] ?? (k ? k.charAt(0).toUpperCase() + k.slice(1) : id)
 }
+
+// Short 1–2 char monogram for a favicon-style brand badge (self-contained — no
+// external logo assets / favicon services). Colored via providerColor().
+const MARKS: Record<string, string> = {
+  igdb: 'IG', screenscraper: 'SS', steam: 'S', gog: 'GG', epic: 'E', xbox: 'X',
+  psn: 'PS', ea: 'EA', itch: 'i', ubisoft: 'U', battlenet: 'B',
+}
+export function providerMark(id: string): string {
+  const k = (id || '').toLowerCase()
+  return MARKS[k] ?? (k ? k.charAt(0).toUpperCase() : '?')
+}

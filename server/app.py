@@ -1030,6 +1030,33 @@ def _spotlight_pool(con):
     return pool or ["overall"]
 
 
+def _warm_spotlight():
+    """Prime the spotlight after a catalog rebuild (or on startup): the atomic swap
+    gives game-library.sqlite a fresh inode (cold OS page cache) and invalidates the
+    mtime-keyed theme-pool cache, so the FIRST dashboard request otherwise pays the
+    cold GROUP-BY scans — while the post-sync media pipeline is still hammering the
+    array. Recompute the pool + run the 'overall' query here (background) so the real
+    request lands warm. Best-effort."""
+    try:
+        con = lib()
+        try:
+            _spotlight_pool(con)                       # repopulate _SPOTLIGHT_POOL_CACHE
+            _spotlight_rows(con, "", [], "gs.universal DESC")  # warm catalog+media+score pages
+        finally:
+            con.close()
+    except Exception as e:                             # never let warming break anything
+        print("spotlight warm: %s" % str(e)[:120], file=sys.stderr)
+
+
+def _warm_spotlight_bg():
+    threading.Thread(target=_warm_spotlight, daemon=True).start()
+
+
+@app.on_event("startup")
+def _startup_warm_spotlight():
+    _warm_spotlight_bg()              # warm on boot so the first dashboard load is snappy
+
+
 def _spotlight_catalog(con):
     """[{id, title, enabled}] for every theme, for the settings on/off list."""
     off = _spotlight_disabled()
@@ -5202,6 +5229,8 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None, job=Non
         errf.seek(0); tail = errf.read().decode("utf-8", "replace").strip()[-300:]
         errf.close(); return False, (tail or "exit %d" % p.returncode)
     errf.close()
+    if os.path.basename(str(script)) == "build_library.py":
+        _warm_spotlight_bg()          # prime the dashboard spotlight after a rebuild
     return True, ""
 
 
@@ -5246,6 +5275,8 @@ def _run_streaming(script, args, on_prog, timeout=3600, job=None):
         return False, "cancelled"
     if timed_out:
         return False, "timed out"
+    if p.returncode == 0 and os.path.basename(str(script)) == "build_library.py":
+        _warm_spotlight_bg()          # prime the dashboard spotlight after a rebuild
     return (p.returncode == 0), ("" if p.returncode == 0 else (tail[-300:] or "exit %d" % p.returncode))
 
 

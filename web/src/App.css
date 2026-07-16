@@ -1911,6 +1911,18 @@ a.idchip:hover { background: var(--accent-bg); }
   transition: opacity 0.2s ease;
 }
 .sl-row.fading { opacity: 0.4; }
+/* first-load skeleton + error (so a slow/failed spotlight isn't a blank void) */
+.sl-loading-txt { opacity: 0.65; }
+.sl-skel-card { aspect-ratio: 3 / 4; border-radius: 8px; border: 1px solid var(--border);
+  background: linear-gradient(90deg, var(--art-bg) 25%, rgba(255,255,255,0.07) 37%, var(--art-bg) 63%);
+  background-size: 400% 100%; animation: sl-shimmer 1.4s ease infinite; }
+@keyframes sl-shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) { .sl-skel-card { animation: none; } }
+.sl-msg-box { display: flex; align-items: center; gap: 12px; }
+.sl-msg { color: var(--muted, #9aa7b8); }
+.sl-retry { padding: 5px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--text); cursor: pointer; font-size: 13px; }
+.sl-retry:hover { border-color: var(--accent); }
 .sl-card {
   position: relative; display: flex; flex-direction: column; gap: 6px;
   padding: 0; border: none; background: none; cursor: pointer; text-align: left;
@@ -3290,7 +3302,15 @@ a.idchip:hover { background: var(--accent-bg); }
   background: rgba(0,0,0,0.62); color: #fff; padding: 4px 9px; border-radius: 7px; max-width: 60%; }
 .hero-wand-note.err { background: rgba(239,68,68,0.88); }
 /* under-hero media strip: icon buttons for screenshots / videos / manuals */
-.media-strip { display: flex; gap: 10px; padding: 14px 24px 0; flex-wrap: wrap; }
+.media-strip { display: flex; gap: 10px; padding: 14px 24px 0; flex-wrap: wrap; align-items: center; }
+/* provider "favicon" links (IGDB/Steam/…) — left of the media-kind tabs */
+.prov-links { display: inline-flex; align-items: center; gap: 6px; margin-right: 2px; }
+.prov-fav { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 30px; height: 32px; padding: 0 7px; border-radius: 8px; color: #fff;
+  font-size: 11px; font-weight: 800; letter-spacing: 0.02em; text-decoration: none;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.35); transition: transform 0.1s ease, filter 0.1s ease; }
+.prov-fav:hover { transform: translateY(-1px); filter: brightness(1.14); }
+.prov-fav:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
 .ms-btn { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
   color: var(--text-h); cursor: pointer; font-size: 13px; }

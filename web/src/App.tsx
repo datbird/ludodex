@@ -17,7 +17,7 @@ import type {
   SpotlightTheme, SourceRow, SplitSuggestion,
   GameRelease, SystemEntry,
 } from './api'
-import { providerColor, providerLabel } from './providers'
+import { providerColor, providerLabel, providerMark } from './providers'
 import './App.css'
 
 const PAGE_OPTIONS = [25, 50, 100, 500, 1000]
@@ -5140,7 +5140,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
               )}
             </div>
 
-            <ArtStrip nk={nk} assets={assets} loading={!media}
+            <ArtStrip nk={nk} assets={assets} loading={!media} links={d.metadata_links}
               kinds={kinds} onChange={(m) => { setMedia(m); setMediaDirty(true) }}
               frames={frames} onFrame={(k, fr) => setFrames((p) => {
                 const n = { ...p }; if (fr) n[k] = fr; else delete n[k]; return n
@@ -5264,10 +5264,11 @@ const STRIP_KINDS: { kind: string; icon: string; label: string }[] = [
   { kind: 'video', icon: '🎬', label: 'Videos' },
   { kind: 'manual', icon: '📖', label: 'Manuals' },
 ]
-function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame }: {
+function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links }: {
   nk: string; assets: MediaAsset[]; loading: boolean; kinds: MediaKind[]
   onChange: (m: MediaLibrary) => void
   frames?: Record<string, Frame>; onFrame?: (kind: string, f: Frame | undefined) => void
+  links?: { provider: string; provider_id: string; slug: string; url: string }[]
 }) {
   const [openKind, setOpenKind] = useState<MediaKind | null>(null)
   const [allOpen, setAllOpen] = useState(false)
@@ -5276,8 +5277,20 @@ function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame }: {
                    mk: kinds.find((x) => x.kind === s.kind) }))
     .filter((s) => s.mk)
   if (loading) return <div className="art-strip loading-sm">Loading media…</div>
+  const provLinks = (links ?? []).filter((l) => l.url)
   return (
     <div className="media-strip">
+      {provLinks.length > 0 && (
+        <span className="prov-links" title="Open this game on its linked provider pages">
+          {provLinks.map((l) => (
+            <a key={l.provider + ':' + l.provider_id} className="prov-fav" href={l.url}
+              target="_blank" rel="noopener noreferrer"
+              title={`Open on ${providerLabel(l.provider)}`}
+              style={{ background: providerColor(l.provider) }}>
+              {providerMark(l.provider)}</a>
+          ))}
+        </span>
+      )}
       {items.map((s) => (
         <button key={s.kind} className={'ms-btn' + (s.n ? '' : ' empty')} disabled={!s.n}
           title={s.n ? `View ${s.n} ${s.label.toLowerCase()}` : `No ${s.label.toLowerCase()} yet`}
@@ -5558,18 +5571,19 @@ function SpotlightSection({ onOpen, prefsTick, onOpenSettings }: {
 }) {
   const [sp, setSp] = useState<SpotlightData | null>(null)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
   const [seconds, setSeconds] = useState(12)
   const [cycle, setCycle] = useState(0)   // remounts the timer bar → restarts it
   const [paused, setPaused] = useState(false)
   const kindRef = useRef<string | undefined>(undefined)   // last theme, to avoid repeats
 
   const load = useCallback(async () => {
-    setLoading(true)
+    setLoading(true); setError(false)
     try {
       const next = await api.spotlight('random', kindRef.current)
       kindRef.current = next.kind
       setSp(next)
-    } catch { /* offline */ }
+    } catch { setError(true) }              // surface it, don't vanish silently
     finally { setLoading(false); setCycle((c) => c + 1) }
   }, [])
   useEffect(() => { load() }, [load])
@@ -5591,7 +5605,35 @@ function SpotlightSection({ onOpen, prefsTick, onOpenSettings }: {
     if (!paused && !loading && sp) setCycle((c) => c + 1)
   }, [paused, seconds])   // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!sp || !sp.items.length) return null
+  // First-load feedback: while the (sometimes slow, post-rebuild) first request is in
+  // flight or after a failure, show a skeleton / retry instead of silently rendering
+  // nothing — which is what made the spotlight look like it "never came up".
+  if (!sp || !sp.items.length) {
+    if (loading) return (
+      <section className="spotlight sl-skeleton">
+        <div className="sl-head">
+          <div className="sl-title">Spotlight
+            <span className="sl-theme sl-loading-txt">finding highlights…</span>
+          </div>
+          <svg className="sl-ico spin" viewBox="0 0 24 24" width="15" height="15"
+            fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"
+            strokeLinejoin="round" aria-hidden="true">
+            <path d="M23 4v6h-6" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+        </div>
+        <div className="sl-row">
+          {[0, 1, 2, 3, 4].map((i) => <div key={i} className="sl-card sl-skel-card" />)}
+        </div>
+      </section>
+    )
+    if (error) return (
+      <section className="spotlight sl-msg-box">
+        <span className="sl-msg">Couldn’t load the spotlight right now.</span>
+        <button className="sl-retry" onClick={load}>Retry</button>
+      </section>
+    )
+    return null   // genuinely no games to show — stay quiet
+  }
   return (
     <section className="spotlight"
       onMouseEnter={() => setPaused(true)}
