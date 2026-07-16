@@ -764,14 +764,24 @@ DEFAULT_PROMPTS = {
     ),
     "metadata": (
         "You are a video-game metadata expert auditing and enriching ONE game's "
-        "catalog entry. You get the game's title, the systems/stores it appears on, "
-        "its CURRENT provider match (if any), attributes already known, and a list of "
-        "MISSING attributes to fill. Do all that apply:\n"
+        "catalog entry. You get the game's title (OFTEN a raw ROM/file name, so it may "
+        "be mangled), the systems/stores it appears on, its CURRENT provider match (if "
+        "any), attributes already known, and a list of MISSING attributes to fill. Do "
+        "all that apply:\n"
         "1) VERIFY the current match — is it truly the SAME game? Watch for remakes, "
         "remasters, 'Anniversary'/'HD'/'Definitive' editions, and sequels that share a "
         "name. Example: 'Tomb Raider: Anniversary' (2007) is NOT 'Tomb Raider' (1996) — "
         "flag that as wrong.\n"
-        "2) If there is NO current match, IDENTIFY the game (canonical title + year).\n"
+        "2) If there is NO current match, IDENTIFY the game — this is the priority, and "
+        "you can almost always do it. The title is usually a raw ROM/file name, so be "
+        "resourceful and DECODE it: strip dump-index number prefixes ('0006 '), "
+        "region/language tags ([USA], (Europe), (En,Fr,De)), and revision/dump flags "
+        "((Rev A), [!], (v1.1), (Proto)); treat underscores/dots as spaces; restore a "
+        "trailing article ('Zelda, The' -> 'The Legend of Zelda'); and allow for "
+        "reordered words, abbreviations, and minor misspellings. Use the listed "
+        "system(s) as a strong hint to pick the right game among same-named ones. "
+        "Return the real commercial game's canonical title + release year. Use status "
+        "'unmatched' ONLY when the name is genuinely unrecognizable, not merely messy.\n"
         "3) SUPPLEMENT — give best-known values ONLY for the listed missing attributes.\n"
         "You are shown which provider (IGDB, ScreenScraper, Steam…) supplied each "
         "attribute and each media kind, plus the gaps. CROSS-REFERENCE them: where "
@@ -1467,7 +1477,11 @@ def _metadata_user(game):
     """Format one game's state into the user message for the metadata area.
     `game` = {title, systems:[...], sources:[...], match:{title,year,slug}|None,
               have:{kind:[values]}, missing:[kinds]}."""
-    lines = ["Game title: %s" % game.get("title", "")]
+    # unmatched games are usually bare ROMs — tell the model the title is a raw
+    # filename so it decodes prefixes/region tags/reordering instead of trusting it.
+    _label = ("Game title (RAW ROM/file name — may have a numeric prefix, region tags, "
+              "or reordered words; decode it)" if not game.get("match") else "Game title")
+    lines = ["%s: %s" % (_label, game.get("title", ""))]
     if game.get("systems"):
         lines.append("Systems/platforms: %s" % ", ".join(game["systems"]))
     if game.get("sources"):
