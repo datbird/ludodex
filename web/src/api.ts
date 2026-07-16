@@ -78,6 +78,7 @@ export interface GameDetail {
   tags: TagRef[]
   scores: Scores
   metadata_links: { provider: string; provider_id: string; slug: string; url: string }[]
+  provider_links?: { provider: string; url: string }[]   // favicon shortcuts (metadata + steam store)
   media_kinds: string[]
   ai_meta?: AiFinding | null
   attribute_provenance?: Record<string, { value: string; origins: string[]; ai: boolean }[]>

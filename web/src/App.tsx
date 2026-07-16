@@ -5140,7 +5140,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
               )}
             </div>
 
-            <ArtStrip nk={nk} assets={assets} loading={!media} links={d.metadata_links}
+            <ArtStrip nk={nk} assets={assets} loading={!media} links={d.provider_links}
               kinds={kinds} onChange={(m) => { setMedia(m); setMediaDirty(true) }}
               frames={frames} onFrame={(k, fr) => setFrames((p) => {
                 const n = { ...p }; if (fr) n[k] = fr; else delete n[k]; return n
@@ -5268,7 +5268,7 @@ function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links
   nk: string; assets: MediaAsset[]; loading: boolean; kinds: MediaKind[]
   onChange: (m: MediaLibrary) => void
   frames?: Record<string, Frame>; onFrame?: (kind: string, f: Frame | undefined) => void
-  links?: { provider: string; provider_id: string; slug: string; url: string }[]
+  links?: { provider: string; url: string }[]
 }) {
   const [openKind, setOpenKind] = useState<MediaKind | null>(null)
   const [allOpen, setAllOpen] = useState(false)
@@ -5283,7 +5283,7 @@ function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links
       {provLinks.length > 0 && (
         <span className="prov-links" title="Open this game on its linked provider pages">
           {provLinks.map((l) => (
-            <a key={l.provider + ':' + l.provider_id} className="prov-fav" href={l.url}
+            <a key={l.provider + ':' + l.url} className="prov-fav" href={l.url}
               target="_blank" rel="noopener noreferrer"
               title={`Open on ${providerLabel(l.provider)}`}
               style={{ background: providerColor(l.provider) }}>

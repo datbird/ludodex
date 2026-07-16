@@ -3234,6 +3234,25 @@ def game_detail(norm_key: str):
         links = [dict(r) for r in con.execute(
             "SELECT provider, provider_id, slug, url FROM metadata_links "
             "WHERE game_id=?", (gid,))]
+        # Provider links to surface as favicon shortcuts by the media tabs: every
+        # metadata link that has a page URL (IGDB, ScreenScraper…) PLUS store-page
+        # links derivable from an owned source (Steam appid → store page). Epic/GOG/
+        # console deep-links aren't reliably derivable from a bare id, so they're
+        # skipped rather than guessed into a dead link.
+        provider_links, _pl_seen = [], set()
+        for l in links:
+            if l.get("url") and l["provider"] not in _pl_seen:
+                provider_links.append({"provider": l["provider"], "url": l["url"]})
+                _pl_seen.add(l["provider"])
+        for s in sources:
+            src, sid = s.get("source"), str(s.get("source_id") or "")
+            if src in _pl_seen:
+                continue
+            url = ("https://store.steampowered.com/app/%s" % sid
+                   if src == "steam" and sid.isdigit() else None)
+            if url:
+                provider_links.append({"provider": src, "url": url})
+                _pl_seen.add(src)
         # media kinds available to THIS entry: its own console's chosen art, plus
         # platform-neutral store/IGDB art — UNLESS this is an era-separated entry
         # (base_key != norm_key), which forfeits the neutral art (it belongs to the
@@ -3258,6 +3277,7 @@ def game_detail(norm_key: str):
             "tags": _game_tags(con, gid, base),
             "scores": _score_breakdown(con, base),
             "metadata_links": links,
+            "provider_links": provider_links,   # favicon shortcuts (metadata + steam store)
             "media_kinds": media_kinds,
             "ai_meta": aimeta.finding_for(base),   # AI audit/supplement, if any
             "ownership": ownership.list_for(DATA, base),  # manual physical/want facts
