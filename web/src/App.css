@@ -943,6 +943,25 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
 }
 .sel-count { font-weight: 700; color: var(--text-h); }
 .sel-hint { font-size: 12px; }
+.select-bar .go:disabled { opacity: 0.45; cursor: not-allowed; }
+/* "some games can't sync" confirm (mixed ROM + marketplace selection) */
+.confirm-panel {
+  max-width: 520px; width: 92%; padding: 22px 24px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.confirm-panel h3 { margin: 0; color: var(--text-h); font-size: 18px; }
+.confirm-lede { margin: 0; font-size: 14px; line-height: 1.5; }
+.skip-list {
+  margin: 0; padding: 0; list-style: none; max-height: 40vh; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 9px;
+}
+.skip-list li {
+  display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
+  padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.skip-list li:last-child { border-bottom: none; }
+.skip-title { color: var(--text-h); font-weight: 600; }
+.confirm-actions { display: flex; gap: 10px; margin-top: 4px; }
 .sel-add { position: relative; }
 .sel-dev-menu {
   position: absolute; bottom: calc(100% + 6px); left: 0; min-width: 200px;

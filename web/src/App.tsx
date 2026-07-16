@@ -468,6 +468,9 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [wishDevs, setWishDevs] = useState<Device[]>([])
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [wantMsg, setWantMsg] = useState('')
+  // set when "Add to device" is chosen on a mixed selection: confirm skipping the
+  // marketplace games before adding the ROM-eligible ones to that device's wishlist.
+  const [wantConfirm, setWantConfirm] = useState<{ deviceId: number; deviceName: string } | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [settingsTarget, setSettingsTarget] = useState<string | null>(null)
   const openSettings = useCallback((section?: string) => {
@@ -571,17 +574,25 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
     if (!selectMode) { setSelected(g.entry_key ?? g.norm_key); return }
     togglePick(g)                             // any game is selectable
   }
-  const addPickedTo = async (deviceId: number, deviceName: string) => {
-    // device wishlist is ROM-only — send the emulation picks' base (norm) keys
+  // Store-marketplace games (Steam/Epic/GOG/itch/EA…) live in their launchers and
+  // can't sync to a device — only ROMs (has an emulation source) are eligible.
+  const addPickedTo = (deviceId: number, deviceName: string) => {
+    const hasStore = [...picked.values()].some((r) => !r.emulation)
+    setAddMenuOpen(false)
+    if (hasStore) { setWantConfirm({ deviceId, deviceName }); return }  // mixed → confirm
+    doAddWants(deviceId, deviceName)
+  }
+  const doAddWants = async (deviceId: number, deviceName: string) => {
+    setWantConfirm(null)
     const nks = [...new Set([...picked.values()].filter((r) => r.emulation).map((r) => r.norm_key))]
     if (!nks.length) {
-      setWantMsg('None of the selected games are emulation ROMs.')
+      setWantMsg('None of the selected games are ROMs.')
       setTimeout(() => setWantMsg(''), 4500); return
     }
     try {
       const r = await api.addWants(deviceId, nks)
       setWantMsg(`Added ${r.added} to ${deviceName}${r.skipped ? ` · ${r.skipped} skipped` : ''} ✓`)
-      setPicked(new Map()); setAddMenuOpen(false)
+      setPicked(new Map())
     } catch (e) { setWantMsg((e as Error).message) }
     setTimeout(() => setWantMsg(''), 4500)
   }
@@ -599,6 +610,9 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
     setTimeout(() => setWantMsg(''), 5000)
   }
 
+  // selection split for the device wishlist: ROMs are eligible, marketplace games aren't
+  const pickedRoms = [...picked.values()].filter((r) => r.emulation)
+  const pickedStore = [...picked.values()].filter((r) => !r.emulation)
   const activeFilters = Object.keys(filters).length
   const filterSections = buildFilterSections(facets)
   // every categorical attribute is available as an optional table column (id
@@ -1066,9 +1080,14 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             title="AI-enrich every selected game — findings land in the Jobs monitor to review & accept">
             ✨ Magic wand</button>
           <div className="sel-add">
-            <button className="go" disabled={!picked.size} onClick={() => setAddMenuOpen((v) => !v)}>
+            <button className="go" disabled={!pickedRoms.length}
+              title={!picked.size ? 'Select some games first'
+                : !pickedRoms.length ? 'None of the selected games are ROMs — store games (Steam, Epic, GOG…) live in their launchers and can’t sync to a device'
+                : pickedStore.length ? `${pickedRoms.length} ROM(s) will sync; ${pickedStore.length} store game(s) will be skipped`
+                : `Add ${pickedRoms.length} ROM(s) to a device’s wishlist`}
+              onClick={() => setAddMenuOpen((v) => !v)}>
               Add to device ▾</button>
-            {addMenuOpen && picked.size > 0 && (
+            {addMenuOpen && pickedRoms.length > 0 && (
               <div className="sel-dev-menu">
                 {wishDevs.length === 0
                   ? <div className="dim sel-dev-none">No devices — add one in Connections.</div>
@@ -1081,6 +1100,31 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           </div>
           {picked.size > 0 && <button className="ops-btn" onClick={() => setPicked(new Map())}>Clear</button>}
           {wantMsg && <span className="connect-msg ok sel-msg">{wantMsg}</span>}
+        </div>
+      )}
+
+      {wantConfirm && (
+        <div className="overlay" onClick={() => setWantConfirm(null)}>
+          <div className="panel confirm-panel" onClick={(e) => e.stopPropagation()}>
+            <button className="close" onClick={() => setWantConfirm(null)}>×</button>
+            <h3>Some games can’t sync to {wantConfirm.deviceName}</h3>
+            <p className="confirm-lede">Only ROMs and local files can be added to a device.
+              These {pickedStore.length} marketplace game{pickedStore.length === 1 ? '' : 's'} will
+              be <b>skipped</b> — they live in their own launcher (Steam, Epic, GOG…):</p>
+            <ul className="skip-list">
+              {pickedStore.map((r) => (
+                <li key={r.entry_key ?? r.norm_key}>
+                  <span className="skip-title">{r.title}</span>
+                  <span className="dim">{r.sources_summary}</span></li>
+              ))}
+            </ul>
+            <div className="confirm-actions">
+              <button className="go" disabled={!pickedRoms.length}
+                onClick={() => doAddWants(wantConfirm.deviceId, wantConfirm.deviceName)}>
+                Add {pickedRoms.length} ROM{pickedRoms.length === 1 ? '' : 's'} to {wantConfirm.deviceName}</button>
+              <button className="ops-btn" onClick={() => setWantConfirm(null)}>Cancel</button>
+            </div>
+          </div>
         </div>
       )}
       </>)}
