@@ -5382,6 +5382,18 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
   const [drag, setDrag] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   useEffect(() => { setOrder(byRank(assets)) }, [assets])
+  // Enlarged view: ← / → step through this category, Esc closes JUST the viewer.
+  useEffect(() => {
+    if (!viewing) return
+    const onKey = (e: KeyboardEvent) => {
+      const vi = order.findIndex((a) => a.id === viewing.id)
+      if (e.key === 'Escape') { e.stopPropagation(); setViewing(null) }
+      else if (e.key === 'ArrowLeft' && vi > 0) setViewing(order[vi - 1])
+      else if (e.key === 'ArrowRight' && vi >= 0 && vi < order.length - 1) setViewing(order[vi + 1])
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [viewing, order])
 
   const persist = async (next: MediaAsset[]) => {
     setBusy(true)
@@ -5462,9 +5474,22 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
             </div>
           )}
       </div>
-      {viewing && (
-        <div className="overlay mko-view" onClick={() => setViewing(null)}>
-          <button className="close" onClick={() => setViewing(null)}>×</button>
+      {viewing && (() => {
+        const vi = order.findIndex((a) => a.id === viewing.id)
+        const step = (e: ReactMouseEvent, d: number) => {
+          e.stopPropagation(); const n = order[vi + d]; if (n) setViewing(n)
+        }
+        // stopPropagation everywhere so the enlarged view's clicks never bubble up to
+        // the picker's backdrop onClose — X/backdrop close ONLY the viewer.
+        return (
+        <div className="overlay mko-view" onClick={(e) => { e.stopPropagation(); setViewing(null) }}>
+          <button className="close" onClick={(e) => { e.stopPropagation(); setViewing(null) }}>×</button>
+          {vi > 0 && (
+            <button className="mko-nav prev" title="Previous (←)" onClick={(e) => step(e, -1)}>‹</button>
+          )}
+          {vi >= 0 && vi < order.length - 1 && (
+            <button className="mko-nav next" title="Next (→)" onClick={(e) => step(e, 1)}>›</button>
+          )}
           <div className="mko-view-inner" onClick={(e) => e.stopPropagation()}>
             {viewing.is_image
               ? <img src={viewing.url} alt={viewing.kind} />
@@ -5476,7 +5501,8 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
                   Open {(viewing.ext || 'file').toUpperCase()}</a>}
           </div>
         </div>
-      )}
+        )
+      })()}
     </div>
   )
 }

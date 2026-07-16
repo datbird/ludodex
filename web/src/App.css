@@ -1350,6 +1350,16 @@ button.am-badge { border: 0; background: none; padding: 0; font-family: inherit;
 .mko-view .close { position: fixed; top: 16px; right: 20px; z-index: 71; }
 .mko-view-inner { display: flex; max-width: 94vw; max-height: 92vh; }
 .mko-view-inner img, .mko-view-inner video { max-width: 94vw; max-height: 92vh; object-fit: contain; }
+/* prev/next through the category in the enlarged view */
+.mko-nav { position: fixed; top: 50%; transform: translateY(-50%); z-index: 71;
+  width: 46px; height: 72px; display: flex; align-items: center; justify-content: center;
+  font-size: 34px; line-height: 1; color: #fff; cursor: pointer;
+  background: rgba(0, 0, 0, 0.45); border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 10px; transition: background 0.12s ease, border-color 0.12s ease; }
+.mko-nav.prev { left: 18px; }
+.mko-nav.next { right: 18px; }
+.mko-nav:hover { background: rgba(0, 0, 0, 0.72); border-color: var(--accent); }
+.mko-nav:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .mko-pdf { width: 88vw; height: 90vh; border: 0; background: #fff; border-radius: 4px; }
 .art-ext-img { display: block; width: 100%; height: 100%; }
 .mko-file.big { padding: 40px; font-size: 18px; }
