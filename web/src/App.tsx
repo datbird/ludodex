@@ -18,7 +18,7 @@ import type {
   GameRelease, SystemEntry,
 } from './api'
 import { providerColor, providerLabel, providerMark } from './providers'
-import { providerIconPath } from './provider-icons'
+import { providerIconPath, providerIconViewBox, providerIconWide } from './provider-icons'
 import './App.css'
 
 const PAGE_OPTIONS = [25, 50, 100, 500, 1000]
@@ -5285,13 +5285,16 @@ function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links
         <span className="prov-links" title="Open this game on its linked provider pages">
           {provLinks.map((l) => {
             const icon = providerIconPath(l.provider)
+            const wide = icon ? providerIconWide(l.provider) : false
             return (
-              <a key={l.provider + ':' + l.url} className={'prov-fav' + (icon ? ' has-logo' : '')} href={l.url}
+              <a key={l.provider + ':' + l.url}
+                className={'prov-fav' + (icon ? ' has-logo' : '') + (wide ? ' wide' : '')} href={l.url}
                 target="_blank" rel="noopener noreferrer"
                 title={`Open on ${providerLabel(l.provider)}`}
                 style={{ background: providerColor(l.provider) }}>
                 {icon
-                  ? <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d={icon} /></svg>
+                  ? <svg viewBox={providerIconViewBox(l.provider)} width={wide ? 36 : 16} height="16"
+                      fill="currentColor" aria-hidden="true"><path d={icon} /></svg>
                   : providerMark(l.provider)}</a>
             )
           })}

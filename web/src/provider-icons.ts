@@ -16,3 +16,16 @@ export const PROVIDER_ICON_PATH: Record<string, string> = {
 export function providerIconPath(id: string): string | null {
   return PROVIDER_ICON_PATH[(id || "").toLowerCase()] ?? null
 }
+// Some brand marks are WIDE wordmarks (short full-width bands) that read as mush in
+// a square badge. Crop the viewBox to the glyph's real bounds and render them in a
+// wider badge so the wordmark is legible — a zoom/crop rather than a tiny shrink.
+export const PROVIDER_ICON_VIEWBOX: Record<string, string> = {
+  igdb: '0 6.228 24 11.543',   // the IGDB logo is only this middle band
+}
+const WIDE = new Set(['igdb'])
+export function providerIconViewBox(id: string): string {
+  return PROVIDER_ICON_VIEWBOX[(id || '').toLowerCase()] ?? '0 0 24 24'
+}
+export function providerIconWide(id: string): boolean {
+  return WIDE.has((id || '').toLowerCase())
+}

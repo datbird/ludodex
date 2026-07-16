@@ -3311,6 +3311,7 @@ a.idchip:hover { background: var(--accent-bg); }
   box-shadow: 0 1px 3px rgba(0,0,0,0.35); transition: transform 0.1s ease, filter 0.1s ease; }
 .prov-fav:hover { transform: translateY(-1px); filter: brightness(1.14); }
 .prov-fav:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
+.prov-fav.wide { min-width: 48px; padding: 0 9px; }   /* wide wordmark logos (IGDB) */
 .ms-btn { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
   color: var(--text-h); cursor: pointer; font-size: 13px; }
