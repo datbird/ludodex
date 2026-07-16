@@ -5444,8 +5444,6 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
                   onDragEnd={() => setDrag(null)}>
                   <div className="mko-media" onClick={() => setViewing(a)} title="Click to enlarge">
                     {thumb(a)}
-                    <span className={'mko-rank' + (i === 0 ? ' used' : '')}
-                      title={i === 0 ? 'Used for this game' : 'Priority order'}>{i + 1}</span>
                     {framable && i === 0 && (
                       <div className="mko-frame-gear" onClick={(e) => e.stopPropagation()}>
                         <FrameEditor nk={nk} kind={kind.kind} value={frames?.[kind.kind]}
@@ -5453,8 +5451,15 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
                       </div>
                     )}
                   </div>
+                  <div className={'mko-prio' + (i === 0 ? ' used' : '')}
+                    title="Priority order — the #1 image is the one this game actually uses. Drag tiles to reorder; the top of the list wins.">
+                    <span className="mko-prio-grip" aria-hidden="true">⠿</span>
+                    <span className="mko-prio-label">Priority</span>
+                    <span className="mko-prio-num">#{i + 1}</span>
+                    {i === 0 && <span className="mko-prio-used">★ Used</span>}
+                  </div>
                   <figcaption className="mko-cap">
-                    <span>{a.provider}{a.user ? ' · yours' : ''}{i === 0 ? ' · used' : ''}</span>
+                    <span>{a.provider}{a.user ? ' · yours' : ''}</span>
                     {a.width ? <span className="dim">{a.width}×{a.height}</span> : null}
                   </figcaption>
                   <div className="mko-ctl">

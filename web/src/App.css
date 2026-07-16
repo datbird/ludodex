@@ -1334,10 +1334,18 @@ button.am-badge { border: 0; background: none; padding: 0; font-family: inherit;
 .mko-item[draggable="true"] { cursor: grab; }
 .mko-item.dragging { opacity: 0.4; }
 .mko-media { position: relative; cursor: zoom-in; display: block; }
-.mko-rank { position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.72); color: #fff;
-  font-size: 11px; font-weight: 700; min-width: 18px; height: 18px; display: inline-flex;
-  align-items: center; justify-content: center; border-radius: 4px; padding: 0 4px; }
-.mko-rank.used { background: var(--accent); color: #fff; box-shadow: 0 0 0 2px rgba(255,255,255,0.25); }
+/* priority strip directly under each media — makes the ranking obvious (the old
+   tiny corner number was easy to miss) and hints it's drag-to-reorder */
+.mko-prio { display: flex; align-items: center; gap: 7px; padding: 5px 9px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--muted, #9aa7b8); background: rgba(127, 127, 127, 0.12);
+  border-top: 2px solid var(--border); cursor: grab; }
+.mko-prio.used { color: #fff; border-top-color: var(--accent);
+  background: linear-gradient(90deg, var(--accent), rgba(139, 122, 255, 0.35)); }
+.mko-prio-grip { font-size: 13px; opacity: 0.6; letter-spacing: -1px; }
+.mko-prio-label { opacity: 0.85; }
+.mko-prio-num { font-variant-numeric: tabular-nums; font-weight: 800; }
+.mko-prio-used { margin-left: auto; font-weight: 800; letter-spacing: 0.02em; }
 .mko-frame-gear { position: absolute; top: 4px; right: 4px; }
 .mko-frame-gear .frame-gear {
   background: rgba(0,0,0,0.72); color: #fff; border: none; border-radius: 4px;
