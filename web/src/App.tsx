@@ -4964,7 +4964,9 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
     if (!d) return
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     setWandErr('')
-    api.aimetaScan({ norm_keys: [nk], label: d.title, media: true, metadata: true, web: true })
+    // scan by the BARE norm_key (base), not the entry_key — the aimeta pipeline
+    // (game_context) looks games up by norm_key, so passing "…@gba" silently no-ops.
+    api.aimetaScan({ norm_keys: [base], label: d.title, media: true, metadata: true, web: true })
       .then(() => {
         flyToJobs(rect)
         showToast('✨ Magic sent to the job monitor — check there for status & to accept')
