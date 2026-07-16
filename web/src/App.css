@@ -2856,6 +2856,12 @@ a.idchip:hover { background: var(--accent-bg); }
 .review-panel { max-width: 640px; width: 92vw; max-height: 88vh; overflow: auto; padding: 20px 22px; }
 .rv-title { color: var(--accent); }
 .jm-label { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-h); }
+/* clickable game name inside a job label → opens that game's detail */
+.jm-gamelink { background: none; border: none; padding: 0; font: inherit; color: inherit;
+  cursor: pointer; text-decoration: underline; text-decoration-color: rgba(148, 163, 184, 0.5);
+  text-underline-offset: 2px; }
+.jm-gamelink:hover { color: var(--accent); text-decoration-color: var(--accent); }
+.jm-gamelink:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
 .jm-status { font-size: 10px; text-transform: capitalize; color: var(--text); }
 .jm-status.s-running { color: #3b82f6; }
 .jm-status.s-paused { color: #d97706; }

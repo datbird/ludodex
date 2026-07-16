@@ -595,6 +595,7 @@ export interface Job {
   status: string; detail: string; error: string | null; progress: JobProgress
   when: number | null; cancelable: boolean; restartable: boolean; deletable: boolean
   findings?: number   // aimeta scan jobs: how many suggestions to review/accept
+  target_key?: string // single-game scan → the game's key, so its name links to detail
 }
 
 async function get<T>(path: string): Promise<T> {

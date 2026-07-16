@@ -2457,11 +2457,17 @@ def _jobs_list():
             ("paused", "partial", "planned") or r["pending"] > 0,
             "deletable": not live})
     _proposed = aimeta.proposed_counts()
+    _pgames = aimeta.proposed_run_games()   # run_id -> [{norm_key,title}] (for naming/linking)
     _shown_runs = set()
     for s in aimeta.scans_list(limit=20):
         _shown_runs.add(s["id"])
         jid = "aimeta:%d" % s["id"]
         rec = _JOBS.get(jid)
+        try:                                # single-game scan → link the game name
+            _skeys = json.loads(s.get("keys_json") or "[]")
+        except Exception:
+            _skeys = []
+        _tkey = _skeys[0] if len(_skeys) == 1 else None
         live = bool(rec and rec["thread"] and rec["thread"].is_alive())
         _prop = _proposed.get(s["id"], 0)
         _sk, _er = s.get("skipped") or 0, s.get("errored") or 0
@@ -2484,6 +2490,7 @@ def _jobs_list():
             "detail": _detail,
             "error": (rec or {}).get("error"),
             "findings": _prop,
+            "target_key": _tkey,                       # single-game scan → clickable name
             "progress": {"done": s["done"], "total": s["total"], "failed": 0},
             "when": s["finished"] or s["created"],
             "cancelable": live, "restartable": not live and s["done"] < s["total"],
@@ -2496,9 +2503,15 @@ def _jobs_list():
     for _rid, _n in _proposed.items():
         if _rid in _shown_runs or not _n:
             continue
+        _games = _pgames.get(_rid, [])
+        if len(_games) == 1:                # name + link the single stranded game
+            _olabel = "Metadata scan — %s" % (_games[0]["title"] or _games[0]["norm_key"])
+            _otarget = _games[0]["norm_key"]
+        else:
+            _olabel, _otarget = "Metadata scan — pending review", None
         out.append({
             "id": "aimeta:%d" % _rid, "kind": "aimeta", "run_id": _rid,
-            "label": "Metadata scan — pending review",
+            "label": _olabel, "target_key": _otarget,
             "status": "done", "detail": "%d to review" % _n, "error": None,
             "findings": _n, "progress": {"done": 0, "total": 0, "failed": 0},
             "when": None, "cancelable": False, "restartable": False, "deletable": True})

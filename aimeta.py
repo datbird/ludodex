@@ -441,6 +441,19 @@ def proposed_counts():
     return out
 
 
+def proposed_run_games():
+    """{run_id: [{norm_key, title}]} for runs with still-proposed findings — lets the
+    monitor name + link a game (esp. an orphaned pending review whose run is gone)."""
+    con = _con()
+    out = {}
+    for r in con.execute("SELECT DISTINCT run_id, norm_key, title FROM findings "
+                         "WHERE status='proposed'"):
+        out.setdefault(r["run_id"], []).append(
+            {"norm_key": r["norm_key"], "title": r["title"]})
+    con.close()
+    return out
+
+
 def accepted_ids():
     """Finding IDs currently 'accepted' (awaiting apply) — captured at the start of
     an apply so a coalesced run marks only what it actually processed."""

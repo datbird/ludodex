@@ -690,7 +690,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           )}
         </div>
         <div className="header-actions">
-          <JobMonitor />
+          <JobMonitor onOpen={setSelected} />
           <SyncMenu />
           <button className="icon-btn" title="Settings" onClick={() => openSettings()}>
             <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
@@ -7624,7 +7624,24 @@ const scanTitle = (label: string) => label.replace(/^Metadata scan\s*[—-]\s*/,
 // A finished wand scan that produced suggestions is ready to review & accept.
 const reviewable = (j: Job) => j.kind === 'aimeta' && j.status === 'done' && (j.findings ?? 0) > 0
 
-function JobMonitor() {
+// A job label whose game name (single-game metadata scans) links to that game's detail.
+function JobLabel({ j, onOpen, cls = 'jm-label' }: { j: Job; onOpen?: (k: string) => void; cls?: string }) {
+  const title = j.detail ? `${j.label} — ${j.detail}` : j.label
+  const detail = j.detail ? <span className="dim"> — {j.detail}</span> : null
+  if (j.target_key && onOpen) {
+    const game = scanTitle(j.label)
+    const prefix = j.label.slice(0, j.label.length - game.length)   // keep the exact "…scan — "
+    return (
+      <span className={cls} title={title}>
+        {prefix}<button type="button" className="jm-gamelink"
+          onClick={(e) => { e.stopPropagation(); onOpen(j.target_key!) }}>{game}</button>{detail}
+      </span>
+    )
+  }
+  return <span className={cls} title={title}>{j.label}{detail}</span>
+}
+
+function JobMonitor({ onOpen }: { onOpen?: (k: string) => void }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [open, setOpen] = useState(false)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
@@ -7651,8 +7668,7 @@ function JobMonitor() {
           </button>
         ) : shown.map((j) => (
           <div key={j.id} className={'jobmon-row' + (reviewable(j) ? ' jm-ready' : '')}>
-            <span className="jm-label" title={j.detail ? `${j.label} — ${j.detail}` : j.label}>
-              {j.label}{j.detail ? <span className="dim"> — {j.detail}</span> : null}</span>
+            <JobLabel j={j} onOpen={onOpen} />
             {reviewable(j) ? (
               <button className="jm-accept" title="Review & accept these changes" onClick={() => openReview(j)}>
                 ✨ Review &amp; accept
@@ -7668,14 +7684,14 @@ function JobMonitor() {
         {active.length > 3 && <span className="jm-more">+{active.length - 3} more</span>}
       </div>
       <button className="jm-expand icon-btn" title="All jobs" onClick={() => setOpen(true)}>⤢</button>
-      {open && <JobOverlay onClose={() => setOpen(false)} />}
+      {open && <JobOverlay onClose={() => setOpen(false)} onOpen={onOpen} />}
       {review && <AiReviewModal runId={review.runId} title={review.title}
         onClose={() => { setReview(null); load() }} />}
     </div>
   )
 }
 
-function JobOverlay({ onClose }: { onClose: () => void }) {
+function JobOverlay({ onClose, onOpen }: { onClose: () => void; onOpen?: (k: string) => void }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [openRun, setOpenRun] = useState<number | null>(null)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
@@ -7694,7 +7710,7 @@ function JobOverlay({ onClose }: { onClose: () => void }) {
           {jobs.map((j) => (
             <div key={j.id} className={'job-trow' + (j.kind === 'fileops' ? ' clickable' : '')}
               onClick={() => { if (j.kind === 'fileops' && j.run_id) setOpenRun(j.run_id) }}>
-              <span className="job-label">{j.label}{j.detail ? <span className="dim"> — {j.detail}</span> : null}</span>
+              <JobLabel j={j} cls="job-label" onOpen={onOpen ? (k) => { onClose(); onOpen(k) } : undefined} />
               <span className={'jm-status s-' + j.status}>{j.status}</span>
               <ProgressBar done={j.progress.done} total={j.progress.total} failed={j.progress.failed} running={j.status === 'running'} />
               <span className="dim job-when">{relTime(j.when)}</span>
