@@ -463,7 +463,8 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [selected, setSelected] = useState<string | null>(null)
   // multi-select → device wishlist ("I want these games on that device")
   const [selectMode, setSelectMode] = useState(false)
-  const [picked, setPicked] = useState<Set<string>>(new Set())
+  // multi-select: entry_key -> the row (keeps norm_key/emulation for actions across pages)
+  const [picked, setPicked] = useState<Map<string, GameRow>>(new Map())
   const [wishDevs, setWishDevs] = useState<Device[]>([])
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [wantMsg, setWantMsg] = useState('')
@@ -561,19 +562,41 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   useEffect(() => {
     if (selectMode && !wishDevs.length) api.devices().then((d) => setWishDevs(d.devices)).catch(() => {})
   }, [selectMode, wishDevs.length])
-  const togglePick = (nk: string) =>
-    setPicked((p) => { const n = new Set(p); n.has(nk) ? n.delete(nk) : n.add(nk); return n })
+  const togglePick = (g: GameRow) =>
+    setPicked((p) => {
+      const n = new Map(p); const k = g.entry_key ?? g.norm_key
+      n.has(k) ? n.delete(k) : n.set(k, g); return n
+    })
   const onCard = (g: GameRow) => {
     if (!selectMode) { setSelected(g.entry_key ?? g.norm_key); return }
-    if (g.emulation) togglePick(g.norm_key)   // emulation-only for the wishlist (for now)
+    togglePick(g)                             // any game is selectable
   }
   const addPickedTo = async (deviceId: number, deviceName: string) => {
+    // device wishlist is ROM-only — send the emulation picks' base (norm) keys
+    const nks = [...new Set([...picked.values()].filter((r) => r.emulation).map((r) => r.norm_key))]
+    if (!nks.length) {
+      setWantMsg('None of the selected games are emulation ROMs.')
+      setTimeout(() => setWantMsg(''), 4500); return
+    }
     try {
-      const r = await api.addWants(deviceId, [...picked])
-      setWantMsg(`Added ${r.added} to ${deviceName}${r.skipped ? ` · ${r.skipped} skipped (not emulation)` : ''} ✓`)
-      setPicked(new Set()); setAddMenuOpen(false)
+      const r = await api.addWants(deviceId, nks)
+      setWantMsg(`Added ${r.added} to ${deviceName}${r.skipped ? ` · ${r.skipped} skipped` : ''} ✓`)
+      setPicked(new Map()); setAddMenuOpen(false)
     } catch (e) { setWantMsg((e as Error).message) }
     setTimeout(() => setWantMsg(''), 4500)
+  }
+  // Bulk Magic wand: AI-enrich every selected game (base keys, deduped) in one scan —
+  // findings land in the Jobs monitor to review/accept, same as the single-game wand.
+  const wandPicked = async () => {
+    const nks = [...new Set([...picked.values()].map((r) => r.norm_key))]
+    if (!nks.length) return
+    try {
+      await api.aimetaScan({ norm_keys: nks, label: `${nks.length} selected`,
+                             media: true, metadata: true, web: true })
+      setWantMsg(`✨ Sent ${nks.length} game(s) to the Jobs monitor — review & accept there`)
+      setPicked(new Map()); setSelectMode(false); setAddMenuOpen(false)
+    } catch (e) { setWantMsg((e as Error).message) }
+    setTimeout(() => setWantMsg(''), 5000)
   }
 
   const activeFilters = Object.keys(filters).length
@@ -933,8 +956,8 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             </div>
           )}
           <button className={'filter-btn' + (selectMode ? ' active' : '')}
-            title="Select multiple games to add to a device's wishlist (emulation only)"
-            onClick={() => { setSelectMode((v) => !v); setPicked(new Set()); setAddMenuOpen(false) }}>
+            title="Select multiple games — AI-enrich them with the Magic wand, or add ROMs to a device's wishlist"
+            onClick={() => { setSelectMode((v) => !v); setPicked(new Map()); setAddMenuOpen(false) }}>
             {selectMode ? '✕ Cancel select' : '☑ Select'}
           </button>
           <button className="filter-btn wand-btn"
@@ -958,10 +981,9 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           {items.map((g) => (
             <button key={g.entry_key ?? g.norm_key} onClick={() => onCard(g)}
               className={'card'
-                + (selectMode && picked.has(g.norm_key) ? ' picked' : '')
-                + (selectMode && !g.emulation ? ' unselectable' : '')}>
-              {selectMode && g.emulation && (
-                <span className="card-check">{picked.has(g.norm_key) ? '✓' : ''}</span>
+                + (selectMode && picked.has(g.entry_key ?? g.norm_key) ? ' picked' : '')}>
+              {selectMode && (
+                <span className="card-check">{picked.has(g.entry_key ?? g.norm_key) ? '✓' : ''}</span>
               )}
               <div className="cover">
                 <Cover g={g} />
@@ -993,8 +1015,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           <tbody>
             {items.map((g) => (
               <tr key={g.entry_key ?? g.norm_key} onClick={() => onCard(g)}
-                className={(selectMode && picked.has(g.norm_key) ? 'picked ' : '')
-                  + (selectMode && !g.emulation ? 'unselectable' : '')}>
+                className={selectMode && picked.has(g.entry_key ?? g.norm_key) ? 'picked' : ''}>
                 {showCol('art') && <td className="gt-art"><Cover g={g} compact /></td>}
                 {showCol('score') && <td className="gt-num">
                   {g.ludodex_score != null
@@ -1040,7 +1061,10 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       {selectMode && (
         <div className="select-bar">
           <span className="sel-count">{picked.size} selected</span>
-          <span className="sel-hint dim">emulation games · adds a “want on device” — no transfer</span>
+          <span className="sel-hint dim">✨ Magic wand: any game · Add to device: ROM-only wishlist (no transfer)</span>
+          <button className="go" disabled={!picked.size} onClick={wandPicked}
+            title="AI-enrich every selected game — findings land in the Jobs monitor to review & accept">
+            ✨ Magic wand</button>
           <div className="sel-add">
             <button className="go" disabled={!picked.size} onClick={() => setAddMenuOpen((v) => !v)}>
               Add to device ▾</button>
@@ -1055,7 +1079,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
               </div>
             )}
           </div>
-          {picked.size > 0 && <button className="ops-btn" onClick={() => setPicked(new Set())}>Clear</button>}
+          {picked.size > 0 && <button className="ops-btn" onClick={() => setPicked(new Map())}>Clear</button>}
           {wantMsg && <span className="connect-msg ok sel-msg">{wantMsg}</span>}
         </div>
       )}
