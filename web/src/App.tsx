@@ -7667,6 +7667,7 @@ function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void
 
   return (
     <div className={'jobmon' + (active.length ? ' busy' : ' idle')}>
+      <div className="jobmon-main">
       <div className="jobmon-rows">
         {shown.length === 0 ? (
           <button className="jobmon-idle" title="Open job monitor" onClick={() => setOpen(true)}>
@@ -7690,6 +7691,8 @@ function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void
         ))}
         {active.length > 3 && <span className="jm-more">+{active.length - 3} more</span>}
       </div>
+      <button className="jm-expand icon-btn" title="All jobs" onClick={() => setOpen(true)}>⤢</button>
+      </div>
       {(attention > 0 || working > 0 || doneCount > 0) && (
         <div className="jobmon-badges">
           {attention > 0 && (
@@ -7708,7 +7711,6 @@ function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void
           )}
         </div>
       )}
-      <button className="jm-expand icon-btn" title="All jobs" onClick={() => setOpen(true)}>⤢</button>
       {open && <JobOverlay onClose={() => setOpen(false)} onOpen={onOpen} />}
       {review && <AiReviewModal runId={review.runId} title={review.title}
         onClose={() => { setReview(null); load() }} />}

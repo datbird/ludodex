@@ -2826,9 +2826,11 @@ a.idchip:hover { background: var(--accent-bg); }
 .fo-find-fix { margin-top: 2px; }
 
 /* job monitor widget (header) */
-.jobmon { display: flex; align-items: center; gap: 6px; max-width: 460px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 4px 6px; }
-/* at-a-glance queue count badges: needs-attention / working / done */
-.jobmon-badges { display: inline-flex; align-items: center; gap: 5px; flex: none; }
+.jobmon { display: flex; flex-direction: column; align-items: stretch; gap: 3px; max-width: 460px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 4px 6px; }
+.jobmon-main { display: flex; align-items: center; gap: 6px; }
+/* at-a-glance queue count badges: needs-attention / working / done — a right-aligned
+   strip along the bottom so they don't steal horizontal space from the job rows */
+.jobmon-badges { display: flex; justify-content: flex-end; align-items: center; gap: 5px; }
 .jm-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
   font-size: 11px; font-weight: 800; border: 1px solid transparent; cursor: pointer;
   font-variant-numeric: tabular-nums; line-height: 1.4; }
