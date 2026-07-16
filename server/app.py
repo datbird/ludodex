@@ -2399,11 +2399,24 @@ def _jobs_list():
         rec = _JOBS.get(jid)
         live = bool(rec and rec["thread"] and rec["thread"].is_alive())
         _prop = _proposed.get(s["id"], 0)
+        _sk, _er = s.get("skipped") or 0, s.get("errored") or 0
+        if _prop:                                   # findings waiting on the user win
+            _detail = "%d to review" % _prop
+        elif live:
+            _detail = "scanning %d/%d…" % (s["done"], s["total"])
+        else:                                       # finished: always show the tally so a
+            _parts = ["scanned %d" % s["done"],     # 0-finding scan reads as a real result
+                      "%d found" % s["findings"]]
+            if _sk:
+                _parts.append("%d skipped" % _sk)
+            if _er:
+                _parts.append("%d error%s" % (_er, "" if _er == 1 else "s"))
+            _detail = " · ".join(_parts)
         out.append({
             "id": jid, "kind": "aimeta", "run_id": s["id"],
             "label": "Metadata scan — %s" % s["target"],
             "status": "running" if live else s["status"],
-            "detail": ("%d to review" % _prop) if _prop else ("%d findings" % s["findings"]),
+            "detail": _detail,
             "error": (rec or {}).get("error"),
             "findings": _prop,
             "progress": {"done": s["done"], "total": s["total"], "failed": 0},
@@ -2604,7 +2617,7 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
     match_prov = bool(opts.get("match_provider"))
     md_kinds = opts.get("metadata_kinds")     # None=all attrs, []=none (media-only)
     model = ai.model_for_area("metadata")
-    done = found = 0
+    done = found = skipped = errored = 0
     lib = aimeta._lib()
     try:
         for nk in norm_keys:
@@ -2612,10 +2625,12 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                 break
             try:
                 ctx = aimeta.game_context(nk, lib=lib)
-                if ctx and md_kinds is not None:   # restrict which attrs AI fills
-                    ctx["missing"] = [k for k in ctx.get("missing", [])
-                                      if k in md_kinds]
-                if ctx:
+                if not ctx:                        # game vanished / no context to analyze
+                    skipped += 1
+                else:
+                    if md_kinds is not None:       # restrict which attrs AI fills
+                        ctx["missing"] = [k for k in ctx.get("missing", [])
+                                          if k in md_kinds]
                     res = ai.analyze_game(ctx, web=web)
                     m = res.get("match") or {}
                     if (match_prov and m.get("suggested_title")
@@ -2632,12 +2647,13 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                     if aimeta.store_finding(run_id, ctx, res, model):
                         found += 1
             except Exception as e:               # one game's failure never aborts
+                errored += 1
                 print("aimeta scan: %s -> %s" % (nk, str(e)[:200]), file=sys.stderr)
             done += 1
-            aimeta.scan_progress(run_id, done, found)
+            aimeta.scan_progress(run_id, done, found, skipped, errored)
     finally:
         lib.close()
-    aimeta.scan_progress(run_id, done, found)
+    aimeta.scan_progress(run_id, done, found, skipped, errored)
     aimeta.scan_finish(run_id, "paused" if done < len(norm_keys) else "done")
 
 

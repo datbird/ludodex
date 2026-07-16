@@ -157,7 +157,10 @@ def _con():
     cols = {r[1] for r in con.execute("PRAGMA table_info(scan_runs)")}
     for col, decl in (("web", "INTEGER DEFAULT 0"),
                       ("match_provider", "INTEGER DEFAULT 0"),
-                      ("keys_json", "TEXT"), ("md_json", "TEXT")):
+                      ("keys_json", "TEXT"), ("md_json", "TEXT"),
+                      # per-run outcome breakdown so a no-finding scan is legible in the
+                      # monitor (scanned N · found M · skipped · errored), not a silent dud
+                      ("skipped", "INTEGER DEFAULT 0"), ("errored", "INTEGER DEFAULT 0")):
         if col not in cols:
             con.execute("ALTER TABLE scan_runs ADD COLUMN %s %s" % (col, decl))
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_nk ON findings(norm_key)")
@@ -544,10 +547,10 @@ def scan_new(target, keys, web=0, match_provider=0, md_kinds=None):
     return rid
 
 
-def scan_progress(run_id, done, findings):
+def scan_progress(run_id, done, findings, skipped=0, errored=0):
     con = _con()
-    con.execute("UPDATE scan_runs SET done=?, findings=? WHERE id=?",
-                (done, findings, run_id))
+    con.execute("UPDATE scan_runs SET done=?, findings=?, skipped=?, errored=? "
+                "WHERE id=?", (done, findings, skipped, errored, run_id))
     con.commit()
     con.close()
 
