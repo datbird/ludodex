@@ -780,6 +780,12 @@ DEFAULT_PROMPTS = {
         "trailing article ('Zelda, The' -> 'The Legend of Zelda'); and allow for "
         "reordered words, abbreviations, and minor misspellings. Use the listed "
         "system(s) as a strong hint to pick the right game among same-named ones. "
+        "When present, USE the ROM file name, its PARENT FOLDER (in a non-flat library "
+        "the folder is often a fuller/cleaner game name than the file), the region/"
+        "edition tags, and any NEIGHBORING files/sidecars (.nfo/.txt/gamelist, disc "
+        "images, cover names) shown — these are frequently the clearest identity, and "
+        "the system + region tags together imply the platform and the likely release "
+        "year of THAT version. "
         "Return the real commercial game's canonical title + release year. Use status "
         "'unmatched' ONLY when the name is genuinely unrecognizable, not merely messy.\n"
         "3) SUPPLEMENT — give best-known values ONLY for the listed missing attributes.\n"
@@ -1486,6 +1492,21 @@ def _metadata_user(game):
         lines.append("Systems/platforms: %s" % ", ".join(game["systems"]))
     if game.get("sources"):
         lines.append("Owned via: %s" % ", ".join(game["sources"]))
+    # ROM filesystem signal (from the ROM index) — file name, parent folder (often a
+    # fuller title in a non-flat library), region/edition tags, and neighbor sidecars.
+    f = game.get("files") or {}
+    if f.get("files"):
+        lines.append("ROM file(s): %s" % "; ".join(f["files"]))
+    if f.get("folders"):
+        lines.append("Parent folder(s) (may be a fuller game name): %s"
+                     % "; ".join(f["folders"]))
+    if f.get("tags"):
+        lines.append("Region/edition tags: %s" % "; ".join(f["tags"]))
+    if f.get("siblings"):
+        lines.append("Neighboring files in the same folder (identity hints): %s"
+                     % ", ".join(f["siblings"]))
+    for _fn, _txt in (f.get("sibling_text") or {}).items():
+        lines.append("  from %s: %s" % (_fn, " ".join(_txt.split())[:300]))
     m = game.get("match")
     if m:
         yr = (" (%s)" % m.get("year")) if m.get("year") else ""

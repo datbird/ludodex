@@ -11,6 +11,7 @@ can be baked into the catalog on the next build (fill-gaps, lowest precedence).
 This module does the sqlite work only — the AI call itself lives in server/ai.py
 (`analyze_game`) and is orchestrated by the server's scan job.
 """
+import glob
 import json
 import os
 import sqlite3
@@ -27,6 +28,115 @@ MEDIA_INDEX = os.path.join(DATA, "media-index.sqlite")
 # deliberately excluded. Holes in these drive the "missing" list + "missing" target.
 SUPPLEMENT_KINDS = ["release_year", "genres", "developers", "publishers",
                     "description", "themes", "game_modes", "player_perspectives"]
+
+# text sidecars small enough to peek at when identifying (id-helpful, not media blobs)
+_SIDECAR_EXTS = {"nfo", "txt", "dat", "xml", "json", "md", "ini"}
+
+
+def _rom_indexes():
+    """Every ROM index available to this host (legacy single + per-manager)."""
+    return sorted(glob.glob(os.path.join(DATA, "roms-index*.sqlite")))
+
+
+_rom_indexed = set()   # ROM dbs we've ensured are indexed this process
+
+
+def _ensure_rom_index(dbp):
+    """Best-effort: add the indexes _rom_file_context needs so per-game lookups are
+    instant even in a big (500k-row) library and don't full-scan on every wand. The
+    device sync rebuilds these dbs, dropping the index — we just re-add it on next
+    use. If the db is read-only or mid-rebuild, skip; queries still work, just slower."""
+    if dbp in _rom_indexed:
+        return
+    _rom_indexed.add(dbp)
+    try:
+        w = sqlite3.connect(dbp, timeout=3)
+        w.execute("PRAGMA busy_timeout=3000")
+        w.execute("CREATE INDEX IF NOT EXISTS ix_roms_game ON roms(game)")
+        w.execute("CREATE INDEX IF NOT EXISTS ix_roms_sys_subdir ON roms(system, subdir)")
+        w.commit()
+        w.close()
+    except sqlite3.Error:
+        pass
+
+
+def _rom_file_context(links, max_files=6, max_sibs=12):
+    """Filesystem signal for identifying a bare ROM, straight from the ROM index —
+    no live-FS walk needed since the scan already indexed every file:
+      • the ROM file name(s) and their parent FOLDER (in a non-flat library the
+        folder is often a fuller game name than the file),
+      • region / language / revision / edition tags (imply platform + release),
+      • neighboring files in the SAME game folder (disc images, a .nfo/.txt/gamelist
+        sidecar, cover art names) — but only when the folder is game-specific, not a
+        giant flat set where "siblings" are just unrelated games.
+    A tiny snippet of any small text sidecar that lives on THIS host is included.
+    `links` = [(raw_system, raw_title)] from the game's emulation/archive sources."""
+    if not links:
+        return None
+    files, folders, tags = [], set(), set()
+    siblings, sibling_text = set(), {}
+    seen_dirs = set()
+    for dbp in _rom_indexes():
+        _ensure_rom_index(dbp)
+        try:
+            rc = sqlite3.connect("file:%s?mode=ro" % dbp, uri=True, timeout=5)
+            rc.row_factory = sqlite3.Row
+        except sqlite3.OperationalError:
+            continue
+        try:
+            for system, title in links:
+                try:
+                    rows = rc.execute(
+                        "SELECT system, subdir, filename, fullpath, relpath, region, "
+                        "languages, revision, tags FROM roms "
+                        "WHERE game=? AND (system=? OR ?='') LIMIT 8",
+                        (title, system, system or "")).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                for r in rows:
+                    if r["filename"] and len(files) < max_files:
+                        files.append(r["filename"])
+                    folder = os.path.dirname(r["relpath"] or "") or (
+                        "%s/%s" % (r["system"], r["subdir"]) if r["subdir"] else r["system"])
+                    if folder:
+                        folders.add(folder)
+                    for v in (r["tags"], r["region"], r["languages"], r["revision"]):
+                        if v and v.strip():
+                            tags.add(v.strip())
+                    # siblings = same (system, subdir) folder, index-backed. Skip a giant
+                    # flat set where "siblings" are just unrelated games, not id hints.
+                    fkey = (r["system"], r["subdir"] or "")
+                    if fkey in seen_dirs:
+                        continue
+                    seen_dirs.add(fkey)
+                    try:
+                        n = rc.execute("SELECT COUNT(*) FROM roms WHERE system=? AND "
+                                       "subdir=?", fkey).fetchone()[0]
+                    except sqlite3.OperationalError:
+                        n = 999
+                    if n > 25:
+                        continue
+                    for s in rc.execute(
+                            "SELECT filename, ext, fullpath, size_bytes FROM roms "
+                            "WHERE system=? AND subdir=? AND filename<>? LIMIT 30",
+                            (r["system"], r["subdir"] or "", r["filename"] or "")):
+                        if not s["filename"] or len(siblings) >= max_sibs:
+                            continue
+                        siblings.add(s["filename"])
+                        if ((s["ext"] or "").lower() in _SIDECAR_EXTS
+                                and 0 < (s["size_bytes"] or 0) < 4096
+                                and len(sibling_text) < 2):
+                            try:
+                                with open(s["fullpath"], "r", errors="replace") as fh:
+                                    sibling_text[s["filename"]] = fh.read(500).strip()
+                            except OSError:
+                                pass       # on the Deck / not mounted here — name only
+        finally:
+            rc.close()
+    if not (files or folders or siblings):
+        return None
+    return {"files": files, "folders": sorted(folders), "tags": sorted(tags),
+            "siblings": sorted(siblings), "sibling_text": sibling_text}
 
 
 # ------------------------------------------------------------------- durable store
@@ -128,18 +238,23 @@ def game_context(norm_key, lib=None):
                 o = o.strip()
                 if o:
                     by_source.setdefault(o, set()).add(r["kind"])
-        systems, sources = [], []
-        for r in own.execute("SELECT DISTINCT source, platform FROM sources "
-                             "WHERE game_id=?", (gid,)):
+        systems, sources, rom_links = [], [], []
+        for r in own.execute("SELECT DISTINCT source, platform, source_id, title_raw "
+                             "FROM sources WHERE game_id=?", (gid,)):
             if r["platform"] and r["platform"] not in systems:
                 systems.append(r["platform"])
             if r["source"] and r["source"] not in sources:
                 sources.append(r["source"])
+            # emulation/archive rows carry the raw system (source_id) + raw ROM name
+            # (title_raw) — the key to look their file/folder/siblings up in the ROM index
+            if r["source"] in ("emulation", "archive") and r["title_raw"]:
+                rom_links.append((r["source_id"] or "", r["title_raw"]))
         missing = [k for k in SUPPLEMENT_KINDS if k not in have]
         return {"norm_key": norm_key, "title": g["canonical_title"],
                 "systems": systems, "sources": sources, "have": have,
                 "missing": missing, "match": _match_info(gid, own),
                 "by_source": {k: sorted(v) for k, v in by_source.items()},
+                "files": _rom_file_context(rom_links),
                 "media": _media_by_provider(norm_key)}
     finally:
         if lib is None:
