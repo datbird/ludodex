@@ -463,5 +463,80 @@ writer (scores / media backfill) waits rather than erroring.
 
 ---
 
+## 13. Collections & compilations — ownership fan-out
+
+A **compilation** (a single owned product that bundles multiple otherwise-standalone
+games — *Sega Genesis Classics*, *Sonic Mega Collection*, *Mega Man Legacy Collection*,
+*Castlevania Anniversary Collection*) is neither one game nor N owned games. Modeling it
+as a normal entry credits nothing to the games inside; marking each member "owned" would
+be wrong (they were never separately purchased). The model: **the collection stays its own
+catalog entry, but its membership is recorded and ownership is *fanned out* (credited) to
+each member game.** This is a *form of ownership*, so it lives as provenance on the
+member's "In your library" rows — not as a phantom entry.
+
+### 13.1 Data model — `collections.sqlite` (durable, survives rebuilds like ownership/tags)
+```sql
+collections(
+  coll_key TEXT PRIMARY KEY,  -- the collection's OWN catalog entry (its norm_key/base_key)
+  name     TEXT,              -- display name, e.g. "Sega Genesis Classics"
+  origin   TEXT,              -- 'ai' | 'provider' | 'manual'
+  updated  REAL)
+collection_members(
+  coll_key TEXT,              -- FK -> collections.coll_key
+  member_key   TEXT,          -- norm(member title) = the member game's base_key
+  member_title TEXT,          -- as named by the AI/provider
+  member_platform TEXT,       -- platform the collection provides it on (usually the coll's)
+  member_year  INTEGER,
+  origin   TEXT,              -- 'ai' | 'provider' | 'manual'
+  added    REAL,
+  PRIMARY KEY(coll_key, member_key))
+```
+`member_key` is the **normalized title** (same `titlenorm.norm` as the catalog), so a member
+row links to a standalone member entry by `base_key` without needing an id — robust across
+rebuilds. A collection is **owned** when its own `coll_key` entry has an owned source.
+
+### 13.2 Phase 1 — detect + provenance
+- **AI detection.** The `metadata` area result gains an optional block:
+  `"collection": {"is_collection": bool, "name": str, "members": [{"title","platform","year"}]}`.
+  Prompt: *a COMPILATION bundling multiple standalone games → is_collection=true, name it,
+  list the standalone games (title + original platform + year). A single game with
+  DLC/editions/"Anniversary" of ONE game is NOT a collection.* Emitted as a finding kind
+  **`collection`** (`aimeta.store_finding`); on accept it writes `collections.sqlite`.
+- **Manual path.** Endpoints to mark an entry `is_collection` and add/edit members, so a
+  human can curate what the AI missed.
+- **"In your library" gains a `Collection` column** — `—` for a standalone copy, the
+  collection's name for a fanned-out row; that row's `Listed as` shows the collection name
+  (how the store actually lists it), not the member's own title.
+
+### 13.3 Phase 2 — fan-out, cross-credit, want-satisfaction
+- **Credit.** In `game_detail(G)` (base_key `BK`): find collections `C` where a
+  `collection_members` row has `member_key = BK` **and** `C.coll_key` is owned. For each,
+  emit a synthetic ownership row `{source: <C's store>, platform: <C's platform>,
+  listed_as: <C.name>, collection: <C.name>, state: 'have', via_collection: C.coll_key}`
+  and add `C`'s platform to `also_owned_on`. So owning *Sega Genesis Classics* (PC) makes
+  standalone Genesis Sonic read **"also owned on: PC (via Sega Genesis Classics)."**
+- **Reverse lookup (title → collections)** — the second AI cross-check: "what compilations
+  contain this title, and does the user own one?" Owned ⇒ the credit above; not-owned ⇒ an
+  optional *"available in <collection>"* hint that feeds Discover / want-vs-have.
+- **Want-satisfaction.** A want for `G` is satisfied when `G` is owned via a collection —
+  the derived "owned" state (and Discover) treats a collection credit as ownership.
+
+### 13.4 What a collection is NOT (guardrails)
+A collection is a bundle of **separately-recognizable games**. NOT: a game + its DLC/season
+pass; an "Anniversary/Definitive/HD" edition of ONE game (that's the era/edition logic in
+§11); a franchise/series grouping (that's IGDB `collection` = series, unrelated). The AI is
+told this explicitly, and `member_key`s that collapse to the collection's own key are
+dropped (a compilation never "contains itself").
+
+### 13.5 Implementation surface
+`compilations.py` (durable store + normalize-on-write; named to avoid shadowing the
+stdlib `collections` package, since the repo dir is on `sys.path`) → `server/ai.py` metadata prompt +
+`analyze_game` result (`collection` block) → `aimeta.store_finding`/apply (kind
+`collection`) → `server/app.py` `game_detail` (fan-out synthetic rows + `also_owned_on`
+credit) + collection CRUD routes → `web/src/api.ts` (`GameDetail.sources[].collection`,
+`also_owned_on[].via`) → UI (`Collection` column, "via" chip). Durable store is preserved
+across catalog rebuilds; credit is computed at read time so no rebuild is needed to reflect
+a newly-recorded collection.
+
 *Selection policy (§9) is the one unresolved design decision blocking the push UX.
 Everything else above is converged.*

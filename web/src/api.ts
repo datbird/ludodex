@@ -71,9 +71,9 @@ export interface GameDetail {
   norm_key: string          // base title key (used for title-level mutations)
   entry_key?: string        // this platform entry's id (base_key@platform)
   platform?: string | null  // this entry's platform
-  also_owned_on?: { entry_key: string; platform: string; title: string }[]
+  also_owned_on?: { entry_key: string; platform: string; title: string; via?: string }[]
   title: string
-  sources: { source: string; platform: string; source_id: string; title_raw: string; detail: string; os: string[] | null; state?: 'have' | 'want' }[]
+  sources: { source: string; platform: string; source_id: string; title_raw: string; detail: string; os: string[] | null; state?: 'have' | 'want'; collection?: string | null; via_collection?: string }[]
   attributes: Record<string, string[]>
   tags: TagRef[]
   scores: Scores
@@ -85,6 +85,15 @@ export interface GameDetail {
   editable_kinds?: string[]
   ownership?: OwnershipFact[]
   framing?: Record<string, Frame>   // kind -> saved position+zoom
+  collection?: Collection | null    // set when THIS entry is itself a compilation
+}
+
+// A compilation the user owns, and the standalone games it contains (DESIGN §13).
+export interface Collection {
+  coll_key: string
+  name: string
+  origin: string
+  members: { member_key: string; member_title: string; member_platform: string; member_year: number | null; origin: string }[]
 }
 
 export interface OwnershipFact {
@@ -929,6 +938,20 @@ export const api = {
   },
   removeWant: async (id: number, norm_key: string) => {
     const r = await fetch('/api/devices/' + id + '/wants/' + encodeURIComponent(norm_key), { method: 'DELETE' })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{ ok: boolean }>
+  },
+  // Collections / compilations (DESIGN §13)
+  setCollection: async (collKey: string, name: string, members: { title: string; platform?: string; year?: number | null }[]) => {
+    const r = await fetch('/api/collections/' + encodeURIComponent(collKey), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, members }),
+    })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{ coll_key: string; name: string; members: number }>
+  },
+  deleteCollection: async (collKey: string) => {
+    const r = await fetch('/api/collections/' + encodeURIComponent(collKey), { method: 'DELETE' })
     if (!r.ok) throw new Error(`${r.status}`)
     return r.json() as Promise<{ ok: boolean }>
   },

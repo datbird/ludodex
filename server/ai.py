@@ -794,6 +794,14 @@ DEFAULT_PROMPTS = {
         "providers agree, trust it; where one provider is missing a field another has "
         "or the web contradicts it, note that in \"notes\"; fill only the gaps no "
         "provider covers.\n"
+        "4) COLLECTION — decide if THIS entry is a COMPILATION that bundles multiple "
+        "otherwise-standalone games (e.g. 'Sega Genesis Classics', 'Sonic Mega "
+        "Collection', 'Mega Man Legacy Collection', 'Castlevania Anniversary "
+        "Collection'). If so, set collection.is_collection=true, give its name, and "
+        "list the STANDALONE games it contains (each: title + original platform + "
+        "year). NOT a collection: a single game plus DLC/season pass; an 'Anniversary'/"
+        "'HD'/'Definitive'/'Remastered' edition of ONE game; a franchise/series name. "
+        "When unsure it's a real multi-game bundle, set is_collection=false.\n"
         "Use only well-established facts. If unsure, LOWER the confidence and say so — "
         "never invent a value.\n"
         "Respond with ONLY a JSON object (no prose, no code fence):\n"
@@ -801,10 +809,14 @@ DEFAULT_PROMPTS = {
         '"issue": "<short reason if wrong>", "suggested_title": "<canonical title>", '
         '"suggested_year": <int or null>}, '
         '"attributes": {"<missing_kind>": <string or array of strings>}, '
+        '"collection": {"is_collection": true|false, "name": "<compilation name>", '
+        '"members": [{"title": "<game>", "platform": "<original system>", '
+        '"year": <int or null>}]}, '
         '"notes": "<one short sentence>"}\n'
         "Attribute formats: release_year=\"YYYY\"; genres/themes/game_modes/"
         "player_perspectives/developers/publishers=arrays of strings; "
-        "description=one paragraph string."
+        "description=one paragraph string. Omit \"collection\" (or is_collection=false) "
+        "for an ordinary single game."
     ),
     "prices": (
         "You are a pricing expert for large-language-model APIs. You are given a "

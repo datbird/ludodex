@@ -5124,9 +5124,10 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                       <>
                         <span className="also-on-label">also owned on</span>
                         {d.also_owned_on.map((s) => (
-                          <button key={s.entry_key} className="also-on-chip" type="button"
+                          <button key={s.entry_key} className={'also-on-chip' + (s.via ? ' via' : '')} type="button"
                             onClick={() => onNavigate?.(s.entry_key)}
-                            title={`View ${s.title} on ${s.platform}`}>{s.platform}</button>
+                            title={s.via ? `Owned via “${s.via}” (${s.platform})` : `View ${s.title} on ${s.platform}`}>
+                            {s.platform}{s.via ? ' 📦' : ''}</button>
                         ))}
                       </>
                     )}
@@ -5169,6 +5170,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                         <th>System</th>
                         <th>OS</th>
                         <th>Listed as</th>
+                        <th>Collection</th>
                         <th>Detail</th>
                       </tr>
                     </thead>
@@ -5190,6 +5192,9 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                                   {OS_ABBR[o] ?? o}</span>)}</span>
                             : <span className="dim">—</span>}</td>
                           <td>{s.title_raw}</td>
+                          <td>{s.collection
+                            ? <span className="own-pill coll" title={`Owned as part of “${s.collection}”`}>📦 Yes</span>
+                            : <span className="dim">—</span>}</td>
                           <td className="dim">{s.detail || '—'}</td>
                         </tr>
                       ))}
@@ -5197,6 +5202,23 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                   </table>
                   <OwnershipEditor nk={d.norm_key} title={d.title} facts={d.ownership ?? []} onChanged={reloadDetail} />
                 </section>
+
+                {d.collection && d.collection.members.length > 0 && (
+                  <section className="coll-section">
+                    <h3>📦 This is a collection
+                      <span className="sec-help">a compilation you own — it credits ownership to each game inside, so they show “owned … via {d.collection.name}”</span>
+                    </h3>
+                    <ul className="coll-members">
+                      {d.collection.members.map((m) => (
+                        <li key={m.member_key}>
+                          <span className="coll-m-title">{m.member_title}</span>
+                          {m.member_platform && <span className="dim">{m.member_platform}</span>}
+                          {m.member_year != null && <span className="dim">({m.member_year})</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
 
                 {d.metadata_links.length > 0 && (
                   <section className="idvia">

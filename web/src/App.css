@@ -1384,7 +1384,15 @@ button.am-badge { border: 0; background: none; padding: 0; font-family: inherit;
 .own-pill.have { background: rgba(52, 199, 89, 0.16); color: #5bd97a; }
 .own-pill.want { background: rgba(255, 179, 64, 0.16); color: #ffb340; }
 .own-pill.unmatched { background: rgba(148, 163, 184, 0.16); color: #9aa7b8; }
+.own-pill.coll { background: rgba(139, 122, 255, 0.18); color: #b3a4ff; }
 .sources-table tr.src-want td { opacity: 0.85; }
+/* collection membership (this entry is a compilation) */
+.also-on-chip.via { background: rgba(139, 122, 255, 0.22); }
+.coll-section .coll-members { list-style: none; margin: 8px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px; }
+.coll-members li { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+.coll-m-title { color: var(--text-h); font-weight: 600; }
 .own-editor { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }
 .own-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .own-editor-title { font-size: 12px; color: var(--text); }

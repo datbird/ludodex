@@ -324,10 +324,14 @@ def store_finding(run_id, ctx, result, model=""):
     attrs = {k: v for k, v in (result.get("attributes") or {}).items()
              if k in SUPPLEMENT_KINDS and v not in (None, "", [], {})}
     status_m = (match.get("status") or "").lower()
-    actionable = bool(attrs) or status_m in ("wrong", "unmatched", "unsure")
+    coll = result.get("collection") or {}
+    is_coll = bool(coll.get("is_collection")) and bool(coll.get("members"))
+    actionable = bool(attrs) or status_m in ("wrong", "unmatched", "unsure") or is_coll
     if not actionable:
         return None
-    kind = ("match" if status_m in ("wrong", "unsure")
+    # a compilation is the notable thing to review; otherwise the usual match/gap logic
+    kind = ("collection" if is_coll
+            else "match" if status_m in ("wrong", "unsure")
             else "identify" if status_m == "unmatched" or not ctx.get("match")
             else "supplement")
     payload = {"match": match, "attributes": attrs,
@@ -335,7 +339,8 @@ def store_finding(run_id, ctx, result, model=""):
                "current_match": ctx.get("match"), "missing": ctx.get("missing"),
                "sources": result.get("sources") or [], "web": bool(result.get("web")),
                "provider_match": result.get("provider_match"),   # IGDB hit (compat)
-               "provider_matches": result.get("provider_matches") or []}  # all providers
+               "provider_matches": result.get("provider_matches") or [],  # all providers
+               "collection": coll if is_coll else None}          # compilation members
     con = _con()
     # a re-scan supersedes an earlier *un-reviewed* finding for the same game;
     # accepted/rejected findings are the user's decision and are left alone.
@@ -486,6 +491,23 @@ def accepted_supplements():
             attrs = {k: v for k, v in attrs.items() if k in sel["attributes"]}
         if attrs:
             out[r["norm_key"]] = attrs
+    con.close()
+    return out
+
+
+def accepted_collections():
+    """Accepted compilation findings — [{coll_key, name, members:[{title,platform,
+    year}]}] — for compilations.set_collection. coll_key = the collection entry's
+    norm_key (the finding's norm_key)."""
+    con = _con()
+    out = []
+    for r in con.execute("SELECT norm_key, payload_json FROM findings "
+                         "WHERE kind='collection' AND status IN ('accepted','applied')"):
+        coll = (json.loads(r["payload_json"] or "{}").get("collection") or {})
+        if coll.get("is_collection") and coll.get("members"):
+            out.append({"coll_key": r["norm_key"],
+                        "name": coll.get("name") or r["norm_key"],
+                        "members": coll.get("members") or []})
     con.close()
     return out
 

@@ -40,6 +40,7 @@ import fileops         # noqa: E402  file-operations engine (profiles + runbooks
 import aimeta          # noqa: E402  AI metadata audit/supplement store + context
 import overrides       # noqa: E402  per-attribute provenance overrides (re-pointing)
 import ownership       # noqa: E402  durable per-format ownership (physical + per-platform wants)
+import compilations    # noqa: E402  durable collections/compilations store (ownership fan-out)
 import igdb_enrich      # noqa: E402  IGDB cache resolvers (cross-platform releases + systems)
 import medialang        # noqa: E402  per-asset media language classification + filter
 import framing         # noqa: E402  per-game/per-kind image framing (position + zoom)
@@ -88,6 +89,7 @@ DATABASES = [
     ("connections", "Device connections", "connections.sqlite", "durable"),
     ("fileops", "File operations", "file-profiles.sqlite", "durable"),
     ("aimeta", "AI metadata", "ai-metadata.sqlite", "durable"),
+    ("collections", "Collections", "collections.sqlite", "durable"),
     ("overrides", "Attribute overrides", "attr-overrides.sqlite", "durable"),
     ("merges", "Duplicate merges", "merges.sqlite", "durable"),
     ("splits", "Peeled-apart games", "splits.sqlite", "durable"),
@@ -1685,6 +1687,40 @@ def device_wants_remove(dev_id: int, norm_key: str):
     return {"ok": True}
 
 
+# --- Collections / compilations (DESIGN §13) -------------------------------- #
+@app.get("/api/collections")
+def collections_list():
+    """Every recorded compilation + its member count."""
+    return {"collections": compilations.all_collections(DATA)}
+
+
+@app.get("/api/collections/{coll_key:path}")
+def collection_get(coll_key: str):
+    c = compilations.get_collection(DATA, _split_entry_key(coll_key)[0])
+    if not c:
+        raise HTTPException(404, "not a collection")
+    return c
+
+
+@app.post("/api/collections/{coll_key:path}")
+def collection_set(coll_key: str, body: dict = Body(...)):
+    """Mark an entry as a compilation and (re)set its members. Body:
+    {name, members:[{title, platform?, year?}]}. Manual curation path."""
+    base = _split_entry_key(coll_key)[0]
+    name = ((body or {}).get("name") or "").strip()
+    members = (body or {}).get("members") or []
+    if not name:
+        raise HTTPException(400, "name required")
+    n = compilations.set_collection(DATA, base, name, members, origin="manual")
+    return {"coll_key": base, "name": name, "members": n}
+
+
+@app.delete("/api/collections/{coll_key:path}")
+def collection_delete(coll_key: str):
+    compilations.clear_collection(DATA, _split_entry_key(coll_key)[0])
+    return {"ok": True}
+
+
 # --------------------------------------------------------------------------- #
 #  Device SYNC — two-way file sync (Files → Sync tab)
 #    push:   master archive ─▶ device (queued "wants")
@@ -2885,6 +2921,14 @@ def _aimeta_apply(should_stop, media=True, only_ids=None):
         touched |= {m["norm_key"] for m in aimeta.accepted_ss_matches()}
     except Exception:
         pass
+    # accepted compilations -> durable collections store. Credit is computed at read
+    # time (game_detail), so this takes effect immediately — no rebuild dependency.
+    try:
+        for c in aimeta.accepted_collections():
+            compilations.set_collection(DATA, c["coll_key"], c["name"],
+                                        c["members"], origin="ai")
+    except Exception as e:
+        print("aimeta apply: collections write: %s" % str(e)[:150], file=sys.stderr)
     mc = sqlite3.connect(cache)
     mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY "
                "KEY, igdb_id INTEGER, slug TEXT, matched_by TEXT, resolved_at INTEGER)")
@@ -3115,6 +3159,37 @@ def game_detail(norm_key: str):
                 s["os"] = ["windows"]  # Epic Games Store is Windows-only (no Linux client)
             else:
                 s["os"] = None
+        for s in sources:
+            s.setdefault("collection", None)     # real rows aren't collection-credited
+        # Collection credit (DESIGN §13): this game is owned via any COMPILATION the
+        # user owns. Add a synthetic "in your library" row + an "also owned on" credit
+        # for each owned collection whose member set includes this game.
+        try:
+            _bk_col = "g2.base_key" if "base_key" in _keys else "g2.norm_key"
+            _seen_plat = {platform} | {a["platform"] for a in also}
+            for c in compilations.credits_for(DATA, base):
+                if c["coll_key"] == base:
+                    continue                     # a collection never credits itself
+                owned = con.execute(
+                    "SELECT s.source, g2.platform, g2.entry_key FROM games g2 "
+                    "JOIN sources s ON s.game_id=g2.id "
+                    "WHERE (g2.norm_key=? OR " + _bk_col + "=?) "
+                    "AND COALESCE(s.state,'have')='have' LIMIT 1",
+                    (c["coll_key"], c["coll_key"])).fetchone()
+                if not owned:
+                    continue                     # user doesn't own this collection
+                sources.append({
+                    "source": owned["source"], "platform": owned["platform"],
+                    "source_id": "", "title_raw": c["name"],
+                    "detail": "part of “%s”" % c["name"], "state": "have", "os": None,
+                    "collection": c["name"], "via_collection": owned["entry_key"]})
+                if owned["platform"] and owned["platform"] not in _seen_plat:
+                    _seen_plat.add(owned["platform"])
+                    also.append({"entry_key": owned["entry_key"],
+                                 "platform": owned["platform"], "title": c["name"],
+                                 "via": c["name"]})
+        except Exception as _ce:                 # credit is best-effort, never 500s detail
+            print("collection credit: %s" % str(_ce)[:150], file=sys.stderr)
         attrs = {}                       # kind -> [values] (compat)
         prov = {}                        # kind -> [{value, origins, ai}] provenance
         for r in con.execute("SELECT kind, value, origin FROM game_attributes "
@@ -3160,6 +3235,7 @@ def game_detail(norm_key: str):
             "ai_meta": aimeta.finding_for(base),   # AI audit/supplement, if any
             "ownership": ownership.list_for(DATA, base),  # manual physical/want facts
             "framing": framing.get_all(DATA, base),       # per-kind image position+zoom
+            "collection": compilations.get_collection(DATA, base),  # if THIS entry is a compilation
         }
     finally:
         con.close()
