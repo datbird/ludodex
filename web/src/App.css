@@ -2826,7 +2826,20 @@ a.idchip:hover { background: var(--accent-bg); }
 .fo-find-fix { margin-top: 2px; }
 
 /* job monitor widget (header) */
-.jobmon { display: flex; align-items: center; gap: 6px; max-width: 340px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 4px 6px; }
+.jobmon { display: flex; align-items: center; gap: 6px; max-width: 460px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 4px 6px; }
+/* at-a-glance queue count badges: needs-attention / working / done */
+.jobmon-badges { display: inline-flex; align-items: center; gap: 5px; flex: none; }
+.jm-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 800; border: 1px solid transparent; cursor: pointer;
+  font-variant-numeric: tabular-nums; line-height: 1.4; }
+.jm-badge:hover { filter: brightness(1.16); }
+.jm-badge.attn { background: rgba(255, 179, 64, 0.18); color: #ffb340; border-color: rgba(255, 179, 64, 0.45); }
+.jm-badge.work { background: rgba(139, 122, 255, 0.18); color: #b3a4ff; }
+.jm-badge.done { background: rgba(52, 199, 89, 0.16); color: #5bd97a; }
+.jm-b-ic { font-size: 10px; }
+.jm-b-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: jm-pulse 1.2s ease infinite; }
+@keyframes jm-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .jm-b-dot { animation: none; } }
 .jobmon.busy { border-color: var(--accent); }
 .jobmon-idle { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text); opacity: 0.75; background: none; border: 0; cursor: pointer; padding: 2px; }
 .jobmon-idle:hover { opacity: 1; }

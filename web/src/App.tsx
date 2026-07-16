@@ -690,7 +690,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           )}
         </div>
         <div className="header-actions">
-          <JobMonitor onOpen={setSelected} />
+          <JobMonitor onOpen={setSelected} pendingApply={stats?.pending_meta ?? 0} />
           <SyncMenu />
           <button className="icon-btn" title="Settings" onClick={() => openSettings()}>
             <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
@@ -7641,7 +7641,7 @@ function JobLabel({ j, onOpen, cls = 'jm-label' }: { j: Job; onOpen?: (k: string
   return <span className={cls} title={title}>{j.label}{detail}</span>
 }
 
-function JobMonitor({ onOpen }: { onOpen?: (k: string) => void }) {
+function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void; pendingApply?: number }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [open, setOpen] = useState(false)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
@@ -7654,6 +7654,13 @@ function JobMonitor({ onOpen }: { onOpen?: (k: string) => void }) {
   const ready = jobs.filter(reviewable)
   const base = active.length ? active : jobs
   const shown = [...ready, ...base.filter((j) => !reviewable(j))].slice(0, 3)
+  // At-a-glance queue counts: things you must act on (reviews to accept + changes to
+  // apply), things working, things recently done.
+  const nowSec = Date.now() / 1000
+  const attention = ready.reduce((n, j) => n + (j.findings ?? 0), 0) + (pendingApply || 0)
+  const working = active.length
+  const doneCount = jobs.filter((j) => j.status === 'done' && !reviewable(j)
+    && !!j.when && nowSec - j.when < 3600).length
   const pause = async (id: string) => { await api.pauseJob(id).catch(() => {}); load() }
   const del = async (id: string) => { await api.deleteJob(id).catch(() => {}); load() }
   const openReview = (j: Job) => setReview({ runId: j.run_id!, title: scanTitle(j.label) })
@@ -7683,6 +7690,24 @@ function JobMonitor({ onOpen }: { onOpen?: (k: string) => void }) {
         ))}
         {active.length > 3 && <span className="jm-more">+{active.length - 3} more</span>}
       </div>
+      {(attention > 0 || working > 0 || doneCount > 0) && (
+        <div className="jobmon-badges">
+          {attention > 0 && (
+            <button className="jm-badge attn" onClick={() => setOpen(true)}
+              title={`${attention} item${attention === 1 ? '' : 's'} need your attention — reviews to accept / changes to apply`}>
+              <span className="jm-b-ic">✦</span>{attention}</button>
+          )}
+          {working > 0 && (
+            <button className="jm-badge work" onClick={() => setOpen(true)}
+              title={`${working} job${working === 1 ? '' : 's'} working`}>
+              <span className="jm-b-dot" />{working}</button>
+          )}
+          {doneCount > 0 && (
+            <button className="jm-badge done" onClick={() => setOpen(true)}
+              title={`${doneCount} recently completed`}>✓{doneCount}</button>
+          )}
+        </div>
+      )}
       <button className="jm-expand icon-btn" title="All jobs" onClick={() => setOpen(true)}>⤢</button>
       {open && <JobOverlay onClose={() => setOpen(false)} onOpen={onOpen} />}
       {review && <AiReviewModal runId={review.runId} title={review.title}
