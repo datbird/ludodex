@@ -438,6 +438,26 @@ for _ws in ("steam", "gog"):
 # retro / era-impossible EMULATION entry a distinct CROSS-REF base_key (a private
 # suffix) so it neither shares metadata nor cross-refs. norm_key stays the real title
 # key (media is indexed by it, siloed by system), so only the grouping key changes.
+def _igdb_ids():
+    """norm_key -> IGDB id for resolved games (DESIGN §11.9 game_key assignment).
+    Kept separate from _igdb_years so the identity map is a plain resolution read,
+    no payload parse."""
+    ids = {}
+    _cache = os.path.join(DATA, "metadata-cache.sqlite")
+    if not os.path.exists(_cache):
+        return ids
+    _c = sqlite3.connect(_cache)
+    try:
+        for _nk, _iid in _c.execute(
+                "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0"):
+            ids[_nk] = _iid
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        _c.close()
+    return ids
+
+
 def _igdb_years():
     """base norm_key -> earliest IGDB release year (for the era check)."""
     ry = {}
@@ -468,6 +488,22 @@ def _igdb_years():
 
 
 _years = _igdb_years()
+_ids = _igdb_ids()               # norm_key -> igdb_id (DESIGN §11.9 game_key)
+
+
+def _game_key(nk, plat, bkey):
+    """Resolved-identity key for an entry (DESIGN §11.9). An ERA-collision entry
+    (\x1f marker in its base_key) NEVER adopts the shared identity — the neutral
+    art belongs to the different-era game — so it gets its own title identity. A
+    non-separated identified entry OR a stray retro-handheld port (\x1e marker)
+    ADOPTS the title's resolved igdb id (the port IS that game). Everything else
+    (unidentified) falls to the title bucket. Mirrors media_fetch.game_key so the
+    two sides meet on a plain string match at serve time."""
+    if "\x1f" in (bkey or "") or nk not in _ids:
+        return "title:%s@%s" % (nk, plat)
+    return "igdb:%s" % _ids[nk]
+
+
 _by_base = {}
 for (_b, _p), _g in games.items():
     _is_store = any(s[0] not in ("emulation", "archive") for s in _g["sources"])
@@ -540,6 +576,7 @@ cur.executescript("""
 CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
   platform TEXT, entry_key TEXT,   -- one entry per (norm_key, platform); entry_key = norm_key@platform
   base_key TEXT,                   -- cross-ref group ("also owned on" + metadata fan-out); = norm_key unless era-separated
+  game_key TEXT,                   -- resolved-identity key (DESIGN §11.9): igdb:<id> when the entry adopts a resolved identity (identified or stray retro-handheld port), else title:<norm_key>@<platform> (era-collision or unidentified). Serve matches this against media.game_key (Phase 3).
   n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
   has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
   has_archive INT, in_playnite INT, in_launchbox INT,
@@ -584,11 +621,12 @@ for (base, plat), g in games.items():
     owned = any(s[5] == "have" for s in srcs)
     bkey = sep_base.get((base, plat), base)     # cross-ref/metadata key (usually = base)
     cur.execute(
-        "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,n_sources,"
-        "n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
+        "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,game_key,"
+        "n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
         "has_archive,in_playnite,in_launchbox,wanted) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (canonical, base, plat, "%s@%s" % (base, plat), bkey, len(srcs), len(kinds), summary,
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (canonical, base, plat, "%s@%s" % (base, plat), bkey, _game_key(base, plat, bkey),
+         len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
          int("archive" in kinds), int(base in playnite_keys),
@@ -610,11 +648,11 @@ for key, w in wanted.items():
     stores = sorted({s[0] for s in w["stores"]})
     plat = "pc"                              # store wishlists (steam/gog) are PC
     cur.execute(
-        "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,n_sources,"
-        "n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
+        "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,game_key,"
+        "n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
         "has_archive,in_playnite,in_launchbox,wanted) "
-        "VALUES(?,?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
-        (w["title"], key, plat, "%s@%s" % (key, plat), key,
+        "VALUES(?,?,?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
+        (w["title"], key, plat, "%s@%s" % (key, plat), key, _game_key(key, plat, key),
          "wishlist:" + ",".join(stores)))
     gid = cur.lastrowid
     key_to_gid[(key, plat)] = gid

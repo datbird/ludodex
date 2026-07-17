@@ -501,10 +501,22 @@ grouping (§11.3), which is orthogonal display grouping.
 branch; metadata fan-out keyed on `game_key`) → `media_fetch.py` (stamp `game_key` at put
 time — it already has `{norm_key→igdb_id}`) → `media_choose.py` (`select`/`_repick` key on
 `(game_key, system, kind)`) → `server/app.py` (four gate sites collapse to one `game_key`
-predicate; `base_key` retained only for "also owned on"). Sequence as phases: **(1)** add
-column + backfill + stamp on fetch (no read-path change, invisible), **(2)** flip
-`build_library` + `media_choose` to `game_key`, **(3)** flip the serve sites and delete the
-marker/forfeit code. Each phase is independently shippable and reversible.
+predicate; `base_key` retained only for "also owned on").
+
+**Rollout — three shippable, reversible phases:**
+- **(1) DONE** — add `media.game_key` + `ix_media_gk`, one-time backfill, stamp on fetch.
+  No read-path change → invisible. (117,939 `igdb:*` / 11,036 `title:*` / 0 NULL on live.)
+- **(2) DONE** — `build_library` writes `games.game_key` per entry (identified & stray
+  ports adopt `igdb:<id>`; era-collision & unidentified take `title:<nk>@<platform>`).
+  Still no consumer → invisible; validated against real entries before Phase 3.
+- **(3) TODO** — flip `media_choose` **and** the four serve sites to `game_key` **together**,
+  then delete the marker / neutral-forfeit code. *`media_choose` moved here from Phase 2
+  on a coupling found in implementation:* ~309 of ~15,700 igdb identities span **two
+  norm_keys** (title variants — "…link's awakening dx" vs "…the link's awakening dx"). If
+  `chosen` were keyed on `game_key` while serve still queried `chosen` by `norm_key`, the
+  losing variant would find no chosen asset and blank. Keying `chosen` and the serve query
+  on `game_key` in the *same* phase closes that window (and actually *unifies* those
+  variants' art — a Phase-3 win, not just a hazard).
 
 ---
 
