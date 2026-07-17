@@ -2592,25 +2592,25 @@ def jobs_restart(jid: str):
     raise HTTPException(400, "start a library sync from the Library page")
 
 
-@app.delete("/api/jobs/{jid:path}")
-def jobs_delete(jid: str):
+def _delete_one_job(jid):
+    """Dismiss/stop a single job by id. Returns True if handled, False if unknown."""
     if jid == "sync":
         sj = _SYNC.get("job")
         if sj and sj.get("running"):        # × on a live sync = stop it (kill phase)
             _sync_stop()
         else:
             _SYNC["job"] = None             # dismiss a finished/stopped job
-        return {"deleted": True}
+        return True
     if jid == "romsync":
         _ROMSYNC["job"] = None
-        return {"deleted": True}
+        return True
     if jid.startswith("xfer:"):
         rec = _JOBS.get(jid)
         if rec and rec["thread"] and rec["thread"].is_alive():
             rec["cancel"].set()
         _XFER.pop(jid, None)
         _JOBS.pop(jid, None)
-        return {"deleted": True}
+        return True
     if jid.startswith("run:"):
         rid = int(jid.split(":", 1)[1])
         rec = _JOBS.get(jid)
@@ -2618,7 +2618,7 @@ def jobs_delete(jid: str):
             rec["cancel"].set()
         fileops.run_delete(rid)
         _JOBS.pop(jid, None)
-        return {"deleted": True}
+        return True
     if jid.startswith("aimeta:"):
         rid = int(jid.split(":", 1)[1])
         rec = _JOBS.get(jid)
@@ -2626,8 +2626,36 @@ def jobs_delete(jid: str):
             rec["cancel"].set()
         aimeta.scan_delete(rid)                 # keeps the findings, drops the run
         _JOBS.pop(jid, None)
-        return {"deleted": True}
-    raise HTTPException(400, "unknown job")
+        return True
+    if jid in _JOBS:                            # generic one-shot job (apply, undo…)
+        rec = _JOBS.get(jid)
+        if not (rec and rec["thread"] and rec["thread"].is_alive()):
+            _JOBS.pop(jid, None)                # only dismiss finished/errored ones
+        return True
+    return False
+
+
+@app.delete("/api/jobs/{jid:path}")
+def jobs_delete(jid: str):
+    if not _delete_one_job(jid):
+        raise HTTPException(400, "unknown job")
+    return {"deleted": True}
+
+
+@app.post("/api/jobs/clear")
+def jobs_clear():
+    """Dismiss every FINISHED job at once (done / interrupted / failed) — leaves running,
+    paused, and still-to-review jobs alone. Scan findings are kept (only the run rows go)."""
+    n = 0
+    for j in _jobs_list():
+        if (j.get("deletable") and j["status"] not in ("running", "paused")
+                and not (j.get("findings") or 0)):     # keep anything awaiting review
+            try:
+                if _delete_one_job(j["id"]):
+                    n += 1
+            except Exception:
+                pass
+    return {"cleared": n}
 
 
 # --------------------------------------------------------------------------- #
@@ -3245,6 +3273,18 @@ def _apply_drain(should_stop, media):
         if not ids:
             break
         _aimeta_apply(should_stop, media=media, only_ids=ids)
+
+
+@app.post("/api/aimeta/accept")
+def aimeta_accept(body: dict = Body(default={})):
+    """Mark the selected changes ACCEPTED but do NOT apply — they queue in the
+    pending-changes bar. Accept as many as you like across scans; a later single Apply
+    then applies them all together in ONE catalog rebuild (no rebuild per accept)."""
+    sels = (body or {}).get("selections")
+    if not sels:
+        raise HTTPException(400, "no selections")
+    aimeta.apply_selection(sels)          # status -> accepted (+ per-attribute selection)
+    return {"accepted": len(sels), "pending": aimeta.pending_count()}
 
 
 @app.post("/api/aimeta/apply")

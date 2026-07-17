@@ -4464,6 +4464,22 @@ function About({ attrs, scores, prov }: {
 function PendingApplyBar({ count, onApplied }: { count: number; onApplied: () => void }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [applyRunning, setApplyRunning] = useState(false)
+  // While an "Apply AI metadata + rebuild" job is live, these changes ARE being applied,
+  // so this bar is redundant with that job — hide it, and refresh when it finishes.
+  useEffect(() => {
+    let alive = true, prev = false
+    const check = () => api.jobs().then((r) => {
+      if (!alive) return
+      const running = r.jobs.some((j) => j.kind === 'aimeta-apply'
+        && (j.status === 'running' || j.status === 'paused'))
+      setApplyRunning(running)
+      if (prev && !running) onApplied()      // apply finished -> refresh so pending clears
+      prev = running
+    }).catch(() => {})
+    check(); const t = setInterval(check, 2500)
+    return () => { alive = false; clearInterval(t) }
+  }, [onApplied])
   const apply = async () => {
     setBusy(true); setErr('')
     try {
@@ -4487,6 +4503,7 @@ function PendingApplyBar({ count, onApplied }: { count: number; onApplied: () =>
     }
     setTimeout(poll, 3000)
   }
+  if (applyRunning) return null              // handed off to the running rebuild job
   return (
     <div className="pending-apply" id="pending-apply-bar">
       <div className="pa-info">
@@ -7400,7 +7417,7 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
     })
   const setAll = (on: boolean) => setSel(on ? new Set(allIds) : new Set())
 
-  const apply = async () => {
+  const buildSelections = (): AiApplySelection[] => {
     const selections: AiApplySelection[] = []
     for (const g of groups) {
       const attrs = g.changes.filter((c) => c.type === 'attr' && sel.has(c.id))
@@ -7409,6 +7426,23 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
       if (attrs.length === 0 && !match) continue
       selections.push({ finding_id: g.f.id, attributes: attrs, match })
     }
+    return selections
+  }
+  // Accept only: queue the changes (no rebuild). Stack up accepts across scans, then a
+  // single Apply from the ✦ bar applies them ALL in one catalog rebuild.
+  const acceptOnly = async () => {
+    const selections = buildSelections()
+    if (!selections.length) return
+    setBusy(true); setNote('')
+    try {
+      await api.aimetaAccept(selections)
+      const msg = `✓ Accepted ${selectedCount} change(s) across ${gamesTouched} game(s) — queued. Apply them together from the ✦ bar when ready.`
+      if (onApplied) { showToast(msg); onApplied() } else { setNote(msg); load() }
+    } catch (e) { setNote((e as Error).message) } finally { setBusy(false) }
+  }
+  // Accept AND apply now: skip waiting — kick the rebuild immediately.
+  const acceptAndApply = async () => {
+    const selections = buildSelections()
     if (!selections.length) return
     setBusy(true); setNote('')
     try {
@@ -7481,8 +7515,12 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
           {' '}across <b>{gamesTouched}</b> game{gamesTouched === 1 ? '' : 's'} selected</span>
         <button className="ops-btn" onClick={() => setAll(true)}>Select all</button>
         <button className="ops-btn" onClick={() => setAll(false)}>Deselect all</button>
-        <button className="ops-btn go" disabled={busy || selectedCount === 0} onClick={apply}>
-          {busy ? 'Applying…' : onApplied ? '✨ Accept & apply' : '✨ Apply selected'}</button>
+        <button className="ops-btn" disabled={busy || selectedCount === 0} onClick={acceptOnly}
+          title="Queue these changes without rebuilding — apply them later, batched with your other accepts">
+          {busy ? '…' : '✓ Accept'}</button>
+        <button className="ops-btn go" disabled={busy || selectedCount === 0} onClick={acceptAndApply}
+          title="Accept and rebuild now">
+          {busy ? 'Applying…' : '✨ Accept & apply'}</button>
       </div>
     </div>
   )
@@ -7788,21 +7826,28 @@ function flashPendingApply() {
 function JobMonitor({ onOpen, pendingApply = 0, onApplied }: { onOpen?: (k: string) => void; pendingApply?: number; onApplied?: () => void }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [open, setOpen] = useState(false)
-  const [applying, setApplying] = useState(false)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
   const load = useCallback(() => api.jobs().then((j) => setJobs(j.jobs)).catch(() => {}), [])
   useEffect(() => { load(); const t = setInterval(load, 2500); return () => clearInterval(t) }, [load])
-  // actually apply the accepted-not-yet-applied changes (all of them, all media) and
-  // kick the rebuild — the pending count clears once the parent refreshes stats.
+  // An apply runs as a background "Apply AI metadata + rebuild" job. While that job is
+  // live the accepted-not-applied changes ARE being applied, so the pending bar is
+  // redundant with the running job — hide it and let the job (+ its badge) represent the
+  // work. When the apply job finishes, refresh stats so the (now-zero) pending clears.
+  const applyRunning = jobs.some((j) => j.kind === 'aimeta-apply'
+    && (j.status === 'running' || j.status === 'paused'))
+  const prevApplyRunning = useRef(false)
+  useEffect(() => {
+    if (prevApplyRunning.current && !applyRunning) onApplied?.()
+    prevApplyRunning.current = applyRunning
+  }, [applyRunning, onApplied])
   const applyPending = async () => {
-    if (applying) return
-    setApplying(true)
+    const before = pendingApply
     try {
       const r = await api.aimetaApply(undefined, true)
-      showToast(`✨ Applying ${pendingApply} change${pendingApply === 1 ? '' : 's'}` +
-        (r.coalesced ? ' — added to the running rebuild.' : ' — rebuilding. Track it here.'))
-      onApplied?.(); load()
-    } catch (e) { showToast((e as Error).message) } finally { setApplying(false) }
+      showToast(`✨ Applying ${before} change${before === 1 ? '' : 's'}` +
+        (r.coalesced ? ' — added to the running rebuild.' : ' — rebuilding…'))
+    } catch (e) { showToast((e as Error).message); return }
+    load()                     // surface the apply job now so the pending bar hands off to it
   }
 
   // Surface any reviewable scan even when other jobs are active, so accepting is
@@ -7815,7 +7860,10 @@ function JobMonitor({ onOpen, pendingApply = 0, onApplied }: { onOpen?: (k: stri
   // what's shown: needs-review + not-yet-applied changes / working / finished-and-clear.
   // (No time window — the done badge counts the done jobs actually in the list, not just
   // ones from the last hour, so 5 "Done" rows never read as "2".)
-  const attention = ready.reduce((n, j) => n + (j.findings ?? 0), 0) + (pendingApply || 0)
+  // pending-apply is "attention" only while it's NOT being applied; once the apply job is
+  // running it counts as work-in-progress (that job), not a separate to-do.
+  const showPending = pendingApply > 0 && !applyRunning
+  const attention = ready.reduce((n, j) => n + (j.findings ?? 0), 0) + (showPending ? pendingApply : 0)
   const working = active.length
   // every settled job that isn't waiting on review — done, interrupted, failed, whatever
   // its exact terminal status — so working + review-ready + done accounts for every row.
@@ -7829,16 +7877,16 @@ function JobMonitor({ onOpen, pendingApply = 0, onApplied }: { onOpen?: (k: stri
     <div className={'jobmon' + (active.length ? ' busy' : ' idle')}>
       <div className="jobmon-main">
       <div className="jobmon-rows">
-        {pendingApply > 0 && (
+        {showPending && (
           <div className="jobmon-row jm-pending" onClick={() => { setOpen(false); flashPendingApply() }}
             title="Accepted changes not applied yet — Apply now to rebuild, or click the row to jump to the Apply bar">
             <span className="jm-label"><span className="jm-pending-ic">✦</span>{' '}
               <b>{pendingApply}</b> accepted change{pendingApply === 1 ? '' : 's'} — not applied</span>
-            <button className="jm-accept" disabled={applying}
-              onClick={(e) => { e.stopPropagation(); applyPending() }}>{applying ? 'Applying…' : '✨ Apply now'}</button>
+            <button className="jm-accept"
+              onClick={(e) => { e.stopPropagation(); applyPending() }}>✨ Apply now</button>
           </div>
         )}
-        {shown.length === 0 && pendingApply === 0 ? (
+        {shown.length === 0 && !showPending ? (
           <button className="jobmon-idle" title="Open job monitor" onClick={() => setOpen(true)}>
             <span className="jm-idle-dot" />
             {jobs.length ? `${jobs.length} recent job${jobs.length === 1 ? '' : 's'}` : 'No active jobs'}
@@ -7883,34 +7931,50 @@ function JobMonitor({ onOpen, pendingApply = 0, onApplied }: { onOpen?: (k: stri
           )}
         </div>
       )}
-      {open && <JobOverlay onClose={() => setOpen(false)} onOpen={onOpen} pendingApply={pendingApply}
-        applying={applying} onApply={applyPending} />}
+      {open && <JobOverlay onClose={() => setOpen(false)} onOpen={onOpen}
+        pendingApply={showPending ? pendingApply : 0} onApply={applyPending} />}
       {review && <AiReviewModal runId={review.runId} title={review.title}
-        onClose={() => { setReview(null); load() }} />}
+        onClose={() => { setReview(null); load(); onApplied?.() }} />}
     </div>
   )
 }
 
-function JobOverlay({ onClose, onOpen, pendingApply = 0, applying = false, onApply }: { onClose: () => void; onOpen?: (k: string) => void; pendingApply?: number; applying?: boolean; onApply?: () => void }) {
+function JobOverlay({ onClose, onOpen, pendingApply = 0, onApply }: { onClose: () => void; onOpen?: (k: string) => void; pendingApply?: number; onApply?: () => void }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [openRun, setOpenRun] = useState<number | null>(null)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
+  const [clearing, setClearing] = useState(false)
   const wrapRef = useClickOutside<HTMLDivElement>(true, onClose)
   const load = useCallback(() => api.jobs().then((j) => setJobs(j.jobs)).catch(() => {}), [])
   useEffect(() => { load(); const t = setInterval(load, 2000); return () => clearInterval(t) }, [load])
 
   const act = async (fn: Promise<unknown>) => { try { await fn } catch { /* */ } load() }
+  // finished jobs that "Clear finished" will dismiss — done/interrupted/failed, not
+  // running/paused, and not still awaiting review.
+  const clearable = jobs.filter((j) => j.deletable
+    && j.status !== 'running' && j.status !== 'paused' && !reviewable(j)).length
+  const clearFinished = async () => {
+    setClearing(true)
+    try { await api.clearJobs() } catch { /* */ }
+    setClearing(false); load()
+  }
   return (
     <div className="overlay" onClick={onClose}>
       <div className="job-overlay" ref={wrapRef} onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={onClose}>×</button>
-        <h2>Jobs</h2>
+        <div className="jo-head">
+          <h2>Jobs</h2>
+          {clearable > 0 && (
+            <button className="ops-btn jo-clear" disabled={clearing} onClick={clearFinished}
+              title="Dismiss all finished jobs (keeps anything running or awaiting review)">
+              {clearing ? 'Clearing…' : `🧹 Clear finished (${clearable})`}</button>
+          )}
+        </div>
         {pendingApply > 0 && (
           <div className="jo-pending">
             <span><span className="jm-pending-ic">✦</span>{' '}
               <b>{pendingApply}</b> accepted change{pendingApply === 1 ? '' : 's'} — not applied yet</span>
-            <button className="jm-accept" disabled={applying}
-              onClick={() => onApply?.()}>{applying ? 'Applying…' : '✨ Apply now'}</button>
+            <button className="jm-accept" onClick={() => onApply?.()}>✨ Apply now</button>
           </div>
         )}
         {jobs.length === 0 && pendingApply === 0 && <div className="sync-note dim">No jobs.</div>}

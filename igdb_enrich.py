@@ -36,6 +36,10 @@ LIB = config.get("library_db")
 
 def cache_con():
     con = sqlite3.connect(CACHE)
+    con.execute("PRAGMA busy_timeout=120000")  # wait out the live server's reads (FUSE
+    # can't do WAL, so metadata-cache stays DELETE-mode where a reader blocks the writer;
+    # a generous busy_timeout + _commit() retry below keeps a batch enrich from dying on
+    # "database is locked" while the server serves game-detail/ownership reads).
     con.executescript("""
     CREATE TABLE IF NOT EXISTS igdb_token(client_id TEXT PRIMARY KEY,
       token TEXT, expires_at INTEGER);
@@ -45,6 +49,20 @@ def cache_con():
       payload_json TEXT, fetched_at INTEGER);
     """)
     return con
+
+
+def _commit(con, tries=6):
+    """Commit, retrying on a transient 'database is locked' (DELETE-mode metadata-cache
+    contends with the live server's reads). Backoff between attempts; re-raise if it
+    never clears so a real error isn't swallowed."""
+    for i in range(tries):
+        try:
+            con.commit()
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower() or i == tries - 1:
+                raise
+            time.sleep(1.5 * (i + 1))
 
 
 def token(con, cid, csec):
@@ -465,7 +483,7 @@ def main(argv):
                     "(norm_key,igdb_id,slug,matched_by,resolved_at) "
                     "VALUES(?,?,?,?,?)", (nk, gid, None, "steam_appid", now))
                 resolved[nk] = gid
-        con.commit()
+        _commit(con)
     if appids:
         print("igdb: resolved %d of %d games that had a Steam appid"
               % (sum(1 for a in appids if appid_map[a] in resolved), len(appids)),
@@ -504,9 +522,9 @@ def main(argv):
             resolved[nk] = iid
         print("PROG\t%d\t%d\t%s\tresolve" % (n, len(remaining), nk), flush=True)
         if n % 50 == 0:
-            con.commit()
+            _commit(con)
             print("igdb: name-search %d/%d" % (n, len(remaining)), file=sys.stderr)
-    con.commit()
+    _commit(con)
 
     # ---- fetch metadata for resolved ids that are missing or stale ----
     want = sorted({iid for iid in resolved.values() if iid})
@@ -525,7 +543,7 @@ def main(argv):
             con.execute("INSERT OR REPLACE INTO igdb_meta"
                         "(igdb_id,payload_json,fetched_at) VALUES(?,?,?)",
                         (g["id"], json.dumps(g, ensure_ascii=False), now))
-        con.commit()
+        _commit(con)
         print("PROG\t%d\t%d\t\tfetch" % (min(i + 200, len(need)), len(need)), flush=True)
         print("igdb: fetched %d/%d" % (min(i + 200, len(need)), len(need)),
               file=sys.stderr)

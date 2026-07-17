@@ -2930,6 +2930,9 @@ a.idchip:hover { background: var(--accent-bg); }
 /* job overlay */
 .job-overlay { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; max-width: 760px; width: 100%; padding: 22px 26px; }
 .job-overlay h2 { color: var(--text-h); margin: 0 24px 14px 0; }
+.jo-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-right: 24px; }
+.jo-head h2 { margin: 0 0 14px 0; }
+.jo-clear { margin-bottom: 14px; white-space: nowrap; }
 .job-table { display: flex; flex-direction: column; }
 .job-trow { display: grid; grid-template-columns: 1.6fr auto 1fr auto auto; gap: 10px; align-items: center; padding: 9px 6px; border-bottom: 1px solid var(--border); }
 .job-trow.clickable { cursor: pointer; border-radius: 6px; }

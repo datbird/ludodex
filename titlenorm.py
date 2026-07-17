@@ -22,6 +22,14 @@ EDITION = re.compile(
 _TRAIL_EXT = re.compile(
     r"\.(m3u|iso|chd|cue|bin|img|mdf|nrg|ccd|rvz|wbfs|nkit|gcm|gcz|cso|pbp|gdi|"
     r"cdi|rom|nds|3ds|zip|7z|rar)$")
+# No-Intro / GoodTools article convention: the leading article is moved to the end after
+# a comma — "Legend of Zelda, The", "Boy and His Blob, A - Trouble on Blobolonia". Drop
+# that comma-article so it matches the article-front form ("The Legend of Zelda", which
+# the leading-article strip below folds to the same key) and article-position twins of
+# the same ROM merge instead of becoming two entries. Covers the common EN + FR/DE/ES/IT
+# articles No-Intro uses.
+_COMMA_ARTICLE = re.compile(
+    r",\s*(the|a|an|le|la|les|las|el|los|il|lo|gli|die|der|das|ein|eine)\b")
 
 _PREFS = None
 
@@ -37,6 +45,7 @@ def _prefs():
 def norm(t):
     preserve_years, strip_editions = _prefs()
     s = (t or "").lower()
+    s = _COMMA_ARTICLE.sub(" ", s)          # No-Intro "Title, The" -> "Title"
     s = _TRAIL_EXT.sub("", s)
     s = re.sub(r"[™®©]", "", s)
     if preserve_years:

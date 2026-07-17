@@ -1370,6 +1370,11 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json()
   },
+  clearJobs: async () => {
+    const r = await fetch('/api/jobs/clear', { method: 'POST' })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ cleared: number }>
+  },
   // ---- AI metadata audit & supplement ----
   aimetaTargets: () => get<AiScanTargets>('/api/aimeta/targets'),
   aimetaScans: () => get<{ scans: AiScanRun[] }>('/api/aimeta/scans'),
@@ -1414,6 +1419,14 @@ export const api = {
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ accepted: number; counts: AiFindingCounts }>
+  },
+  aimetaAccept: async (selections: AiApplySelection[]) => {
+    const r = await fetch('/api/aimeta/accept', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ selections }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ accepted: number; pending: number }>
   },
   aimetaApply: async (selections?: AiApplySelection[], media?: ScopeValue) => {
     const body: { selections?: AiApplySelection[]; media?: ScopeValue } = {}
