@@ -950,6 +950,19 @@ def model_for_area(area_id):
     return model_for(p) if p else None
 
 
+# Areas that ESCALATE to a second, harder pass (web-grounded / re-structured) and can
+# therefore use a bigger "escalation model". Currently only metadata's analyze_game.
+ESCALATE_AREAS = {"metadata"}
+
+
+def escalation_model_for_area(area_id):
+    """Optional larger/smarter model to use for this area's ESCALATED requests (the
+    web-grounded / hard-case second pass). Unset → escalation reuses the area's normal
+    model. Set in AI settings so tough games get a stronger model without paying for it
+    on every routine call."""
+    return config.get("ai_area_" + area_id + "_escalation_model") or None
+
+
 def area_available(area_id):
     p = provider_for_area(area_id)
     return bool(p and key_for(p))
@@ -1065,6 +1078,10 @@ def status():
              "data": bool(a.get("data", not a.get("vision"))),
              "assigned": (config.get("ai_area_" + a["id"]) or None),
              "assigned_model": (config.get("ai_area_" + a["id"] + "_model") or None),
+             # bigger model for this area's escalated (web / hard-case) pass, if it has one
+             "escalates": a["id"] in ESCALATE_AREAS,
+             "escalation_model": (escalation_model_for_area(a["id"]) if a["id"] in
+                                  ESCALATE_AREAS else None),
              "effective": provider_for_area(a["id"]),
              "effective_model": model_for_area(a["id"]),
              "prompt": (config.get("ai_area_" + a["id"] + "_prompt") or None),
@@ -1547,6 +1564,13 @@ def _metadata_user(game):
                      % ", ".join(media["missing"]))
     lines.append("MISSING attributes to fill: %s"
                  % (", ".join(game.get("missing") or []) or "(none)"))
+    # user-supplied context from the review page's "add context & re-run" — the human
+    # telling the model what it got wrong or what this actually is. Trust it strongly.
+    hint = (game.get("user_hint") or "").strip()
+    if hint:
+        lines.append("\nIMPORTANT — CONTEXT PROVIDED BY THE USER (they know this game; "
+                     "treat it as authoritative and reconcile your answer with it): "
+                     + hint)
     return "\n".join(lines)
 
 
@@ -1562,29 +1586,91 @@ WEB_GUIDANCE = (
 )
 
 
-def analyze_game(game, provider=None, model=None, web=False):
-    """Audit + enrich one game. `game` is the context dict built by the caller.
-    When `web` is set and the provider supports it, the model searches the live
-    web and the result carries a `sources` list of citations. Returns
-    {match:{...}, attributes:{...}, notes, sources:[{title,url}], web:bool}."""
-    provider, key, model = _resolve(provider or provider_for_area("metadata"),
-                                    model or model_for_area("metadata"))
-    user = _metadata_user(game)
-    used_web = bool(web and supports_web(provider))
-    if used_web:
-        text, sources = _complete_text_web(provider, key, model,
-                                           area_prompt("metadata") + WEB_GUIDANCE,
-                                           user)
-    else:
-        text = _complete_text(provider, key, model, area_prompt("metadata"), user)
-        sources = []
+def _parse_metadata(text):
+    """Parse analyze_game()'s model reply into a normalized {match, attributes, ...}."""
     obj = _json(text)
     if not isinstance(obj, dict):
         raise RuntimeError("model did not return a metadata object")
     obj.setdefault("match", {})
     obj.setdefault("attributes", {})
-    # model-reported sources may be bare URL strings — normalize, then merge with
-    # the provider's grounding citations
+    return obj
+
+
+def _actionable_content(obj):
+    """Does this analysis carry anything worth storing — filled attributes, a detected
+    compilation, or a flagged match problem? Mirrors aimeta.store_finding so we can tell
+    a real result from an empty 'looks fine, nothing added' reply."""
+    attrs = obj.get("attributes") or {}
+    if any(v not in (None, "", [], {}) for v in attrs.values()):
+        return True
+    coll = obj.get("collection") or {}
+    if coll.get("is_collection") and coll.get("members"):
+        return True
+    return ((obj.get("match") or {}).get("status") or "").lower() in (
+        "wrong", "unmatched", "unsure")
+
+
+def _should_escalate(obj, game):
+    """Whether to spend a web round-trip. Escalate when the reliable pass flags a match
+    problem, OR leaves most of the game's KNOWN metadata gaps unfilled — that's where
+    fresh web facts actually help. Self-reported confidence is NOT a good signal (the
+    model is happily 1.0 even on a made-up title), so we key off whether it produced the
+    missing data. If it already filled the gaps (e.g. Tec Toy's "20 em 1"), skip web —
+    grounding a good answer tends to DEGRADE it (Gemini can't enforce JSON with its search
+    tool, so grounded replies drop attributes and the whole collection)."""
+    if ((obj.get("match") or {}).get("status") or "").lower() in (
+            "unmatched", "unsure", "wrong"):
+        return True
+    gaps = game.get("missing") or []       # already the SUPPLEMENT_KINDS the game lacks
+    if not gaps:
+        return False
+    attrs = obj.get("attributes") or {}
+    filled = {k for k, v in attrs.items() if v not in (None, "", [], {})}
+    unfilled = [k for k in gaps if k not in filled]
+    return len(unfilled) > len(gaps) // 2          # more than half still empty
+
+
+def analyze_game(game, provider=None, model=None, web=False, force_web=False):
+    """Audit + enrich one game. `game` is the context dict built by the caller. Returns
+    {match:{...}, attributes:{...}, notes, sources:[{title,url}], web:bool}.
+
+    `force_web` skips the escalation heuristic and always does the web round when web is
+    on — used by the review page's explicit "add context & re-run" so a user asking for
+    a web-grounded retry actually gets one.
+
+    Reliability-first: the structured extraction ALWAYS comes from the plain
+    JSON-enforced completion, which is far more consistent than web-grounded output.
+    When `web` is set AND the reliable pass is uncertain (unmatched/unsure/low-confidence,
+    or empty on a game with gaps), we escalate: gather live-web research, then RE-STRUCTURE
+    with that research as context so the answer stays complete JSON with citations. This
+    fixes the old failure where the wand's web mode silently returned 0 findings for a
+    clearly-identifiable game (e.g. the Tec Toy "20 em 1" Master System compilation)."""
+    # an explicit `model` (e.g. the review page's model picker) wins for BOTH passes;
+    # otherwise the first pass uses the area's normal model and the escalated pass uses
+    # the configured bigger "escalation model" (falling back to the same model).
+    explicit = model
+    provider, key, model = _resolve(provider or provider_for_area("metadata"),
+                                    explicit or model_for_area("metadata"))
+    esc_model = explicit or escalation_model_for_area("metadata") or model
+    user = _metadata_user(game)
+    sysp = area_prompt("metadata")
+
+    obj = _parse_metadata(_complete_text(provider, key, model, sysp, user))
+    sources, used_web = [], False
+    if web and supports_web(provider) and (force_web or _should_escalate(obj, game)):
+        research, sources = _complete_text_web(provider, key, esc_model,
+                                               sysp + WEB_GUIDANCE, user)
+        used_web = True
+        webbed = _parse_metadata(_complete_text(
+            provider, key, esc_model, sysp,
+            user + "\n\nWEB RESEARCH to incorporate (may be noisy or incomplete — trust "
+            "it over guessing, but still answer with ONLY the JSON schema):\n"
+            + (research or "")))
+        # keep the web-informed structuring when it's at least as useful as the first pass
+        if _actionable_content(webbed) or not _actionable_content(obj):
+            obj = webbed
+
+    # normalize sources (model-reported may be bare URL strings) + grounding citations
     reported = []
     for s in (obj.get("sources") or []):
         if isinstance(s, str):

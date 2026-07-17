@@ -25,10 +25,12 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
+import console_eras
 import igdb
 from titlenorm import norm
 
 CACHE = os.path.join(DATA, "metadata-cache.sqlite")
+INDEX = os.path.join(DATA, "media-index.sqlite")   # media_fetch/media_choose store
 LIB = config.get("library_db")
 
 
@@ -156,7 +158,187 @@ def all_platforms(allow_fetch=True):
         con.close()
 
 
+def _year_of(hit):
+    """First-release year of an IGDB search hit (unix `first_release_date`), or None."""
+    d = hit.get("first_release_date")
+    if not d:
+        return None
+    try:
+        return time.gmtime(int(d)).tm_year
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _era_ok(consoles, year):
+    """True if a candidate dated `year` is plausible for a game living on `consoles`.
+
+    A candidate is rejected only when its year is impossible for EVERY one of the
+    game's platforms — so an Apple II ROM (era 1977-1993) rejects a 2010 movie tie-in
+    of the same name, while a title also owned on Steam ('pc', not an era-bound
+    console) accepts any year. Unknown year or no era-bound console → accept."""
+    if year is None or not consoles:
+        return True
+    return not all(console_eras.impossible(c, year) for c in consoles)
+
+
+def _pick_era_aware(hits, nk, consoles):
+    """From IGDB `search` hits, pick the best EXACT normalized-title match that is
+    era-plausible for `consoles`. Returns (igdb_id, slug) or (0, None).
+
+    Guards the exact-name matcher against same-name/different-era collisions: two
+    unrelated games can normalize identically ('Alice in Wonderland' the 1985 Apple II
+    text adventure vs. the 2010 film game). Among era-OK exact matches we prefer the
+    EARLIEST release — the original, not a later remake of the same name. If no exact
+    match is era-plausible, we stay unmatched rather than adopt the wrong game."""
+    exact = [h for h in hits if norm(h.get("name", "")) == nk]
+    if not exact:
+        return 0, None
+    ok = [h for h in exact if _era_ok(consoles, _year_of(h))]
+    if not ok:
+        return 0, None
+    ok.sort(key=lambda h: (_year_of(h) is None, _year_of(h) or 9999))
+    h = ok[0]
+    return h["id"], h.get("slug")
+
+
+def _consoles_by_norm():
+    """{norm_key: {console, ...}} — every EMULATION console each game has a ROM on, for
+    the era gate. ONLY emulation sources: console_eras is keyed by emulation platform
+    labels, and a store 'xbox'/'pc' ownership row spans all generations (an Xbox One
+    game is not the 2001 Xbox), so store platforms must never year-restrict."""
+    lib = sqlite3.connect(LIB)
+    out = {}
+    for nk, plat in lib.execute(
+            "SELECT g.norm_key, s.platform FROM games g JOIN sources s "
+            "ON s.game_id=g.id WHERE s.source='emulation'"):
+        if plat:
+            out.setdefault(nk, set()).add(plat)
+    lib.close()
+    return out
+
+
+def era_reheal(argv):
+    """Fix ALREADY-resolved games whose IGDB match is era-impossible for their
+    console(s) — the same-name/different-era collisions that predate the era-aware
+    matcher (Apple II 'Alice in Wonderland' bound to the 2010 film game). For each we
+    re-search era-aware (binding the correct earlier game if IGDB has one, else leaving
+    it unmatched), then purge the game's stale platform-neutral remote art from the
+    media index so its wrong cover/background drops on the next media rebuild.
+
+      python3 igdb_enrich.py --era-reheal            # heal + purge
+      python3 igdb_enrich.py --era-reheal --dry-run  # report only, change nothing
+    """
+    dry = "--dry-run" in argv
+    if not config.metadata_enabled("igdb"):
+        print("igdb: disabled — nothing to reheal", file=sys.stderr)
+        return
+    cid, csec = config.igdb_creds()
+    if not (cid and csec):
+        print("igdb: no credentials — cannot reheal", file=sys.stderr)
+        return
+    if not os.path.exists(LIB):
+        print("igdb: no catalog yet — run build_library.py first.", file=sys.stderr)
+        return
+    con = cache_con()
+    tok = token(con, cid, csec)
+    now = int(time.time())
+    consoles = _consoles_by_norm()
+
+    # candidates: resolved AND living on at least one era-bound emulation console
+    # (store-only games are never era-gated, so skip them).
+    cand = []                       # [(norm_key, igdb_id)]
+    for nk, iid in con.execute(
+            "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0"):
+        cs = consoles.get(nk)
+        if cs and any(console_eras.era(c) for c in cs):
+            cand.append((nk, iid))
+
+    # matched year per igdb_id: cache-first, then FETCH the rest. Most resolutions have
+    # no cached metadata payload (meta is fetched lazily), so relying on the cache alone
+    # would miss the vast majority of era-impossible matches — batch-fetch by id.
+    yr = {}
+    for iid, payload in con.execute("SELECT igdb_id, payload_json FROM igdb_meta"):
+        try:
+            g = json.loads(payload) if payload else None
+        except (ValueError, TypeError):
+            g = None
+        if g:
+            yr[iid] = _year_of(g)
+    need_ids = sorted({iid for _, iid in cand})
+    miss = [i for i in need_ids if i not in yr]
+    for i in range(0, len(miss), 200):
+        batch = miss[i:i + 200]
+        body = ("fields id,first_release_date; where id = (%s); limit 500;"
+                % ",".join(str(x) for x in batch))
+        try:
+            for g in igdb.query("games", body, cid, tok):
+                yr[g["id"]] = _year_of(g)
+        except Exception as e:
+            print("igdb reheal: year fetch batch failed: %s" % e, file=sys.stderr)
+    print("igdb reheal: %d resolved game(s) on era-bound consoles | %d years fetched"
+          % (len(cand), len(miss)), file=sys.stderr)
+
+    # resolved games whose matched year can't exist on ANY of their era-bound consoles
+    suspect = []
+    for nk, iid in cand:
+        y = yr.get(iid)
+        if y is not None and not _era_ok(consoles.get(nk), y):
+            suspect.append((nk, iid, y))
+    print("igdb reheal: %d resolved game(s) have an era-impossible match"
+          % len(suspect), file=sys.stderr)
+
+    affected, rebound = [], []
+    for nk, old_iid, y in suspect:
+        title = nk.replace('"', " ").strip()
+        try:
+            hits = igdb.query(
+                "games",
+                'search "%s"; fields id,name,slug,first_release_date; limit 8;'
+                % title, cid, tok)
+        except Exception:
+            hits = []
+        new_iid, slug = _pick_era_aware(hits, nk, consoles.get(nk))
+        cons = ",".join(sorted(consoles.get(nk) or []))
+        print("  %-40s [%s] #%d(y%s) -> %s"
+              % (nk[:40], cons, old_iid, y,
+                 ("#%d" % new_iid if new_iid else "UNMATCHED")), file=sys.stderr)
+        affected.append(nk)
+        if new_iid:
+            rebound.append(nk)
+        if not dry:
+            con.execute(
+                "INSERT OR REPLACE INTO igdb_resolution"
+                "(norm_key,igdb_id,slug,matched_by,resolved_at) VALUES(?,?,?,?,?)",
+                (nk, new_iid or 0, slug, "era_reheal" if new_iid else "era_reject",
+                 now))
+    if not dry:
+        con.commit()
+    con.close()
+
+    # purge the affected games' stale platform-neutral remote art (the wrong cover /
+    # background came from the old match). A subsequent media_fetch rebuilds igdb/steam
+    # from the corrected resolutions; deleting steamgriddb neutral rows here stops a
+    # name-collision grid re-winning. Own-console ROM art (system=<console>) is kept.
+    purged = 0
+    if not dry and affected and os.path.exists(INDEX):
+        mi = sqlite3.connect(INDEX)
+        ph = ",".join("?" * len(affected))
+        cur = mi.execute(
+            "DELETE FROM media WHERE norm_key IN (%s) "
+            "AND COALESCE(system,'')='' AND provider IN ('igdb','steam','steamgriddb')"
+            % ph, affected)
+        purged = cur.rowcount
+        mi.commit()
+        mi.close()
+    print("igdb reheal: %d affected | %d rebound to a correct game | %d unmatched | "
+          "%d stale neutral media rows purged%s"
+          % (len(affected), len(rebound), len(affected) - len(rebound), purged,
+             "  (dry-run: no changes written)" if dry else ""), file=sys.stderr)
+
+
 def main(argv):
+    if "--era-reheal" in argv:
+        return era_reheal(argv)
     do_all = "--all" in argv
     limit = int(argv[argv.index("--limit") + 1]) if "--limit" in argv else None
 
@@ -179,9 +361,20 @@ def main(argv):
 
     # ---- worklist: each game's norm_key, title, and a Steam appid if present ----
     lib = sqlite3.connect(LIB)
-    games = {nk: {"title": title, "appid": None}
+    games = {nk: {"title": title, "appid": None, "consoles": set()}
              for nk, title in lib.execute(
                  "SELECT norm_key, canonical_title FROM games")}
+    # Every EMULATION console a norm_key has a ROM on — the era-aware matcher rejects
+    # candidates whose release year is impossible for ALL of them (an Apple II ROM
+    # can't be a 2010 game). ONLY emulation sources feed this: console_eras is keyed by
+    # emulation platform labels, and a store 'xbox'/'pc' ownership row spans every
+    # generation (Xbox One games are not the 2001 Xbox), so store platforms must never
+    # year-restrict. A game owned only on stores has no era-bound console -> never gated.
+    for nk, plat in lib.execute(
+            "SELECT g.norm_key, s.platform FROM games g JOIN sources s "
+            "ON s.game_id=g.id WHERE s.source='emulation'"):
+        if nk in games and plat:
+            games[nk]["consoles"].add(plat)
     for nk, sid in lib.execute(
             "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
             "ON s.game_id=g.id WHERE s.source='steam'"):
@@ -274,21 +467,22 @@ def main(argv):
         title = games[nk]["title"].replace('"', " ").strip()
         iid, slug = 0, None
         try:
-            hits = igdb.query("games", 'search "%s"; fields id,name,slug; limit 8;'
-                              % title, cid, tok)
+            hits = igdb.query(
+                "games",
+                'search "%s"; fields id,name,slug,first_release_date; limit 8;'
+                % title, cid, tok)
         except Exception:               # one bad title shouldn't abort the run
             hits = []
-        # Accept ONLY an exact normalized-title match. We used to fall back to IGDB's
-        # top fuzzy hit when nothing matched, but `search` ranks by relevance and would
-        # bind e.g. "gods" (Bitmap Bros, 1991) -> "God of War Ragnarök", renaming the
-        # ROM and poisoning its score/metadata. norm() already folds case, punctuation,
-        # articles, roman numerals, &/+, and editions, so an exact match still catches
-        # real spelling variants; a genuine miss stays unmatched (keeps its filename
-        # title) rather than adopting a wrong game. (User decision 2026-07-15.)
-        for h in hits:
-            if norm(h.get("name", "")) == nk:
-                iid, slug = h["id"], h.get("slug")
-                break
+        # Accept ONLY an exact normalized-title match that is era-plausible for the
+        # game's console(s). We used to fall back to IGDB's top fuzzy hit when nothing
+        # matched, but `search` ranks by relevance and would bind e.g. "gods" (Bitmap
+        # Bros, 1991) -> "God of War Ragnarök", renaming the ROM and poisoning its
+        # metadata. norm() folds case, punctuation, articles, roman numerals, &/+, and
+        # editions, so an exact match still catches real spelling variants; the era
+        # gate then rejects same-name/different-era collisions (Apple II 'Alice in
+        # Wonderland' vs. the 2010 film game). A genuine miss stays unmatched (keeps its
+        # filename title) rather than adopting a wrong game. (User decisions 2026-07-15/16.)
+        iid, slug = _pick_era_aware(hits, nk, games[nk]["consoles"])
         con.execute("INSERT OR REPLACE INTO igdb_resolution"
                     "(norm_key,igdb_id,slug,matched_by,resolved_at) "
                     "VALUES(?,?,?,?,?)",

@@ -2816,6 +2816,7 @@ a.idchip:hover { background: var(--accent-bg); }
 .run-badge.s-partial { background: rgba(239,68,68,0.16); color: #ef4444; }
 .run-badge.s-planned { background: var(--accent-bg); color: var(--accent); }
 .run-badge.s-undone { background: var(--border); color: var(--text); }
+.run-badge.s-interrupted { background: var(--border); color: var(--text-dim, #9aa); }
 .run-progress { position: relative; height: 6px; border-radius: 4px; background: var(--border); overflow: hidden; min-width: 80px; flex: 1; margin: 6px 0; }
 .run-progress .rp-done { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); }
 .run-progress .rp-fail { position: absolute; right: 0; top: 0; bottom: 0; background: #ef4444; }
@@ -2886,6 +2887,24 @@ a.idchip:hover { background: var(--accent-bg); }
 .jobmon-row.jm-ready { animation: jm-ready-pulse 2s ease-in-out infinite; border-radius: 6px; }
 .jobmon-row.jm-ready .jm-label { color: var(--text-h); font-weight: 600; }
 @keyframes jm-ready-pulse { 0%, 100% { background: transparent; } 50% { background: color-mix(in srgb, var(--accent) 12%, transparent); } }
+
+/* pending-apply row (accepted-but-not-applied) — the ✦ attention item, surfaced right
+   in the monitor and clickable through to the Apply bar */
+.jobmon-row.jm-pending { cursor: pointer; border-radius: 6px; padding: 2px 4px; background: rgba(255, 179, 64, 0.10); }
+.jobmon-row.jm-pending:hover { background: rgba(255, 179, 64, 0.18); }
+.jobmon-row.jm-pending .jm-label { max-width: none; flex: 1; color: #ffb340; }
+.jm-pending-ic { color: #ffb340; font-weight: 700; }
+.jo-pending { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin: 6px 0 10px; padding: 9px 12px; border-radius: 8px; cursor: pointer;
+  background: rgba(255, 179, 64, 0.12); border: 1px solid rgba(255, 179, 64, 0.4); color: #ffb340; font-size: 13px; }
+.jo-pending:hover { background: rgba(255, 179, 64, 0.2); }
+/* pulse the Apply bar when jumped to from a badge / pending row */
+.pending-apply.pa-flash { animation: pa-flash 1.8s ease-out; }
+@keyframes pa-flash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 179, 64, 0); }
+  15% { box-shadow: 0 0 0 3px rgba(255, 179, 64, 0.7); }
+  50% { box-shadow: 0 0 0 3px rgba(255, 179, 64, 0.35); }
+}
 .review-panel { max-width: 640px; width: 92vw; max-height: 88vh; overflow: auto; padding: 20px 22px; }
 .rv-title { color: var(--accent); }
 .jm-label { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-h); }
@@ -2900,6 +2919,7 @@ a.idchip:hover { background: var(--accent-bg); }
 .jm-status.s-paused { color: #d97706; }
 .jm-status.s-done { color: #16a34a; }
 .jm-status.s-partial { color: #ef4444; }
+.jm-status.s-interrupted { color: var(--text-dim, #9aa); }
 .jm-btn { background: none; border: none; color: var(--text); cursor: pointer; font-size: 12px; padding: 0 2px; line-height: 1; }
 .jm-btn:hover { color: var(--accent); }
 .jm-expand { flex: none; }
@@ -3035,6 +3055,24 @@ a.idchip:hover { background: var(--accent-bg); }
 .chg-link .chg-value { color: var(--accent); }
 .chg-sources { padding: 6px 12px; font-size: 12px; }
 .chg-sources ul { margin: 4px 0 0; padding-left: 18px; }
+
+/* factual context strip — what we KNOW about the ROM, above the AI's proposals */
+.fc-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: rgba(127,127,127,0.05); }
+.fc-chip { font-size: 11px; color: var(--text); background: var(--border); border-radius: 6px; padding: 2px 7px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fc-chip.fc-file { font-family: var(--mono, ui-monospace, monospace); }
+.fc-chip.fc-dim { background: transparent; color: var(--text-dim, #9aa); padding-left: 0; }
+
+/* "add context & re-run" */
+.refine-toggle { display: block; width: 100%; text-align: left; padding: 7px 12px; border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--text-dim, #9aa); font-size: 12px; cursor: pointer; }
+.refine-toggle:hover { color: var(--accent); background: var(--accent-bg); }
+.refine-panel { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.refine-hint { width: 100%; resize: vertical; font: inherit; font-size: 12px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); box-sizing: border-box; }
+.refine-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.refine-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim, #9aa); }
+.refine-field select { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); max-width: 240px; }
+.refine-web { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text); }
+.refine-note { font-size: 12px; }
+.refine-err { font-size: 12px; color: #ef4444; }
 .chg-bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; margin-top: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 -2px 10px rgba(0,0,0,0.15); }
 .chg-summary { flex: 1; font-size: 13px; color: var(--text); }
 

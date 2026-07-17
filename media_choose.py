@@ -43,6 +43,10 @@ def repo_dir():
 def con_index():
     con = sqlite3.connect(INDEX)
     con.row_factory = sqlite3.Row
+    # materialize() holds the write connection across long downloads while the live
+    # server reads/writes the same index — without a busy timeout a momentary lock
+    # aborts the whole pass at commit time. Wait for the lock instead of failing.
+    con.execute("PRAGMA busy_timeout=30000")
     if "hidden" not in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
         con.execute("ALTER TABLE media ADD COLUMN hidden INTEGER DEFAULT 0")
         con.commit()

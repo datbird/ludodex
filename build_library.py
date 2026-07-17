@@ -479,21 +479,34 @@ for _b, _ents in _by_base.items():
     _y = _years.get(_b)
     # a "home" sibling = a store/PC entry or an emulation entry on non-handheld hardware
     _has_home = any(_st or not console_eras.is_handheld(_p) for _p, _st in _ents)
-    # a real OWNED store/PC sibling anchors the modern release year. Without one, `_y`
-    # is just a bare IGDB name-match (often to a modern same-named game you don't own),
-    # which must NOT split legit same-era console ports apart (e.g. Gods on Genesis +
-    # SNES + Amiga all normalize to "gods" — one game, three platforms, not three games).
-    _has_store = any(_st for _p, _st in _ents)
+    # Siblings that could plausibly BE the `_y`-dated game: any store/PC entry (era-
+    # unbounded) OR any console whose production era CAN contain `_y`. When such an
+    # anchor exists, a sibling whose console CAN'T contain `_y` is a DIFFERENT same-named
+    # game and gets peeled off. This catches all-emulation cross-era collisions — Apple
+    # II "Alice in Wonderland" (1985) sharing a norm_key with the NDS 2010 movie game the
+    # title resolved to — without splitting legit same-era ports: Gods on Genesis+SNES+
+    # Amiga are all era-compatible with 1991, so `_compat` holds all three and none is
+    # "impossible while a sibling is compatible". The era-aware IGDB matcher makes `_y`
+    # trustworthy (it never binds a year impossible for the WHOLE console set), so this
+    # no longer needs a store sibling to anchor the modern year. (DESIGN §11.6.)
+    _compat = [_p for _p, _st in _ents
+               if _st or (_y and not console_eras.impossible(_p, _y))]
     for _p, _st in _ents:
         if _st:
             continue            # store entries are authoritative, never separated
-        _impossible = bool(_y and _has_store and console_eras.impossible(_p, _y))
+        _impossible = bool(_y and console_eras.impossible(_p, _y)
+                           and any(_cp != _p for _cp in _compat))
         _stray = _has_home and console_eras.is_retro_handheld(_p)
-        # only separate when a DIFFERENT home sibling exists (so this really is a
-        # distinct game, not just the game's own platform)
+        # The stray-handheld heuristic (a retro-handheld port sitting next to a home
+        # version) only splits when a DIFFERENT *home* sibling exists, so it doesn't peel
+        # a game off its own handheld self. The era-impossible branch needs no such guard:
+        # `_compat` already proves a DIFFERENT platform can be the `_y` game, so this
+        # entry's console genuinely can't be — separate it even when the compatible
+        # sibling is itself a handheld (Apple II "Alice in Wonderland" 1985 vs. the NDS
+        # 2010 movie game: NDS is the only compatible sibling, yet Apple II must split).
         _other_home = any((_op != _p) and (_os or not console_eras.is_handheld(_op))
                           for _op, _os in _ents)
-        if (_impossible or _stray) and _other_home:
+        if _impossible or (_stray and _other_home):
             _sep.append(((_b, _p), _b + "\x1f" + _p))
 sep_base = {ekey: newbase for ekey, newbase in _sep}   # (norm_key, plat) -> cross-ref base_key
 if _sep:

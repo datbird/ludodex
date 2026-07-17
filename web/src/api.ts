@@ -140,6 +140,16 @@ export interface AiFindingPayload {
   sources?: SourceCite[]
   web?: boolean
 }
+export interface FindingContext {
+  title: string | null
+  systems: string[]
+  sources: string[]
+  files: string[]
+  folders: string[]
+  tags: string[]
+  siblings: string[]
+  current_match: string | null
+}
 export interface AiFinding {
   id: number
   run_id: number
@@ -151,6 +161,7 @@ export interface AiFinding {
   model: string
   created: number
   payload: AiFindingPayload
+  context?: FindingContext | null
   selection?: { attributes: string[] | null; match: boolean } | null
 }
 export interface AiApplySelection {
@@ -159,7 +170,7 @@ export interface AiApplySelection {
   match: boolean
 }
 export type AiFindingCounts = Record<string, Record<string, number>>
-export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number; web_capable: boolean; attributes: string[]; media_kinds: string[] }
+export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number; web_capable: boolean; provider?: string; model?: string; escalation_model?: string | null; attributes: string[]; media_kinds: string[] }
 export type ScopeValue = boolean | string[]   // true=all, false=none, [kinds]=subset
 export interface ScanOpts { web?: boolean; match_provider?: boolean; metadata?: ScopeValue; media?: ScopeValue }
 export interface AiScanRun {
@@ -213,6 +224,8 @@ export interface AiArea {
   data?: boolean
   assigned: string | null
   assigned_model: string | null
+  escalates?: boolean            // area has an escalated (web/hard-case) pass
+  escalation_model?: string | null   // bigger model for that pass (null = reuse normal)
   effective: string | null
   effective_model: string | null
   prompt: string | null          // user override (null = using default)
@@ -261,7 +274,7 @@ export interface AiConfigUpdate {
   vision?: { provider?: string; model?: string }
   keys?: Record<string, string>
   models?: Record<string, string>
-  areas?: Record<string, { provider?: string; model?: string; prompt?: string }>
+  areas?: Record<string, { provider?: string; model?: string; escalation_model?: string; prompt?: string }>
 }
 
 export interface ArtPick {
@@ -1378,6 +1391,16 @@ export const api = {
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ run_id: number; target: string; count: number; web: boolean; match_provider: boolean }>
+  },
+  aimetaRefine: async (
+    body: { norm_key: string; hint?: string; model?: string; web?: boolean; run_id?: number },
+  ) => {
+    const r = await fetch('/api/aimeta/refine', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ kind: string | null; finding: AiFinding | null; used_web: boolean; model: string; context: FindingContext | null }>
   },
   aimetaFindingAction: async (id: number, action: 'accept' | 'reject' | 'reset') => {
     const r = await fetch('/api/aimeta/finding/' + id + '/' + action, { method: 'POST' })

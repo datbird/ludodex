@@ -1055,6 +1055,12 @@ def _warm_spotlight_bg():
 @app.on_event("startup")
 def _startup_warm_spotlight():
     _warm_spotlight_bg()              # warm on boot so the first dashboard load is snappy
+    try:                             # reap scans orphaned 'running' by a prior process
+        _reaped = aimeta.reap_running()   # (container restart/redeploy/crash mid-scan)
+        if _reaped:
+            print("startup: reaped %d orphaned scan run(s)" % _reaped, file=sys.stderr)
+    except Exception as _e:
+        print("startup: scan reap failed: %s" % _e, file=sys.stderr)
 
 
 def _spotlight_catalog(con):
@@ -2486,7 +2492,11 @@ def _jobs_list():
         out.append({
             "id": jid, "kind": "aimeta", "run_id": s["id"],
             "label": "Metadata scan — %s" % s["target"],
-            "status": "running" if live else s["status"],
+            # only ACTUALLY-live (thread alive in this process) is 'running'. A DB row still
+            # 'running' with no live thread is a mid-session orphan (its worker died) — show
+            # it 'interrupted' rather than a phantom spinner; startup reap fixes it durably.
+            "status": ("running" if live
+                       else "interrupted" if s["status"] == "running" else s["status"]),
             "detail": _detail,
             "error": (rec or {}).get("error"),
             "findings": _prop,
@@ -2804,21 +2814,111 @@ def aimeta_scan(body: dict = Body(default={})):
             "match_provider": match_provider}
 
 
+@app.post("/api/aimeta/refine")
+def aimeta_refine(body: dict = Body(default={})):
+    """Re-run the pipeline for ONE game with user-supplied context and (optionally) a
+    bigger model — the review page's "not right? add context & re-run". Synchronous:
+    supersedes the game's proposed finding and returns the fresh one so the reviewer
+    sees the new result immediately. Body: {norm_key, hint, model?, web?, run_id?}."""
+    body = body or {}
+    nk = (body.get("norm_key") or "").strip()
+    if not nk:
+        raise HTTPException(400, "norm_key required")
+    provider = ai.provider_for_area("metadata")
+    try:
+        model = (body.get("model") or "").strip() or ai.model_for_area("metadata")
+        ai._resolve(provider, model)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    web = bool(body.get("web", True)) and ai.supports_web(provider)
+    ctx = aimeta.game_context(nk)
+    if not ctx:
+        raise HTTPException(404, "no such game / no context to analyze")
+    ctx["user_hint"] = (body.get("hint") or "").strip()
+    try:
+        # force_web: an explicit web-checked re-run always grounds (bypass the escalation
+        # heuristic — the user asked for the web pass on purpose).
+        res = ai.analyze_game(ctx, provider=provider, model=model, web=web,
+                              force_web=web)
+    except Exception as e:                      # surface the failure to the reviewer
+        raise HTTPException(502, "AI re-run failed: %s" % str(e)[:200])
+    m = res.get("match") or {}
+    if m.get("suggested_title") and m.get("status") in ("unmatched", "wrong", "unsure"):
+        title, yr = m.get("suggested_title"), m.get("suggested_year")
+        sys0 = (ctx.get("systems") or [None])[0]
+        pms = [p for p in (_provider_match(title, yr),
+                           _ss_match([title, ctx.get("title")], sys0, yr)) if p]
+        if pms:
+            res["provider_matches"] = pms
+            res["provider_match"] = next(
+                (p for p in pms if p["provider"] == "igdb"), pms[0])
+    run_id = int(body.get("run_id") or 0) or _refine_run_id(nk)
+    kind = aimeta.store_finding(run_id, ctx, res, model + " · refined")
+    fresh = next((f for f in aimeta.findings_list("proposed", run_id=run_id)
+                  if f["norm_key"] == nk), None)
+    return {"kind": kind, "finding": fresh, "used_web": bool(res.get("web")),
+            "model": model, "context": _finding_context(ctx)}
+
+
+def _refine_run_id(nk):
+    """The scan run to hang a refined finding on: the game's existing proposed finding's
+    run, or a fresh lightweight run so it still groups in the monitor."""
+    con = aimeta._con()
+    row = con.execute("SELECT run_id FROM findings WHERE norm_key=? AND status='proposed'"
+                      " ORDER BY created DESC LIMIT 1", (nk,)).fetchone()
+    con.close()
+    if row and row[0]:
+        return row[0]
+    rid = aimeta.scan_new("refine — %s" % nk, [nk], False, True, None)
+    aimeta.scan_finish(rid, "done")
+    return rid
+
+
 @app.get("/api/aimeta/targets")
 def aimeta_targets():
     """Per-target game counts + whether the metadata provider can search the web."""
     out = {t: aimeta.target_count(t) for t in ("unmatched", "matched", "missing", "all")}
     out["web_capable"] = ai.supports_web(ai.provider_for_area("metadata"))
+    out["provider"] = ai.provider_for_area("metadata")     # for the refine model picker
+    out["model"] = ai.model_for_area("metadata")           # current default model
+    out["escalation_model"] = ai.escalation_model_for_area("metadata")  # bigger, if set
     out["attributes"] = aimeta.SUPPLEMENT_KINDS       # metadata kinds the wand can fill
     out["media_kinds"] = list(media.SCALAR_KINDS)      # media kinds it can (re)choose
     return out
 
 
+def _finding_context(ctx):
+    """The factual, non-AI things we KNOW about a game — shown on the review page so a
+    reviewer can sanity-check the AI against the actual ROM: platform(s), file name(s),
+    parent folder, region/edition tags, current provider match."""
+    f = ctx.get("files") or {}
+    m = ctx.get("match") or {}
+    return {"title": ctx.get("title"), "systems": ctx.get("systems") or [],
+            "sources": ctx.get("sources") or [],
+            "files": f.get("files") or [], "folders": f.get("folders") or [],
+            "tags": f.get("tags") or [], "siblings": f.get("siblings") or [],
+            "current_match": (m.get("title") if m else None)}
+
+
 @app.get("/api/aimeta/findings")
 def aimeta_findings(status: str = Query(None), kind: str = Query(None),
                     run_id: int = Query(None)):
-    return {"findings": aimeta.findings_list(status, kind, run_id=run_id),
-            "counts": aimeta.findings_counts()}
+    findings = aimeta.findings_list(status, kind, run_id=run_id)
+    # attach live factual context per game so the review page ALWAYS shows filename /
+    # platform / folder / tags — even for findings created before this existed. Bounded
+    # so a huge changeset can't stall; the ROM index is cached after first use.
+    if len(findings) <= 60:
+        seen = {}
+        for f in findings:
+            nk = f.get("norm_key")
+            if nk and nk not in seen:
+                try:
+                    ctx = aimeta.game_context(nk)
+                    seen[nk] = _finding_context(ctx) if ctx else None
+                except Exception:
+                    seen[nk] = None
+            f["context"] = seen.get(nk)
+    return {"findings": findings, "counts": aimeta.findings_counts()}
 
 
 @app.get("/api/aimeta/scans")
@@ -4392,6 +4492,9 @@ def ai_config_set(body: dict):
             config.set_("ai_area_" + area_id, prov)
         if "model" in val:
             config.set_("ai_area_" + area_id + "_model", val.get("model") or "")
+        if "escalation_model" in val:
+            config.set_("ai_area_" + area_id + "_escalation_model",
+                        val.get("escalation_model") or "")
         if "prompt" in val:
             config.set_("ai_area_" + area_id + "_prompt", val.get("prompt") or "")
     return ai.status()

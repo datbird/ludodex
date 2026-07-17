@@ -598,6 +598,28 @@ def scan_finish(run_id, status):
     con.close()
 
 
+def reap_running():
+    """Finalize orphaned scans left 'running' by a process that died mid-scan (container
+    restart/redeploy, crash, OOM). A freshly-started server owns NO in-flight scan, so any
+    row still 'running' at boot can never be updated by its (dead) worker and would spin in
+    the monitor forever. A killed scan that already produced proposed findings is finished
+    as 'done' so those results stay reviewable; an empty one becomes 'interrupted'
+    (terminal + dismissable, and restartable since done<total). Returns the count reaped."""
+    con = _con()
+    rows = con.execute("SELECT id FROM scan_runs WHERE status='running'").fetchall()
+    n = 0
+    for (rid,) in rows:
+        prop = con.execute("SELECT COUNT(*) FROM findings WHERE run_id=? "
+                           "AND status='proposed'", (rid,)).fetchone()[0]
+        con.execute("UPDATE scan_runs SET status=?, finished=COALESCE(finished,?) "
+                    "WHERE id=?",
+                    ("done" if prop else "interrupted", time.time(), rid))
+        n += 1
+    con.commit()
+    con.close()
+    return n
+
+
 def scan_get(run_id):
     con = _con()
     r = con.execute("SELECT * FROM scan_runs WHERE id=?", (run_id,)).fetchone()

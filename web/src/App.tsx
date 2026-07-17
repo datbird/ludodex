@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback, useMemo, Fragment, type CSSProperties, type ChangeEvent, type DragEvent, type FormEvent, type MouseEvent as ReactMouseEvent } from 'react'
+import { useEffect, useState, useRef, useCallback, useMemo, Fragment, type ReactNode, type CSSProperties, type ChangeEvent, type DragEvent, type FormEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { api } from './api'
 import type {
   GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
@@ -11,7 +11,7 @@ import type {
   FileVariable, FileProfile, FilePlan, FileDetect, SourceModel,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
-  AiFindingPayload, ProviderMatch, ScopeValue,
+  AiFindingPayload, FindingContext, ProviderMatch, ScopeValue,
   AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState, DbSyncTest,
   Prefs, MediaMode, FileopsApplyMode, MediaLangMode, MediaLangResult, FsStat, OwnershipFact, Frame,
   SpotlightTheme, SourceRow, SplitSuggestion,
@@ -2797,6 +2797,9 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
   async function setArea(id: string, provider: string, model: string) {
     await api.setAiConfig({ areas: { [id]: { provider, model } } }); onChange()
   }
+  async function saveEscalationModel(id: string, model: string) {
+    await api.setAiConfig({ areas: { [id]: { escalation_model: model } } }); onChange()
+  }
   async function savePrompt(id: string, prompt: string) {
     await api.setAiConfig({ areas: { [id]: { prompt } } }); onChange()
   }
@@ -2910,7 +2913,21 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
                         placeholder={a.effective_model ?? 'model'}
                         onSave={(m) => setArea(a.id, a.assigned ?? '', m)} />
                     </label>
+                    {a.escalates && (
+                      <label className="area-sel" title="A larger / smarter model used only for the escalated, harder pass — web-grounded look-ups and the review page's re-run. Leave blank to reuse the model above.">
+                        <span>Escalation model ↑</span>
+                        <ModelInput models={modelsFor(effProv)}
+                          value={a.escalation_model ?? ''}
+                          placeholder={`same as model (${a.effective_model ?? 'model'})`}
+                          onSave={(m) => saveEscalationModel(a.id, m)} />
+                      </label>
+                    )}
                   </div>
+                  {a.escalates && (
+                    <div className="area-desc dim">↑ Used for tough games: the web-grounded
+                      pass and the review page's “add context &amp; re-run”. Routine calls stay
+                      on the normal model.</div>
+                  )}
                   <div className="area-btns">
                     <button className="link-btn" onClick={() => setPromptOpen(pOpen ? null : a.id)}>
                       {pOpen ? '▾ Hide prompt' : '✎ Edit prompt'}</button>
@@ -4468,7 +4485,7 @@ function PendingApplyBar({ count, onApplied }: { count: number; onApplied: () =>
     setTimeout(poll, 3000)
   }
   return (
-    <div className="pending-apply">
+    <div className="pending-apply" id="pending-apply-bar">
       <div className="pa-info">
         <span className="pa-count">{count}</span>
         <div className="pa-text">
@@ -7270,11 +7287,80 @@ function findingChanges(f: AiFinding): Change[] {
   return out
 }
 
+// The factual, non-AI things we KNOW about a ROM (platform, file name, folder, region
+// tags, current match) — shown on the review page so the reviewer can sanity-check the
+// AI's proposal against reality.
+function FindingContextStrip({ ctx }: { ctx?: FindingContext | null }) {
+  if (!ctx) return null
+  const bits: ReactNode[] = []
+  if (ctx.systems?.length) bits.push(<span key="sys" className="fc-chip">🖥 {ctx.systems.join(', ')}</span>)
+  if (ctx.files?.length) bits.push(<span key="f" className="fc-chip fc-file" title={ctx.files.join('; ')}>📄 {ctx.files.join('; ')}</span>)
+  if (ctx.folders?.length) bits.push(<span key="d" className="fc-chip" title={ctx.folders.join('; ')}>📁 {ctx.folders.join('; ')}</span>)
+  if (ctx.tags?.length) bits.push(<span key="t" className="fc-chip">🏷 {ctx.tags.join(' · ')}</span>)
+  if (ctx.sources?.length) bits.push(<span key="s" className="fc-chip fc-dim">via {ctx.sources.join(', ')}</span>)
+  if (ctx.current_match) bits.push(<span key="m" className="fc-chip fc-dim">now: {ctx.current_match}</span>)
+  if (!bits.length) return null
+  return <div className="fc-strip" title="The actual facts on this ROM (not the AI's guess)">{bits}</div>
+}
+
+// "Not right? Add context & re-run" — let the reviewer feed the model a hint and send
+// the game back through the pipeline, optionally on a larger model.
+function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onRefined }: {
+  f: AiFinding; currentModel?: string; escalationModel?: string; models: string[]; webCapable: boolean; onRefined: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [hint, setHint] = useState('')
+  const [model, setModel] = useState(escalationModel || currentModel || '')
+  const [web, setWeb] = useState(webCapable)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const run = async () => {
+    setBusy(true); setErr('')
+    try {
+      const r = await api.aimetaRefine({
+        norm_key: f.norm_key, hint: hint.trim(), model: model || undefined,
+        web, run_id: f.run_id })
+      if (!r.finding) setErr('Re-run found nothing to change — try a stronger model or more specific context.')
+      else onRefined()
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+  if (!open) return (
+    <button className="refine-toggle" onClick={() => setOpen(true)}>🔁 Not right? Add context &amp; re-run</button>
+  )
+  const extra = [currentModel, escalationModel].filter((m): m is string => !!m && !models.includes(m))
+  const opts = [...new Set([...extra, ...models])]
+  const tagFor = (m: string) => m === escalationModel ? ' — escalation' : m === currentModel ? ' — current' : ''
+  return (
+    <div className="refine-panel">
+      <textarea className="refine-hint" rows={2} value={hint} autoFocus
+        placeholder="Tell the AI what it got wrong or what this really is — e.g. “this is the Brazilian Tec Toy 20-in-1 pack-in compilation, list its 20 minigames”."
+        onChange={(e) => setHint(e.target.value)} />
+      <div className="refine-row">
+        <label className="refine-field" title="Pick a larger / stronger model for a tough game">
+          <span>Model</span>
+          <select value={model} onChange={(e) => setModel(e.target.value)}>
+            {opts.length === 0 && <option value="">(default)</option>}
+            {opts.map((m) => <option key={m} value={m}>{m}{tagFor(m)}</option>)}
+          </select>
+        </label>
+        <label className="refine-web" title={webCapable ? 'Ground the re-run on a live web search' : 'This provider has no web search'}>
+          <input type="checkbox" checked={web} disabled={!webCapable} onChange={(e) => setWeb(e.target.checked)} /> Web
+        </label>
+        <button className="ops-btn go" disabled={busy} onClick={run}>{busy ? 'Re-running…' : '✨ Re-run'}</button>
+        <button className="ops-btn" disabled={busy} onClick={() => { setOpen(false); setErr('') }}>Cancel</button>
+      </div>
+      {busy && <div className="refine-note dim">Sending back through the pipeline{web ? ' with web search' : ''}{model && model !== currentModel ? ` on ${model}` : ''}…</div>}
+      {err && <div className="refine-err">{err}</div>}
+    </div>
+  )
+}
+
 function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: () => void }) {
   const [findings, setFindings] = useState<AiFinding[] | null>(null)
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
+  const [meta, setMeta] = useState<{ model?: string; escalationModel?: string; webCapable: boolean; models: string[] }>({ webCapable: false, models: [] })
 
   const load = useCallback(() => {
     api.aimetaFindings('proposed', undefined, runId).then((d) => {
@@ -7285,6 +7371,13 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
     }).catch(() => setFindings([]))
   }, [runId])
   useEffect(() => { load() }, [load])
+  useEffect(() => {
+    api.aimetaTargets().then(async (t) => {
+      let models: string[] = []
+      if (t.provider) { try { models = (await api.aiModels(t.provider)).models } catch { models = [] } }
+      setMeta({ model: t.model, escalationModel: t.escalation_model || undefined, webCapable: t.web_capable, models })
+    }).catch(() => {})
+  }, [])
 
   const groups = (findings || []).map((f) => ({ f, changes: findingChanges(f) }))
     .filter((g) => g.changes.length > 0)
@@ -7349,6 +7442,7 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
               <span className="chg-gtitle">{f.title}</span>
               <span className="chg-conf">{Math.round((f.confidence || 0) * 100)}%</span>
             </div>
+            <FindingContextStrip ctx={f.context} />
             {p.match?.status === 'wrong' && (
               <div className="chg-warn">⚠ current match may be wrong:{' '}
                 <b>{p.current_match?.title || '—'}</b> → <b>{p.match.suggested_title || '—'}</b></div>
@@ -7370,6 +7464,8 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
                 ))}</ul>
               </details>
             )}
+            <RefinePanel f={f} currentModel={meta.model} escalationModel={meta.escalationModel}
+              models={meta.models} webCapable={meta.webCapable} onRefined={load} />
           </div>
         )
       })}
@@ -7672,6 +7768,18 @@ function JobLabel({ j, onOpen, cls = 'jm-label' }: { j: Job; onOpen?: (k: string
   return <span className={cls} title={title}>{j.label}{detail}</span>
 }
 
+// Scroll the "changes accepted — not applied" bar into view and pulse it, so the
+// attention badge / job-monitor pending row can point straight at what needs applying.
+function flashPendingApply() {
+  const el = document.getElementById('pending-apply-bar')
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  el.classList.remove('pa-flash')
+  void el.offsetWidth                       // restart the animation if already flashed
+  el.classList.add('pa-flash')
+  window.setTimeout(() => el.classList.remove('pa-flash'), 1800)
+}
+
 function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void; pendingApply?: number }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [open, setOpen] = useState(false)
@@ -7685,13 +7793,16 @@ function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void
   const ready = jobs.filter(reviewable)
   const base = active.length ? active : jobs
   const shown = [...ready, ...base.filter((j) => !reviewable(j))].slice(0, 3)
-  // At-a-glance queue counts: things you must act on (reviews to accept + changes to
-  // apply), things working, things recently done.
-  const nowSec = Date.now() / 1000
+  // At-a-glance queue counts that PARTITION the jobs in the list so they line up with
+  // what's shown: needs-review + not-yet-applied changes / working / finished-and-clear.
+  // (No time window — the done badge counts the done jobs actually in the list, not just
+  // ones from the last hour, so 5 "Done" rows never read as "2".)
   const attention = ready.reduce((n, j) => n + (j.findings ?? 0), 0) + (pendingApply || 0)
   const working = active.length
-  const doneCount = jobs.filter((j) => j.status === 'done' && !reviewable(j)
-    && !!j.when && nowSec - j.when < 3600).length
+  // every settled job that isn't waiting on review — done, interrupted, failed, whatever
+  // its exact terminal status — so working + review-ready + done accounts for every row.
+  const doneCount = jobs.filter((j) =>
+    j.status !== 'running' && j.status !== 'paused' && !reviewable(j)).length
   const pause = async (id: string) => { await api.pauseJob(id).catch(() => {}); load() }
   const del = async (id: string) => { await api.deleteJob(id).catch(() => {}); load() }
   const openReview = (j: Job) => setReview({ runId: j.run_id!, title: scanTitle(j.label) })
@@ -7700,7 +7811,15 @@ function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void
     <div className={'jobmon' + (active.length ? ' busy' : ' idle')}>
       <div className="jobmon-main">
       <div className="jobmon-rows">
-        {shown.length === 0 ? (
+        {pendingApply > 0 && (
+          <div className="jobmon-row jm-pending" onClick={() => { setOpen(false); flashPendingApply() }}
+            title="You accepted these changes but haven't applied them yet — click to jump to the Apply bar">
+            <span className="jm-label"><span className="jm-pending-ic">✦</span>{' '}
+              <b>{pendingApply}</b> accepted change{pendingApply === 1 ? '' : 's'} — not applied</span>
+            <button className="jm-accept" onClick={(e) => { e.stopPropagation(); setOpen(false); flashPendingApply() }}>Apply →</button>
+          </div>
+        )}
+        {shown.length === 0 && pendingApply === 0 ? (
           <button className="jobmon-idle" title="Open job monitor" onClick={() => setOpen(true)}>
             <span className="jm-idle-dot" />
             {jobs.length ? `${jobs.length} recent job${jobs.length === 1 ? '' : 's'}` : 'No active jobs'}
@@ -7727,8 +7846,11 @@ function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void
       {(attention > 0 || working > 0 || doneCount > 0) && (
         <div className="jobmon-badges">
           {attention > 0 && (
-            <button className="jm-badge attn" onClick={() => setOpen(true)}
-              title={`${attention} item${attention === 1 ? '' : 's'} need your attention — reviews to accept / changes to apply`}>
+            <button className="jm-badge attn"
+              onClick={() => { if (ready.length) setOpen(true); else { setOpen(false); flashPendingApply() } }}
+              title={ready.length
+                ? `${attention} item${attention === 1 ? '' : 's'} need attention — open to review / apply`
+                : `${pendingApply} accepted change${pendingApply === 1 ? '' : 's'} not applied — jump to the Apply bar`}>
               <span className="jm-b-ic">✦</span>{attention}</button>
           )}
           {working > 0 && (
@@ -7742,14 +7864,14 @@ function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void
           )}
         </div>
       )}
-      {open && <JobOverlay onClose={() => setOpen(false)} onOpen={onOpen} />}
+      {open && <JobOverlay onClose={() => setOpen(false)} onOpen={onOpen} pendingApply={pendingApply} />}
       {review && <AiReviewModal runId={review.runId} title={review.title}
         onClose={() => { setReview(null); load() }} />}
     </div>
   )
 }
 
-function JobOverlay({ onClose, onOpen }: { onClose: () => void; onOpen?: (k: string) => void }) {
+function JobOverlay({ onClose, onOpen, pendingApply = 0 }: { onClose: () => void; onOpen?: (k: string) => void; pendingApply?: number }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [openRun, setOpenRun] = useState<number | null>(null)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
@@ -7763,7 +7885,15 @@ function JobOverlay({ onClose, onOpen }: { onClose: () => void; onOpen?: (k: str
       <div className="job-overlay" ref={wrapRef} onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={onClose}>×</button>
         <h2>Jobs</h2>
-        {jobs.length === 0 && <div className="sync-note dim">No jobs.</div>}
+        {pendingApply > 0 && (
+          <div className="jo-pending" onClick={() => { onClose(); flashPendingApply() }}
+            title="Accepted changes not yet applied — click to jump to the Apply bar">
+            <span><span className="jm-pending-ic">✦</span>{' '}
+              <b>{pendingApply}</b> accepted change{pendingApply === 1 ? '' : 's'} — not applied yet</span>
+            <button className="jm-accept" onClick={(e) => { e.stopPropagation(); onClose(); flashPendingApply() }}>Apply →</button>
+          </div>
+        )}
+        {jobs.length === 0 && pendingApply === 0 && <div className="sync-note dim">No jobs.</div>}
         <div className="job-table">
           {jobs.map((j) => (
             <div key={j.id} className={'job-trow' + (j.kind === 'fileops' ? ' clickable' : '')}

@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Console production eras — the hardware timeline used to catch wrongly-merged games.
 
-A game cannot ship on hardware that doesn't exist yet. When a catalog entry has a
-store/IGDB identity dated year Y and ALSO an emulation ROM on a console whose
-production era can't contain Y, that ROM is a DIFFERENT game that only collapsed in
-because the titles normalize the same — e.g. a ~1994 Game Boy "Uno" folded into the
-2016 Steam "UNO". `impossible(platform, Y)` flags exactly that so build_library can
-peel it back out. Keyed by the catalog's own emulation platform labels
-(`sources.platform` for source='emulation').
+A game dated year Y that is NEWER than a console's whole production era cannot be a ROM
+on that console. When a catalog entry has an IGDB identity dated Y and ALSO an emulation
+ROM on a console whose era ended well before Y, that ROM is a DIFFERENT game that only
+collapsed in because the titles normalize the same — e.g. a ~1994 Game Boy "Uno" folded
+into the 2016 Steam "UNO", or the Apple II "Alice in Wonderland" (1985) sharing a
+norm_key with the 2010 film game. `impossible(platform, Y)` flags exactly that so the
+matcher rejects it and build_library peels it back out. Keyed by the catalog's own
+emulation platform labels (`sources.platform` for source='emulation').
 
-Y is IGDB's FIRST-release year, so a legitimately re-released old game (Sonic 1991 on
-Genesis + Steam) keeps its original year and stays merged; only a genuinely NEW
-same-named game (Uno 2016) trips the check.
+The check is deliberately ONE-SIDED (a game too NEW for the console). The opposite —
+a game OLDER than the console — is NOT flagged: modern consoles legitimately host
+re-releases of old games (PS1 Classics on PS3, Virtual Console, NSO), and IGDB reports
+the ORIGINAL first-release year, so a 1998 game re-released on PS3 would look
+"impossible" for the PS3 era if we gated the low side. Gating only the high side keeps
+those legitimate re-releases while still catching genuinely newer same-named games.
 """
 
 # platform label -> (first commercial year, last mainstream year). 9999 = still
@@ -82,12 +86,15 @@ def _year(v):
 
 
 def impossible(platform, year):
-    """True when a game dated `year` could NOT be on this console — i.e. `year` is
-    before the console launched or well after its last commercial software. Unknown
-    platform or year → False (never split on missing data)."""
+    """True when a game dated `year` is too NEW to be on this console — i.e. `year` is
+    well after the console's last commercial software. One-sided by design: a game
+    OLDER than the console is NOT flagged (modern consoles re-release old games; IGDB
+    reports the original year). Unknown platform or year → False (never split on missing
+    data). LOW_BUFFER is retained for callers that want the launch year but no longer
+    gates this check."""
     e = era(platform)
     y = _year(year)
     if not e or y is None:
         return False
-    lo, hi = e
-    return y < lo - LOW_BUFFER or y > hi + HIGH_BUFFER
+    _lo, hi = e
+    return y > hi + HIGH_BUFFER

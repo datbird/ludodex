@@ -18,6 +18,7 @@ Providers (in increasing cost; later ones gap-fill what earlier ones lack):
   python3 media_fetch.py --provider steam
   python3 media_fetch.py --steamgriddb [--limit N]   # gap-fill (opt-in, slow)
 """
+import json
 import os
 import sqlite3
 import sys
@@ -62,6 +63,7 @@ SGDB = "https://www.steamgriddb.com/api/v2"
 
 def con_index():
     con = sqlite3.connect(INDEX)
+    con.execute("PRAGMA busy_timeout=30000")   # wait out the live server's locks
     con.execute("""CREATE TABLE IF NOT EXISTS media(
       id INTEGER PRIMARY KEY, norm_key TEXT NOT NULL, system TEXT,
       kind TEXT NOT NULL, provider TEXT NOT NULL, mount TEXT,
