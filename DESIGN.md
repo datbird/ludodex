@@ -403,6 +403,109 @@ catalog intact. Any large SQLite writer added here follows the same pattern. Ser
 connections (`ro()`) also carry `busy_timeout` so a brief lock from another pipeline
 writer (scores / media backfill) waits rather than erroring.
 
+### 11.9 Media identity binding — the durable exit from the read-time heuristic stack
+
+**The soft spot.** §11.4 silos media by `(norm_key, system)`; §11.6 peels era/handheld-
+mismatched entries off the shared title. Both are *read-time heuristics* compensating for
+one root fact: **media is keyed by title, not by resolved game identity.** Concretely —
+`igdb_resolution` is `norm_key PRIMARY KEY → igdb_id` (exactly one resolved game per
+title-string), and the `media` table carries only `(norm_key, system, kind, …)` with **no
+identity column**. So whenever a title-string maps to more than one real game — an *era
+collision* like Alice/Apple II (1985) sharing `norm_key` with the 2010 NDS movie game, or
+Portal/Amiga vs. Valve's Portal — the serve layer has to *guess* which cover belongs to
+which entry from platform + era alone. Each new collision shape has needed another rule:
+system-silo → forfeit-neutral-on-separation → era-impossible vs. retro-handheld-stray →
+the `\x1f`/`\x1e` base_key markers (§11.6). The stack is correct but it **grows per new
+shape** — that is the ~20% of foundation that is heuristic rather than structural. This
+section is the bounded exit that takes it to 95%+.
+
+**Why title-keying exists (don't just delete it).** ~45% of the catalog is *unidentified*
+(ROMs matched only by name+system, no IGDB id). The pipeline needs **one universal key**
+that exists for identified and unidentified games alike, and title-norm is the only thing
+both have. Title-keying is therefore *forced by the unidentified tail*, not a shortcut. The
+fix is a hybrid, not a rewrite.
+
+**Root change — a `game_key` per resolved identity, stamped on entries AND media.** Give
+every catalog entry and every media row a stable identity string drawn from two
+namespaces:
+
+- **Identified:** `game_key = "igdb:<id>"` (extensible: `"ss:<id>"`, etc. — provider-
+  qualified so two providers never collide).
+- **Unidentified:** `game_key = "title:<norm_key>@<system>"` — the current title+system
+  bucket, now explicitly namespaced so it can **never** match an identified key.
+
+Identity is assigned **per entry** in `build_library`, reusing the era classification that
+§11.6 already computes — only its *output* moves from a base_key marker to a `game_key`:
+
+| Entry class (per platform)                         | `game_key`                    | Gets identity's art + metadata? |
+|----------------------------------------------------|-------------------------------|---------------------------------|
+| Identified, era-compatible                         | `igdb:<id>`                   | yes                             |
+| Stray retro-handheld **port** of an identified game (today's `\x1e`) | `igdb:<id>` (adopts parent identity) | yes — same game, so it *should* |
+| Era-impossible collision (today's `\x1f`)          | `title:<nk>@<platform>`       | no — a distinct identity        |
+| Unidentified                                        | `title:<nk>@<system>`         | n/a (title bucket)              |
+
+Media rows are stamped at **fetch time**, where the target is already known: `media_fetch`
+already loads `{norm_key → igdb_id}` (it uses it to pull IGDB art by id) — so IGDB/store
+art → `igdb:<id>`; ScreenScraper art for an identified game → `igdb:<id>` with its
+`system` set (console-specific box art *within* that identity); art for an unidentified
+game → `title:<nk>@<system>`. `media_choose.select()` picks `chosen` per **`(game_key,
+system, kind)`** instead of `(norm_key, system, kind)`.
+
+**Serve becomes a trivial match — the whole heuristic stack retires.** An entry serves
+`media WHERE media.game_key = entry.game_key`, preferring `system = platform` (console-
+specific) over `system = ''` (neutral) over nothing, then `chosen`. That's it. The four
+gate sites in `server/app.py` (list `cover_v`/`has_cover`, detail `media_kinds`, the
+`/api/media` serve resolver) collapse to that one predicate. Gone: the neutral-forfeit
+gate, the `base_key<>norm_key` checks, the `instr(base_key, char(31))` marker tests, and
+the era-vs-stray split *for art*. **Cross-identity contamination becomes structurally
+impossible** — a cover literally cannot be served to a non-matching `game_key`, so Alice
+can't borrow the NDS cover no matter what new same-title console shows up. New collision
+shapes need **zero** new serve rules; they only need correct `game_key` assignment, which
+happens in exactly one place.
+
+**Bonus — metadata unifies with art.** Today §11.6 excludes *all* separated entries from
+the metadata fan-out (`base_to_gids` is keyed by `bkey`, so a marker-bearing entry gets no
+IGDB link, score, or title). Under `game_key`, the fan-out keys on identity: a **stray
+port now correctly inherits its parent game's score/description** (it *is* that game),
+while an **era-collision stays bare** (distinct identity, no link) — one key drives both
+metadata and media, so "adopt identity" and "own identity" are the only two states and
+they behave consistently. `base_key` is then freed to mean *only* cross-ref "also owned on"
+grouping (§11.3), which is orthogonal display grouping.
+
+**What this deliberately does NOT solve (the honest remaining ~5%).**
+- **One identified game per title.** `igdb_resolution` stays `norm_key`-keyed, so a title
+  that is genuinely *two different identified games* on two platforms still gets a single
+  resolution; `build_library` can only *adopt or reject* it per entry, not assign a second
+  identity. Rare, and a later change (resolution keyed by `entry_key`) slots in without
+  disturbing the `game_key` serve model.
+- **The unidentified tail is still title+system.** For the ~45% with no id, `game_key`
+  falls back to `title:<nk>@<system>` — the same siloing as today. The win is *namespace
+  isolation*: an unidentified ROM can no longer contaminate a **known** game's art, even
+  when they share a title. Within the unidentified tail, same-title/same-system collisions
+  remain possible (no identity exists to separate them) — inherent to being unidentified.
+
+**Migration (non-destructive, re-derives on rebuild).**
+1. `media` gains a `game_key TEXT` column + index `(game_key, system, kind)`; a one-time
+   backfill stamps existing rows from `{norm_key → igdb_id}` (identified) else
+   `title:<nk>@<system>`. Old rows without it fall back to the title bucket — safe.
+2. `build_library` writes `game_key` per entry (the table above) alongside `entry_key` /
+   `base_key`; regenerates every rebuild, so no catalog data migration (per §11.6/§11.8).
+3. `media_fetch` / `media_choose` stamp + key on `game_key`.
+4. Serve sites swap to the single predicate; markers/forfeit logic deleted.
+5. Ships behind the same build-to-temp atomic swap (§11.8); verified end-to-end against
+   real data (Alice stays bare, Smash T.V./Game Gear + KOF 2001/NGPC show covers *and*
+   inherit metadata, BG3 multi-platform art unchanged).
+
+**Implementation surface.** `igdb_enrich.py` (unchanged — resolution stays per-title) →
+`build_library.py` (per-entry `game_key` derivation, replacing the `\x1f`/`\x1e` marker
+branch; metadata fan-out keyed on `game_key`) → `media_fetch.py` (stamp `game_key` at put
+time — it already has `{norm_key→igdb_id}`) → `media_choose.py` (`select`/`_repick` key on
+`(game_key, system, kind)`) → `server/app.py` (four gate sites collapse to one `game_key`
+predicate; `base_key` retained only for "also owned on"). Sequence as phases: **(1)** add
+column + backfill + stamp on fetch (no read-path change, invisible), **(2)** flip
+`build_library` + `media_choose` to `game_key`, **(3)** flip the serve sites and delete the
+marker/forfeit code. Each phase is independently shippable and reversible.
+
 ---
 
 ## 12. Roadmap / docket
