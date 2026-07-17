@@ -771,11 +771,14 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     if has_ek:
         _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
         # neutral (platform-agnostic store/IGDB) art belongs to the IGDB-resolved game.
-        # An era-separated entry (base_key != norm_key) is a DIFFERENT game that merely
-        # shares the title-key, so it must NOT borrow the modern game's neutral cover —
-        # it acts as zero media unless it has its own console art. (g.* outer refs are
-        # legal in a subquery WHERE; only ORDER BY forbids them.)
-        _sep_ok = (" AND g.base_key=g.norm_key" if _has_col(con, "games", "base_key") else "")
+        # An ERA-separated entry (base_key carries the \x1f marker) is a DIFFERENT-era game
+        # that merely shares the title-key, so it must NOT borrow the modern game's neutral
+        # cover — it acts as zero media unless it has its own console art. A STRAY
+        # retro-handheld split (\x1e marker) is the same game and KEEPS neutral art, so the
+        # gate keys on the \x1f marker (char 31), not on base_key<>norm_key. (g.* outer refs
+        # are legal in a subquery WHERE; only ORDER BY forbids them.)
+        _sep_ok = (" AND instr(COALESCE(g.base_key,''),char(31))=0"
+                   if _has_col(con, "games", "base_key") else "")
         _neutral = " AND COALESCE(md.system,'')=''" + _sep_ok
         cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ") AS cover_v, ")
         # has_cover reflects SERVABLE art (own console or gated neutral), so a card with
@@ -930,11 +933,13 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
     _um = ("(SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE um.norm_key=g.norm_key "
            "AND um.kind='cover' ORDER BY um.created DESC LIMIT 1)")
     # own console art or platform-neutral store art only — never another console's cover.
-    # Era-separated entries (base_key != norm_key) forfeit the neutral cover too: it
-    # belongs to the modern IGDB-resolved game, not the retro title sharing its key.
+    # ERA-separated entries (\x1f marker in base_key) forfeit the neutral cover too: it
+    # belongs to the modern IGDB-resolved game, not the retro title sharing its key. A
+    # STRAY retro-handheld split (\x1e) keeps neutral art, so the gate keys on char(31).
     _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
     _neutral = (" AND COALESCE(md.system,'')=''"
-                + (" AND g.base_key=g.norm_key" if _has_col(con, "games", "base_key") else ""))
+                + (" AND instr(COALESCE(g.base_key,''),char(31))=0"
+                   if _has_col(con, "games", "base_key") else ""))
     if has_ek:
         cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ") AS cover_v ")
         has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
@@ -3423,10 +3428,11 @@ def game_detail(norm_key: str):
                 provider_links.append({"provider": src, "url": url})
                 _pl_seen.add(src)
         # media kinds available to THIS entry: its own console's chosen art, plus
-        # platform-neutral store/IGDB art — UNLESS this is an era-separated entry
-        # (base_key != norm_key), which forfeits the neutral art (it belongs to the
-        # modern game sharing the key) and acts as zero media without its own console art.
-        _sep = ("base_key" in _keys and g["base_key"] and g["base_key"] != base)
+        # platform-neutral store/IGDB art — UNLESS this is an ERA-separated entry (\x1f
+        # marker in base_key), which forfeits the neutral art (it belongs to the modern
+        # game sharing the key) and acts as zero media without its own console art. A stray
+        # retro-handheld split (\x1e) keeps neutral art, so key on the \x1f marker.
+        _sep = ("base_key" in _keys and g["base_key"] and "\x1f" in g["base_key"])
         _neu = "" if _sep else " OR COALESCE(system,'')=''"
         media_kinds = [r["kind"] for r in con.execute(
             "SELECT DISTINCT kind FROM m.media WHERE norm_key=? AND chosen=1 "
@@ -4374,18 +4380,19 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
     rcon = ro(INDEX_DB)
     try:
         if platform:
-            # Era-separated entries (base_key != norm_key) forfeit platform-neutral art:
+            # ERA-separated entries (\x1f marker in base_key) forfeit platform-neutral art:
             # it belongs to the modern IGDB-resolved game sharing this norm_key, so a
             # retro title (e.g. Portal/Amiga vs Valve's Portal) must show only its OWN
-            # console art or nothing — never borrow the modern cover. base_key lives in
-            # the catalog db, not the media index, so a tiny separate ro lookup decides.
+            # console art or nothing — never borrow the modern cover. A stray retro-handheld
+            # split (\x1e) is the same game and keeps neutral art, so key on char(31).
+            # base_key lives in the catalog db, not the media index, so a tiny ro lookup.
             separated = False
             try:
                 lcon = ro(LIBRARY_DB)
                 try:
                     separated = lcon.execute(
                         "SELECT 1 FROM games WHERE norm_key=? AND platform=? "
-                        "AND base_key IS NOT NULL AND base_key<>norm_key LIMIT 1",
+                        "AND base_key IS NOT NULL AND instr(base_key,char(31))>0 LIMIT 1",
                         (base, platform)).fetchone() is not None
                 finally:
                     lcon.close()

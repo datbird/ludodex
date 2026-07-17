@@ -507,7 +507,16 @@ for _b, _ents in _by_base.items():
         _other_home = any((_op != _p) and (_os or not console_eras.is_handheld(_op))
                           for _op, _os in _ents)
         if _impossible or (_stray and _other_home):
-            _sep.append(((_b, _p), _b + "\x1f" + _p))
+            # Two separation flavors, distinguished by marker so the media layer can tell
+            # them apart. ERA-impossible (\x1f) means the shared-title neighbor is a
+            # DIFFERENT-era game, so the platform-neutral cover belongs to that other game
+            # and this entry must forfeit it (Alice/Apple II vs. the 2010 NDS movie game).
+            # STRAY retro-handheld (\x1e) is the SAME game in a downgraded port — the
+            # name-based neutral cover is still correct art, so it keeps neutral media; the
+            # split only exists to give the port its own metadata/cross-ref group, not to
+            # blank its cover (Smash T.V. on Game Gear next to the NES version).
+            _mark = "\x1f" if _impossible else "\x1e"
+            _sep.append(((_b, _p), _b + _mark + _p))
 sep_base = {ekey: newbase for ekey, newbase in _sep}   # (norm_key, plat) -> cross-ref base_key
 if _sep:
     print("# era/handheld separation: split %d era-mismatched entr(y/ies) off their "
