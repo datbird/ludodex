@@ -509,14 +509,25 @@ predicate; `base_key` retained only for "also owned on").
 - **(2) DONE** — `build_library` writes `games.game_key` per entry (identified & stray
   ports adopt `igdb:<id>`; era-collision & unidentified take `title:<nk>@<platform>`).
   Still no consumer → invisible; validated against real entries before Phase 3.
-- **(3) TODO** — flip `media_choose` **and** the four serve sites to `game_key` **together**,
-  then delete the marker / neutral-forfeit code. *`media_choose` moved here from Phase 2
-  on a coupling found in implementation:* ~309 of ~15,700 igdb identities span **two
-  norm_keys** (title variants — "…link's awakening dx" vs "…the link's awakening dx"). If
-  `chosen` were keyed on `game_key` while serve still queried `chosen` by `norm_key`, the
-  losing variant would find no chosen asset and blank. Keying `chosen` and the serve query
-  on `game_key` in the *same* phase closes that window (and actually *unifies* those
-  variants' art — a Phase-3 win, not just a hazard).
+- **(3) DONE** — the four serve sites now gate neutral art on `md.game_key = g.game_key`
+  (identity match) instead of the base_key era-marker; the marker/forfeit tests are gone
+  from the serve path. `media_choose` was **not** flipped after all — with the serve query
+  still correlated on `norm_key`, keying `chosen` on `game_key` would only reintroduce the
+  ~309-variant blanking risk (two norm_keys → one `game_key` → one chosen → the other
+  blanks) for **no** benefit, since per-`norm_key` chosen already lets the identity match
+  find an asset. So `media_choose` stays keyed on `(norm_key, system, kind)`; the variant
+  *unification* (dropping the `norm_key` correlation so variants share art) is a clean
+  follow-on, deferred. Two refinements landed in implementation: the title bucket is
+  **suffix-free `title:<nk>`** (the `@<system>`/`@<platform>` form mismatched neutral media,
+  system `''`, against entries and would have blanked 121 unresolved games with store art);
+  and the base_key `\x1f`/`\x1e` markers **remain** — they still drive cross-ref grouping
+  (§11.3) and the metadata fan-out, they're just no longer read by the serve path.
+  **Proven equivalent:** the old marker gate and the new game_key gate select the *identical*
+  20,299 servable-cover entries (0 diff either way) — a pure refactor to identity, zero
+  user-visible change, now future-proof (a new collision shape needs only correct `game_key`
+  assignment in one place, never a new serve rule). *Still open (bonus, §11.9 above):*
+  keying the **metadata** fan-out on `game_key` too, so a stray port inherits its parent's
+  score/description instead of staying bare.
 
 ---
 

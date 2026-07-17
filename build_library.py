@@ -491,16 +491,17 @@ _years = _igdb_years()
 _ids = _igdb_ids()               # norm_key -> igdb_id (DESIGN §11.9 game_key)
 
 
-def _game_key(nk, plat, bkey):
+def _game_key(nk, bkey):
     """Resolved-identity key for an entry (DESIGN §11.9). An ERA-collision entry
     (\x1f marker in its base_key) NEVER adopts the shared identity — the neutral
     art belongs to the different-era game — so it gets its own title identity. A
     non-separated identified entry OR a stray retro-handheld port (\x1e marker)
     ADOPTS the title's resolved igdb id (the port IS that game). Everything else
-    (unidentified) falls to the title bucket. Mirrors media_fetch.game_key so the
-    two sides meet on a plain string match at serve time."""
+    (unidentified) falls to the title bucket. Suffix-free `title:<nk>` mirrors
+    media_fetch.game_key so entry and media identities meet on a plain string
+    match at serve time (see the format note there)."""
     if "\x1f" in (bkey or "") or nk not in _ids:
-        return "title:%s@%s" % (nk, plat)
+        return "title:%s" % nk
     return "igdb:%s" % _ids[nk]
 
 
@@ -625,7 +626,7 @@ for (base, plat), g in games.items():
         "n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
         "has_archive,in_playnite,in_launchbox,wanted) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (canonical, base, plat, "%s@%s" % (base, plat), bkey, _game_key(base, plat, bkey),
+        (canonical, base, plat, "%s@%s" % (base, plat), bkey, _game_key(base, bkey),
          len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
@@ -652,7 +653,7 @@ for key, w in wanted.items():
         "n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
         "has_archive,in_playnite,in_launchbox,wanted) "
         "VALUES(?,?,?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
-        (w["title"], key, plat, "%s@%s" % (key, plat), key, _game_key(key, plat, key),
+        (w["title"], key, plat, "%s@%s" % (key, plat), key, _game_key(key, key),
          "wishlist:" + ",".join(stores)))
     gid = cur.lastrowid
     key_to_gid[(key, plat)] = gid

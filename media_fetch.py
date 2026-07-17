@@ -63,10 +63,13 @@ SGDB = "https://www.steamgriddb.com/api/v2"
 
 # --- resolved-identity key (DESIGN §11.9) ------------------------------------ #
 # Every media row carries a `game_key`: the identity the art belongs to, so the
-# serve path (Phase 3) can match art to a game instead of guessing from title +
-# system. Two namespaces, provider-qualified so they can never collide:
-#   * identified   -> "igdb:<id>"           (the game the title resolved to)
-#   * unidentified -> "title:<norm_key>@<system>"   (the current title+system bucket)
+# serve path matches art to a game instead of guessing from title + system. Two
+# namespaces, provider-qualified so they can never collide:
+#   * identified   -> "igdb:<id>"      (the game the title resolved to)
+#   * unidentified -> "title:<norm_key>"  (no console suffix — a resolved title's
+#     neutral art is always igdb:<id>, so an era-collision entry, whose game_key is
+#     title:<nk>, never matches it and correctly forfeits it; an UNidentified game's
+#     own neutral art is title:<nk> and matches its title:<nk> entry, so it shows.)
 # Media identity is title-level here (keyed off igdb_resolution, which is
 # norm_key-keyed). The per-ENTRY decision — a stray retro-handheld port ADOPTS its
 # parent's igdb identity, an era-collision gets its own title identity — lives in
@@ -92,9 +95,10 @@ def _resmap():
 
 
 def game_key(nk, system=None):
-    """The identity key for media on title `nk` / console `system`."""
+    """The identity key for media on title `nk` (the `system` arg is kept for call
+    compatibility but no longer part of the key — see the namespace note above)."""
     iid = _resmap().get(nk)
-    return "igdb:%s" % iid if iid else "title:%s@%s" % (nk, system or "")
+    return "igdb:%s" % iid if iid else "title:%s" % nk
 
 
 def _backfill_game_key(con):
@@ -105,6 +109,13 @@ def _backfill_game_key(con):
     title bucket. Never fails a fetch run: any error leaves game_key NULL (safe —
     nothing reads it in Phase 1) and the next run retries."""
     try:
+        # normalize any legacy suffixed title keys (title:<nk>@<system>, written by an
+        # earlier build) to the suffix-free scheme so entry/media title keys align.
+        if con.execute("SELECT 1 FROM media WHERE game_key LIKE 'title:%@%' "
+                       "LIMIT 1").fetchone():
+            con.execute("UPDATE media SET game_key='title:'||norm_key "
+                        "WHERE game_key LIKE 'title:%@%'")
+            con.commit()
         if not con.execute("SELECT 1 FROM media WHERE game_key IS NULL "
                            "OR game_key='' LIMIT 1").fetchone():
             return                              # already fully stamped
@@ -124,7 +135,7 @@ def _backfill_game_key(con):
                 except sqlite3.OperationalError:
                     pass
         con.execute(
-            "UPDATE media SET game_key='title:'||norm_key||'@'||COALESCE(system,'') "
+            "UPDATE media SET game_key='title:'||norm_key "
             "WHERE game_key IS NULL OR game_key=''")
         con.commit()
     except sqlite3.OperationalError as e:
