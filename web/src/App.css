@@ -3063,7 +3063,11 @@ a.idchip:hover { background: var(--accent-bg); }
 .chg-sources ul { margin: 4px 0 0; padding-left: 18px; }
 
 /* factual context strip — what we KNOW about the ROM, above the AI's proposals */
-.fc-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: rgba(127,127,127,0.05); }
+.fc-strip { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: rgba(127,127,127,0.05); }
+.fc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.fc-paths { display: flex; flex-direction: column; gap: 3px; }
+.fc-paths-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim, #9aa); }
+.fc-path { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; color: var(--text); background: var(--border); border-radius: 5px; padding: 3px 7px; user-select: all; word-break: break-all; overflow-wrap: anywhere; }
 .fc-chip { font-size: 11px; color: var(--text); background: var(--border); border-radius: 6px; padding: 2px 7px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fc-chip.fc-file { font-family: var(--mono, ui-monospace, monospace); }
 .fc-chip.fc-dim { background: transparent; color: var(--text-dim, #9aa); padding-left: 0; }

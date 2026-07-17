@@ -73,7 +73,7 @@ def _rom_file_context(links, max_files=6, max_sibs=12):
     `links` = [(raw_system, raw_title)] from the game's emulation/archive sources."""
     if not links:
         return None
-    files, folders, tags = [], set(), set()
+    files, paths, folders, tags = [], [], set(), set()
     siblings, sibling_text = set(), {}
     seen_dirs = set()
     for dbp in _rom_indexes():
@@ -96,6 +96,11 @@ def _rom_file_context(links, max_files=6, max_sibs=12):
                 for r in rows:
                     if r["filename"] and len(files) < max_files:
                         files.append(r["filename"])
+                    # the FULL on-disk path — the strongest single identity signal a
+                    # reviewer has (folder tree + region + edition all in one string).
+                    _fp = r["fullpath"] or r["relpath"]
+                    if _fp and _fp not in paths and len(paths) < max_files:
+                        paths.append(_fp)
                     folder = os.path.dirname(r["relpath"] or "") or (
                         "%s/%s" % (r["system"], r["subdir"]) if r["subdir"] else r["system"])
                     if folder:
@@ -135,8 +140,9 @@ def _rom_file_context(links, max_files=6, max_sibs=12):
             rc.close()
     if not (files or folders or siblings):
         return None
-    return {"files": files, "folders": sorted(folders), "tags": sorted(tags),
-            "siblings": sorted(siblings), "sibling_text": sibling_text}
+    return {"files": files, "paths": paths, "folders": sorted(folders),
+            "tags": sorted(tags), "siblings": sorted(siblings),
+            "sibling_text": sibling_text}
 
 
 # ------------------------------------------------------------------- durable store
@@ -241,9 +247,13 @@ def game_context(norm_key, lib=None):
                 o = o.strip()
                 if o:
                     by_source.setdefault(o, set()).add(r["kind"])
+        # sources span EVERY platform entry of this title (a finding is title-level, so the
+        # reviewer should see all the files it touches — e.g. both the NES and TurboGfx ROMs
+        # under norm_key 'gradius', not just whichever entry we happened to key on).
         systems, sources, rom_links = [], [], []
-        for r in own.execute("SELECT DISTINCT source, platform, source_id, title_raw "
-                             "FROM sources WHERE game_id=?", (gid,)):
+        for r in own.execute(
+                "SELECT DISTINCT source, platform, source_id, title_raw FROM sources "
+                "WHERE game_id IN (SELECT id FROM games WHERE norm_key=?)", (norm_key,)):
             if r["platform"] and r["platform"] not in systems:
                 systems.append(r["platform"])
             if r["source"] and r["source"] not in sources:

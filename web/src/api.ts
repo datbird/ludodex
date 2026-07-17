@@ -145,6 +145,7 @@ export interface FindingContext {
   systems: string[]
   sources: string[]
   files: string[]
+  paths: string[]
   folders: string[]
   tags: string[]
   siblings: string[]

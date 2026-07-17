@@ -2928,7 +2928,8 @@ def _finding_context(ctx):
     m = ctx.get("match") or {}
     return {"title": ctx.get("title"), "systems": ctx.get("systems") or [],
             "sources": ctx.get("sources") or [],
-            "files": f.get("files") or [], "folders": f.get("folders") or [],
+            "files": f.get("files") or [], "paths": f.get("paths") or [],
+            "folders": f.get("folders") or [],
             "tags": f.get("tags") or [], "siblings": f.get("siblings") or [],
             "current_match": (m.get("title") if m else None)}
 

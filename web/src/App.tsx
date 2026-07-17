@@ -7316,13 +7316,28 @@ function FindingContextStrip({ ctx }: { ctx?: FindingContext | null }) {
   if (!ctx) return null
   const bits: ReactNode[] = []
   if (ctx.systems?.length) bits.push(<span key="sys" className="fc-chip">🖥 {ctx.systems.join(', ')}</span>)
-  if (ctx.files?.length) bits.push(<span key="f" className="fc-chip fc-file" title={ctx.files.join('; ')}>📄 {ctx.files.join('; ')}</span>)
+  // when we have full paths, they carry the filename already — keep the file chip only
+  // as a quick-glance when no path is available.
+  if (!ctx.paths?.length && ctx.files?.length) bits.push(<span key="f" className="fc-chip fc-file" title={ctx.files.join('; ')}>📄 {ctx.files.join('; ')}</span>)
   if (ctx.folders?.length) bits.push(<span key="d" className="fc-chip" title={ctx.folders.join('; ')}>📁 {ctx.folders.join('; ')}</span>)
   if (ctx.tags?.length) bits.push(<span key="t" className="fc-chip">🏷 {ctx.tags.join(' · ')}</span>)
   if (ctx.sources?.length) bits.push(<span key="s" className="fc-chip fc-dim">via {ctx.sources.join(', ')}</span>)
   if (ctx.current_match) bits.push(<span key="m" className="fc-chip fc-dim">now: {ctx.current_match}</span>)
-  if (!bits.length) return null
-  return <div className="fc-strip" title="The actual facts on this ROM (not the AI's guess)">{bits}</div>
+  const paths = ctx.paths || []
+  if (!bits.length && !paths.length) return null
+  return (
+    <div className="fc-strip" title="The actual facts on this ROM (not the AI's guess)">
+      {paths.length > 0 && (
+        // The full on-disk path is the single strongest identity signal — show it in full,
+        // selectable, so the reviewer can confirm exactly which file(s) this change touches.
+        <div className="fc-paths">
+          <span className="fc-paths-label">File{paths.length > 1 ? 's' : ''} being updated</span>
+          {paths.map((p, i) => <code key={i} className="fc-path">{p}</code>)}
+        </div>
+      )}
+      {bits.length > 0 && <div className="fc-chips">{bits}</div>}
+    </div>
+  )
 }
 
 // "Not right? Add context & re-run" — let the reviewer feed the model a hint and send
