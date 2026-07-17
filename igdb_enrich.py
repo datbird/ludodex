@@ -181,22 +181,34 @@ def _era_ok(consoles, year):
     return not all(console_eras.impossible(c, year) for c in consoles)
 
 
-def _pick_era_aware(hits, nk, consoles):
+def _pick_era_aware(hits, nk, consoles, require_unique=False):
     """From IGDB `search` hits, pick the best EXACT normalized-title match that is
     era-plausible for `consoles`. Returns (igdb_id, slug) or (0, None).
 
     Guards the exact-name matcher against same-name/different-era collisions: two
     unrelated games can normalize identically ('Alice in Wonderland' the 1985 Apple II
-    text adventure vs. the 2010 film game). Among era-OK exact matches we prefer the
-    EARLIEST release — the original, not a later remake of the same name. If no exact
-    match is era-plausible, we stay unmatched rather than adopt the wrong game."""
+    text adventure vs. the 2010 film game). If no exact match is era-plausible, we stay
+    unmatched rather than adopt the wrong game.
+
+    `require_unique` (set for STORE games whose appid IGDB couldn't resolve): refuse when
+    2+ same-name games remain, because a generic store title is a coin-flip — IGDB ranks
+    the 1973 mainframe "Star Trek" above the 2013 game you actually own. A lone exact
+    match (a re-release like "System Shock Classic" → the 1994 original) is still safe.
+
+    Earliest-preference (original over remake) applies ONLY to ERA-BOUND consoles, where
+    an exact-name collision is original-vs-remake. For a store/PC-only title there is no
+    era to anchor on, so we keep IGDB's own relevance order instead of blindly taking the
+    oldest same-named game."""
     exact = [h for h in hits if norm(h.get("name", "")) == nk]
     if not exact:
         return 0, None
     ok = [h for h in exact if _era_ok(consoles, _year_of(h))]
     if not ok:
         return 0, None
-    ok.sort(key=lambda h: (_year_of(h) is None, _year_of(h) or 9999))
+    if require_unique and len(ok) > 1:
+        return 0, None
+    if consoles and any(console_eras.era(c) for c in consoles):
+        ok.sort(key=lambda h: (_year_of(h) is None, _year_of(h) or 9999))
     h = ok[0]
     return h["id"], h.get("slug")
 
@@ -482,7 +494,8 @@ def main(argv):
         # gate then rejects same-name/different-era collisions (Apple II 'Alice in
         # Wonderland' vs. the 2010 film game). A genuine miss stays unmatched (keeps its
         # filename title) rather than adopting a wrong game. (User decisions 2026-07-15/16.)
-        iid, slug = _pick_era_aware(hits, nk, games[nk]["consoles"])
+        iid, slug = _pick_era_aware(hits, nk, games[nk]["consoles"],
+                                    require_unique=bool(games[nk]["appid"]))
         con.execute("INSERT OR REPLACE INTO igdb_resolution"
                     "(norm_key,igdb_id,slug,matched_by,resolved_at) "
                     "VALUES(?,?,?,?,?)",

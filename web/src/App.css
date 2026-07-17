@@ -7,11 +7,14 @@
 header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 16px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
 }
+/* jobmon sits between the brand and the action buttons; margin-left:auto pushes it (and
+   the buttons after it) to the right, so desktop keeps brand-left / jobmon+buttons-right */
+.jm-slot { display: flex; align-items: center; margin-left: auto; min-width: 0; }
 .brand { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .logo-mark {
   height: 46px;
@@ -3446,13 +3449,18 @@ a.idchip:hover { background: var(--accent-bg); }
   /* prevent iOS focus-zoom: form controls at 16px */
   input, select, textarea { font-size: 16px; }
 
-  /* header: compact brand; actions may wrap to a second row */
+  /* header: line 1 = brand (left) + action buttons (right); line 2 = the job monitor,
+     full width on its own; then the tabs. */
   header { flex-wrap: wrap; gap: 8px 10px; }
-  .brand { gap: 9px; }
+  .brand { gap: 9px; order: 0; }
   .logo-mark { height: 32px; }
   header h1 { font-size: 21px; letter-spacing: -0.5px; }
   .stats { display: none; }               /* the same numbers live on the Dashboard */
-  .header-actions { gap: 2px; flex-wrap: wrap; justify-content: flex-end; }
+  .header-actions { gap: 2px; flex-wrap: wrap; justify-content: flex-end; order: 1; margin-left: auto; }
+  /* job monitor: its own full-width row, capped at 2 rows (rest behind the ⤢ expand) */
+  .jm-slot { order: 2; flex-basis: 100%; width: 100%; margin-left: 0; display: block; }
+  .jm-slot .jobmon { max-width: none; width: 100%; }
+  .jm-slot .jobmon-rows .jobmon-row:nth-child(n+3) { display: none; }
   .icon-btn { width: 40px; height: 40px; font-size: 19px; }
   .jobmon { max-width: 190px; }
   .jm-label { max-width: 84px; }
@@ -3483,6 +3491,11 @@ a.idchip:hover { background: var(--accent-bg); }
   /* list view: table sizes to its content so the wrapper scrolls horizontally */
   .game-table { white-space: nowrap; width: max-content; min-width: 100%; }
   .game-table .gt-title { white-space: normal; min-width: 140px; }
+
+  /* "In your library" ownership table: size to content and let the .table-scroll wrapper
+     scroll sideways instead of clipping the Collection column. Selector is
+     `.table-scroll .sources-table` to outrank `.panel table { width:100% }`. */
+  .table-scroll .sources-table { white-space: nowrap; width: max-content; min-width: 100%; }
 
   /* dashboard: 2-up cards */
   .dash-cards { grid-template-columns: 1fr 1fr; }

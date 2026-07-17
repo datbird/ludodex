@@ -689,8 +689,11 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             </div>
           )}
         </div>
+        <div className="jm-slot">
+          <JobMonitor onOpen={setSelected} pendingApply={stats?.pending_meta ?? 0}
+            onApplied={() => { refreshStats(); load(true) }} />
+        </div>
         <div className="header-actions">
-          <JobMonitor onOpen={setSelected} pendingApply={stats?.pending_meta ?? 0} />
           <SyncMenu />
           <button className="icon-btn" title="Settings" onClick={() => openSettings()}>
             <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
@@ -5185,6 +5188,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                   <h3>In your library
                     <span className="sec-help">how you have (or want) this game — one row per format, store entry, or console</span>
                   </h3>
+                  <div className="table-scroll">
                   <table className="sources-table">
                     <thead>
                       <tr>
@@ -5223,6 +5227,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                   <OwnershipEditor nk={d.norm_key} title={d.title} facts={d.ownership ?? []} onChanged={reloadDetail} />
                 </section>
 
@@ -7780,12 +7785,25 @@ function flashPendingApply() {
   window.setTimeout(() => el.classList.remove('pa-flash'), 1800)
 }
 
-function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void; pendingApply?: number }) {
+function JobMonitor({ onOpen, pendingApply = 0, onApplied }: { onOpen?: (k: string) => void; pendingApply?: number; onApplied?: () => void }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [open, setOpen] = useState(false)
+  const [applying, setApplying] = useState(false)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
   const load = useCallback(() => api.jobs().then((j) => setJobs(j.jobs)).catch(() => {}), [])
   useEffect(() => { load(); const t = setInterval(load, 2500); return () => clearInterval(t) }, [load])
+  // actually apply the accepted-not-yet-applied changes (all of them, all media) and
+  // kick the rebuild — the pending count clears once the parent refreshes stats.
+  const applyPending = async () => {
+    if (applying) return
+    setApplying(true)
+    try {
+      const r = await api.aimetaApply(undefined, true)
+      showToast(`✨ Applying ${pendingApply} change${pendingApply === 1 ? '' : 's'}` +
+        (r.coalesced ? ' — added to the running rebuild.' : ' — rebuilding. Track it here.'))
+      onApplied?.(); load()
+    } catch (e) { showToast((e as Error).message) } finally { setApplying(false) }
+  }
 
   // Surface any reviewable scan even when other jobs are active, so accepting is
   // never buried — the whole point is to queue wands and accept them from here.
@@ -7813,10 +7831,11 @@ function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void
       <div className="jobmon-rows">
         {pendingApply > 0 && (
           <div className="jobmon-row jm-pending" onClick={() => { setOpen(false); flashPendingApply() }}
-            title="You accepted these changes but haven't applied them yet — click to jump to the Apply bar">
+            title="Accepted changes not applied yet — Apply now to rebuild, or click the row to jump to the Apply bar">
             <span className="jm-label"><span className="jm-pending-ic">✦</span>{' '}
               <b>{pendingApply}</b> accepted change{pendingApply === 1 ? '' : 's'} — not applied</span>
-            <button className="jm-accept" onClick={(e) => { e.stopPropagation(); setOpen(false); flashPendingApply() }}>Apply →</button>
+            <button className="jm-accept" disabled={applying}
+              onClick={(e) => { e.stopPropagation(); applyPending() }}>{applying ? 'Applying…' : '✨ Apply now'}</button>
           </div>
         )}
         {shown.length === 0 && pendingApply === 0 ? (
@@ -7864,14 +7883,15 @@ function JobMonitor({ onOpen, pendingApply = 0 }: { onOpen?: (k: string) => void
           )}
         </div>
       )}
-      {open && <JobOverlay onClose={() => setOpen(false)} onOpen={onOpen} pendingApply={pendingApply} />}
+      {open && <JobOverlay onClose={() => setOpen(false)} onOpen={onOpen} pendingApply={pendingApply}
+        applying={applying} onApply={applyPending} />}
       {review && <AiReviewModal runId={review.runId} title={review.title}
         onClose={() => { setReview(null); load() }} />}
     </div>
   )
 }
 
-function JobOverlay({ onClose, onOpen, pendingApply = 0 }: { onClose: () => void; onOpen?: (k: string) => void; pendingApply?: number }) {
+function JobOverlay({ onClose, onOpen, pendingApply = 0, applying = false, onApply }: { onClose: () => void; onOpen?: (k: string) => void; pendingApply?: number; applying?: boolean; onApply?: () => void }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [openRun, setOpenRun] = useState<number | null>(null)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
@@ -7886,11 +7906,11 @@ function JobOverlay({ onClose, onOpen, pendingApply = 0 }: { onClose: () => void
         <button className="close" onClick={onClose}>×</button>
         <h2>Jobs</h2>
         {pendingApply > 0 && (
-          <div className="jo-pending" onClick={() => { onClose(); flashPendingApply() }}
-            title="Accepted changes not yet applied — click to jump to the Apply bar">
+          <div className="jo-pending">
             <span><span className="jm-pending-ic">✦</span>{' '}
               <b>{pendingApply}</b> accepted change{pendingApply === 1 ? '' : 's'} — not applied yet</span>
-            <button className="jm-accept" onClick={(e) => { e.stopPropagation(); onClose(); flashPendingApply() }}>Apply →</button>
+            <button className="jm-accept" disabled={applying}
+              onClick={() => onApply?.()}>{applying ? 'Applying…' : '✨ Apply now'}</button>
           </div>
         )}
         {jobs.length === 0 && pendingApply === 0 && <div className="sync-note dim">No jobs.</div>}
