@@ -61,6 +61,77 @@ IGDB_IMG = "https://images.igdb.com/igdb/image/upload/%s/%s.jpg"
 SGDB = "https://www.steamgriddb.com/api/v2"
 
 
+# --- resolved-identity key (DESIGN §11.9) ------------------------------------ #
+# Every media row carries a `game_key`: the identity the art belongs to, so the
+# serve path (Phase 3) can match art to a game instead of guessing from title +
+# system. Two namespaces, provider-qualified so they can never collide:
+#   * identified   -> "igdb:<id>"           (the game the title resolved to)
+#   * unidentified -> "title:<norm_key>@<system>"   (the current title+system bucket)
+# Media identity is title-level here (keyed off igdb_resolution, which is
+# norm_key-keyed). The per-ENTRY decision — a stray retro-handheld port ADOPTS its
+# parent's igdb identity, an era-collision gets its own title identity — lives in
+# build_library (Phase 2); the two meet at serve time on a plain game_key match.
+_RESMAP = None
+
+
+def _resmap():
+    """Cached {norm_key -> igdb_id} for resolved games (igdb_id>0). Empty if the
+    metadata cache is absent or unpopulated (fresh install / IGDB disabled)."""
+    global _RESMAP
+    if _RESMAP is None:
+        _RESMAP = {}
+        if os.path.exists(META_CACHE):
+            try:
+                mc = sqlite3.connect(META_CACHE)
+                _RESMAP = {nk: iid for nk, iid in mc.execute(
+                    "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0")}
+                mc.close()
+            except sqlite3.OperationalError:
+                _RESMAP = {}                    # cache exists but enrich hasn't run
+    return _RESMAP
+
+
+def game_key(nk, system=None):
+    """The identity key for media on title `nk` / console `system`."""
+    iid = _resmap().get(nk)
+    return "igdb:%s" % iid if iid else "title:%s@%s" % (nk, system or "")
+
+
+def _backfill_game_key(con):
+    """One-time (idempotent) fill of game_key for rows that predate the column or
+    came from a producer that doesn't stamp yet (media_index / importers). Cheap
+    no-op once every row is stamped — guarded by an existence check. Identified
+    rows take the igdb key (SQL join to the metadata cache); the rest fall to the
+    title bucket. Never fails a fetch run: any error leaves game_key NULL (safe —
+    nothing reads it in Phase 1) and the next run retries."""
+    try:
+        if not con.execute("SELECT 1 FROM media WHERE game_key IS NULL "
+                           "OR game_key='' LIMIT 1").fetchone():
+            return                              # already fully stamped
+        if os.path.exists(META_CACHE):
+            try:
+                con.execute("ATTACH ? AS mc", (META_CACHE,))
+                con.execute(
+                    "UPDATE media SET game_key='igdb:'||"
+                    "(SELECT r.igdb_id FROM mc.igdb_resolution r "
+                    " WHERE r.norm_key=media.norm_key AND r.igdb_id>0) "
+                    "WHERE (game_key IS NULL OR game_key='') AND norm_key IN "
+                    "(SELECT norm_key FROM mc.igdb_resolution WHERE igdb_id>0)")
+                con.commit()                    # release mc read-lock before DETACH
+            finally:
+                try:
+                    con.execute("DETACH mc")
+                except sqlite3.OperationalError:
+                    pass
+        con.execute(
+            "UPDATE media SET game_key='title:'||norm_key||'@'||COALESCE(system,'') "
+            "WHERE game_key IS NULL OR game_key=''")
+        con.commit()
+    except sqlite3.OperationalError as e:
+        print("media_fetch: game_key backfill deferred: %s" % str(e)[:120],
+              file=sys.stderr)
+
+
 def con_index():
     con = sqlite3.connect(INDEX)
     con.execute("PRAGMA busy_timeout=30000")   # wait out the live server's locks
@@ -70,11 +141,18 @@ def con_index():
       ref_type TEXT NOT NULL, ref TEXT NOT NULL, ext TEXT, sha1 TEXT,
       width INTEGER, height INTEGER, chosen INTEGER DEFAULT 0,
       matched INTEGER DEFAULT 0, meta TEXT, indexed_at INTEGER,
-      hidden INTEGER DEFAULT 0,
+      hidden INTEGER DEFAULT 0, game_key TEXT,
       UNIQUE(provider, kind, ref))""")
-    if "hidden" not in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
+    _cols = {r[1] for r in con.execute("PRAGMA table_info(media)")}
+    if "hidden" not in _cols:
         con.execute("ALTER TABLE media ADD COLUMN hidden INTEGER DEFAULT 0")
+    # DESIGN §11.9 — resolved-identity key for media (Phase 1: add + backfill + stamp
+    # on fetch; NOT yet read by the serve path, so this stays invisible until Phase 3).
+    if "game_key" not in _cols:
+        con.execute("ALTER TABLE media ADD COLUMN game_key TEXT")
     con.execute("CREATE INDEX IF NOT EXISTS ix_media_nk ON media(norm_key)")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_media_gk ON media(game_key, system, kind)")
+    _backfill_game_key(con)
     return con
 
 
@@ -127,9 +205,10 @@ def put(con, nk, kind, provider, url, now, ext="jpg", system=None, meta=None,
         meta = json.dumps({k: v for k, v in attrs.items() if v not in (None, "")},
                           separators=(",", ":"))
     con.execute("INSERT OR REPLACE INTO media(norm_key,system,kind,provider,"
-                "ref_type,ref,ext,matched,meta,indexed_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (nk, system, kind, provider, "url", url, ext, 1, meta, now))
+                "ref_type,ref,ext,matched,meta,indexed_at,game_key) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (nk, system, kind, provider, "url", url, ext, 1, meta, now,
+                 game_key(nk, system)))
 
 
 # --------------------------------------------------------------------------- #

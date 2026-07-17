@@ -60,6 +60,7 @@ def index_con():
       meta TEXT,
       indexed_at INTEGER,
       hidden INTEGER DEFAULT 0,
+      game_key TEXT,                 -- resolved-identity key (DESIGN §11.9); see media_fetch
       UNIQUE(provider, kind, ref));
     CREATE INDEX IF NOT EXISTS ix_media_nk ON media(norm_key);
     CREATE INDEX IF NOT EXISTS ix_media_nk_kind ON media(norm_key, kind);
