@@ -38,6 +38,14 @@ GOOD_CODES = {
 }
 _COMBO = re.compile(r"^[UEJWFGISKCABRDH]{2,6}$")
 
+# Case-insensitive decode: ROM sets aren't consistent about capitalization, so a
+# lowercase (u)/(usa)/(en) must resolve the same as (U)/(USA)/(En). NOTE: the multi-
+# letter _COMBO regex above stays UPPERCASE-only on purpose — case-folding it would
+# misread ordinary words whose letters are all region codes ("Sega" -> S,E,G,A).
+_REGIONS_CI = {r.lower(): r for r in REGIONS}
+_LANGS_CI = {l.lower(): l for l in LANGS}
+_GOOD_CI = {k.lower(): v for k, v in GOOD_CODES.items()}
+
 # Generic container folders that aren't the game itself.
 GENERIC_DIRS = {"archive", "archives", "archived", "favorites", "favorite",
                 "roms", "games", "game", "iso", "isos", "complete", "_storage"}
@@ -83,17 +91,17 @@ def parse_name(filename):
     flags = []
     for g in parens:
         t = toks(g)
-        if not region and t and all(x in REGIONS for x in t):
-            region = ", ".join(t)
+        if not region and t and all(x.lower() in _REGIONS_CI for x in t):
+            region = ", ".join(_REGIONS_CI[x.lower()] for x in t)
             continue
-        if not region and g in GOOD_CODES:
-            region = GOOD_CODES[g]
+        if not region and g.lower() in _GOOD_CI:
+            region = _GOOD_CI[g.lower()]
             continue
         if not region and _COMBO.match(g):
-            region = ", ".join(GOOD_CODES[c] for c in g if c in GOOD_CODES)
+            region = ", ".join(_GOOD_CI[c.lower()] for c in g if c.lower() in _GOOD_CI)
             continue
-        if not languages and t and all(x in LANGS for x in t):
-            languages = ",".join(t)
+        if not languages and t and all(x.lower() in _LANGS_CI for x in t):
+            languages = ",".join(_LANGS_CI[x.lower()] for x in t)
             continue
         if not languages and re.fullmatch(r"M\d+", g):
             languages = g
