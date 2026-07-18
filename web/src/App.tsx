@@ -4493,8 +4493,10 @@ function PendingApplyBar({ count, onApplied }: { count: number; onApplied: () =>
         api.jobs().then((r) => r.jobs).catch(() => [] as Job[]),
       ])
       const pendingCleared = !!s && (s.pending_meta ?? 0) < count
+      // the metadata apply is what we wait on — NOT the separate 'aimeta-art' art job,
+      // which hydrates in the background after the rebuild.
       const jobDone = !jobs.some((j) =>
-        (j.kind === 'aimeta' || j.id.includes('aimeta')) &&
+        (j.kind === 'aimeta' || j.kind === 'aimeta-apply') &&
         (j.status === 'running' || j.status === 'paused'))
       if (pendingCleared || (jobDone && tries >= 2) || tries > 80) {
         setBusy(false); onApplied(); return
@@ -7286,18 +7288,29 @@ function MetadataScan() {
 
 // One selectable change within a finding: the provider link, or one attribute fill.
 type Change =
-  | { id: string; type: 'match'; label: string; value: string; cover?: string | null }
+  | { id: string; type: 'match'; label: string; value: string; cover?: string | null
+      renameFrom?: string; renameTo?: string }
   | { id: string; type: 'attr'; attrKind: string; label: string; value: string }
 
 function findingChanges(f: AiFinding): Change[] {
   const out: Change[] = []
   const pms = providerMatches(f.payload)
   if (pms.length) {
+    // Applying a match renames the game's title — but ONLY IGDB renames, and ONLY for
+    // ROM/archive-only games (store-owned titles are already clean; build_library.py
+    // guards on NOT EXISTS non-emulation source). So state the concrete title change
+    // the reviewer will get on apply, when it actually applies.
+    const igdb = pms.find((m) => m.provider === 'igdb' || m.igdb_id != null)
+    const curTitle = f.payload.current_match?.title || f.title
+    const srcs = f.context?.sources || []
+    const romOnly = srcs.length > 0 && srcs.every((s) => s === 'emulation' || s === 'archive')
+    const renameTo = (romOnly && igdb?.name && igdb.name !== curTitle) ? igdb.name : undefined
     out.push({
       id: `${f.id}:match`, type: 'match',
       label: '🔗 Link to ' + pms.map((m) => `${pmLabel(m)} #${pmId(m)}`).join(' + '),
       cover: pms.find((m) => m.cover)?.cover ?? null,
       value: pms.map((m) => `${m.name}${m.year ? ` (${m.year})` : ''}`).join(' · '),
+      renameFrom: renameTo ? curTitle : undefined, renameTo,
     })
   }
   for (const k of Object.keys(f.payload.attributes || {})) {
@@ -7312,10 +7325,44 @@ function findingChanges(f: AiFinding): Change[] {
 // The factual, non-AI things we KNOW about a ROM (platform, file name, folder, region
 // tags, current match) — shown on the review page so the reviewer can sanity-check the
 // AI's proposal against reality.
+// Two anchor facts we ALWAYS state on every game card, whether or not the scan is
+// changing them: the platform/system and the release year. A ✨/✓ badge marks whether
+// the value is new info from this scan or something we already knew.
+function AnchorFacts({ f }: { f: AiFinding }) {
+  const ctx = f.context
+  const systems = ctx?.systems || []
+  const knownYear = ctx?.year ?? null
+  // did THIS finding propose a year? (the scan setting/changing release_year)
+  const rawProposed = f.payload.attributes?.release_year
+  const proposedYear = rawProposed != null
+    ? (String(Array.isArray(rawProposed) ? rawProposed[0] : rawProposed).match(/(?:19|20)\d{2}/)?.[0] ?? null)
+    : null
+  const yearIsNew = !!proposedYear && String(proposedYear) !== String(knownYear ?? '')
+  const yearVal = yearIsNew ? proposedYear : (knownYear != null ? String(knownYear) : proposedYear)
+  const badge = (isNew: boolean) => isNew
+    ? <span className="af-badge af-new" title="New info from this scan">✨ new</span>
+    : <span className="af-badge af-known" title="Already known — unchanged by this scan">✓ known</span>
+  return (
+    <div className="af-row">
+      <span className="af-fact">
+        <span className="af-key">🖥 System</span>
+        <span className="af-val">{systems.length ? systems.join(', ') : '—'}</span>
+        {badge(false)}
+      </span>
+      <span className="af-fact">
+        <span className="af-key">📅 Year</span>
+        <span className="af-val">{yearVal ?? 'unknown'}</span>
+        {yearVal != null && badge(yearIsNew)}
+      </span>
+    </div>
+  )
+}
+
 function FindingContextStrip({ ctx }: { ctx?: FindingContext | null }) {
   if (!ctx) return null
   const bits: ReactNode[] = []
-  if (ctx.systems?.length) bits.push(<span key="sys" className="fc-chip">🖥 {ctx.systems.join(', ')}</span>)
+  // System is stated in the always-on AnchorFacts row above, so it's intentionally not
+  // repeated here.
   // when we have full paths, they carry the filename already — keep the file chip only
   // as a quick-glance when no path is available.
   if (!ctx.paths?.length && ctx.files?.length) bits.push(<span key="f" className="fc-chip fc-file" title={ctx.files.join('; ')}>📄 {ctx.files.join('; ')}</span>)
@@ -7496,19 +7543,39 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
               <span className="chg-gtitle">{f.title}</span>
               <span className="chg-conf">{Math.round((f.confidence || 0) * 100)}%</span>
             </div>
+            <AnchorFacts f={f} />
             <FindingContextStrip ctx={f.context} />
             {p.match?.status === 'wrong' && (
               <div className="chg-warn">⚠ current match may be wrong:{' '}
                 <b>{p.current_match?.title || '—'}</b> → <b>{p.match.suggested_title || '—'}</b></div>
             )}
             {changes.map((c) => (
-              <label key={c.id} className={'chg-row' + (c.type === 'match' ? ' chg-link' : '')}>
-                <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} />
-                {c.type === 'match' && c.cover && <img className="chg-cover" src={c.cover} alt="" />}
-                <span className="chg-label">{c.label}</span>
-                <span className="chg-arrow">→</span>
-                <span className="chg-value">{c.value}</span>
-              </label>
+              c.type === 'match' ? (
+                <label key={c.id} className="chg-row chg-link">
+                  <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} />
+                  {c.cover && <img className="chg-cover" src={c.cover} alt="" />}
+                  <div className="chg-match-body">
+                    {c.renameTo ? (
+                      <div className="chg-rename">
+                        <span className="chg-label">Title</span>
+                        <b className="chg-from">{c.renameFrom}</b>
+                        <span className="chg-arrow">→</span>
+                        <b className="chg-to">{c.renameTo}</b>
+                      </div>
+                    ) : (
+                      <div className="chg-rename"><span className="chg-value">{c.value}</span></div>
+                    )}
+                    <div className="chg-match-src">{c.label}</div>
+                  </div>
+                </label>
+              ) : (
+                <label key={c.id} className="chg-row">
+                  <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} />
+                  <span className="chg-label">{c.label}</span>
+                  <span className="chg-arrow">→</span>
+                  <span className="chg-value">{c.value}</span>
+                </label>
+              )
             ))}
             {p.web && (p.sources || []).length > 0 && (
               <details className="chg-sources">

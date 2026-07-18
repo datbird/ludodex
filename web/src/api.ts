@@ -143,6 +143,7 @@ export interface AiFindingPayload {
 export interface FindingContext {
   title: string | null
   systems: string[]
+  year: number | null
   sources: string[]
   files: string[]
   paths: string[]

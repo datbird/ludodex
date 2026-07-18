@@ -3059,6 +3059,13 @@ a.idchip:hover { background: var(--accent-bg); }
 .chg-arrow { color: var(--text); opacity: 0.4; }
 .chg-value { color: var(--text-h); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; flex: 1; }
 .chg-link .chg-value { color: var(--accent); }
+/* match row: title-rename headline + a subordinate provider-link line */
+.chg-match-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.chg-rename { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.chg-rename .chg-label { color: var(--text-dim, #9aa); text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; }
+.chg-from { color: var(--text-h); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--text-h) 45%, transparent); font-weight: 500; }
+.chg-to { color: var(--accent); font-weight: 700; }
+.chg-match-src { font-size: 11px; color: var(--text-dim, #9aa); }
 .chg-sources { padding: 6px 12px; font-size: 12px; }
 .chg-sources ul { margin: 4px 0 0; padding-left: 18px; }
 
@@ -3071,6 +3078,15 @@ a.idchip:hover { background: var(--accent-bg); }
 .fc-chip { font-size: 11px; color: var(--text); background: var(--border); border-radius: 6px; padding: 2px 7px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fc-chip.fc-file { font-family: var(--mono, ui-monospace, monospace); }
 .fc-chip.fc-dim { background: transparent; color: var(--text-dim, #9aa); padding-left: 0; }
+
+/* always-on anchor facts (System / Year) with a new/known badge */
+.af-row { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.af-fact { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.af-key { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim, #9aa); white-space: nowrap; }
+.af-val { font-size: 13px; color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.af-badge { font-size: 10px; font-weight: 600; border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
+.af-badge.af-new { color: var(--accent); background: var(--accent-bg, color-mix(in srgb, var(--accent) 14%, transparent)); }
+.af-badge.af-known { color: var(--text-dim, #9aa); background: rgba(127,127,127,0.12); }
 
 /* "add context & re-run" */
 .refine-toggle { display: block; width: 100%; text-align: left; padding: 7px 12px; border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--text-dim, #9aa); font-size: 12px; cursor: pointer; }

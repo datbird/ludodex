@@ -1391,21 +1391,10 @@ def _igdb_token():
     return cid, tok
 
 
-def _igdb_search(name, limit=8):
-    """IGDB free-text search -> candidate matches (id, name, year, platforms, cover)."""
-    cid, tok = _igdb_token()
-    if not tok:
-        return []
-    import igdb
-    body = ('search "%s"; fields id,name,slug,first_release_date,'
-            'platforms.abbreviation,cover.image_id; limit %d;'
-            % (name.replace('"', ""), limit))
-    try:
-        hits = igdb.query("games", body, cid, tok)
-    except Exception:
-        return []
+def _igdb_hits(raw):
+    """Normalize raw IGDB game rows -> our candidate dicts (id, name, year, ...)."""
     out = []
-    for h in hits or []:
+    for h in raw or []:
         img = (h.get("cover") or {}).get("image_id")
         yr = None
         if h.get("first_release_date"):
@@ -1421,6 +1410,46 @@ def _igdb_search(name, limit=8):
                       "%s.jpg" % img) if img else None,
         })
     return out
+
+
+_IGDB_FIELDS = ("fields id,name,slug,first_release_date,"
+                "platforms.abbreviation,cover.image_id;")
+
+
+def _igdb_search(name, limit=8):
+    """IGDB free-text search -> candidate matches (id, name, year, platforms, cover)."""
+    cid, tok = _igdb_token()
+    if not tok:
+        return []
+    import igdb
+    body = 'search "%s"; %s limit %d;' % (name.replace('"', ""), _IGDB_FIELDS, limit)
+    try:
+        return _igdb_hits(igdb.query("games", body, cid, tok))
+    except Exception:
+        return []
+
+
+def _igdb_by_name(name, limit=15):
+    """Case-insensitive EXACT-name lookup. IGDB's relevance `search` buries an exact
+    short title under its own sequels ("Gradius" ranks below Gradius II/III/IV/V), so a
+    title the AI is confident about can be missing from search results entirely. `~` is
+    a case-insensitive exact match — it returns only games literally named `name` (a
+    small, deterministic set: original + re-releases), which the caller filters/ranks —
+    unlike a `*"..."*` contains query, whose arbitrary limited window can omit the very
+    entry we need."""
+    cid, tok = _igdb_token()
+    if not tok:
+        return []
+    import igdb
+    safe = name.replace('"', "").replace("\\", "").replace("*", "")
+    # sort by release date asc so the ORIGINAL lands in the window (IGDB's default order
+    # can push a modern re-release ahead of the 1986 original and cap it out at `limit`).
+    body = ('%s where name ~ "%s"; sort first_release_date asc; limit %d;'
+            % (_IGDB_FIELDS, safe, limit))
+    try:
+        return _igdb_hits(igdb.query("games", body, cid, tok))
+    except Exception:
+        return []
 
 
 @app.get("/api/identify")
@@ -2670,24 +2699,41 @@ def jobs_clear():
 #  in the detail view and bake into the catalog on the next rebuild.
 # --------------------------------------------------------------------------- #
 def _provider_match(title, year=None):
-    """Search IGDB for an AI-proposed title → the best real provider hit (or None).
-    This is how an AI identification becomes a *trusted provider* match."""
+    """Search IGDB for an AI-proposed title → the real provider hit (or None).
+    This is how an AI identification becomes a *trusted provider* match, so it binds
+    ONLY on an exact normalized-title match — never the arbitrary top relevance hit.
+    (IGDB ranks "Gradius" below Gradius II/III/…, so the fuzzy #1 for a short title is
+    routinely the WRONG game; a garbage link is worse than no link.)"""
     if not title:
         return None
-    try:
-        hits = _igdb_search(title, limit=6)
-    except Exception:
-        return None
-    if not hits:
-        return None
     tn = titlenorm.norm(title)
-    best = None
-    for h in hits:
-        s = (2 if titlenorm.norm(h.get("name") or "") == tn else 0) + \
-            (1 if year and h.get("year") == year else 0)
-        if best is None or s > best[0]:
-            best = (s, h)
-    h = best[1]
+    try:
+        search_hits = _igdb_search(title, limit=8)
+    except Exception:
+        search_hits = []
+    sx = [h for h in search_hits if titlenorm.norm(h.get("name") or "") == tn]
+    # fast path: the fuzzy search already gave an exact-title entry at the AI's year.
+    yr_hit = next((h for h in sx if year and h.get("year") == year), None)
+    if yr_hit:
+        return _pack_igdb(yr_hit)
+    # else consult the exact-name index too — IGDB's relevance `search` routinely omits
+    # the buried original ("Gradius" → only its sequels) or ranks a modern re-release
+    # first ("Contra" → the 2006 remake), so merge both candidate sets before ranking.
+    cands = {h["igdb_id"]: h for h in sx}
+    for h in _igdb_by_name(title):
+        if titlenorm.norm(h.get("name") or "") == tn:
+            cands.setdefault(h["igdb_id"], h)
+    if not cands:
+        return None                 # no trustworthy IGDB entry — better none than wrong
+    # prefer the AI's year (distinguishes remakes/eras sharing a title); else the
+    # earliest exact-title entry (the original, not a later remake/re-release).
+    best = sorted(cands.values(),
+                  key=lambda h: (0 if (year and h.get("year") == year) else 1,
+                                 h.get("year") or 9999))[0]
+    return _pack_igdb(best)
+
+
+def _pack_igdb(h):
     return {"provider": "igdb", "igdb_id": h.get("igdb_id"), "name": h.get("name"),
             "year": h.get("year"), "cover": h.get("cover"),
             "platforms": h.get("platforms")}
@@ -2920,14 +2966,34 @@ def aimeta_targets():
     return out
 
 
+def _current_year(ctx):
+    """The release year we ALREADY know for this game (existing attribute first, else the
+    IGDB match year) — so the review page can always state the year, even when the scan
+    isn't changing it. None if genuinely unknown."""
+    have = ctx.get("have") or {}
+    ry = have.get("release_year")
+    if ry:
+        v = ry[0] if isinstance(ry, list) else ry
+        mm = re.search(r"(?:19|20)\d{2}", str(v))
+        if mm:
+            return int(mm.group())
+    m = ctx.get("match") or {}
+    if m and m.get("year"):
+        try:
+            return int(m["year"])
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def _finding_context(ctx):
     """The factual, non-AI things we KNOW about a game — shown on the review page so a
     reviewer can sanity-check the AI against the actual ROM: platform(s), file name(s),
-    parent folder, region/edition tags, current provider match."""
+    parent folder, region/edition tags, current provider match, known release year."""
     f = ctx.get("files") or {}
     m = ctx.get("match") or {}
     return {"title": ctx.get("title"), "systems": ctx.get("systems") or [],
-            "sources": ctx.get("sources") or [],
+            "sources": ctx.get("sources") or [], "year": _current_year(ctx),
             "files": f.get("files") or [], "paths": f.get("paths") or [],
             "folders": f.get("folders") or [],
             "tags": f.get("tags") or [], "siblings": f.get("siblings") or [],
@@ -3089,13 +3155,16 @@ def _ai_adjudicate_game(nk, title):
         print("adjudicate attrs %s: %s" % (nk, str(e)[:160]), file=sys.stderr)
 
 
-def _aimeta_apply(should_stop, media=True, only_ids=None):
+def _aimeta_apply(should_stop, only_ids=None):
     """Make accepted findings real: write AI provider-matches into igdb_resolution
     (+ fetch their IGDB records), then rebuild the catalog so accepted supplements
-    and new provider links + their trusted attributes/media flow in. `media` is
-    True (all art), False (skip art), or a list of media kinds to (re)choose.
-    `only_ids` scopes which findings get marked applied — captured at the start so a
-    coalesced drain never marks findings accepted mid-run but not processed here."""
+    and new provider links + their trusted attributes flow in. Returns the set of
+    touched norm_keys so the caller can hand ART hydration off to a SEPARATE job —
+    the metadata (rename/attrs/links) is what the reviewer waits on; media fetch +
+    choose (up to ~30 min) runs in the background so the apply completes at the
+    rebuild. `only_ids` scopes which findings get marked applied — captured at the
+    start so a coalesced drain never marks findings accepted mid-run but not processed
+    here."""
     import igdb
     cache = os.path.join(DATA, "metadata-cache.sqlite")
     now = int(time.time())
@@ -3172,13 +3241,19 @@ def _aimeta_apply(should_stop, media=True, only_ids=None):
                       file=sys.stderr)
     except Exception as e:
         print("apply steam-tags: %s" % str(e)[:150], file=sys.stderr)
-    ok, err = _run_script("build_library.py", timeout=1800)
-    if not ok:
-        # build_library can exit non-zero under concurrency yet still produce the
-        # catalog; the provider matches are durable in igdb_resolution regardless.
-        # Mark applied anyway so the pending banner clears (a later rebuild reapplies).
-        print("aimeta apply: build_library reported error (continuing): %s"
-              % (err or "")[:200], file=sys.stderr)
+    # INSTANT APPLY: reflect the accepted changes into the LIVE catalog right now
+    # (rename + provider links + accepted AI attributes) so the reviewer sees them in
+    # seconds — instead of blocking on a ~10-min full rebuild. The authoritative
+    # rebuild is handed to the background reconcile job (which re-derives the same
+    # facts canonically + adds provider-record attrs/game_key), mirroring the eager-
+    # preview pattern of _apply_ownership_live. All accepted changes are durable
+    # (igdb_resolution / ss_game caches + supplements read at status IN accepted,
+    # applied), so the deferred rebuild reproduces them even after mark_applied.
+    try:
+        _apply_surgical_meta(touched)
+    except Exception as e:                 # never let the preview block the apply
+        print("aimeta apply: surgical preview failed (rebuild will apply): %s"
+              % str(e)[:200], file=sys.stderr)
     aimeta.mark_applied(only_ids)  # accepted -> applied (only this pass's findings)
     # recompute the combined Ludodex score from the IGDB ratings the wand just
     # cached (reads the cache, no network), so a newly-matched game's score lands
@@ -3186,6 +3261,104 @@ def _aimeta_apply(should_stop, media=True, only_ids=None):
     ok_s, err_s = _run_script("scores_fetch.py", args=["igdb"], timeout=180)
     if not ok_s:
         print("apply scores: %s" % (err_s or "")[:150], file=sys.stderr)
+    return touched
+
+
+def _apply_surgical_meta(touched):
+    """Eager preview: write accepted matches + supplements straight into the LIVE
+    game-library.sqlite for the touched games — the title rename (IGDB name, ROM/
+    archive-only entries, mirroring build_library's guard), provider links, and
+    accepted AI attributes (fill-only, never overriding an existing kind). The
+    background reconcile rebuild supersedes this with the canonical derivation (which
+    also adds provider-record attributes + game_key), so this only has to be visually
+    right, not exhaustive. Best-effort per game; a failure just waits for the rebuild."""
+    if not touched:
+        return
+    pms = {pm["norm_key"]: pm for pm in aimeta.accepted_provider_matches()}
+    ssm = {}
+    for m in aimeta.accepted_ss_matches():
+        ssm.setdefault(m["norm_key"], []).append(m)
+    sup = aimeta.accepted_supplements()
+    # IGDB names for the matched games come from the igdb_meta cache just fetched.
+    igdb_names = {}
+    if pms:
+        mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+        try:
+            for pm in pms.values():
+                r = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?",
+                               (pm["igdb_id"],)).fetchone()
+                if r and r["payload_json"]:
+                    try:
+                        igdb_names[pm["norm_key"]] = (json.loads(r["payload_json"])
+                                                      .get("name") or "").strip()
+                    except ValueError:
+                        pass
+        finally:
+            mc.close()
+    con = sqlite3.connect(LIBRARY_DB)
+    try:
+        con.execute("PRAGMA busy_timeout=8000")
+        if not _has_col(con, "games", "game_key"):
+            return                         # pre-migration schema; the rebuild applies
+        for nk in touched:
+            gids = [r[0] for r in con.execute(
+                "SELECT id FROM games WHERE norm_key=?", (nk,)).fetchall()]
+            if not gids:
+                continue
+            pm = pms.get(nk)
+            name = igdb_names.get(nk)
+            for gid in gids:
+                # rename to the matched title — only ROM/archive-only entries (store
+                # titles are already clean; build_library guards the same way)
+                if name:
+                    con.execute(
+                        "UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
+                        "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
+                        "('emulation','archive'))", (name, gid, gid))
+                # provider links (replace this provider's link for the entry)
+                if pm:
+                    con.execute("DELETE FROM metadata_links WHERE game_id=? AND "
+                                "provider='igdb'", (gid,))
+                    con.execute("INSERT INTO metadata_links(game_id,provider,"
+                                "provider_id,slug,url) VALUES(?,?,?,?,?)",
+                                (gid, "igdb", str(pm["igdb_id"]), None,
+                                 "https://www.igdb.com/games/%s" % pm["igdb_id"]))
+                for m in ssm.get(nk, []):
+                    con.execute("DELETE FROM metadata_links WHERE game_id=? AND "
+                                "provider='screenscraper'", (gid,))
+                    con.execute("INSERT INTO metadata_links(game_id,provider,"
+                                "provider_id,slug,url) VALUES(?,?,?,?,?)",
+                                (gid, "screenscraper", str(m["ss_id"]), None,
+                                 "https://www.screenscraper.fr/gameinfos.php?gameid=%s"
+                                 % m["ss_id"]))
+                # accepted AI attributes — fill only kinds no source already supplied
+                attrs = sup.get(nk)
+                if attrs:
+                    have = {r[0] for r in con.execute(
+                        "SELECT DISTINCT kind FROM game_attributes WHERE game_id=?",
+                        (gid,))}
+                    rows = []
+                    for kind, val in attrs.items():
+                        if kind in have:
+                            continue
+                        for v in (val if isinstance(val, list) else [val]):
+                            if v not in (None, ""):
+                                rows.append((gid, kind, str(v), "ai"))
+                    if rows:
+                        con.executemany("INSERT INTO game_attributes(game_id,kind,"
+                                        "value,origin) VALUES(?,?,?,?)", rows)
+        con.commit()
+    finally:
+        con.close()
+
+
+def _aimeta_apply_media(touched, media, should_stop):
+    """Background art hydration for games an apply just touched: fetch provider media,
+    gap-fill via SteamGridDB, prune blanks, choose the best per kind, then AI-adjudicate
+    images/attribute conflicts. Split out of _aimeta_apply so the apply job completes at
+    the catalog rebuild and this (the ~30-min tail) runs as its own coalesced job.
+    `media` is True (all art), False (skip — never reaches here), or a list of kinds."""
+    now = int(time.time())
     if media is not False:                 # media: False skips art entirely
         # pull provider media for newly-linked games (IGDB/Steam/ScreenScraper),
         # then pick the best per kind — restricted to `media` kinds if a list given
@@ -3239,6 +3412,71 @@ def _aimeta_apply(should_stop, media=True, only_ids=None):
             _ai_adjudicate_game(nk, titles.get(nk, nk))
 
 
+# --- background art job: coalesced queue drained on its own thread so metadata apply
+# never waits on media. _ART_RUNNING (under _ART_LOCK) is the single-flight gate; a new
+# apply that lands while art runs just adds its touched keys and the drain re-checks. ---
+_ART_LOCK = threading.Lock()
+_ART_QUEUE = set()
+_ART_MEDIA = [True]                         # latest media spec (True | [kinds])
+_ART_RUNNING = [False]
+
+
+def _enqueue_reconcile(touched, media):
+    """Queue touched games for the background reconcile (rebuild + scores + art); start
+    the drain if idle. Always schedules when there's touched work — the rebuild must run
+    to make the surgical preview canonical — even if `media` is False (art then skipped)."""
+    if not touched:
+        return
+    start = False
+    with _ART_LOCK:
+        _ART_QUEUE.update(touched)
+        _ART_MEDIA[0] = media
+        if not _ART_RUNNING[0]:
+            _ART_RUNNING[0] = True
+            start = True
+            cancel = threading.Event()
+            rec = {"kind": "aimeta-art", "label": "Rebuild + art (reconcile)",
+                   "cancel": cancel, "thread": None, "error": None, "run_id": None,
+                   "cancelable": False, "started": time.time()}
+
+            def worker():
+                try:
+                    _reconcile_drain(cancel.is_set)
+                except Exception as e:      # noqa: BLE001 — surface to the monitor
+                    rec["error"] = str(e)[:300]
+            t = threading.Thread(target=worker, daemon=True)
+            rec["thread"] = t
+            with _JOBS_LOCK:
+                _JOBS["aimeta-art"] = rec
+    if start:
+        rec["thread"].start()
+
+
+def _reconcile_drain(should_stop):
+    """Background reconcile: run the authoritative catalog rebuild (superseding the
+    instant surgical preview with the canonical derivation), refresh scores, then
+    hydrate art — in coalesced batches until the queue is empty. All queue decisions
+    are under the lock so a concurrent _enqueue_reconcile never strands a game."""
+    while not should_stop():
+        with _ART_LOCK:
+            if not _ART_QUEUE:
+                _ART_RUNNING[0] = False
+                return
+            batch = set(_ART_QUEUE)
+            _ART_QUEUE.clear()
+            media = _ART_MEDIA[0]
+        # canonical rebuild — provider matches/supplements are durable, so this
+        # reproduces every accepted change and adds provider-record attrs + game_key.
+        ok, err = _run_script("build_library.py", timeout=1800)
+        if not ok:
+            print("reconcile: build_library reported error (continuing): %s"
+                  % (err or "")[:200], file=sys.stderr)
+        _run_script("scores_fetch.py", args=["igdb"], timeout=180)
+        _aimeta_apply_media(batch, media, should_stop)
+    with _ART_LOCK:
+        _ART_RUNNING[0] = False
+
+
 def _apply_ss_matches(now):
     """Fetch accepted ScreenScraper matches by game id and cache the full record in
     ss_game, so build_library links them (metadata) and media_fetch pulls SS media."""
@@ -3273,12 +3511,16 @@ def _apply_ss_matches(now):
 def _apply_drain(should_stop, media):
     """Apply accepted findings, then loop while more are accepted — so accepting
     several games in quick succession coalesces into one running rebuild instead of
-    N. Each pass captures + marks only the findings it processed."""
+    N. Each pass captures + marks only the findings it processed. Art hydration for all
+    touched games is handed to a SEPARATE background job at the end, so this apply job
+    finishes at the catalog rebuild rather than waiting on the ~30-min media pass."""
+    all_touched = set()
     while not should_stop():
         ids = aimeta.accepted_ids()
         if not ids:
             break
-        _aimeta_apply(should_stop, media=media, only_ids=ids)
+        all_touched |= _aimeta_apply(should_stop, only_ids=ids)
+    _enqueue_reconcile(all_touched, media)
 
 
 @app.post("/api/aimeta/accept")
