@@ -3123,6 +3123,12 @@ a.idchip:hover { background: var(--accent-bg); }
 .ap-kind { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: none; padding: 8px 10px; cursor: pointer; text-align: left; color: var(--text-h); }
 .ap-kname { min-width: 130px; text-transform: capitalize; font-weight: 600; font-size: 13px; }
 .ap-vals { flex: 1; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+/* read-only ROM file path row(s) in the attributes panel */
+.ap-row.ap-readonly { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; cursor: default; }
+.ap-files { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ap-file { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5; word-break: break-all; overflow-wrap: anywhere; user-select: all; }
+.ap-file-dir { color: var(--text-dim, #9aa); }
+.ap-file-name { color: var(--text-h); font-weight: 700; }
 .ap-caret { color: var(--text); opacity: 0.5; }
 .ap-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-h); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; }
 .ap-chip.ap-chosen { border-color: var(--accent); }

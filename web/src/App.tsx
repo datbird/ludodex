@@ -4318,6 +4318,23 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
       </button>
       {show && (
       <div className="ap-list">
+        {d.rom_files && d.rom_files.length > 0 && (
+          <div className="ap-row ap-readonly">
+            <span className="ap-kname">ROM file{d.rom_files.length > 1 ? 's' : ''}</span>
+            <div className="ap-files">
+              {d.rom_files.map((f, i) => {
+                const slash = f.path.lastIndexOf('/')
+                const dir = slash >= 0 ? f.path.slice(0, slash + 1) : ''
+                const name = slash >= 0 ? f.path.slice(slash + 1) : f.path
+                return (
+                  <code key={i} className="ap-file" title="Full on-disk path (read-only)">
+                    <span className="ap-file-dir">{dir}</span><b className="ap-file-name">{name}</b>
+                  </code>
+                )
+              })}
+            </div>
+          </div>
+        )}
         {kinds.map((kind) => {
           const vals = prov[kind] || []
           const ov = overrides[kind]

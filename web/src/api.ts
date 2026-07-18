@@ -74,6 +74,7 @@ export interface GameDetail {
   also_owned_on?: { entry_key: string; platform: string; title: string; via?: string }[]
   title: string
   sources: { source: string; platform: string; source_id: string; title_raw: string; detail: string; os: string[] | null; state?: 'have' | 'want'; collection?: string | null; via_collection?: string }[]
+  rom_files?: { path: string; filename: string; system: string }[]   // on-disk ROM path(s)
   attributes: Record<string, string[]>
   tags: TagRef[]
   scores: Scores

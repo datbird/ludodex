@@ -3568,6 +3568,49 @@ _EDITABLE_ATTR_KINDS = [
 ]
 
 
+def _entry_rom_paths(sources, limit=40):
+    """Full on-disk path(s) for this entry's emulation/archive ROM files, straight from
+    the ROM index (which already has fullpath/filename per file) — so the detail view
+    can show WHERE the ROM lives, not just the title it matched. Returns
+    [{path, filename, system}] deduped in path order. Empty for non-ROM games."""
+    links = [(s.get("source_id") or "", s.get("title_raw") or "")
+             for s in sources
+             if s.get("source") in ("emulation", "archive") and s.get("title_raw")]
+    if not links:
+        return []
+    out, seen = [], set()
+    for dbp in aimeta._rom_indexes():
+        aimeta._ensure_rom_index(dbp)
+        try:
+            rc = sqlite3.connect("file:%s?mode=ro" % dbp, uri=True, timeout=5)
+            rc.row_factory = sqlite3.Row
+        except sqlite3.OperationalError:
+            continue
+        try:
+            for system, title in links:
+                try:
+                    rows = rc.execute(
+                        "SELECT system, filename, fullpath, relpath FROM roms "
+                        "WHERE game=? AND (system=? OR ?='') LIMIT ?",
+                        (title, system, system or "", limit)).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                for r in rows:
+                    fp = r["fullpath"] or r["relpath"]
+                    if fp and fp not in seen:
+                        seen.add(fp)
+                        out.append({"path": fp,
+                                    "filename": r["filename"] or os.path.basename(fp),
+                                    "system": r["system"]})
+                        if len(out) >= limit:
+                            break
+        finally:
+            rc.close()
+        if len(out) >= limit:
+            break
+    return out
+
+
 @app.get("/api/games/{norm_key}")
 def game_detail(norm_key: str):
     con = lib()
@@ -3690,6 +3733,7 @@ def game_detail(norm_key: str):
             "also_owned_on": also,             # sibling platform entries (cross-ref)
             "title": g["canonical_title"],
             "sources": sources,
+            "rom_files": _entry_rom_paths(sources),   # on-disk ROM path(s) for this entry
             "attributes": attrs,
             "attribute_provenance": prov,     # per-value origins (+ ai flag → ✨)
             "attribute_overrides": ov,        # user re-pointed canonical values
