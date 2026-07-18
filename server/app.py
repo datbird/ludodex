@@ -916,7 +916,8 @@ _PLAT_LABEL = {
 }
 
 
-def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
+def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
+                    include_homebrew=False):
     # spotlight is a games showcase — never surface applications/tools/mods/etc.
     clauses = [where] if where else []
     args = list(args)
@@ -924,6 +925,14 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10):
         clauses.append("g.norm_key NOT IN (SELECT norm_key FROM sco.steam_type "
                        "WHERE type IN (%s))" % ",".join("?" * len(NON_GAME_TYPES)))
         args += list(NON_GAME_TYPES)
+    # Keep un-official releases (homebrew/hack/proto/demo/unlicensed — the editable
+    # `release_type` attribute) out of the normal themes; the dedicated 'homebrew'
+    # theme flips this on so they still have a home. A Translation is exempt — it IS
+    # the real commercial game, just localized — so it stays in the normal themes.
+    if not include_homebrew:
+        clauses.append("NOT EXISTS(SELECT 1 FROM game_attributes ga WHERE "
+                       "ga.game_id=g.id AND ga.kind='release_type' "
+                       "AND ga.value<>'Translation')")
     clause = ("WHERE " + " AND ".join("(%s)" % c for c in clauses) + " ") if clauses else ""
     has_ek = _has_col(con, "games", "entry_key")
     eksel = ("g.entry_key AS entry_key, g.platform AS platform, " if has_ek
@@ -1007,6 +1016,10 @@ def _compute_spotlight_all_ids(con):
         # and just fall back to 'overall' — which is what makes it feel repetitive.
         if con.execute("SELECT COUNT(*) FROM sco.game_scores").fetchone()[0] >= 20:
             pool += ["underrated", "hidden_gems", "acclaimed", "beloved"]
+        if con.execute("SELECT COUNT(DISTINCT game_id) FROM game_attributes "
+                       "WHERE kind='release_type' AND value<>'Translation'"
+                       ).fetchone()[0] >= 8:
+            pool.append("homebrew")
         for (plat,) in con.execute(
             "SELECT s.platform FROM sources s JOIN games g ON g.id=s.game_id "
             "WHERE s.platform!='' AND s.platform NOT IN (%s) "
@@ -1084,6 +1097,11 @@ def _resolve_spotlight(kind):
     if kind == "emulation":
         return ("Best on emulation", "Top games across your ROM library",
                 "g.has_emulation=1", [], "gs.universal DESC")
+    if kind == "homebrew":
+        return ("Homebrew & Hacks", "Fan games, hacks, prototypes & demos you own",
+                "EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
+                "AND ga.kind='release_type' AND ga.value<>'Translation')", [],
+                "gs.universal DESC")
     if kind == "underrated":
         return ("Underrated", "Players rate these higher than the critics did",
                 "gs.critic IS NOT NULL AND gs.user IS NOT NULL AND gs.user-gs.critic>=8 "
@@ -1132,7 +1150,8 @@ def spotlight(kind: str = Query("random"), exclude: str = Query(None)):
                 pool = [p for p in pool if p != exclude] or pool
             kind = random.choice(pool) if pool else "overall"
         title, subtitle, where, args, order = _resolve_spotlight(kind)
-        items = _spotlight_rows(con, where, args, order)
+        items = _spotlight_rows(con, where, args, order,
+                                include_homebrew=(kind == "homebrew"))
         if len(items) < 4 and kind != "overall":         # thin theme -> fall back
             kind = "overall"
             title, subtitle, where, args, order = _resolve_spotlight(kind)
@@ -2515,14 +2534,34 @@ def _jobs_list():
             _detail = "%d to review" % _prop
         elif live:
             _detail = "scanning %d/%d…" % (s["done"], s["total"])
-        else:                                       # finished: always show the tally so a
-            _parts = ["scanned %d" % s["done"],     # 0-finding scan reads as a real result
-                      "%d found" % s["findings"]]
-            if _sk:
-                _parts.append("%d skipped" % _sk)
-            if _er:
-                _parts.append("%d error%s" % (_er, "" if _er == 1 else "s"))
-            _detail = " · ".join(_parts)
+        else:                                       # finished: say WHY, not just a tally —
+            # "0 found" has two very different meanings (already matched & complete vs.
+            # couldn't identify); spell them out so a no-change scan isn't read as a failure.
+            _co, _um = s.get("complete") or 0, s.get("unmatched") or 0
+            if s["total"] == 1:                     # single-game wand → the specific verdict
+                if s["findings"]:
+                    _detail = "1 change found"
+                elif _co:
+                    _detail = "already matched & complete — nothing to change"
+                elif _um:
+                    _detail = "couldn't identify this game"
+                elif _sk:
+                    _detail = "skipped — no data to analyze"
+                elif _er:
+                    _detail = "scan errored"
+                else:
+                    _detail = "nothing to change"
+            else:
+                _parts = ["scanned %d" % s["done"], "%d found" % s["findings"]]
+                if _co:
+                    _parts.append("%d already complete" % _co)
+                if _um:
+                    _parts.append("%d not identified" % _um)
+                if _sk:
+                    _parts.append("%d skipped" % _sk)
+                if _er:
+                    _parts.append("%d error%s" % (_er, "" if _er == 1 else "s"))
+                _detail = " · ".join(_parts)
         out.append({
             "id": jid, "kind": "aimeta", "run_id": s["id"],
             "label": "Metadata scan — %s" % s["target"],
@@ -2798,7 +2837,7 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
     match_prov = bool(opts.get("match_provider"))
     md_kinds = opts.get("metadata_kinds")     # None=all attrs, []=none (media-only)
     model = ai.model_for_area("metadata")
-    done = found = skipped = errored = 0
+    done = found = skipped = errored = complete = unmatched = 0
     lib = aimeta._lib()
     try:
         for nk in norm_keys:
@@ -2827,14 +2866,18 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                                 (p for p in pms if p["provider"] == "igdb"), pms[0])
                     if aimeta.store_finding(run_id, ctx, res, model):
                         found += 1
+                    elif ctx.get("match"):       # already matched, nothing new to add
+                        complete += 1
+                    else:                        # no match AND the AI couldn't identify it
+                        unmatched += 1
             except Exception as e:               # one game's failure never aborts
                 errored += 1
                 print("aimeta scan: %s -> %s" % (nk, str(e)[:200]), file=sys.stderr)
             done += 1
-            aimeta.scan_progress(run_id, done, found, skipped, errored)
+            aimeta.scan_progress(run_id, done, found, skipped, errored, complete, unmatched)
     finally:
         lib.close()
-    aimeta.scan_progress(run_id, done, found, skipped, errored)
+    aimeta.scan_progress(run_id, done, found, skipped, errored, complete, unmatched)
     aimeta.scan_finish(run_id, "paused" if done < len(norm_keys) else "done")
 
 
@@ -3560,7 +3603,7 @@ def aimeta_apply(body: dict = Body(default={})):
 # the catalog vocabulary minus internal plumbing (install paths, activity stamps,
 # app flags). Blank kinds are shown too, so the user can fill them in.
 _EDITABLE_ATTR_KINDS = [
-    "release_year", "release_date", "platforms", "genres", "themes",
+    "release_type", "language", "release_year", "release_date", "platforms", "genres", "themes",
     "game_modes", "player_perspectives", "developers", "publishers", "series",
     "features", "categories", "age_ratings", "regions", "os", "device",
     "version", "completion_status", "user_score", "critic_score",
@@ -4096,18 +4139,32 @@ def game_media(norm_key: str):
     console's), so the detail hero/candidates match the platform. `pinned`/`rank`
     come from the durable (title-level) pin store."""
     base, platform = _split_entry_key(norm_key)
+    _cols = ("id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1")
     con = lib()
     try:
-        if platform:
+        if platform and _has_col(con, "games", "game_key"):
+            # Mirror the SERVE gate (DESIGN §11.9) so the picker only offers art this
+            # entry can actually display: own-console art (by system) always, but
+            # platform-neutral store/IGDB art ONLY when its identity matches THIS
+            # entry's game_key. An era-collision entry (game_key title:<nk>) thus isn't
+            # shown — or allowed to "use" — the modern same-title game's covers that
+            # serve would blank out (e.g. the Sega 32X "Doom" and the 2016 DOOM art).
+            _gkr = con.execute("SELECT game_key FROM games WHERE norm_key=? AND "
+                               "COALESCE(platform,'')=? LIMIT 1", (base, platform)).fetchone()
+            _gk = (_gkr["game_key"] if _gkr else None) or "\x00"
             rows = con.execute(
-                "SELECT id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1 "
-                "FROM m.media WHERE norm_key=? "
+                "SELECT " + _cols + " FROM m.media WHERE norm_key=? AND "
+                "(COALESCE(system,'')=? OR (COALESCE(system,'')='' AND "
+                "COALESCE(game_key,'')=?)) ORDER BY kind", (base, platform, _gk)).fetchall()
+        elif platform:
+            rows = con.execute(
+                "SELECT " + _cols + " FROM m.media WHERE norm_key=? "
                 "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') ORDER BY kind",
                 (base, platform)).fetchall()
         else:
             rows = con.execute(
-                "SELECT id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1 "
-                "FROM m.media WHERE norm_key=? ORDER BY kind", (base,)).fetchall()
+                "SELECT " + _cols + " FROM m.media WHERE norm_key=? ORDER BY kind",
+                (base,)).fetchall()
     finally:
         con.close()
     pins = _pin_map(base)

@@ -165,8 +165,11 @@ def _con():
                       ("match_provider", "INTEGER DEFAULT 0"),
                       ("keys_json", "TEXT"), ("md_json", "TEXT"),
                       # per-run outcome breakdown so a no-finding scan is legible in the
-                      # monitor (scanned N · found M · skipped · errored), not a silent dud
-                      ("skipped", "INTEGER DEFAULT 0"), ("errored", "INTEGER DEFAULT 0")):
+                      # monitor (scanned N · found M · skipped · errored), not a silent dud.
+                      # complete = already matched + nothing to add; unmatched = no match and
+                      # the AI couldn't identify it — the two very different "0 found" reasons.
+                      ("skipped", "INTEGER DEFAULT 0"), ("errored", "INTEGER DEFAULT 0"),
+                      ("complete", "INTEGER DEFAULT 0"), ("unmatched", "INTEGER DEFAULT 0")):
         if col not in cols:
             con.execute("ALTER TABLE scan_runs ADD COLUMN %s %s" % (col, decl))
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_nk ON findings(norm_key)")
@@ -592,10 +595,11 @@ def scan_new(target, keys, web=0, match_provider=0, md_kinds=None):
     return rid
 
 
-def scan_progress(run_id, done, findings, skipped=0, errored=0):
+def scan_progress(run_id, done, findings, skipped=0, errored=0, complete=0, unmatched=0):
     con = _con()
-    con.execute("UPDATE scan_runs SET done=?, findings=?, skipped=?, errored=? "
-                "WHERE id=?", (done, findings, skipped, errored, run_id))
+    con.execute("UPDATE scan_runs SET done=?, findings=?, skipped=?, errored=?, "
+                "complete=?, unmatched=? WHERE id=?",
+                (done, findings, skipped, errored, complete, unmatched, run_id))
     con.commit()
     con.close()
 
