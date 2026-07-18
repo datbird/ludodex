@@ -199,6 +199,17 @@ def _era_ok(consoles, year):
     return not all(console_eras.impossible(c, year) for c in consoles)
 
 
+def _title_matches(h, nk):
+    """True when the game's primary name OR any alternate name normalizes to `nk`."""
+    if norm(h.get("name", "")) == nk:
+        return True
+    for a in (h.get("alternative_names") or []):
+        an = a.get("name") if isinstance(a, dict) else a
+        if an and norm(an) == nk:
+            return True
+    return False
+
+
 def _pick_era_aware(hits, nk, consoles, require_unique=False):
     """From IGDB `search` hits, pick the best EXACT normalized-title match that is
     era-plausible for `consoles`. Returns (igdb_id, slug) or (0, None).
@@ -216,8 +227,13 @@ def _pick_era_aware(hits, nk, consoles, require_unique=False):
     Earliest-preference (original over remake) applies ONLY to ERA-BOUND consoles, where
     an exact-name collision is original-vs-remake. For a store/PC-only title there is no
     era to anchor on, so we keep IGDB's own relevance order instead of blindly taking the
-    oldest same-named game."""
-    exact = [h for h in hits if norm(h.get("name", "")) == nk]
+    oldest same-named game.
+
+    Matches on the primary name OR any IGDB `alternate_names` — so a Japanese/romanized
+    ROM title resolves to its real entry (Akumajou Dracula X: Chi no Rondo -> Castlevania:
+    Rondo of Blood), which is what lets an English fan-translation inherit the base game's
+    metadata + art."""
+    exact = [h for h in hits if _title_matches(h, nk)]
     if not exact:
         return 0, None
     ok = [h for h in exact if _era_ok(consoles, _year_of(h))]
@@ -323,7 +339,7 @@ def era_reheal(argv):
         try:
             hits = igdb.query(
                 "games",
-                'search "%s"; fields id,name,slug,first_release_date; limit 8;'
+                'search "%s"; fields id,name,slug,first_release_date,alternative_names.name; limit 8;'
                 % title, cid, tok)
         except Exception:
             hits = []
@@ -499,7 +515,7 @@ def main(argv):
         try:
             hits = igdb.query(
                 "games",
-                'search "%s"; fields id,name,slug,first_release_date; limit 8;'
+                'search "%s"; fields id,name,slug,first_release_date,alternative_names.name; limit 8;'
                 % title, cid, tok)
         except Exception:               # one bad title shouldn't abort the run
             hits = []

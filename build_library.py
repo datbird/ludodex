@@ -23,6 +23,8 @@ from titlenorm import norm      # shared dedupe normalizer (honors config prefs)
 import merges                   # durable user merges — fold duplicates into one
 import splits                   # durable "peel apart" — split a merged-away game out
 import console_eras             # hardware timelines — catch era-impossible merges
+import homebrew                 # ROM release-type classifier (homebrew/hack/proto/…)
+import overrides                # durable per-attribute user corrections
 _MERGE_ALIAS = merges.alias_map()
 _PEEL = splits.overrides()      # {(source, source_id): (to_key, to_title)}
 
@@ -560,6 +562,153 @@ if _sep:
           "shared cross-ref key" % len(_sep), file=sys.stderr)
 
 
+# ---- merge regional duplicates (DESIGN §11.7) ----
+# Two ROMs of the SAME game on the SAME platform (the US "Bowser's Inside Story" and
+# the Japanese "Mario & Luigi RPG 3") normalize to DIFFERENT titles -> different
+# entries, yet IGDB resolved BOTH to one id. Collapse them into ONE entry, unioning
+# their ROM sources, so the card shows a single game with its multiple regional
+# versions listed (not duplicate covers). Grouped by the resolved-identity game_key +
+# platform: an era-separated collision has a `title:…` game_key so it never merges, and
+# nothing is dropped (every source is carried onto the surviving entry).
+def _entry_game_key(_ek):
+    _b, _p = _ek
+    return _game_key(_b, sep_base.get(_ek, _b))
+
+_id_groups = {}                 # (game_key, platform) -> [ekey,...], resolved games only
+for _ek in list(games):
+    _gk = _entry_game_key(_ek)
+    if _gk.startswith("igdb:"):
+        _id_groups.setdefault((_gk, _ek[1]), []).append(_ek)
+
+# resolved title (normalized) per igdb id -> pick the representative ROM as the one
+# whose norm_key matches the canonical game, so its region's art + identity survive.
+_igdb_name_norm = {}
+if any(len(v) > 1 for v in _id_groups.values()):
+    _mcache = os.path.join(DATA, "metadata-cache.sqlite")
+    if os.path.exists(_mcache):
+        _mc = sqlite3.connect(_mcache)
+        try:
+            for _iid, _payload in _mc.execute("SELECT igdb_id, payload_json FROM igdb_meta"):
+                try:
+                    _nm = (json.loads(_payload) or {}).get("name")
+                except Exception:
+                    _nm = None
+                if _nm:
+                    _igdb_name_norm[_iid] = _mkey(_nm)
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            _mc.close()
+
+_merged_n = 0
+for (_gk, _plat), _eks in _id_groups.items():
+    if len(_eks) < 2:
+        continue
+    _canon_nk = _igdb_name_norm.get(int(_gk.split(":", 1)[1]))
+    # representative (lower is better): the canonical-title ROM, else the most-sourced
+    # entry, else the lexically-smallest norm_key (deterministic across rebuilds).
+    _rep = min(_eks, key=lambda _ek: (0 if _ek[0] == _canon_nk else 1,
+                                      -len(games[_ek]["sources"]), _ek[0]))
+    _rg = games[_rep]
+    # dedup by (source, source_id, title_raw): emulation rows share source_id=SYSTEM
+    # (e.g. 'nds'), so the ROM name is what distinguishes the US ROM from the Japanese
+    # one — keep BOTH as sources so the merged card lists every regional version (and
+    # the ROM-file lookup finds each). Store rows (real unique source_id) still dedup.
+    _have = {(s[0], s[2], s[3]) for s in _rg["sources"]}
+    for _ek in _eks:
+        if _ek == _rep:
+            continue
+        _og = games.pop(_ek)
+        for _s in _og["sources"]:
+            _sig = (_s[0], _s[2], _s[3])
+            if _sig not in _have:
+                _rg["sources"].append(_s)
+                _have.add(_sig)
+        if not _rg.get("store_title") and _og.get("store_title"):
+            _rg["store_title"] = _og["store_title"]
+        if _ek[0] in games_attrs:               # fold attribute records onto the rep
+            games_attrs.setdefault(_rep[0], {"src": []})["src"].extend(
+                games_attrs.pop(_ek[0]).get("src", []))
+        _merged_n += 1
+if _merged_n:
+    print("# regional-dup merge: folded %d duplicate entr(y/ies) into their canonical "
+          "game (same IGDB id + platform)" % _merged_n, file=sys.stderr)
+
+
+# ---- release type + unofficial-match block (DESIGN §11.8) ----
+# Classify each ROM entry from its RAW filename tags (the parsed title strips them):
+# Homebrew / Hack / Prototype / Demo / Unlicensed, or commercial. Two uses:
+#  (1) the editable `release_type` attribute (written after the entries exist), which
+#      Spotlight excludes from its normal themes;
+#  (2) BLOCK a purely-unofficial title from inheriting a commercial IGDB identity — a
+#      (pd) "hello world" is NOT the visual novel "Hello, world.". A Homebrew/Hack/
+#      Unlicensed entry with NO commercial/proto/demo/store sibling forfeits the match:
+#      it keeps its own filename + ROM art (game_key title:<nk>, no rename, no metadata).
+#      Prototype/Demo of an official game still match — they ARE that game (early build).
+rt_map = {}
+lang_map = {}                    # (norm_key, platform) -> translation language
+ver_map = {}                     # (norm_key, platform) -> translation/patch version
+_rt_ov = {}
+# Translation is deliberately NOT blocked: a fan English (or other) translation IS the
+# base game, localized — it inherits the real IGDB identity/art and carries language +
+# version attributes on top. Homebrew/Hack/Unlicensed are different works -> blocked.
+BLOCK_RELEASE_TYPES = {"Homebrew", "Hack", "Unlicensed"}
+blocked_entries = set()          # (norm_key, platform) that forfeit a commercial identity
+if config.source_enabled("emulation"):
+    _rtph = ",".join("?" * len(ROM_EXTS))
+    for _rom_db in _rom_indexes():
+        try:
+            _rrc = sqlite3.connect("file:%s?mode=ro" % _rom_db, uri=True)
+        except sqlite3.OperationalError:
+            continue
+        try:
+            for _sys, _game, _fn in _rrc.execute(
+                    "SELECT system, game, filename FROM roms WHERE ext IN (%s) "
+                    "AND game<>''" % _rtph, list(ROM_EXTS)):
+                _k = _mkey(_game)
+                if not _k:
+                    continue
+                _ek = (_k, _entry_platform("emulation", _sys))
+                _rt = homebrew.classify(_fn)
+                if _rt is None:
+                    rt_map[_ek] = None          # a commercial dump present -> commercial
+                elif _ek not in rt_map:
+                    rt_map[_ek] = _rt           # first non-commercial type seen
+                if _rt == "Translation":        # pull language + version off the patch
+                    _lg = homebrew.extract_language(_fn)
+                    _vr = homebrew.extract_version(_fn)
+                    if _lg and _ek not in lang_map:
+                        lang_map[_ek] = _lg
+                    if _vr and _ek not in ver_map:
+                        ver_map[_ek] = _vr
+        except sqlite3.OperationalError:
+            pass
+        _rrc.close()
+    try:                             # user corrections win (blank/"Commercial" clears it)
+        _rt_ov = {_nk: (_kinds.get("release_type", {}).get("value") or "").strip()
+                  for _nk, _kinds in overrides.all_overrides().items()
+                  if "release_type" in _kinds}
+    except Exception:
+        _rt_ov = {}
+
+
+def _entry_release_type(base, plat):
+    """Effective release_type for an entry — the user override wins; blank = commercial."""
+    if base in _rt_ov:
+        _v = _rt_ov[base]
+        return _v if _v in homebrew.TYPES else None
+    return rt_map.get((base, plat))
+
+
+for (_b, _p), _g in games.items():
+    _hs = any(s[0] not in ("emulation", "archive") for s in _g["sources"])
+    if not _hs and _entry_release_type(_b, _p) in BLOCK_RELEASE_TYPES:
+        blocked_entries.add((_b, _p))
+if blocked_entries:
+    print("# unofficial-match block: %d homebrew/hack/unlicensed entr(y/ies) kept off a "
+          "commercial IGDB identity" % len(blocked_entries), file=sys.stderr)
+
+
 # ---- write ----
 # Build into a TEMP db and atomically swap it in at the very end, so a reader (the
 # server serving the library while a sync rebuilds) always sees a COMPLETE catalog —
@@ -626,7 +775,9 @@ for (base, plat), g in games.items():
         "n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
         "has_archive,in_playnite,in_launchbox,wanted) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (canonical, base, plat, "%s@%s" % (base, plat), bkey, _game_key(base, bkey),
+        (canonical, base, plat, "%s@%s" % (base, plat), bkey,
+         ("title:%s" % base if (base, plat) in blocked_entries
+          else _game_key(base, bkey)),
          len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
@@ -663,6 +814,27 @@ for key, w in wanted.items():
     _wrote += 1
     if _wrote % 200 == 0:
         print("PROG\t%d\t%d\t%s\tcatalog" % (_wrote, _wtotal, key), flush=True)
+
+# ---- release type -> editable attribute (classification computed above) ----
+# gids of blocked entries, so the enrichment below skips them (no rename / no metadata
+# from the wrongly-matched commercial game); their game_key is already title:<nk>.
+blocked_gids = {key_to_gid[_e] for _e in blocked_entries if _e in key_to_gid}
+_rt_rows = []
+for (_base, _plat), _gid in key_to_gid.items():
+    _rt = _entry_release_type(_base, _plat)
+    if _rt:
+        _rt_rows.append((_gid, "release_type", _rt, "rom"))
+    _lg = lang_map.get((_base, _plat))       # translation language + patch version
+    if _lg:
+        _rt_rows.append((_gid, "language", _lg, "rom"))
+    _vr = ver_map.get((_base, _plat))
+    if _vr:
+        _rt_rows.append((_gid, "version", _vr, "rom"))
+if _rt_rows:
+    cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                    "VALUES(?,?,?,?)", _rt_rows)
+    print("# release types: flagged %d rows (type/language/version)" % len(_rt_rows),
+          file=sys.stderr)
 
 # ---- attribute tables (Playnite parity) ----
 # Tags are handled apart from other attribute kinds: we keep each tag's ORIGIN
@@ -805,6 +977,8 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
         name = (rec.get("name") or "").strip()
         mapped = igdb_map(rec)
         for gid in gids:
+            if gid in blocked_gids:          # homebrew/hack/unlicensed: NOT this game
+                continue
             cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
                         "slug,url) VALUES(?,?,?,?,?)",
                         (gid, "igdb", str(iid), slug, url))
@@ -845,6 +1019,8 @@ if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
             continue
         mapped = ss_map(jeu)
         for gid in gids:
+            if gid in blocked_gids:          # homebrew/hack/unlicensed: NOT this game
+                continue
             if ss_id and (gid, ss_id) not in linked:
                 cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
                             "slug,url) VALUES(?,?,?,?,?)",
