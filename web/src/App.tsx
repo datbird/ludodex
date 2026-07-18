@@ -481,6 +481,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [showAddGame, setShowAddGame] = useState(false)
   const [showWand, setShowWand] = useState(false)
   const [prefsTick, setPrefsTick] = useState(0)   // bump to push prefs changes live
+  const [mediaTick, setMediaTick] = useState(0)   // bump to refresh spotlight covers live
   // Dashboard is always the landing page (not persisted), per product decision.
   const [tab, setTab] = useState<'library' | 'dashboard' | 'files'>('dashboard')
   const [theme, setTheme] = useState<'dark' | 'light'>(
@@ -750,7 +751,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       {tab === 'dashboard' && <Dashboard stats={stats} onBrowse={() => setTab('library')}
         onFilter={(f) => { setFilters(f); setTab('library') }} onOpen={setSelected}
-        prefsTick={prefsTick} onOpenSettings={openSettings} />}
+        prefsTick={prefsTick} mediaTick={mediaTick} onOpenSettings={openSettings} />}
 
       {tab === 'library' && (<>
       {!!stats?.pending_meta && (
@@ -1141,7 +1142,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       {tab === 'files' && <FilesTab />}
 
       {selected && <Detail nk={selected} onClose={() => { setSelected(null); refreshStats() }}
-        onMediaChanged={() => load(true)} onNavigate={setSelected} />}
+        onMediaChanged={() => { load(true); setMediaTick((t) => t + 1) }} onNavigate={setSelected} />}
       {showSettings && <Settings onClose={() => setShowSettings(false)}
         onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} user={user}
         initialSection={settingsTarget} />}
@@ -5669,8 +5670,9 @@ function MediaKindCard({ nk, kind, assets, onChange, frames, onFrame }: {
 // A thin countdown bar depletes right→left over the (configurable) dwell time and
 // drives the rotation: when it finishes it loads the next theme. Hovering pauses
 // the bar — and therefore the rotation — so you can read/click without it moving.
-function SpotlightSection({ onOpen, prefsTick, onOpenSettings }: {
-  onOpen: (nk: string) => void; prefsTick: number; onOpenSettings: (section?: string) => void
+function SpotlightSection({ onOpen, prefsTick, mediaTick, onOpenSettings }: {
+  onOpen: (nk: string) => void; prefsTick: number; mediaTick: number
+  onOpenSettings: (section?: string) => void
 }) {
   const [sp, setSp] = useState<SpotlightData | null>(null)
   const [loading, setLoading] = useState(false)
@@ -5694,6 +5696,16 @@ function SpotlightSection({ onOpen, prefsTick, onOpenSettings }: {
   useEffect(() => {
     api.prefs().then((p) => setSeconds(p.spotlight_seconds)).catch(() => {})
   }, [prefsTick])
+  // A cover was just changed for a title (mediaTick bumped on the detail closing) —
+  // re-fetch THIS spotlight's current theme in place so the new cover swaps in, rather
+  // than rotating to a different theme. cover_v changes → the <img> reloads.
+  useEffect(() => {
+    if (!mediaTick || !kindRef.current) return
+    api.spotlight(kindRef.current).then((next) => {
+      kindRef.current = next.kind
+      setSp(next)
+    }).catch(() => { /* keep the current spotlight on failure */ })
+  }, [mediaTick])   // eslint-disable-line react-hooks/exhaustive-deps
   // Rotate on a real timer (not the CSS animationend, which can silently miss a
   // fire when the tab is backgrounded/paused and leave the spotlight stuck).
   useEffect(() => {
@@ -5780,15 +5792,17 @@ function SpotlightSection({ onOpen, prefsTick, onOpenSettings }: {
   )
 }
 
-function Dashboard({ stats, onBrowse, onFilter, onOpen, prefsTick, onOpenSettings }: {
+function Dashboard({ stats, onBrowse, onFilter, onOpen, prefsTick, mediaTick, onOpenSettings }: {
   stats: Stats | null; onBrowse: () => void; onFilter: (f: FilterState) => void
-  onOpen: (nk: string) => void; prefsTick: number; onOpenSettings: (section?: string) => void
+  onOpen: (nk: string) => void; prefsTick: number; mediaTick: number
+  onOpenSettings: (section?: string) => void
 }) {
   // Spotlight fetches its own (fast) data, so render it immediately — don't hide it
   // behind the slower stats() call that gates the rest of the dashboard.
   return (
     <div className="dashboard">
-      <SpotlightSection onOpen={onOpen} prefsTick={prefsTick} onOpenSettings={onOpenSettings} />
+      <SpotlightSection onOpen={onOpen} prefsTick={prefsTick} mediaTick={mediaTick}
+        onOpenSettings={onOpenSettings} />
       {!stats
         ? <div className="loading">Loading…</div>
         : <DashStats stats={stats} onBrowse={onBrowse} onFilter={onFilter} />}
@@ -7295,7 +7309,9 @@ function MetadataScan() {
           <StatusBadge status={s.status} />
           <span className="fo-hprofile">{s.target}</span>
           <ProgressBar done={s.done} total={s.total} failed={0} />
-          <span className="dim">{s.done}/{s.total} · {s.findings} findings</span>
+          <span className="dim">{s.done}/{s.total} · {s.findings} found
+            {s.complete ? ` · ${s.complete} complete` : ''}
+            {s.unmatched ? ` · ${s.unmatched} unidentified` : ''}</span>
           <span className="dim fo-hwhen">{relTime(s.finished || s.created)}</span>
         </div>
       ))}

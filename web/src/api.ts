@@ -182,6 +182,10 @@ export interface AiScanRun {
   total: number
   done: number
   findings: number
+  skipped?: number
+  errored?: number
+  complete?: number      // already matched & complete — nothing to change
+  unmatched?: number     // no match and the AI couldn't identify it
   status: string
   created: number
   finished: number | null
