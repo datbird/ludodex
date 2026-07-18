@@ -11,7 +11,7 @@ import type {
   FileVariable, FileProfile, FilePlan, FileDetect, SourceModel,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
-  AiFindingPayload, FindingContext, ProviderMatch, ScopeValue,
+  AiFindingPayload, FindingContext, ProviderMatch, ScopeValue, MediaDiff,
   AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState, DbSyncTest,
   Prefs, MediaMode, FileopsApplyMode, MediaLangMode, MediaLangResult, FsStat, OwnershipFact, Frame,
   SpotlightTheme, SourceRow, SplitSuggestion,
@@ -7075,6 +7075,60 @@ function wandMedia(): ScopeValue {
   return true
 }
 
+// The review overlay lets you decide, per session, whether to evaluate + apply
+// metadata, media, or both — so we only dry-run the media diff when media is in scope.
+type ReviewScope = 'both' | 'metadata' | 'media'
+const REVIEW_SCOPE_KEY = 'ludodex_review_scope'
+function reviewScopeInit(): ReviewScope {
+  try {
+    const v = localStorage.getItem(REVIEW_SCOPE_KEY)
+    if (v === 'both' || v === 'metadata' || v === 'media') return v
+  } catch { /* */ }
+  return 'both'
+}
+// The media kinds to Apply for a chosen review scope: none for metadata-only,
+// otherwise the wand's remembered selection (defaulting to all art).
+function mediaForScope(scope: ReviewScope): ScopeValue {
+  if (scope === 'metadata') return false
+  const m = wandMedia()
+  if (m === false || (Array.isArray(m) && m.length === 0)) return true
+  return m
+}
+
+// Per-finding before/after cover strip — the visual media diff. "before" is the
+// entry's currently-served cover; "after" is the matched provider cover it adopts.
+function MediaDiffStrip({ diff }: { diff: MediaDiff }) {
+  const changed = diff.platforms.filter((p) => p.change !== 'none')
+  if (!changed.length) return null
+  return (
+    <div className="chg-media">
+      <div className="chg-media-h">🖼 Cover changes
+        <span className="dim"> — {changed.length} platform{changed.length === 1 ? '' : 's'}</span></div>
+      <div className="chg-media-rows">
+        {changed.map((p) => (
+          <div key={p.entry_key} className="chg-media-row">
+            <span className="chg-media-plat">{p.platform || 'all'}</span>
+            <div className="chg-media-pair">
+              {p.has_before
+                ? <img className="chg-media-thumb" loading="lazy" alt=""
+                    src={api.mediaUrl(p.entry_key, 'cover', true)} />
+                : <span className="chg-media-thumb none">none</span>}
+              <span className="chg-media-arrow">→</span>
+              {diff.after_cover
+                ? <img className="chg-media-thumb" loading="lazy" alt="" src={diff.after_cover} />
+                : <span className="chg-media-thumb none">—</span>}
+            </div>
+            <span className={'chg-media-tag ' + p.change}>
+              {p.change === 'add' ? 'added' : 'replaced'}</span>
+          </div>
+        ))}
+      </div>
+      <div className="chg-media-note dim">Other art (hero, logo, screenshots) and
+        blank-cover cleanup are refreshed in the background on apply.</div>
+    </div>
+  )
+}
+
 function ScopeCategory({ name, unit, items, master, setMaster, picked, setPicked }: {
   name: string; unit: string; items: string[]
   master: boolean; setMaster: (b: boolean) => void
@@ -7478,6 +7532,9 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [meta, setMeta] = useState<{ model?: string; escalationModel?: string; webCapable: boolean; models: string[] }>({ webCapable: false, models: [] })
+  const [reviewScope, setReviewScope] = useState<ReviewScope>(reviewScopeInit)
+  const [mediaDiffs, setMediaDiffs] = useState<Record<string, MediaDiff>>({})
+  const [diffLoading, setDiffLoading] = useState(false)
 
   const load = useCallback(() => {
     api.aimetaFindings('proposed', undefined, runId).then((d) => {
@@ -7495,6 +7552,27 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
       setMeta({ model: t.model, escalationModel: t.escalation_model || undefined, webCapable: t.web_capable, models })
     }).catch(() => {})
   }, [])
+  useEffect(() => { try { localStorage.setItem(REVIEW_SCOPE_KEY, reviewScope) } catch { /* */ } }, [reviewScope])
+  // Dry-run the cover diff only when media is in scope (keeps metadata-only review light).
+  useEffect(() => {
+    if (reviewScope === 'metadata' || !findings || !findings.length) { setMediaDiffs({}); return }
+    // send each finding's matched-provider cover (prefer IGDB — that's the neutral art
+    // serve gates on) so the diff is exact; skip findings with no cover to preview.
+    const seen = new Set<string>()
+    const items = findings.map((f) => {
+      const pms = providerMatches(f.payload)
+      const cover = pms.find((m) => m.provider === 'igdb' && m.cover)?.cover
+        ?? pms.find((m) => m.cover)?.cover ?? null
+      return { norm_key: f.norm_key, after_cover: cover, title: f.title }
+    }).filter((it) => it.after_cover && !seen.has(it.norm_key) && seen.add(it.norm_key))
+    if (!items.length) { setMediaDiffs({}); return }
+    setDiffLoading(true)
+    api.aimetaMediaDiff(items).then((r) => {
+      const m: Record<string, MediaDiff> = {}
+      r.items.forEach((it) => { m[it.norm_key] = it })
+      setMediaDiffs(m)
+    }).catch(() => {}).finally(() => setDiffLoading(false))
+  }, [reviewScope, findings])
 
   const groups = (findings || []).map((f) => ({ f, changes: findingChanges(f) }))
     .filter((g) => g.changes.length > 0)
@@ -7541,10 +7619,30 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
     if (!selections.length) return
     setBusy(true); setNote('')
     try {
-      const r = await api.aimetaApply(selections, wandMedia())
+      const r = await api.aimetaApply(selections, mediaForScope(reviewScope))
       const msg = `✨ Applying ${selectedCount} change(s) across ${gamesTouched} game(s)` +
         (r.coalesced ? ' — added to the running rebuild.' : ' — rebuilding. Track it in the job monitor.')
       if (onApplied) { showToast(msg); onApplied() } else { setNote(msg); load() }
+    } catch (e) { setNote((e as Error).message) } finally { setBusy(false) }
+  }
+  // Discard: reject the finding(s) so they drop out of review and stop reappearing on
+  // re-scan (recoverable from the Cards view via Reset). Single from a group's ✕, or
+  // bulk for every finding with a selected change.
+  const discardGroup = async (fid: number) => {
+    setBusy(true); setNote('')
+    try { await api.aimetaFindingAction(fid, 'reject'); load() }
+    catch (e) { setNote((e as Error).message) } finally { setBusy(false) }
+  }
+  const discardSelected = async () => {
+    const ids = groups.filter((g) => g.changes.some((c) => sel.has(c.id))).map((g) => g.f.id)
+    if (!ids.length) return
+    if (!window.confirm(`Discard ${ids.length} suggestion${ids.length === 1 ? '' : 's'}? ` +
+      `They'll be removed from review (recoverable from the Cards view).`)) return
+    setBusy(true); setNote('')
+    try {
+      await Promise.all(ids.map((id) => api.aimetaFindingAction(id, 'reject')))
+      setNote(`✕ Discarded ${ids.length} suggestion${ids.length === 1 ? '' : 's'}.`)
+      load()
     } catch (e) { setNote((e as Error).message) } finally { setBusy(false) }
   }
 
@@ -7559,6 +7657,26 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
     <div className="chg-wrap">
       <p className="dim">Here's everything the AI wants to change. Tick the changes to keep,
         then apply — like a runbook, nothing happens until you apply.</p>
+
+      <div className="chg-scope">
+        <span className="chg-scope-lbl">Review &amp; apply</span>
+        <div className="chg-scope-seg">
+          {(['both', 'metadata', 'media'] as ReviewScope[]).map((s) => (
+            <button key={s} className={'chg-scope-btn' + (reviewScope === s ? ' sel' : '')}
+              onClick={() => setReviewScope(s)}>
+              {s === 'both' ? 'Metadata + media' : s === 'metadata' ? 'Metadata only' : 'Media only'}
+            </button>
+          ))}
+        </div>
+        <span className="chg-scope-hint">
+          {reviewScope === 'metadata'
+            ? 'Applies text changes only — no art is fetched or altered.'
+            : reviewScope === 'media'
+              ? 'Previews cover changes below; applies the match and refreshes art.'
+              : 'Applies text changes and refreshes art; cover changes previewed below.'}
+          {diffLoading && reviewScope !== 'metadata' && <span className="dim"> · checking covers…</span>}
+        </span>
+      </div>
 
       {groups.map(({ f, changes }) => {
         const ids = changes.map((c) => c.id)
@@ -7575,6 +7693,8 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
               </label>
               <span className="chg-gtitle">{f.title}</span>
               <span className="chg-conf">{Math.round((f.confidence || 0) * 100)}%</span>
+              <button className="chg-dismiss" title="Discard this suggestion"
+                disabled={busy} onClick={() => discardGroup(f.id)}>✕</button>
             </div>
             <AnchorFacts f={f} />
             <FindingContextStrip ctx={f.context} />
@@ -7618,6 +7738,9 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
                 ))}</ul>
               </details>
             )}
+            {reviewScope !== 'metadata' && mediaDiffs[f.norm_key] && (
+              <MediaDiffStrip diff={mediaDiffs[f.norm_key]} />
+            )}
             <RefinePanel f={f} currentModel={meta.model} escalationModel={meta.escalationModel}
               models={meta.models} webCapable={meta.webCapable} onRefined={load} />
           </div>
@@ -7630,6 +7753,9 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
           {' '}across <b>{gamesTouched}</b> game{gamesTouched === 1 ? '' : 's'} selected</span>
         <button className="ops-btn" onClick={() => setAll(true)}>Select all</button>
         <button className="ops-btn" onClick={() => setAll(false)}>Deselect all</button>
+        <button className="ops-btn danger" disabled={busy || selectedCount === 0} onClick={discardSelected}
+          title="Reject the selected suggestions so they stop showing up (recoverable from Cards view)">
+          {busy ? '…' : '✕ Discard'}</button>
         <button className="ops-btn" disabled={busy || selectedCount === 0} onClick={acceptOnly}
           title="Queue these changes without rebuilding — apply them later, batched with your other accepts">
           {busy ? '…' : '✓ Accept'}</button>

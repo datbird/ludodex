@@ -3599,6 +3599,76 @@ def aimeta_apply(body: dict = Body(default={})):
     return {"started": True, "selected": len(sels) if sels else None}
 
 
+@app.post("/api/aimeta/media-diff")
+def aimeta_media_diff(body: dict = Body(default={})):
+    """Read-only preview of how ACCEPTING each finding would change the served COVER,
+    per platform entry — the before (currently-served cover) vs after (the matched
+    provider cover the entry would adopt). This is what makes media adds/replaces part
+    of the accept decision. Deliberately LIGHT: no network fetch, no mutation. The
+    'after' URL is the finding's own matched-provider cover (passed in by the caller,
+    which already has it); a platform that already serves its OWN console art is
+    unchanged (own art always wins over neutral store/IGDB art, DESIGN §11.9), and an
+    entry currently serving mismatched-identity neutral art (game_key title:<nk>) reads
+    as no-cover now → the match makes it adopt the new cover. The heavier art (hero/logo/
+    screenshots + blank-prune) only lands on Apply; the endpoint flags that rather than
+    dry-run-fetching it. Body: {items:[{norm_key, after_cover}]}."""
+    items_in = [it for it in ((body or {}).get("items") or [])
+                if isinstance(it, dict) and it.get("norm_key")][:200]
+    if not items_in:
+        return {"items": []}
+    con = lib()
+    try:
+        has_gk = _has_col(con, "games", "game_key")
+        has_ek = _has_col(con, "games", "entry_key")
+        eksel = ("entry_key, platform" if has_ek
+                 else "norm_key AS entry_key, NULL AS platform")
+        gksel = ", game_key" if has_gk else ""
+        out = []
+        for it in items_in:
+            nk = it["norm_key"]
+            after_url = it.get("after_cover") or None
+            title = it.get("title") or nk
+            rows = con.execute(
+                "SELECT id, %s, canonical_title%s FROM games WHERE norm_key=?"
+                % (eksel, gksel), (nk,)).fetchall()
+            plats = []
+            for r in rows:
+                platform = r["platform"] if "platform" in r.keys() else None
+                gk = r["game_key"] if (has_gk and "game_key" in r.keys()) else None
+                own = con.execute(
+                    "SELECT 1 FROM m.media md WHERE md.norm_key=? AND md.chosen=1 AND "
+                    "md.kind='cover' AND COALESCE(md.system,'')=COALESCE(?,'') LIMIT 1",
+                    (nk, platform)).fetchone()
+                if has_gk and gk:
+                    neu = con.execute(
+                        "SELECT 1 FROM m.media md WHERE md.norm_key=? AND md.chosen=1 AND "
+                        "md.kind='cover' AND COALESCE(md.system,'')='' AND md.game_key=? "
+                        "LIMIT 1", (nk, gk)).fetchone()
+                else:
+                    neu = con.execute(
+                        "SELECT 1 FROM m.media md WHERE md.norm_key=? AND md.chosen=1 AND "
+                        "md.kind='cover' AND COALESCE(md.system,'')='' LIMIT 1",
+                        (nk,)).fetchone()
+                # own-console art is never displaced by neutral art → unchanged.
+                if own:
+                    change = "none"
+                elif after_url:
+                    change = "replace" if neu else "add"
+                else:
+                    change = "none"
+                plats.append({
+                    "entry_key": r["entry_key"], "platform": platform,
+                    "has_before": bool(own or neu), "own_art": bool(own),
+                    "change": change,
+                })
+            if any(p["change"] != "none" for p in plats):
+                out.append({"norm_key": nk, "title": title,
+                            "after_cover": after_url, "platforms": plats})
+        return {"items": out}
+    finally:
+        con.close()
+
+
 # User-facing attribute kinds for the detail "view / edit all attributes" panel —
 # the catalog vocabulary minus internal plumbing (install paths, activity stamps,
 # app flags). Blank kinds are shown too, so the user can fill them in.

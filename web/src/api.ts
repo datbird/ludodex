@@ -173,6 +173,20 @@ export interface AiApplySelection {
   match: boolean
 }
 export type AiFindingCounts = Record<string, Record<string, number>>
+// Per-platform cover diff for a finding: what accepting it does to the served cover.
+export interface MediaDiffPlatform {
+  entry_key: string
+  platform: string | null
+  has_before: boolean      // an entry serves a cover today
+  own_art: boolean         // that cover is this console's OWN art (never displaced)
+  change: 'add' | 'replace' | 'none'
+}
+export interface MediaDiff {
+  norm_key: string
+  title: string
+  after_cover: string | null   // the matched provider cover the entry(ies) adopt
+  platforms: MediaDiffPlatform[]
+}
 export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number; web_capable: boolean; provider?: string; model?: string; escalation_model?: string | null; attributes: string[]; media_kinds: string[] }
 export type ScopeValue = boolean | string[]   // true=all, false=none, [kinds]=subset
 export interface ScanOpts { web?: boolean; match_provider?: boolean; metadata?: ScopeValue; media?: ScopeValue }
@@ -1445,6 +1459,14 @@ export const api = {
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ started: boolean; selected: number | null; coalesced?: boolean }>
+  },
+  aimetaMediaDiff: async (items: { norm_key: string; after_cover: string | null; title?: string }[]) => {
+    const r = await fetch('/api/aimeta/media-diff', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ items: MediaDiff[] }>
   },
   setAttributeOverride: async (nk: string, kind: string, value: string, origin: string) => {
     const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/attribute', {
