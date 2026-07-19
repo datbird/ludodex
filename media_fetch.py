@@ -209,17 +209,20 @@ def _banned():
 
 
 def put(con, nk, kind, provider, url, now, ext="jpg", system=None, meta=None,
-        attrs=None):
+        attrs=None, gkey=None):
     if (nk, kind, provider, url) in _banned():
         return                              # user banned this asset — don't re-add
     if attrs:                               # structured per-asset metadata -> JSON meta
         meta = json.dumps({k: v for k, v in attrs.items() if v not in (None, "")},
                           separators=(",", ":"))
+    # gkey pins an explicit identity — used for per-entry same-title splits (a ROM entry
+    # whose igdb id differs from the title-level resolution, DESIGN §11.9); default keys
+    # the row by the title-level resolution via game_key(nk).
     con.execute("INSERT OR REPLACE INTO media(norm_key,system,kind,provider,"
                 "ref_type,ref,ext,matched,meta,indexed_at,game_key) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (nk, system, kind, provider, "url", url, ext, 1, meta, now,
-                 game_key(nk, system)))
+                 gkey or game_key(nk, system)))
 
 
 # --------------------------------------------------------------------------- #
@@ -237,7 +240,13 @@ def fetch_steam(con, now):
           % (n, len(games)), file=sys.stderr)
 
 
-def fetch_igdb(con, now):
+def fetch_igdb(con, now, only=None):
+    """Fetch IGDB cover/artwork/screenshot URLs for resolved games. `only` (a set of
+    norm_keys) scopes the fetch to specific games — the surgical per-game wand path;
+    None = the whole catalog. Also fetches PER-ENTRY override ids (same-title splits,
+    DESIGN §11.9) and stamps their rows with the override's own game_key, so a split
+    ROM entry (the 1986 Portal) gets ITS game's art instead of the title-level (store)
+    game's — otherwise its cover could never be sourced."""
     if not os.path.exists(META_CACHE):
         print("media_fetch: igdb — no metadata-cache yet (run igdb_enrich.py)",
               file=sys.stderr)
@@ -248,14 +257,48 @@ def fetch_igdb(con, now):
         return
     import igdb
     mc = sqlite3.connect(META_CACHE)
-    res = {iid: nk for nk, iid in mc.execute(
-        "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0")}
+    res = {}                                # igdb_id -> nk (title-level resolution)
+    for nk, iid in mc.execute(
+            "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0"):
+        if only is None or nk in only:
+            res[iid] = nk
+    eres = {}                               # igdb_id -> [nk, ...] per-entry overrides
+    try:
+        for nk, iid in mc.execute(
+                "SELECT norm_key, igdb_id FROM entry_resolution WHERE igdb_id>0"):
+            if only is None or nk in only:
+                eres.setdefault(iid, []).append(nk)
+    except sqlite3.OperationalError:
+        pass                                # no per-entry overrides table yet
     mc.close()
-    if not res:
-        print("media_fetch: igdb — no resolutions cached yet", file=sys.stderr)
+    if not res and not eres:
+        print("media_fetch: igdb — no resolutions cached yet"
+              + ("" if only is None else " for the requested games"), file=sys.stderr)
         return
     tok, _ = igdb.get_token(cid, csec)
-    ids = sorted(res)
+    ids = sorted(set(res) | set(eres))
+
+    def _emit(nk, g, gkey):
+        c = 0
+        cov = (g.get("cover") or {}).get("image_id")
+        if cov:
+            put(con, nk, "cover", "igdb", IGDB_IMG % (IGDB_SIZE["cover"], cov),
+                now, meta=str(g["id"]), gkey=gkey)
+            c += 1
+        for art in (g.get("artworks") or [])[:1]:
+            if art.get("image_id"):
+                put(con, nk, "background", "igdb",
+                    IGDB_IMG % (IGDB_SIZE["background"], art["image_id"]),
+                    now, meta=str(g["id"]), gkey=gkey)
+                c += 1
+        for sh in (g.get("screenshots") or [])[:3]:
+            if sh.get("image_id"):
+                put(con, nk, "screenshot", "igdb",
+                    IGDB_IMG % (IGDB_SIZE["screenshot"], sh["image_id"]),
+                    now, meta=str(g["id"]), gkey=gkey)
+                c += 1
+        return c
+
     n = 0
     for i in range(0, len(ids), 200):
         batch = ids[i:i + 200]
@@ -263,29 +306,14 @@ def fetch_igdb(con, now):
                 "screenshots.image_id; where id=(%s); limit 500;"
                 % ",".join(str(x) for x in batch))
         for g in igdb.query("games", body, cid, tok):
-            nk = res.get(g["id"])
-            if not nk:
-                continue
-            cov = (g.get("cover") or {}).get("image_id")
-            if cov:
-                put(con, nk, "cover", "igdb",
-                    IGDB_IMG % (IGDB_SIZE["cover"], cov), now, meta=str(g["id"]))
-                n += 1
-            for art in (g.get("artworks") or [])[:1]:
-                if art.get("image_id"):
-                    put(con, nk, "background", "igdb",
-                        IGDB_IMG % (IGDB_SIZE["background"], art["image_id"]),
-                        now, meta=str(g["id"]))
-                    n += 1
-            for sh in (g.get("screenshots") or [])[:3]:
-                if sh.get("image_id"):
-                    put(con, nk, "screenshot", "igdb",
-                        IGDB_IMG % (IGDB_SIZE["screenshot"], sh["image_id"]),
-                        now, meta=str(g["id"]))
-                    n += 1
+            gid = g["id"]
+            if gid in res:                  # title-level: default game_key(nk)
+                n += _emit(res[gid], g, None)
+            for nk in eres.get(gid, ()):    # per-entry override: pinned game_key
+                n += _emit(nk, g, "igdb:%d" % gid)
         con.commit()
-    print("media_fetch: igdb — %d image URLs from %d resolved games"
-          % (n, len(res)), file=sys.stderr)
+    print("media_fetch: igdb — %d image URLs from %d resolved + %d override entries"
+          % (n, len(res), sum(len(v) for v in eres.values())), file=sys.stderr)
 
 
 def _sgdb_get(path, key):

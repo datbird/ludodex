@@ -99,15 +99,18 @@ def select(con, kinds=None):
     # choice on every re-select. Keyed by (norm_key, kind, provider, ref) -> pin rank.
     pin_rank = _load_pins()
     rows = con.execute(
-        "SELECT id, norm_key, system, kind, provider, ref, matched, ref_type FROM media "
-        "WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
+        "SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key "
+        "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
         % ",".join("'%s'" % k for k in scalar)
     ).fetchall()
     # chosen is per (norm_key, SYSTEM, kind): each console gets its own best asset, and
     # platform-neutral store art (system NULL/'') is its own bucket — so a per-platform
     # library entry serves its own console's art (DESIGN §11.4), the serve resolver
-    # falling back to the neutral bucket when a console has none.
-    best = {}                       # (norm_key, system, kind) -> (sortkey, id)
+    # falling back to the neutral bucket when a console has none. The NEUTRAL bucket is
+    # further split by game_key so a same-title split (DESIGN §11.9 — the 1986 Portal vs
+    # Valve's) chooses one cover PER identity; console art is already siloed by system, so
+    # game_key only sub-divides the neutral bucket (non-split games have one key → no-op).
+    best = {}                       # (norm_key, system, game_key?, kind) -> (sortkey, id)
     for r in rows:
         pr = rank[r["kind"]].get(r["provider"], 99)
         pin = pin_rank.get((r["norm_key"], r["kind"], r["provider"], r["ref"]), 1 << 30)
@@ -115,7 +118,9 @@ def select(con, kinds=None):
         # then tie-breakers: catalog-matched, local file over URL, lowest id (stable).
         sk = (pin, pr, 0 if r["matched"] else 1, 0 if r["ref_type"] == "file" else 1,
               r["id"])
-        key = (r["norm_key"], r["system"] or "", r["kind"])
+        _sys = r["system"] or ""
+        _gk = (r["game_key"] or "") if not _sys else ""
+        key = (r["norm_key"], _sys, _gk, r["kind"])
         if key not in best or sk < best[key][0]:
             best[key] = (sk, r["id"])
     ids = [i for _, i in best.values()]

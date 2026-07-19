@@ -2996,14 +2996,13 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                                           if k in md_kinds]
                     res = ai.analyze_game(ctx, web=web)
                     m = res.get("match") or {}
-                    # Provider-match when the AI flags a match problem OR when the game
-                    # is currently UNLINKED and the AI proposed a title — a confidently
-                    # identified ROM (status 'ok', suggested_title set, no existing match)
-                    # still needs the real IGDB link, else it gets AI text but no provider
-                    # metadata and NO media to fetch on apply. Binds only on exact title.
-                    if (match_prov and m.get("suggested_title")
-                            and (m.get("status") in ("unmatched", "wrong", "unsure")
-                                 or not ctx.get("match"))):
+                    # Re-verify identity on EVERY run regardless of current status: the wand
+                    # is "make this game correct," so an already-matched game is re-resolved
+                    # too (the match may be wrong/stale, or a same-title split now applies).
+                    # Binds only on an exact normalized-title match, so re-confirming a
+                    # correct game just re-proposes the same id (store_finding = no-op); it
+                    # never regresses a good match to an arbitrary top hit.
+                    if (match_prov and m.get("suggested_title")):
                         title, yr = m.get("suggested_title"), m.get("suggested_year")
                         sys0 = (ctx.get("systems") or [None])[0]
                         pms = [p for p in (
@@ -3467,6 +3466,14 @@ def _aimeta_apply(should_stop, only_ids=None):
     except Exception as e:                 # never let the preview block the apply
         print("aimeta apply: surgical preview failed (rebuild will apply): %s"
               % str(e)[:200], file=sys.stderr)
+    # INSTANT media: fetch + choose art for JUST these games now, so a corrected/split
+    # cover shows when this apply job finishes — not after the ~30-min whole-catalog art
+    # tail in the background reconcile (which still runs, authoritatively, after).
+    try:
+        _reconcile_media_now(touched, now)
+    except Exception as e:
+        print("aimeta apply: instant media failed (reconcile will apply): %s"
+              % str(e)[:200], file=sys.stderr)
     aimeta.mark_applied(only_ids)  # accepted -> applied (only this pass's findings)
     # recompute the combined Ludodex score from the IGDB ratings the wand just
     # cached (reads the cache, no network), so a newly-matched game's score lands
@@ -3493,8 +3500,13 @@ def _apply_surgical_meta(touched):
         ssm.setdefault(m["norm_key"], []).append(m)
     sup = aimeta.accepted_supplements()
     # IGDB names for the matched games come from the igdb_meta cache just fetched.
+    # Also load the CURRENT resolution maps for the touched games so the eager preview
+    # can set games.game_key surgically (DESIGN §11.9) — the identity key the media
+    # serve-gate keys on, normally only written by build_library in the background rebuild.
     igdb_names = {}
-    if pms:
+    title_ids = {}                       # nk -> igdb_id (title-level resolution)
+    entry_ids = {}                       # (nk, platform) -> igdb_id (per-entry override)
+    if touched:
         mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
         try:
             for pm in pms.values():
@@ -3506,18 +3518,53 @@ def _apply_surgical_meta(touched):
                                                       .get("name") or "").strip()
                     except ValueError:
                         pass
+            qs = ",".join("?" * len(touched))
+            tt = tuple(touched)
+            try:
+                for _nk, _iid in mc.execute(
+                        "SELECT norm_key, igdb_id FROM igdb_resolution "
+                        "WHERE igdb_id>0 AND norm_key IN (%s)" % qs, tt):
+                    title_ids[_nk] = _iid
+            except sqlite3.OperationalError:
+                pass
+            try:
+                for _nk, _p, _iid in mc.execute(
+                        "SELECT norm_key, platform, igdb_id FROM entry_resolution "
+                        "WHERE igdb_id>0 AND norm_key IN (%s)" % qs, tt):
+                    entry_ids[(_nk, _p)] = _iid
+            except sqlite3.OperationalError:
+                pass                     # no per-entry overrides table yet
         finally:
             mc.close()
+
+    def _gk(nk, platform, bkey):
+        """Mirror build_library._game_key: per-entry override wins, else an era-collision
+        (\x1f in base_key) or unresolved entry falls to the title bucket, else the title's
+        igdb id. Suffix-free title:<nk> matches media_fetch.game_key at serve time."""
+        eid = entry_ids.get((nk, platform))
+        if eid:
+            return "igdb:%d" % eid
+        if "\x1f" in (bkey or "") or nk not in title_ids:
+            return "title:%s" % nk
+        return "igdb:%d" % title_ids[nk]
     con = sqlite3.connect(LIBRARY_DB)
     try:
         con.execute("PRAGMA busy_timeout=8000")
         if not _has_col(con, "games", "game_key"):
             return                         # pre-migration schema; the rebuild applies
         for nk in touched:
-            gids = [r[0] for r in con.execute(
-                "SELECT id FROM games WHERE norm_key=?", (nk,)).fetchall()]
-            if not gids:
+            entries = con.execute(
+                "SELECT id, platform, base_key FROM games WHERE norm_key=?",
+                (nk,)).fetchall()
+            if not entries:
                 continue
+            # Surgical game_key: set each entry's identity now (build_library does this
+            # canonically in the background rebuild). This is what flips the media
+            # serve-gate so a corrected/split cover appears without the ~10-min rebuild.
+            for gid, plat, bkey in entries:
+                con.execute("UPDATE games SET game_key=? WHERE id=?",
+                            (_gk(nk, plat, bkey), gid))
+            gids = [e[0] for e in entries]
             pm = pms.get(nk)
             name = igdb_names.get(nk)
             # A store-locked match applies its IGDB identity only to ROM/archive entries;
@@ -3568,6 +3615,26 @@ def _apply_surgical_meta(touched):
                     if rows:
                         con.executemany("INSERT INTO game_attributes(game_id,kind,"
                                         "value,origin) VALUES(?,?,?,?)", rows)
+        con.commit()
+    finally:
+        con.close()
+
+
+def _reconcile_media_now(touched, now):
+    """Surgical, synchronous media reconcile for the games an apply just touched: fetch
+    their provider art (IGDB — incl. per-entry same-title override ids) and re-choose the
+    best per kind, so the corrected identity's cover is available immediately. Whole-catalog
+    fetch/choose (all providers, SteamGridDB gap-fill, materialize) still runs in the
+    background reconcile; this just makes the touched games right in seconds, not ~30 min."""
+    if not touched:
+        return
+    import media_fetch as _mf
+    con = media_choose.con_index()         # Row factory — media_choose.select needs it
+    try:
+        con.execute("PRAGMA busy_timeout=30000")
+        _mf.fetch_igdb(con, now, only=set(touched))   # incl. entry-override art
+        _mf._backfill_game_key(con)                   # stamp any legacy/unstamped rows
+        media_choose.select(con)                      # re-choose best per (nk,system,gkey,kind)
         con.commit()
     finally:
         con.close()
