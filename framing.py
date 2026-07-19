@@ -22,6 +22,12 @@ def _db(data_dir):
         m_bottom REAL DEFAULT 0, m_left REAL DEFAULT 0,
         zoom REAL DEFAULT 1,
         PRIMARY KEY(norm_key, kind))""")
+    # per-game hero override — which media drives the detail hero (same "durable
+    # render overlay" idea as framing, so it lives in the same store). Value is
+    # 'marquee' (force the scrolling dance) or a media kind to force as the static
+    # background; absent = 'auto' (the default hero/background/header → marquee logic).
+    con.execute("""CREATE TABLE IF NOT EXISTS hero_pref(
+        norm_key TEXT PRIMARY KEY, source TEXT NOT NULL)""")
     con.commit()
     return con
 
@@ -95,3 +101,30 @@ def clear(data_dir, norm_key, kind):
         con.commit()
     finally:
         con.close()
+
+
+def get_hero(data_dir, norm_key):
+    """The hero override for one game: 'marquee', a media kind, or None (= auto)."""
+    con = _db(data_dir)
+    try:
+        r = con.execute("SELECT source FROM hero_pref WHERE norm_key=?",
+                        (norm_key,)).fetchone()
+        return r[0] if r else None
+    finally:
+        con.close()
+
+
+def set_hero(data_dir, norm_key, source):
+    """Set/clear the hero override. Empty or 'auto' clears it (back to default)."""
+    con = _db(data_dir)
+    try:
+        if not source or source == "auto":
+            con.execute("DELETE FROM hero_pref WHERE norm_key=?", (norm_key,))
+            source = None
+        else:
+            con.execute("INSERT OR REPLACE INTO hero_pref(norm_key,source) VALUES(?,?)",
+                        (norm_key, str(source)))
+        con.commit()
+    finally:
+        con.close()
+    return source

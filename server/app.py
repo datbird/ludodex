@@ -2853,8 +2853,14 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                                           if k in md_kinds]
                     res = ai.analyze_game(ctx, web=web)
                     m = res.get("match") or {}
+                    # Provider-match when the AI flags a match problem OR when the game
+                    # is currently UNLINKED and the AI proposed a title — a confidently
+                    # identified ROM (status 'ok', suggested_title set, no existing match)
+                    # still needs the real IGDB link, else it gets AI text but no provider
+                    # metadata and NO media to fetch on apply. Binds only on exact title.
                     if (match_prov and m.get("suggested_title")
-                            and m.get("status") in ("unmatched", "wrong", "unsure")):
+                            and (m.get("status") in ("unmatched", "wrong", "unsure")
+                                 or not ctx.get("match"))):
                         title, yr = m.get("suggested_title"), m.get("suggested_year")
                         sys0 = (ctx.get("systems") or [None])[0]
                         pms = [p for p in (
@@ -2965,7 +2971,9 @@ def aimeta_refine(body: dict = Body(default={})):
     except Exception as e:                      # surface the failure to the reviewer
         raise HTTPException(502, "AI re-run failed: %s" % str(e)[:200])
     m = res.get("match") or {}
-    if m.get("suggested_title") and m.get("status") in ("unmatched", "wrong", "unsure"):
+    if (m.get("suggested_title")
+            and (m.get("status") in ("unmatched", "wrong", "unsure")
+                 or not ctx.get("match"))):     # unlinked+identified still needs the link
         title, yr = m.get("suggested_title"), m.get("suggested_year")
         sys0 = (ctx.get("systems") or [None])[0]
         pms = [p for p in (_provider_match(title, yr),
@@ -3599,23 +3607,69 @@ def aimeta_apply(body: dict = Body(default={})):
     return {"started": True, "selected": len(sels) if sels else None}
 
 
+_IGDB_PREVIEW_SIZE = {"cover": "t_cover_small", "background": "t_screenshot_med",
+                      "screenshot": "t_screenshot_med"}
+
+
+def _igdb_media_preview(igdb_ids):
+    """One batched IGDB lookup → {igdb_id: [{kind, url}]} of the art a match would
+    fetch on apply (cover, artwork→background, screenshots). Preview thumbnails; the
+    real fetch (media_fetch) pulls the full-size versions. Empty on no creds/error."""
+    ids = sorted({int(i) for i in igdb_ids if i})
+    if not ids:
+        return {}
+    cid, tok = _igdb_token()
+    if not tok:
+        return {}
+    import igdb as _igdb
+    out = {}
+    img = "https://images.igdb.com/igdb/image/upload/%s/%s.jpg"
+    for i in range(0, len(ids), 200):
+        batch = ids[i:i + 200]
+        q = ("fields id,cover.image_id,artworks.image_id,screenshots.image_id; "
+             "where id=(%s); limit 500;" % ",".join(str(x) for x in batch))
+        try:
+            for g in _igdb.query("games", q, cid, tok):
+                art = []
+                cov = (g.get("cover") or {}).get("image_id")
+                if cov:
+                    art.append({"kind": "cover",
+                                "url": img % (_IGDB_PREVIEW_SIZE["cover"], cov)})
+                for a in (g.get("artworks") or [])[:2]:
+                    if a.get("image_id"):
+                        art.append({"kind": "background",
+                                    "url": img % (_IGDB_PREVIEW_SIZE["background"], a["image_id"])})
+                for s in (g.get("screenshots") or [])[:4]:
+                    if s.get("image_id"):
+                        art.append({"kind": "screenshot",
+                                    "url": img % (_IGDB_PREVIEW_SIZE["screenshot"], s["image_id"])})
+                out[g["id"]] = art
+        except Exception:
+            pass
+    return out
+
+
 @app.post("/api/aimeta/media-diff")
 def aimeta_media_diff(body: dict = Body(default={})):
-    """Read-only preview of how ACCEPTING each finding would change the served COVER,
-    per platform entry — the before (currently-served cover) vs after (the matched
-    provider cover the entry would adopt). This is what makes media adds/replaces part
-    of the accept decision. Deliberately LIGHT: no network fetch, no mutation. The
-    'after' URL is the finding's own matched-provider cover (passed in by the caller,
-    which already has it); a platform that already serves its OWN console art is
-    unchanged (own art always wins over neutral store/IGDB art, DESIGN §11.9), and an
-    entry currently serving mismatched-identity neutral art (game_key title:<nk>) reads
-    as no-cover now → the match makes it adopt the new cover. The heavier art (hero/logo/
-    screenshots + blank-prune) only lands on Apply; the endpoint flags that rather than
-    dry-run-fetching it. Body: {items:[{norm_key, after_cover}]}."""
+    """Preview the media a finding would add/change on apply. Two parts per item:
+    (1) the full ART SET the matched IGDB game supplies (cover + artwork + screenshots),
+    each flagged new vs already-held — a light dry-run: ONE batched IGDB metadata call
+    for every item, no image download, no mutation; and (2) the per-platform COVER
+    before→after — own-console art is never displaced by neutral store/IGDB art
+    (DESIGN §11.9), an entry on mismatched-identity neutral art reads as no-cover now →
+    the match makes it adopt the new cover. SteamGridDB may add hero/logo art too on
+    apply (flagged via `sgdb`); its dry-run isn't run here. Body:
+    {items:[{norm_key, after_cover, igdb_id}]}."""
     items_in = [it for it in ((body or {}).get("items") or [])
                 if isinstance(it, dict) and it.get("norm_key")][:200]
     if not items_in:
-        return {"items": []}
+        return {"items": [], "sgdb": False}
+    art_by_id = _igdb_media_preview([it.get("igdb_id") for it in items_in])
+    try:
+        import media_fetch as _mf
+        sgdb = bool(_mf.config.steamgriddb_key())
+    except Exception:
+        sgdb = False
     con = lib()
     try:
         has_gk = _has_col(con, "games", "game_key")
@@ -3628,6 +3682,12 @@ def aimeta_media_diff(body: dict = Body(default={})):
             nk = it["norm_key"]
             after_url = it.get("after_cover") or None
             title = it.get("title") or nk
+            # kinds the game already has chosen art for → mark added art new vs extra
+            have_kinds = {r["kind"] for r in con.execute(
+                "SELECT DISTINCT kind FROM m.media md WHERE md.norm_key=? AND md.chosen=1",
+                (nk,))}
+            added = [{"kind": a["kind"], "url": a["url"], "new": a["kind"] not in have_kinds}
+                     for a in art_by_id.get(int(it["igdb_id"]), [])] if it.get("igdb_id") else []
             rows = con.execute(
                 "SELECT id, %s, canonical_title%s FROM games WHERE norm_key=?"
                 % (eksel, gksel), (nk,)).fetchall()
@@ -3661,10 +3721,10 @@ def aimeta_media_diff(body: dict = Body(default={})):
                     "has_before": bool(own or neu), "own_art": bool(own),
                     "change": change,
                 })
-            if any(p["change"] != "none" for p in plats):
-                out.append({"norm_key": nk, "title": title,
-                            "after_cover": after_url, "platforms": plats})
-        return {"items": out}
+            if any(p["change"] != "none" for p in plats) or any(a["new"] for a in added):
+                out.append({"norm_key": nk, "title": title, "after_cover": after_url,
+                            "platforms": plats, "added_art": added})
+        return {"items": out, "sgdb": sgdb}
     finally:
         con.close()
 
@@ -3859,6 +3919,7 @@ def game_detail(norm_key: str):
             "ai_meta": aimeta.finding_for(base),   # AI audit/supplement, if any
             "ownership": ownership.list_for(DATA, base),  # manual physical/want facts
             "framing": framing.get_all(DATA, base),       # per-kind image position+zoom
+            "hero_pref": framing.get_hero(DATA, base),     # hero override (marquee|<kind>|None)
             "collection": compilations.get_collection(DATA, base),  # if THIS entry is a compilation
         }
     finally:
@@ -3934,6 +3995,17 @@ def set_framing(norm_key: str, body: dict = Body(...)):
 def clear_framing(norm_key: str, kind: str):
     framing.clear(DATA, _split_entry_key(norm_key)[0], kind)
     return {"ok": True}
+
+
+@app.post("/api/games/{norm_key}/hero")
+def set_hero_pref(norm_key: str, body: dict = Body(...)):
+    """Override what drives the detail hero for one game: 'marquee' (force the
+    scrolling media dance), a media kind to force as the static background, or
+    'auto'/'' to clear (default hero→background→header→marquee logic). Keyed by
+    norm_key, applied at render time."""
+    source = ((body or {}).get("source") or "").strip()
+    saved = framing.set_hero(DATA, _split_entry_key(norm_key)[0], source)
+    return {"hero_pref": saved}
 
 
 @app.get("/api/games/{norm_key}/ownership")

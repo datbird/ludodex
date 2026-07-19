@@ -3066,7 +3066,15 @@ a.idchip:hover { background: var(--accent-bg); }
 .chg-media-tag { font-size: 10px; font-weight: 700; border-radius: 8px; padding: 1px 7px; }
 .chg-media-tag.add { color: #16a34a; background: color-mix(in srgb, #16a34a 15%, transparent); }
 .chg-media-tag.replace { color: #d98a00; background: color-mix(in srgb, #d98a00 15%, transparent); }
+.chg-media-h2 { margin-top: 10px; }
+.chg-art-gallery { display: flex; flex-wrap: wrap; gap: 8px; }
+.chg-art { display: flex; flex-direction: column; align-items: center; gap: 3px; max-width: 96px; }
+.chg-art.have { opacity: 0.5; }
+.chg-art-thumb { max-width: 90px; max-height: 68px; object-fit: cover; border-radius: 4px; border: 1px solid var(--border); background: var(--panel); }
+.chg-art.have .chg-art-thumb { border-style: dashed; }
+.chg-art-kind { font-size: 10px; color: var(--text-dim); text-transform: capitalize; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chg-media-note { font-size: 11px; margin-top: 7px; }
+.chg-media-none { font-size: 12px; color: var(--text-dim); }
 .chg-group { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; background: var(--panel); overflow: hidden; }
 .chg-ghead { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: color-mix(in srgb, var(--panel) 80%, var(--border)); border-bottom: 1px solid var(--border); }
 .chg-check { display: inline-flex; }
@@ -3365,7 +3373,9 @@ a.idchip:hover { background: var(--accent-bg); }
 /* wand pinned to the hero's lower-right */
 /* Game tools — a small toolbox to the LEFT of the close button that collects the
    per-game actions (magic wand, fix duplication, peel apart) so they don't overlap. */
-.hero-tools { position: absolute; top: 10px; right: 54px; z-index: 11; }
+/* Above the hero art (z-index 2–6) but BELOW nested overlays (.overlay = 10), so the
+   All Media / wand / kind windows cover the toolbox instead of it floating on top. */
+.hero-tools { position: absolute; top: 10px; right: 54px; z-index: 9; }
 .hero-tools-btn {
   width: 34px; height: 34px; border-radius: 50%; border: none; cursor: pointer;
   background: rgba(0,0,0,0.45); color: #fff; font-size: 16px; line-height: 1;
@@ -3455,6 +3465,33 @@ a.idchip:hover { background: var(--accent-bg); }
 .ms-all { margin-left: auto; border-color: var(--accent); color: var(--text-h); }
 .ms-all:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); border-color: var(--accent); }
 .allmedia-panel { max-width: 1000px; }
+/* hero-display gear in the All Media header, just left of the × */
+.am-hero-gear {
+  position: absolute; top: 12px; right: 52px; z-index: 3;
+  width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 8px; background: none; color: var(--text);
+  font-size: 18px; line-height: 1; cursor: pointer;
+}
+.am-hero-gear:hover { background: var(--bg); color: var(--text-h); }
+.hero-cfg-backdrop { position: fixed; inset: 0; z-index: 4; }
+.hero-cfg {
+  position: absolute; top: 50px; right: 16px; z-index: 5; width: 260px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35); padding: 10px; max-height: 60vh; overflow: auto;
+}
+.hero-cfg-h { font-weight: 700; color: var(--text-h); font-size: 13px; }
+.hero-cfg-note { font-size: 11px; color: var(--text-dim); margin: 2px 0 8px; }
+.hero-cfg-sec { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 8px 4px 3px; }
+.hero-cfg-opt {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 6px 8px; border: none; border-radius: 6px; background: none; color: var(--text);
+  font-size: 13px; cursor: pointer;
+}
+.hero-cfg-opt:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.hero-cfg-opt.sel { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text-h); }
+.hero-cfg-radio { color: var(--accent); font-size: 12px; flex: none; }
+.hero-cfg-lbl { text-transform: capitalize; }
+.hero-cfg-sub { color: var(--text-dim); font-size: 11px; text-transform: none; }
 .ms-icon { font-size: 18px; line-height: 1; }
 .ms-text { font-weight: 600; }
 .ms-count { background: rgba(127,127,127,0.22); border-radius: 20px; padding: 1px 8px;

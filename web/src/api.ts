@@ -87,6 +87,7 @@ export interface GameDetail {
   editable_kinds?: string[]
   ownership?: OwnershipFact[]
   framing?: Record<string, Frame>   // kind -> saved position+zoom
+  hero_pref?: string | null         // hero override: 'marquee' | a media kind | null (auto)
   collection?: Collection | null    // set when THIS entry is itself a compilation
 }
 
@@ -181,11 +182,13 @@ export interface MediaDiffPlatform {
   own_art: boolean         // that cover is this console's OWN art (never displaced)
   change: 'add' | 'replace' | 'none'
 }
+export interface MediaAdd { kind: string; url: string; new: boolean }
 export interface MediaDiff {
   norm_key: string
   title: string
   after_cover: string | null   // the matched provider cover the entry(ies) adopt
   platforms: MediaDiffPlatform[]
+  added_art: MediaAdd[]         // full IGDB art set that fetches on apply (cover/bg/shots)
 }
 export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number; web_capable: boolean; provider?: string; model?: string; escalation_model?: string | null; attributes: string[]; media_kinds: string[] }
 export type ScopeValue = boolean | string[]   // true=all, false=none, [kinds]=subset
@@ -811,6 +814,14 @@ export const api = {
       encodeURIComponent(kind), { method: 'DELETE' })
     if (!r.ok) throw new Error(`${r.status} framing`)
     return r.json()
+  },
+  setHeroPref: async (nk: string, source: string) => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/hero', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ hero_pref: string | null }>
   },
   mediaLibrary: (nk: string) =>
     get<MediaLibrary>('/api/games/' + encodeURIComponent(nk) + '/media'),
@@ -1460,13 +1471,13 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ started: boolean; selected: number | null; coalesced?: boolean }>
   },
-  aimetaMediaDiff: async (items: { norm_key: string; after_cover: string | null; title?: string }[]) => {
+  aimetaMediaDiff: async (items: { norm_key: string; after_cover: string | null; igdb_id?: number | null; title?: string }[]) => {
     const r = await fetch('/api/aimeta/media-diff', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ items }),
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ items: MediaDiff[] }>
+    return r.json() as Promise<{ items: MediaDiff[]; sgdb: boolean }>
   },
   setAttributeOverride: async (nk: string, kind: string, value: string, origin: string) => {
     const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/attribute', {

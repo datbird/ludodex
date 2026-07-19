@@ -11,7 +11,7 @@ import type {
   FileVariable, FileProfile, FilePlan, FileDetect, SourceModel,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
-  AiFindingPayload, FindingContext, ProviderMatch, ScopeValue, MediaDiff,
+  AiFindingPayload, FindingContext, ProviderMatch, ScopeValue, MediaDiff, MediaAdd,
   AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState, DbSyncTest,
   Prefs, MediaMode, FileopsApplyMode, MediaLangMode, MediaLangResult, FsStat, OwnershipFact, Frame,
   SpotlightTheme, SourceRow, SplitSuggestion,
@@ -480,6 +480,9 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [showProfile, setShowProfile] = useState(false)
   const [showAddGame, setShowAddGame] = useState(false)
   const [showWand, setShowWand] = useState(false)
+  // when the wand is opened on a specific set (bulk selection), it carries that here;
+  // null = the plain filter/all-scoped wand from the toolbar button.
+  const [wandTarget, setWandTarget] = useState<{ norm_keys: string[]; label: string } | null>(null)
   const [prefsTick, setPrefsTick] = useState(0)   // bump to push prefs changes live
   const [mediaTick, setMediaTick] = useState(0)   // bump to refresh spotlight covers live
   // Dashboard is always the landing page (not persisted), per product decision.
@@ -603,18 +606,14 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
     } catch (e) { setWantMsg((e as Error).message) }
     setTimeout(() => setWantMsg(''), 4500)
   }
-  // Bulk Magic wand: AI-enrich every selected game (base keys, deduped) in one scan —
-  // findings land in the Jobs monitor to review/accept, same as the single-game wand.
-  const wandPicked = async () => {
+  // Bulk Magic wand: open the ONE wand pre-scoped to the selected games, so a bulk run
+  // has the same scope/options/fill choices (and review flow) as any other wand run.
+  const wandPicked = () => {
     const nks = [...new Set([...picked.values()].map((r) => r.norm_key))]
     if (!nks.length) return
-    try {
-      await api.aimetaScan({ norm_keys: nks, label: `${nks.length} selected`,
-                             media: true, metadata: true, web: true })
-      setWantMsg(`✨ Sent ${nks.length} game(s) to the Jobs monitor — review & accept there`)
-      setPicked(new Map()); setSelectMode(false); setAddMenuOpen(false)
-    } catch (e) { setWantMsg((e as Error).message) }
-    setTimeout(() => setWantMsg(''), 5000)
+    setWandTarget({ norm_keys: nks, label: `${nks.length} selected` })
+    setShowWand(true)
+    setSelectMode(false); setAddMenuOpen(false)
   }
 
   // selection split for the device wishlist: ROMs are eligible, marketplace games aren't
@@ -986,7 +985,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           </button>
           <button className="filter-btn wand-btn"
             title="Let AI enrich and supplement metadata and media for your library"
-            onClick={() => setShowWand(true)}>
+            onClick={() => { setWandTarget(null); setShowWand(true) }}>
             <span className="wand-spark">✨</span> Magic wand
           </button>
           <button className="filter-btn add-game" title="Add a game"
@@ -1149,13 +1148,14 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       {showAddGame && <AddGame facets={facets} onClose={() => setShowAddGame(false)}
         onAdded={() => load(true)} />}
       {showWand && <MagicWandOverlay
-        filterQuery={{
+        filterQuery={wandTarget ? undefined : {
           q: q || undefined,
           include: Object.keys(filters).filter((k) => filters[k] === 'include'),
           exclude: Object.keys(filters).filter((k) => filters[k] === 'exclude'),
         }}
         filterCount={total}
-        onClose={() => setShowWand(false)} />}
+        target={wandTarget ?? undefined}
+        onClose={() => { setShowWand(false); setWandTarget(null) }} />}
     </div>
   )
 }
@@ -4811,26 +4811,6 @@ function FrameEditor({ nk, kind, value, onChange, label, disabled }: {
   )
 }
 
-// Fly a ✨ from a source element toward the Jobs monitor, insinuating the work was
-// handed off there. Pure DOM (no React state) so it survives the overlay closing.
-function flyToJobs(from: DOMRect) {
-  const target = document.querySelector('.jobmon')?.getBoundingClientRect()
-  const el = document.createElement('span')
-  el.className = 'wand-fly'
-  el.textContent = '✨'
-  const sx = from.left + from.width / 2, sy = from.top + from.height / 2
-  el.style.left = sx + 'px'
-  el.style.top = sy + 'px'
-  document.body.appendChild(el)
-  const tx = (target ? target.left + target.width / 2 : window.innerWidth - 40) - sx
-  const ty = (target ? target.top + target.height / 2 : 20) - sy
-  requestAnimationFrame(() => {
-    el.style.transform = `translate(${tx}px, ${ty}px) scale(0.25) rotate(200deg)`
-    el.style.opacity = '0'
-  })
-  window.setTimeout(() => el.remove(), 950)
-}
-
 // Lightweight transient toast, body-mounted so it outlives whatever fired it.
 function showToast(msg: string) {
   const el = document.createElement('div')
@@ -5068,8 +5048,8 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   const [d, setD] = useState<GameDetail | null>(null)
   const [media, setMedia] = useState<MediaLibrary | null>(null)
   const [kinds, setKinds] = useState<MediaKind[]>([])
-  const [wandSent, setWandSent] = useState(false)
-  const [wandErr, setWandErr] = useState('')
+  const [wandOpen, setWandOpen] = useState(false)
+  const [heroPref, setHeroPref] = useState<string | null>(null)
   const [frames, setFrames] = useState<Record<string, Frame>>({})
   const [fixDup, setFixDup] = useState(false)
   const [peel, setPeel] = useState(false)
@@ -5080,6 +5060,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
   useEffect(() => { reloadDetail() }, [reloadDetail])
   useEffect(() => { setFrames(d?.framing ?? {}) }, [d?.framing])
+  useEffect(() => { setHeroPref(d?.hero_pref ?? null) }, [d?.hero_pref])
   useEffect(() => { setMedia(null); api.mediaLibrary(nk).then(setMedia).catch(() => {}) }, [nk])
   useEffect(() => {
     api.mediaKinds().then((r) => {
@@ -5087,25 +5068,6 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
       r.kinds.forEach((k, i) => { KIND_ORDER[k.kind] = i })
     }).catch(() => {})
   }, [])
-
-  // Single-game magic wand: fire-and-forget. Kick off a background scan job, fling
-  // a ✨ toward the Jobs monitor, and tell the user to review/accept it there — so
-  // they can keep browsing and queue up as many as they like. No inline waiting.
-  const runWand = (e: ReactMouseEvent) => {
-    if (!d) return
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    setWandErr('')
-    // scan by the BARE norm_key (base), not the entry_key — the aimeta pipeline
-    // (game_context) looks games up by norm_key, so passing "…@gba" silently no-ops.
-    api.aimetaScan({ norm_keys: [base], label: d.title, media: true, metadata: true, web: true })
-      .then(() => {
-        flyToJobs(rect)
-        showToast('✨ Magic sent to the job monitor — check there for status & to accept')
-        setWandSent(true)
-        window.setTimeout(() => setWandSent(false), 5000)
-      })
-      .catch((err) => setWandErr((err as Error).message))
-  }
 
   const assets = media?.assets ?? []
   const pickKind = (kind: string) => {
@@ -5116,8 +5078,14 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   // store/manual source); a bare ROM (emulation/archive only, no match) is not.
   const identified = (d?.metadata_links?.length ?? 0) > 0 ||
     (d?.sources ?? []).some((s) => !NON_ID_SRC.has(s.source))
-  const bgKind = pickKind('hero') ? 'hero' : pickKind('background') ? 'background'
+  // Hero source: default picks the best wide art (hero → background → header). A
+  // per-game override can force the scrolling "dance" ('marquee') or a specific media
+  // kind as the static background; a forced kind with no asset falls back to the dance.
+  const autoBgKind = pickKind('hero') ? 'hero' : pickKind('background') ? 'background'
     : pickKind('header') ? 'header' : null
+  const bgKind = !heroPref ? autoBgKind
+    : heroPref === 'marquee' ? null
+      : (pickKind(heroPref) ? heroPref : null)
   const bg = bgKind ? pickKind(bgKind) : null
   const logo = pickKind('logo')
   // No wide hero art → float ALL of the game's images by, right-to-left in a loop,
@@ -5134,7 +5102,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
               aria-label="Game tools" onClick={() => setToolsOpen((o) => !o)}>🧰</button>
             {toolsOpen && (
               <div className="hero-tools-menu">
-                <button onClick={(e) => { runWand(e); setToolsOpen(false) }}>
+                <button onClick={() => { setToolsOpen(false); setWandOpen(true) }}>
                   <span className="htm-ic">✨</span> Magic wand
                   <span className="htm-sub">AI-enrich (review in Jobs)</span></button>
                 <button onClick={() => { setToolsOpen(false); setFixDup(true) }}>
@@ -5146,6 +5114,13 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
               </div>
             )}
           </div>
+        )}
+        {wandOpen && d && (
+          // The ONE wand, pre-scoped to this game. Scan by the BARE norm_key (base),
+          // not the entry_key — the aimeta pipeline resolves by norm_key, so "…@gba"
+          // would silently no-op.
+          <MagicWandOverlay target={{ norm_keys: [base], label: d.title }}
+            onClose={() => setWandOpen(false)} />
         )}
         {fixDup && d && (
           <FixDupModal nk={base} title={d.title} onClose={() => setFixDup(false)}
@@ -5197,14 +5172,17 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                   </div>
                 )}
               </div>
-              {(wandSent || wandErr) && (
-                <span className={'hero-wand-note' + (wandErr ? ' err' : '')}>
-                  {wandErr || '✨ Sent to the job monitor — review & accept there'}</span>
-              )}
             </div>
 
             <ArtStrip nk={nk} assets={assets} loading={!media} links={d.provider_links}
               kinds={kinds} onChange={(m) => { setMedia(m); setMediaDirty(true) }}
+              heroPref={heroPref}
+              onHeroPref={async (v) => {
+                const prev = heroPref
+                setHeroPref(v && v !== 'auto' ? v : null)   // optimistic — hero swaps instantly
+                try { await api.setHeroPref(base, v) }
+                catch { setHeroPref(prev) }
+              }}
               frames={frames} onFrame={(k, fr) => setFrames((p) => {
                 const n = { ...p }; if (fr) n[k] = fr; else delete n[k]; return n
               })} />
@@ -5312,6 +5290,38 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   )
 }
 
+// Hero display override popover (opened from the ⚙ in the All Media header): choose
+// what fills the detail banner — auto, the scrolling "dance", or a specific media kind.
+function HeroConfig({ assets, heroPref, onPick, onClose }: {
+  assets: MediaAsset[]; heroPref: string | null
+  onPick: (source: string) => void; onClose: () => void
+}) {
+  const imgKinds = Array.from(new Set(assets.filter((a) => a.is_image).map((a) => a.kind)))
+    .filter((k) => k !== 'logo')   // the logo sits ON the hero; it's not a background
+    .sort()
+  const current = heroPref ?? 'auto'
+  const opt = (value: string, label: string, sub?: string) => (
+    <button key={value} className={'hero-cfg-opt' + (current === value ? ' sel' : '')}
+      onClick={() => onPick(value)}>
+      <span className="hero-cfg-radio">{current === value ? '◉' : '○'}</span>
+      <span className="hero-cfg-lbl">{label}{sub && <span className="hero-cfg-sub"> — {sub}</span>}</span>
+    </button>
+  )
+  return (
+    <>
+      <div className="hero-cfg-backdrop" onClick={onClose} />
+      <div className="hero-cfg" onClick={(e) => e.stopPropagation()}>
+        <div className="hero-cfg-h">Hero display</div>
+        <div className="hero-cfg-note">What fills the banner at the top of this game.</div>
+        {opt('auto', 'Auto', 'best wide art, else the dance')}
+        {opt('marquee', 'Media dance', 'scroll every image across the hero')}
+        {imgKinds.length > 0 && <div className="hero-cfg-sec">Force a specific media</div>}
+        {imgKinds.map((k) => opt(k, k.replace(/_/g, ' ')))}
+      </div>
+    </>
+  )
+}
+
 // Horizontally-scrollable strip of every art asset the game actually has, with
 // image kinds that render into a fixed viewport, so framing (position+zoom) applies
 const FRAMABLE_KINDS = new Set(['cover', 'background', 'hero', 'header', 'fanart'])
@@ -5329,14 +5339,16 @@ const STRIP_KINDS: { kind: string; icon: string; label: string }[] = [
   { kind: 'video', icon: '🎬', label: 'Videos' },
   { kind: 'manual', icon: '📖', label: 'Manuals' },
 ]
-function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links }: {
+function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links, heroPref, onHeroPref }: {
   nk: string; assets: MediaAsset[]; loading: boolean; kinds: MediaKind[]
   onChange: (m: MediaLibrary) => void
   frames?: Record<string, Frame>; onFrame?: (kind: string, f: Frame | undefined) => void
   links?: { provider: string; url: string }[]
+  heroPref?: string | null; onHeroPref?: (source: string) => void
 }) {
   const [openKind, setOpenKind] = useState<MediaKind | null>(null)
   const [allOpen, setAllOpen] = useState(false)
+  const [heroCfg, setHeroCfg] = useState(false)
   const items = STRIP_KINDS
     .map((s) => ({ ...s, n: assets.filter((a) => a.kind === s.kind).length,
                    mk: kinds.find((x) => x.kind === s.kind) }))
@@ -5387,7 +5399,16 @@ function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links
       {allOpen && (
         <div className="overlay" onClick={() => setAllOpen(false)}>
           <div className="panel mko-panel allmedia-panel" onClick={(e) => e.stopPropagation()}>
+            {onHeroPref && (
+              <button className="am-hero-gear" title="Hero display settings"
+                onClick={() => setHeroCfg((v) => !v)}>⚙</button>
+            )}
             <button className="close" onClick={() => setAllOpen(false)}>×</button>
+            {heroCfg && onHeroPref && (
+              <HeroConfig assets={assets} heroPref={heroPref ?? null}
+                onPick={(v) => { onHeroPref(v); setHeroCfg(false) }}
+                onClose={() => setHeroCfg(false)} />
+            )}
             <AllMedia nk={nk} kinds={kinds} assets={assets} onChange={onChange}
               frames={frames} onFrame={onFrame} />
             <ArtPicker nk={nk} />
@@ -7097,34 +7118,54 @@ function mediaForScope(scope: ReviewScope): ScopeValue {
 
 // Per-finding before/after cover strip — the visual media diff. "before" is the
 // entry's currently-served cover; "after" is the matched provider cover it adopts.
-function MediaDiffStrip({ diff }: { diff: MediaDiff }) {
+function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
   const changed = diff.platforms.filter((p) => p.change !== 'none')
-  if (!changed.length) return null
+  const art: MediaAdd[] = diff.added_art || []
+  const newCount = art.filter((a) => a.new).length
+  if (!changed.length && !newCount) return null
   return (
     <div className="chg-media">
-      <div className="chg-media-h">🖼 Cover changes
-        <span className="dim"> — {changed.length} platform{changed.length === 1 ? '' : 's'}</span></div>
-      <div className="chg-media-rows">
-        {changed.map((p) => (
-          <div key={p.entry_key} className="chg-media-row">
-            <span className="chg-media-plat">{p.platform || 'all'}</span>
-            <div className="chg-media-pair">
-              {p.has_before
-                ? <img className="chg-media-thumb" loading="lazy" alt=""
-                    src={api.mediaUrl(p.entry_key, 'cover', true)} />
-                : <span className="chg-media-thumb none">none</span>}
-              <span className="chg-media-arrow">→</span>
-              {diff.after_cover
-                ? <img className="chg-media-thumb" loading="lazy" alt="" src={diff.after_cover} />
-                : <span className="chg-media-thumb none">—</span>}
-            </div>
-            <span className={'chg-media-tag ' + p.change}>
-              {p.change === 'add' ? 'added' : 'replaced'}</span>
+      {art.length > 0 && (
+        <>
+          <div className="chg-media-h">🖼 Media being added
+            <span className="dim"> — {newCount} new{art.length > newCount ? `, ${art.length - newCount} already have` : ''}</span></div>
+          <div className="chg-art-gallery">
+            {art.map((a, i) => (
+              <div key={i} className={'chg-art' + (a.new ? '' : ' have')}
+                title={a.new ? `New ${a.kind}` : `Already have ${a.kind}`}>
+                <img className="chg-art-thumb" src={a.url} alt="" loading="lazy" />
+                <span className="chg-art-kind">{a.kind.replace(/_/g, ' ')}{a.new ? '' : ' ✓'}</span>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-      <div className="chg-media-note dim">Other art (hero, logo, screenshots) and
-        blank-cover cleanup are refreshed in the background on apply.</div>
+        </>
+      )}
+      {changed.length > 0 && (
+        <>
+          <div className={'chg-media-h' + (art.length ? ' chg-media-h2' : '')}>Cover per platform
+            <span className="dim"> — {changed.length} change{changed.length === 1 ? '' : 's'}</span></div>
+          <div className="chg-media-rows">
+            {changed.map((p) => (
+              <div key={p.entry_key} className="chg-media-row">
+                <span className="chg-media-plat">{p.platform || 'all'}</span>
+                <div className="chg-media-pair">
+                  {p.has_before
+                    ? <img className="chg-media-thumb" loading="lazy" alt=""
+                        src={api.mediaUrl(p.entry_key, 'cover', true)} />
+                    : <span className="chg-media-thumb none">none</span>}
+                  <span className="chg-media-arrow">→</span>
+                  {diff.after_cover
+                    ? <img className="chg-media-thumb" loading="lazy" alt="" src={diff.after_cover} />
+                    : <span className="chg-media-thumb none">—</span>}
+                </div>
+                <span className={'chg-media-tag ' + p.change}>
+                  {p.change === 'add' ? 'added' : 'replaced'}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      <div className="chg-media-note dim">Fetched on apply{sgdb ? '; SteamGridDB may add hero/logo art too' : ''}. Blank covers are cleaned up automatically.</div>
     </div>
   )
 }
@@ -7165,12 +7206,16 @@ function ScopeCategory({ name, unit, items, master, setMaster, picked, setPicked
   )
 }
 
-function MagicWandOverlay({ filterQuery, filterCount, onClose }: {
-  filterQuery: GamesQuery; filterCount: number; onClose: () => void
+function MagicWandOverlay({ filterQuery, filterCount, target, onClose }: {
+  filterQuery?: GamesQuery; filterCount?: number
+  // explicit game set (one game from its detail, or a bulk selection) — the SAME wand,
+  // just pre-scoped. When present, the default scope is this set instead of the filter.
+  target?: { norm_keys: string[]; label: string }
+  onClose: () => void
 }) {
   useScrollLock()
   const [targets, setTargets] = useState<AiScanTargets | null>(null)
-  const [scope, setScope] = useState<'all' | 'filtered'>('filtered')
+  const [scope, setScope] = useState<'all' | 'filtered' | 'explicit'>(target ? 'explicit' : 'filtered')
   const [web, setWeb] = useState(false)
   const [matchProvider, setMatchProvider] = useState(true)
   const [limit, setLimit] = useState(100)
@@ -7183,7 +7228,7 @@ function MagicWandOverlay({ filterQuery, filterCount, onClose }: {
   const [mediaMaster, setMediaMaster] = useState(true)
   const [mediaPicked, setMediaPicked] = useState<Set<string>>(new Set())
   useEffect(() => { api.aimetaTargets().then(setTargets).catch(() => {}) }, [])
-  const hasFilter = !!(filterQuery.q || (filterQuery.include || []).length || (filterQuery.exclude || []).length)
+  const hasFilter = !!(filterQuery && (filterQuery.q || (filterQuery.include || []).length || (filterQuery.exclude || []).length))
 
   const metadataVal = scopeValue(mdMaster, mdPicked)
   const mediaVal = scopeValue(mediaMaster, mediaPicked)
@@ -7198,11 +7243,13 @@ function MagicWandOverlay({ filterQuery, filterCount, onClose }: {
       }
       try { localStorage.setItem(WAND_MEDIA_KEY, JSON.stringify(mediaVal)) } catch { /* */ }
       let r
-      if (scope === 'all') {
+      if (scope === 'explicit' && target) {
+        r = await api.aimetaScan({ norm_keys: target.norm_keys, label: target.label, ...opts })
+      } else if (scope === 'all') {
         r = await api.aimetaScan({ target: 'all', limit, ...opts })
       } else {
         // resolve the current filter to an explicit set of norm_keys
-        const page = await api.games({ ...filterQuery, limit: 2000, offset: 0 })
+        const page = await api.games({ ...(filterQuery || {}), limit: 2000, offset: 0 })
         const keys = page.items.map((g) => g.norm_key)
         if (!keys.length) { setErr('No games in the current filter.'); setBusy(false); return }
         r = await api.aimetaScan({ norm_keys: keys, label: 'filtered', ...opts })
@@ -7228,11 +7275,20 @@ function MagicWandOverlay({ filterQuery, filterCount, onClose }: {
           <>
             <div className="wand-sec">
               <div className="wand-sec-h">Scope</div>
-              <label className="wand-radio">
-                <input type="radio" checked={scope === 'filtered'} onChange={() => setScope('filtered')} />
-                <span>{hasFilter ? 'Only what’s currently filtered' : 'Current view'}
-                  <span className="wand-n">{filterCount.toLocaleString()} games</span></span>
-              </label>
+              {target ? (
+                <label className="wand-radio">
+                  <input type="radio" checked={scope === 'explicit'} onChange={() => setScope('explicit')} />
+                  <span>{target.norm_keys.length === 1 ? 'This game' : 'These selected games'}
+                    <span className="wand-n">{target.norm_keys.length === 1
+                      ? target.label : `${target.norm_keys.length.toLocaleString()} games`}</span></span>
+                </label>
+              ) : (
+                <label className="wand-radio">
+                  <input type="radio" checked={scope === 'filtered'} onChange={() => setScope('filtered')} />
+                  <span>{hasFilter ? 'Only what’s currently filtered' : 'Current view'}
+                    <span className="wand-n">{(filterCount ?? 0).toLocaleString()} games</span></span>
+                </label>
+              )}
               <label className="wand-radio">
                 <input type="radio" checked={scope === 'all'} onChange={() => setScope('all')} />
                 <span>All games<span className="wand-n">{targets ? targets.all.toLocaleString() : '…'}</span></span>
@@ -7534,6 +7590,7 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
   const [meta, setMeta] = useState<{ model?: string; escalationModel?: string; webCapable: boolean; models: string[] }>({ webCapable: false, models: [] })
   const [reviewScope, setReviewScope] = useState<ReviewScope>(reviewScopeInit)
   const [mediaDiffs, setMediaDiffs] = useState<Record<string, MediaDiff>>({})
+  const [sgdb, setSgdb] = useState(false)
   const [diffLoading, setDiffLoading] = useState(false)
 
   const load = useCallback(() => {
@@ -7560,17 +7617,16 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
     // serve gates on) so the diff is exact; skip findings with no cover to preview.
     const seen = new Set<string>()
     const items = findings.map((f) => {
-      const pms = providerMatches(f.payload)
-      const cover = pms.find((m) => m.provider === 'igdb' && m.cover)?.cover
-        ?? pms.find((m) => m.cover)?.cover ?? null
-      return { norm_key: f.norm_key, after_cover: cover, title: f.title }
-    }).filter((it) => it.after_cover && !seen.has(it.norm_key) && seen.add(it.norm_key))
+      const igdb = providerMatches(f.payload).find((m) => m.provider === 'igdb')
+      const cover = igdb?.cover ?? providerMatches(f.payload).find((m) => m.cover)?.cover ?? null
+      return { norm_key: f.norm_key, after_cover: cover, igdb_id: igdb?.igdb_id ?? null, title: f.title }
+    }).filter((it) => (it.after_cover || it.igdb_id) && !seen.has(it.norm_key) && seen.add(it.norm_key))
     if (!items.length) { setMediaDiffs({}); return }
     setDiffLoading(true)
     api.aimetaMediaDiff(items).then((r) => {
       const m: Record<string, MediaDiff> = {}
       r.items.forEach((it) => { m[it.norm_key] = it })
-      setMediaDiffs(m)
+      setMediaDiffs(m); setSgdb(r.sgdb)
     }).catch(() => {}).finally(() => setDiffLoading(false))
   }, [reviewScope, findings])
 
@@ -7738,8 +7794,15 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
                 ))}</ul>
               </details>
             )}
-            {reviewScope !== 'metadata' && mediaDiffs[f.norm_key] && (
-              <MediaDiffStrip diff={mediaDiffs[f.norm_key]} />
+            {reviewScope !== 'metadata' && (
+              mediaDiffs[f.norm_key]
+                ? <MediaDiffStrip diff={mediaDiffs[f.norm_key]} sgdb={sgdb} />
+                : <div className="chg-media chg-media-none">
+                    {providerMatches(f.payload).length === 0
+                      ? '🖼 No art to add — this game isn’t linked to a provider yet. Art is pulled from a matched provider, so keep “Match to a provider” on when you run the wand (then art fetches on apply).'
+                      : diffLoading ? '🖼 Checking for cover changes…'
+                        : '🖼 No cover changes — this game already has its art on every platform.'}
+                  </div>
             )}
             <RefinePanel f={f} currentModel={meta.model} escalationModel={meta.escalationModel}
               models={meta.models} webCapable={meta.webCapable} onRefined={load} />
