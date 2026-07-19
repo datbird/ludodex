@@ -4283,6 +4283,11 @@ function ScoreBadge({ v }: { v: number }) {
 
 // The "About" block: description, scores, key facts and tag groups — built from
 // the raw game_attributes so nothing is shown as a cryptic key/value dump.
+// Manual game/non-game classification values. Anything other than "Game" hides the
+// item from Spotlight + the library (when hide-non-games is on), overriding Steam's guess.
+const CONTENT_TYPES = ['Game', 'Application', 'Tool', 'Soundtrack', 'Video', 'Mod', 'Other']
+const attrLabel = (kind: string) => kind === 'content_type' ? 'Type' : kind.replace(/_/g, ' ')
+
 function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () => void }) {
   const prov = d.attribute_provenance || {}
   const overrides = d.attribute_overrides || {}
@@ -4344,7 +4349,7 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
           return (
             <div key={kind} className={'ap-row' + (open ? ' open' : '') + (blank ? ' blank' : '')}>
               <button className="ap-kind" onClick={() => { setEditing(open ? null : kind); setManual('') }}>
-                <span className="ap-kname">{kind.replace(/_/g, ' ')}</span>
+                <span className="ap-kname">{attrLabel(kind)}</span>
                 <span className="ap-vals">
                   {ov ? (
                     <span className="ap-chip ap-chosen prov-badge" style={attrBadgeStyle([ov.origin])}>
@@ -4363,11 +4368,24 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
               </button>
               {open && (
                 <div className="attr-repoint">
-                  <div className="ar-h">{blank ? 'Add a value for' : 'Canonical value for'} “{kind.replace(/_/g, ' ')}”</div>
+                  <div className="ar-h">{blank ? 'Add a value for' : 'Canonical value for'} “{attrLabel(kind)}”</div>
+                  {kind === 'content_type' && (
+                    <div className="ar-hint dim">Mark non-games (apps/tools) so they’re kept out of
+                      Spotlight and the library when “hide non-games” is on. “Game” forces it back in.</div>
+                  )}
                   {ov && (
                     <div className="ar-cur">Currently pinned: <b>{ov.value}</b>
                       <ProvTag origin={ov.origin} />
-                      <button className="link-btn" onClick={() => clearOv(kind)}>revert to sources</button>
+                      <button className="link-btn" onClick={() => clearOv(kind)}>
+                        revert to {kind === 'content_type' ? 'auto-detect' : 'sources'}</button>
+                    </div>
+                  )}
+                  {kind === 'content_type' && (
+                    <div className="ar-opts">
+                      {CONTENT_TYPES.map((v) => (
+                        <button key={v} className={'ar-opt' + (ov?.value === v ? ' sel' : '')}
+                          onClick={() => setOv(kind, v, 'manual')}>{v}</button>
+                      ))}
                     </div>
                   )}
                   {vals.length > 0 && (

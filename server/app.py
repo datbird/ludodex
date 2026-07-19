@@ -42,6 +42,8 @@ import overrides       # noqa: E402  per-attribute provenance overrides (re-poin
 import ownership       # noqa: E402  durable per-format ownership (physical + per-platform wants)
 import compilations    # noqa: E402  durable collections/compilations store (ownership fan-out)
 import igdb_enrich      # noqa: E402  IGDB cache resolvers (cross-platform releases + systems)
+import console_eras     # noqa: E402  emulation platform era windows (year-plausibility gate)
+import entry_res        # noqa: E402  per-entry IGDB resolution overrides (same-title split)
 import medialang        # noqa: E402  per-asset media language classification + filter
 import framing         # noqa: E402  per-game/per-kind image framing (position + zoom)
 import mediaflags      # noqa: E402  durable per-asset ban / not-redistributable flags
@@ -368,6 +370,23 @@ def _scores_con():
 # Steam appdetails `type`s that aren't games — hidden when hide_non_games is on.
 NON_GAME_TYPES = ("application", "tool", "music", "video", "hardware", "series", "mod")
 
+
+def _non_game_hidden_sql():
+    """SQL boolean (+args) that is TRUE for an entry to hide as a NON-game. The manual
+    `content_type` override (attr-overrides, aliased `ov`) wins over Steam's detected
+    type: a value other than 'Game' hides an item Steam mis-tagged as a game (Wallpaper
+    Engine, fpsVR — Steam calls them games), and 'Game' rescues a real game Steam
+    mis-tagged as a tool. With no manual override, fall back to the Steam type. Requires
+    a connection with `ov` + `sco` attached (i.e. lib())."""
+    ph = ",".join("?" * len(NON_GAME_TYPES))
+    expr = ("CASE WHEN EXISTS(SELECT 1 FROM ov.overrides o WHERE o.norm_key=g.norm_key "
+            "AND o.kind='content_type') "
+            "THEN EXISTS(SELECT 1 FROM ov.overrides o WHERE o.norm_key=g.norm_key AND "
+            "o.kind='content_type' AND lower(o.value)<>'game') "
+            "ELSE g.norm_key IN (SELECT norm_key FROM sco.steam_type WHERE type IN (%s)) "
+            "END" % ph)
+    return expr, list(NON_GAME_TYPES)
+
 # Storefront labels are Sources, not Systems — PC-store games get platform=source,
 # so exclude these (and the generic psn/xbox fallbacks) from the Systems facet.
 # Real consoles (ps4/ps5/xbox one/…/windows) are kept.
@@ -389,6 +408,7 @@ _tags_con().close()     # ensure files + schema exist so lib() can ATTACH them r
 _umedia_con().close()
 _scores_con().close()
 _manual_con().close()
+overrides._con().close()   # attr-overrides.sqlite must exist so lib() can ATTACH it ro
 
 
 def _ensure_catalog():
@@ -439,6 +459,7 @@ def lib():
     con.execute("ATTACH DATABASE ? AS t", ("file:%s?mode=ro" % TAGS_DB,))
     con.execute("ATTACH DATABASE ? AS u", ("file:%s?mode=ro" % UMEDIA_DB,))
     con.execute("ATTACH DATABASE ? AS sco", ("file:%s?mode=ro" % SCORES_DB,))
+    con.execute("ATTACH DATABASE ? AS ov", ("file:%s?mode=ro" % overrides.DB,))
     return con
 
 
@@ -740,9 +761,9 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
                      "WHERE chosen=1 AND kind=?)")
         args.append(has_kind)
     if config.get_bool("hide_non_games", True):
-        where.append("g.norm_key NOT IN (SELECT norm_key FROM sco.steam_type "
-                     "WHERE type IN (%s))" % ",".join("?" * len(NON_GAME_TYPES)))
-        args += list(NON_GAME_TYPES)
+        _ex, _exargs = _non_game_hidden_sql()
+        where.append("NOT (" + _ex + ")")
+        args += _exargs
     clause = (" WHERE " + " AND ".join(where)) if where else ""
 
     total = con.execute("SELECT COUNT(*) FROM games g" + clause, args).fetchone()[0]
@@ -922,9 +943,9 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
     clauses = [where] if where else []
     args = list(args)
     if config.get_bool("hide_non_games", True):
-        clauses.append("g.norm_key NOT IN (SELECT norm_key FROM sco.steam_type "
-                       "WHERE type IN (%s))" % ",".join("?" * len(NON_GAME_TYPES)))
-        args += list(NON_GAME_TYPES)
+        _ex, _exargs = _non_game_hidden_sql()
+        clauses.append("NOT (" + _ex + ")")
+        args += _exargs
     # Keep un-official releases (homebrew/hack/proto/demo/unlicensed — the editable
     # `release_type` attribute) out of the normal themes; the dedicated 'homebrew'
     # theme flips this on so they still have a home. A Translation is exempt — it IS
@@ -2737,14 +2758,61 @@ def jobs_clear():
 #  Findings are proposals the user accepts/rejects; accepted supplements show
 #  in the detail view and bake into the catalog on the next rebuild.
 # --------------------------------------------------------------------------- #
-def _provider_match(title, year=None):
+# fields carrying what igdb_enrich._pick_era_aware needs: first_release_date (era gate)
+# + alternative_names (JP/romanized title matching). _IGDB_FIELDS omits alt-names.
+_IGDB_FIELDS_ERA = ("fields id,name,slug,first_release_date,alternative_names.name,"
+                    "platforms.abbreviation,cover.image_id;")
+
+
+def _igdb_raw_hits(title, limit=15):
+    """RAW (un-normalized) IGDB hits for `title` — search + exact-name(`~`), deduped by id.
+    Carries first_release_date + alternative_names so the shared era-aware selector can
+    apply its console/era gate and alt-name matching. Empty on no creds/error."""
+    cid, tok = _igdb_token()
+    if not tok:
+        return []
+    import igdb
+    safe = title.replace('"', "").replace("\\", "").replace("*", "")
+    out, seen = [], set()
+    for body in ('search "%s"; %s limit 8;' % (safe, _IGDB_FIELDS_ERA),
+                 '%s where name ~ "%s"; sort first_release_date asc; limit %d;'
+                 % (_IGDB_FIELDS_ERA, safe, limit)):
+        try:
+            for h in igdb.query("games", body, cid, tok):
+                if h.get("id") and h["id"] not in seen:
+                    seen.add(h["id"])
+                    out.append(h)
+        except Exception:
+            pass
+    return out
+
+
+def _provider_match(title, year=None, consoles=None):
     """Search IGDB for an AI-proposed title → the real provider hit (or None).
-    This is how an AI identification becomes a *trusted provider* match, so it binds
-    ONLY on an exact normalized-title match — never the arbitrary top relevance hit.
-    (IGDB ranks "Gradius" below Gradius II/III/…, so the fuzzy #1 for a short title is
-    routinely the WRONG game; a garbage link is worse than no link.)"""
+
+    When `consoles` is given (the game's EMULATION platforms), use the SAME era-aware
+    selection as the catalog sync — igdb_enrich._pick_era_aware: exact normalized-title
+    (incl. alternative_names), reject any year era-impossible for those consoles, prefer
+    the earliest plausible (original over remake). This is what stops the wand binding a
+    modern same-title game to a retro ROM (Valve's Portal 2007 → the 1986 Amiga ROM); the
+    wand now identifies exactly as build_library would, instead of via a second, weaker
+    matcher. Falls back to the legacy title+year path when no console context is available.
+
+    Either way it binds ONLY on an exact normalized-title match — never the arbitrary top
+    relevance hit (IGDB ranks 'Gradius' below its sequels; a garbage link is worse than
+    none)."""
     if not title:
         return None
+    if consoles:
+        raw = _igdb_raw_hits(title)
+        if not raw:
+            return None
+        iid, _slug = igdb_enrich._pick_era_aware(
+            raw, titlenorm.norm(title), set(consoles), require_unique=False)
+        if not iid:
+            return None                 # era gate / exact-title rejected everything
+        hit = next((h for h in raw if h.get("id") == iid), None)
+        return _pack_igdb(_igdb_hits([hit])[0]) if hit else None
     tn = titlenorm.norm(title)
     try:
         search_hits = _igdb_search(title, limit=8)
@@ -2776,6 +2844,81 @@ def _pack_igdb(h):
     return {"provider": "igdb", "igdb_id": h.get("igdb_id"), "name": h.get("name"),
             "year": h.get("year"), "cover": h.get("cover"),
             "platforms": h.get("platforms")}
+
+
+def _emulation_consoles(nk):
+    """The EMULATION console labels for a game, for the era gate — emulation sources only,
+    matching igdb_enrich._consoles_by_norm. console_eras is keyed by these raw platform
+    labels; a store 'pc'/'xbox' row spans all generations and must never year-restrict."""
+    con = ro(LIBRARY_DB)
+    try:
+        return {r[0] for r in con.execute(
+            "SELECT DISTINCT s.platform FROM games g JOIN sources s ON s.game_id=g.id "
+            "WHERE g.norm_key=? AND s.source='emulation' AND s.platform IS NOT NULL "
+            "AND s.platform!=''", (nk,))}
+    except Exception:
+        return set()
+    finally:
+        con.close()
+
+
+def _igdb_year_from_meta(mc, iid):
+    """Release year of a cached IGDB record (from first_release_date), or None."""
+    r = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?", (iid,)).fetchone()
+    if not r or not r[0]:
+        return None
+    try:
+        d = json.loads(r[0]).get("first_release_date")
+        return time.gmtime(int(d)).tm_year if d else None
+    except (ValueError, OverflowError, OSError, TypeError):
+        return None
+
+
+def _era_compatible_emulation_entries(nk, year):
+    """The ENTRY platforms of `nk`'s emulation entries whose console can plausibly be
+    `year` (not HIGH-side impossible) — the entries a retro identity applies to. The store
+    entry (pc/xbox) is excluded: it keeps its own appid identity. `games.platform` is the
+    per-entry (norm_system'd) platform, the same label console_eras.impossible expects."""
+    con = ro(LIBRARY_DB)
+    try:
+        plats = {r[0] for r in con.execute(
+            "SELECT DISTINCT g.platform FROM games g JOIN sources s ON s.game_id=g.id "
+            "WHERE g.norm_key=? AND s.source IN ('emulation','archive') "
+            "AND g.platform IS NOT NULL AND g.platform!=''", (nk,))}
+    except Exception:
+        return set()
+    finally:
+        con.close()
+    if year is None:
+        return plats
+    return {p for p in plats if not console_eras.impossible(p, year)}
+
+
+def _store_locked_igdb(nk, proposed_id):
+    """True when norm_key already resolves via a Steam appid (an authoritative
+    external_games link) to a DIFFERENT IGDB game — so the wand must NOT overwrite it
+    with an AI name-match. This is what keeps a modern store game (Valve's Portal 2007,
+    Steam appid 400 → IGDB 71) from being clobbered by the AI's retro identity for
+    emulation ROMs that share the title (the 1986 text adventure, IGDB 14546). Mirrors
+    igdb_enrich precedence: a steam_appid resolution wins and the name pass is skipped.
+    Only the appid-owning store entry keeps the resolution; the retro ROMs sharing the
+    norm_key stay era-separated (their own console art), never adopting the store id."""
+    if not proposed_id:
+        return False
+    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    if not os.path.exists(cache):
+        return False
+    try:
+        c = ro(cache)
+        try:
+            r = c.execute("SELECT igdb_id, matched_by FROM igdb_resolution "
+                          "WHERE norm_key=?", (nk,)).fetchone()
+        finally:
+            c.close()
+    except Exception:
+        return False
+    return bool(r and r["matched_by"] == "steam_appid"
+                and r["igdb_id"] and r["igdb_id"] != proposed_id)
 
 
 def _ss_match(queries, system, year=None):
@@ -2864,8 +3007,11 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                         title, yr = m.get("suggested_title"), m.get("suggested_year")
                         sys0 = (ctx.get("systems") or [None])[0]
                         pms = [p for p in (
-                            _provider_match(title, yr),
+                            _provider_match(title, yr, consoles=_emulation_consoles(nk)),
                             _ss_match([title, ctx.get("title")], sys0, yr)) if p]
+                        # A store-locked title (Valve's Portal vs the 1986 ROMs) is no
+                        # longer suppressed here — apply routes the match PER ENTRY to the
+                        # era-compatible ROMs and leaves the store entry alone.
                         if pms:
                             res["provider_matches"] = pms
                             res["provider_match"] = next(  # keep single for compat
@@ -2976,9 +3122,9 @@ def aimeta_refine(body: dict = Body(default={})):
                  or not ctx.get("match"))):     # unlinked+identified still needs the link
         title, yr = m.get("suggested_title"), m.get("suggested_year")
         sys0 = (ctx.get("systems") or [None])[0]
-        pms = [p for p in (_provider_match(title, yr),
+        pms = [p for p in (_provider_match(title, yr, consoles=_emulation_consoles(nk)),
                            _ss_match([title, ctx.get("title")], sys0, yr)) if p]
-        if pms:
+        if pms:            # store-locked titles apply per-entry at apply time (see _aimeta_apply)
             res["provider_matches"] = pms
             res["provider_match"] = next(
                 (p for p in pms if p["provider"] == "igdb"), pms[0])
@@ -3244,17 +3390,13 @@ def _aimeta_apply(should_stop, only_ids=None):
                "KEY, igdb_id INTEGER, slug TEXT, matched_by TEXT, resolved_at INTEGER)")
     mc.execute("CREATE TABLE IF NOT EXISTS igdb_meta(igdb_id INTEGER PRIMARY KEY, "
                "payload_json TEXT, fetched_at INTEGER)")
-    need = []
-    for pm in pms:
-        mc.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,slug,"
-                   "matched_by,resolved_at) VALUES(?,?,?,?,?)",
-                   (pm["norm_key"], pm["igdb_id"], None, "ai_name", now))
-        if not mc.execute("SELECT 1 FROM igdb_meta WHERE igdb_id=?",
-                          (pm["igdb_id"],)).fetchone():
-            need.append(pm["igdb_id"])
-    mc.commit()
+    entry_res.ensure(mc)
+    # Fetch the trusted IGDB records FIRST — the per-entry apply below needs each match's
+    # release year for its era check, and title-level writes want the meta cached too.
+    need = [pm["igdb_id"] for pm in pms if not mc.execute(
+        "SELECT 1 FROM igdb_meta WHERE igdb_id=?", (pm["igdb_id"],)).fetchone()]
     cid, tok = _igdb_token()
-    if tok and need:                     # fetch the trusted records for new matches
+    if tok and need:
         for i in range(0, len(need), 200):
             batch = need[i:i + 200]
             body = ("fields %s; where id = (%s); limit 500;"
@@ -3267,6 +3409,26 @@ def _aimeta_apply(should_stop, only_ids=None):
                 mc.commit()
             except Exception:
                 pass
+    # Write resolutions. A store-locked title (a confident appid identity of a DIFFERENT
+    # game — Valve's Portal vs the 1986 ROMs) does NOT clobber the shared slot: the match
+    # is applied PER ENTRY to the era-compatible emulation entries (entry_resolution),
+    # leaving the store entry's title-level identity intact. Everything else writes
+    # title-level as before.
+    for pm in pms:
+        nk, iid = pm["norm_key"], pm["igdb_id"]
+        if _store_locked_igdb(nk, iid):
+            yr = _igdb_year_from_meta(mc, iid)
+            plats = _era_compatible_emulation_entries(nk, yr)
+            for plat in plats:
+                entry_res.set_entry(mc, nk, plat, iid, "ai_entry")
+            if plats:
+                print("aimeta apply: %s -> igdb:%s per-entry on %s (store id kept)"
+                      % (nk, iid, sorted(plats)), file=sys.stderr)
+        else:
+            mc.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,slug,"
+                       "matched_by,resolved_at) VALUES(?,?,?,?,?)",
+                       (nk, iid, None, "ai_name", now))
+    mc.commit()
     mc.close()
     _apply_ss_matches(now)
     # Steam community tags (SteamSpy) for touched Steam games — fetched BEFORE the
@@ -3358,16 +3520,24 @@ def _apply_surgical_meta(touched):
                 continue
             pm = pms.get(nk)
             name = igdb_names.get(nk)
+            # A store-locked match applies its IGDB identity only to ROM/archive entries;
+            # the store entry keeps its appid identity (the rebuild does this canonically
+            # via entry_resolution — mirror it here so the eager preview doesn't relink it).
+            store_locked = bool(pm and _store_locked_igdb(nk, pm["igdb_id"]))
             for gid in gids:
+                is_store_entry = bool(con.execute(
+                    "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
+                    "('emulation','archive') LIMIT 1", (gid,)).fetchone())
+                apply_igdb = bool(pm) and not (store_locked and is_store_entry)
                 # rename to the matched title — only ROM/archive-only entries (store
                 # titles are already clean; build_library guards the same way)
-                if name:
+                if name and apply_igdb:
                     con.execute(
                         "UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
                         "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
                         "('emulation','archive'))", (name, gid, gid))
                 # provider links (replace this provider's link for the entry)
-                if pm:
+                if apply_igdb:
                     con.execute("DELETE FROM metadata_links WHERE game_id=? AND "
                                 "provider='igdb'", (gid,))
                     con.execute("INSERT INTO metadata_links(game_id,provider,"
@@ -3688,6 +3858,9 @@ def aimeta_media_diff(body: dict = Body(default={})):
                 (nk,))}
             added = [{"kind": a["kind"], "url": a["url"], "new": a["kind"] not in have_kinds}
                      for a in art_by_id.get(int(it["igdb_id"]), [])] if it.get("igdb_id") else []
+            # store-locked: this match applies PER ENTRY to the ROMs only — the store
+            # entry (pc/xbox) keeps its own identity + cover, so show it as unchanged.
+            store_locked = bool(it.get("igdb_id")) and _store_locked_igdb(nk, it.get("igdb_id"))
             rows = con.execute(
                 "SELECT id, %s, canonical_title%s FROM games WHERE norm_key=?"
                 % (eksel, gksel), (nk,)).fetchall()
@@ -3695,6 +3868,10 @@ def aimeta_media_diff(body: dict = Body(default={})):
             for r in rows:
                 platform = r["platform"] if "platform" in r.keys() else None
                 gk = r["game_key"] if (has_gk and "game_key" in r.keys()) else None
+                if store_locked and platform in ("pc", "xbox"):
+                    plats.append({"entry_key": r["entry_key"], "platform": platform,
+                                  "has_before": True, "own_art": False, "change": "none"})
+                    continue
                 own = con.execute(
                     "SELECT 1 FROM m.media md WHERE md.norm_key=? AND md.chosen=1 AND "
                     "md.kind='cover' AND COALESCE(md.system,'')=COALESCE(?,'') LIMIT 1",
@@ -3733,6 +3910,7 @@ def aimeta_media_diff(body: dict = Body(default={})):
 # the catalog vocabulary minus internal plumbing (install paths, activity stamps,
 # app flags). Blank kinds are shown too, so the user can fill them in.
 _EDITABLE_ATTR_KINDS = [
+    "content_type",
     "release_type", "language", "release_year", "release_date", "platforms", "genres", "themes",
     "game_modes", "player_perspectives", "developers", "publishers", "series",
     "features", "categories", "age_ratings", "regions", "os", "device",

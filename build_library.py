@@ -493,15 +493,42 @@ _years = _igdb_years()
 _ids = _igdb_ids()               # norm_key -> igdb_id (DESIGN §11.9 game_key)
 
 
-def _game_key(nk, bkey):
-    """Resolved-identity key for an entry (DESIGN §11.9). An ERA-collision entry
-    (\x1f marker in its base_key) NEVER adopts the shared identity — the neutral
-    art belongs to the different-era game — so it gets its own title identity. A
-    non-separated identified entry OR a stray retro-handheld port (\x1e marker)
-    ADOPTS the title's resolved igdb id (the port IS that game). Everything else
-    (unidentified) falls to the title bucket. Suffix-free `title:<nk>` mirrors
-    media_fetch.game_key so entry and media identities meet on a plain string
-    match at serve time (see the format note there)."""
+def _entry_igdb_ids():
+    """(norm_key, platform) -> IGDB id for PER-ENTRY resolution overrides. When one title
+    is two different games on two platforms (the 1986 Portal ROMs vs Valve's 2007 Portal),
+    the ROM entries carry their own id here — overriding both the title-level resolution
+    (which the store entry keeps) and the era-collision forfeit."""
+    out = {}
+    _cache = os.path.join(DATA, "metadata-cache.sqlite")
+    if not os.path.exists(_cache):
+        return out
+    _c = sqlite3.connect(_cache)
+    try:
+        for _nk, _p, _iid in _c.execute(
+                "SELECT norm_key, platform, igdb_id FROM entry_resolution WHERE igdb_id>0"):
+            out[(_nk, _p)] = _iid
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        _c.close()
+    return out
+
+
+_entry_ids = _entry_igdb_ids()   # (norm_key, platform) -> igdb_id (per-entry override)
+
+
+def _game_key(nk, platform, bkey):
+    """Resolved-identity key for an entry (DESIGN §11.9). A PER-ENTRY resolution override
+    wins first (a same-title split — the entry IS its own game). Else: an ERA-collision
+    entry (\x1f marker in its base_key) NEVER adopts the shared identity — the neutral art
+    belongs to the different-era game — so it gets its own title identity. A non-separated
+    identified entry OR a stray retro-handheld port (\x1e marker) ADOPTS the title's
+    resolved igdb id (the port IS that game). Everything else (unidentified) falls to the
+    title bucket. Suffix-free `title:<nk>` mirrors media_fetch.game_key so entry and media
+    identities meet on a plain string match at serve time (see the format note there)."""
+    eid = _entry_ids.get((nk, platform))
+    if eid:
+        return "igdb:%s" % eid
     if "\x1f" in (bkey or "") or nk not in _ids:
         return "title:%s" % nk
     return "igdb:%s" % _ids[nk]
@@ -572,7 +599,7 @@ if _sep:
 # nothing is dropped (every source is carried onto the surviving entry).
 def _entry_game_key(_ek):
     _b, _p = _ek
-    return _game_key(_b, sep_base.get(_ek, _b))
+    return _game_key(_b, _p, sep_base.get(_ek, _b))
 
 _id_groups = {}                 # (game_key, platform) -> [ekey,...], resolved games only
 for _ek in list(games):
@@ -777,7 +804,7 @@ for (base, plat), g in games.items():
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (canonical, base, plat, "%s@%s" % (base, plat), bkey,
          ("title:%s" % base if (base, plat) in blocked_entries
-          else _game_key(base, bkey)),
+          else _game_key(base, plat, bkey)),
          len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
@@ -804,7 +831,7 @@ for key, w in wanted.items():
         "n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
         "has_archive,in_playnite,in_launchbox,wanted) "
         "VALUES(?,?,?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
-        (w["title"], key, plat, "%s@%s" % (key, plat), key, _game_key(key, key),
+        (w["title"], key, plat, "%s@%s" % (key, plat), key, _game_key(key, plat, key),
          "wishlist:" + ",".join(stores)))
     gid = cur.lastrowid
     key_to_gid[(key, plat)] = gid
@@ -964,6 +991,13 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
             "WHERE r.igdb_id>0").fetchall()
     except sqlite3.OperationalError:
         rows = []                   # cache exists but enrich hasn't populated it
+    try:
+        erows = mc.execute(
+            "SELECT er.norm_key, er.platform, er.igdb_id, m.payload_json "
+            "FROM entry_resolution er JOIN igdb_meta m ON m.igdb_id=er.igdb_id "
+            "WHERE er.igdb_id>0").fetchall()
+    except sqlite3.OperationalError:
+        erows = []                  # no per-entry overrides yet
     mc.close()
     for nk, iid, slug, payload in rows:
         gids = base_to_gids.get(nk)          # metadata is title-level → every platform entry
@@ -994,6 +1028,29 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
                     "('emulation','archive'))", (name, gid, gid))
             for kind, val in mapped.items():
                 _accum(gid, kind, val, "igdb")
+    # per-entry resolutions: a same-title split entry (the 1986 Portal ROMs, whose store
+    # sibling stays Valve's Portal) gets ITS OWN game's link + metadata, on just that
+    # entry's gid — keyed by (norm_key, platform), overriding the era-collision forfeit.
+    for nk, plat, iid, payload in erows:
+        gid = key_to_gid.get((nk, plat))
+        if not gid or gid in blocked_gids:
+            continue
+        try:
+            rec = json.loads(payload)
+        except ValueError:
+            continue
+        cur.execute("DELETE FROM metadata_links WHERE game_id=? AND provider='igdb'", (gid,))
+        cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,slug,url) "
+                    "VALUES(?,?,?,?,?)", (gid, "igdb", str(iid), None,
+                    "https://www.igdb.com/games/%s" % iid))
+        n_link += 1
+        name = (rec.get("name") or "").strip()
+        if name:
+            cur.execute("UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
+                        "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
+                        "('emulation','archive'))", (name, gid, gid))
+        for kind, val in igdb_map(rec).items():
+            _accum(gid, kind, val, "igdb")
 
 # ScreenScraper (emulation metadata; one scrape yields metadata + media, media is
 # indexed separately). Unioned with IGDB per the merge above.

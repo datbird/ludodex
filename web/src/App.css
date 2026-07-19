@@ -3183,6 +3183,8 @@ a.idchip:hover { background: var(--accent-bg); }
 .ar-opts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .ar-opt { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-h); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; cursor: pointer; }
 .ar-opt:hover { border-color: var(--accent); }
+.ar-opt.sel { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 700; }
+.ar-hint { font-size: 11px; margin: -2px 0 8px; }
 .ar-manual { display: flex; gap: 6px; }
 .ar-manual input { flex: 1; padding: 6px 9px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text-h); font-size: 13px; }
 
