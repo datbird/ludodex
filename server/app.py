@@ -2955,56 +2955,74 @@ def _store_locked_igdb(nk, proposed_id):
                 and r["igdb_id"] and r["igdb_id"] != proposed_id)
 
 
-def _ss_match(queries, system, year=None):
-    """Search ScreenScraper by name (jeuRecherche) → the best candidate. Unlike
-    IGDB, SS is media-rich and covers the console/arcade long-tail. `queries` is
-    one or more title strings to try (e.g. the AI's clean title + the raw title),
-    since SS naming varies ('007 : Tomorrow Never Dies' vs 'James Bond 007: …').
-    Matches by token overlap, not exact equality. Returns a match dict or None."""
+def _ss_match(queries, systems, year=None):
+    """Search ScreenScraper by name (jeuRecherche) → the best candidate across the game's
+    systems. SS is media-rich and covers the console/arcade long-tail. `queries` = title
+    strings to try; `systems` = the game's platform label(s) — SS is per-system, so we try
+    each (then a cross-system pass) and stop at the first match.
+
+    Matches by QUERY-token coverage: a short title like 'Flashback' correctly matches SS's
+    'Flashback : The Quest for Identity' (the query is fully contained in the SS name) — the
+    old metric measured NAME coverage and wrongly rejected every subtitled game. Ties break
+    toward a tighter name + a matching year. Returns a match dict or None."""
     import screenscraper as ss
     creds = config.screenscraper_creds()
     if not creds:
         return None
-    sid = ss.systeme_id(system) if system else None
-    raw = [q for q in (queries if isinstance(queries, (list, tuple)) else [queries])
-           if q]
-    # SS name-search is picky: strip file extensions + (region)/[tag] noise, and
-    # keep the raw forms too. Dedup while preserving order.
+    if isinstance(systems, str):
+        systems = [systems]
+    sids = []
+    for s in (systems or []):
+        sid = ss.systeme_id(s)
+        if sid and sid not in sids:
+            sids.append(sid)
+    sids.append(None)                            # cross-system fallback, last
+    # query variants: raw, (region)/[tag]/ext-stripped, and subtitle-stripped (before a
+    # ':' / ' - '), since SS name-search is picky about full subtitles. Dedup, keep order.
+    raw = [q for q in (queries if isinstance(queries, (list, tuple)) else [queries]) if q]
     qlist, seenq = [], set()
     for q in raw:
-        clean = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "",
-                       re.sub(r"\.\w{2,4}$", "", q)).strip()
-        for cand in (clean, q):
+        for cand in (q,
+                     re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "",
+                            re.sub(r"\.\w{2,4}$", "", q)).strip(),
+                     re.split(r"\s*[:\-–]\s", q)[0].strip()):
             if cand and cand.lower() not in seenq:
                 seenq.add(cand.lower())
                 qlist.append(cand)
     best, seen = None, set()
-    for q in qlist:
-        try:
-            cands = ss.jeu_recherche(creds, q, systemeid=sid, limit=8)
-        except Exception:
-            continue
-        qtok = set(titlenorm.norm(q).split())
-        for j in cands:
-            jid = j.get("id")
-            if jid in seen:
+    for sid in sids:
+        for q in qlist:
+            try:
+                cands = ss.jeu_recherche(creds, q, systemeid=sid, limit=8)
+            except Exception as e:               # surface, don't swallow silently
+                print("ss search %r sys=%s: %s" % (q, sid, str(e)[:120]), file=sys.stderr)
                 continue
-            seen.add(jid)
-            ntok = set(titlenorm.norm(ss.jeu_name(j)).split())
-            if not ntok:
-                continue
-            overlap = len(qtok & ntok) / len(ntok)   # SS-name tokens covered by query
-            yr = ss.jeu_year(j)
-            score = overlap + (0.3 if year and yr == str(year) else 0)
-            if overlap >= 0.6 and (best is None or score > best[0]):
-                best = (score, j, ss.jeu_name(j), yr)
-        if best and best[0] >= 1.0:                  # strong hit — stop trying variants
+            qtok = set(titlenorm.norm(q).split())
+            for j in cands:
+                jid = j.get("id")
+                if jid in seen:
+                    continue
+                seen.add(jid)
+                ntok = set(titlenorm.norm(ss.jeu_name(j)).split())
+                if not (qtok and ntok):
+                    continue
+                inter = len(qtok & ntok)
+                qc = inter / len(qtok)           # query tokens covered by the SS name
+                nc = inter / len(ntok)           # SS-name tokens covered by the query
+                yr = ss.jeu_year(j)
+                score = qc + nc + (0.4 if year and yr == str(year) else 0)
+                if qc >= 0.8 and (best is None or score > best[0]):
+                    best = (score, j, ss.jeu_name(j), yr)
+            if best and best[0] >= 1.7:          # near-exact (qc≈1 + nc≈1) — stop
+                break
+        if best:                                 # matched on this system — done
             break
     if not best:
         return None
     _, j, nm, yr = best
     return {"provider": "screenscraper", "ss_id": j.get("id"), "name": nm,
-            "year": int(yr) if yr and str(yr).isdigit() else None, "system": system}
+            "year": int(yr) if yr and str(yr).isdigit() else None,
+            "system": systems[0] if systems else None}
 
 
 def _aimeta_scan(run_id, norm_keys, opts, should_stop):
@@ -3045,7 +3063,7 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                         sys0 = (ctx.get("systems") or [None])[0]
                         pms = [p for p in (
                             _provider_match(title, yr, consoles=_emulation_consoles(nk)),
-                            _ss_match([title, ctx.get("title")], sys0, yr)) if p]
+                            _ss_match([title, ctx.get("title")], ctx.get("systems"), yr)) if p]
                         # A store-locked title (Valve's Portal vs the 1986 ROMs) is no
                         # longer suppressed here — apply routes the match PER ENTRY to the
                         # era-compatible ROMs and leaves the store entry alone.
@@ -3278,7 +3296,7 @@ def aimeta_refine(body: dict = Body(default={})):
         title, yr = m.get("suggested_title"), m.get("suggested_year")
         sys0 = (ctx.get("systems") or [None])[0]
         pms = [p for p in (_provider_match(title, yr, consoles=_emulation_consoles(nk)),
-                           _ss_match([title, ctx.get("title")], sys0, yr)) if p]
+                           _ss_match([title, ctx.get("title")], ctx.get("systems"), yr)) if p]
         if pms:            # store-locked titles apply per-entry at apply time (see _aimeta_apply)
             res["provider_matches"] = pms
             res["provider_match"] = next(
