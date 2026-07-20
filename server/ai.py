@@ -994,7 +994,12 @@ _MODELS_CACHE = {}
 _NON_VISION = ("embed", "whisper", "tts", "audio", "moderation", "rerank",
                "dall-e", "imagen", "speech", "transcribe", "veo", "sora",
                "-realtime", "image-generation", "gpt-image", "chatgpt-image",
-               "image-latest", "image-1")
+               "image-latest", "image-1",
+               # Gemini image-GENERATION/editing models ("…-flash-image", nano-banana):
+               # they OUTPUT images and reject a JSON-analysis request (400), so they must
+               # never be offered/kept for a vision-analysis area. This is what had the
+               # 'art' + 'identify' areas 400-ing on every call.
+               "-image")
 
 
 def is_vision_model(provider, mid):
@@ -1422,8 +1427,9 @@ def pick_art(title, kind, images, provider=None, model=None, language=None):
         instr += (" Prefer an image whose visible text, logo, or box-art language "
                   "is %s when overall quality is comparable." % language)
     text = _complete_vision(provider, key, model, system, instr, images)
-    obj = _json(text)
-    idx = int(obj.get("index", 1)) - 1
+    obj = _json(text) or {}
+    raw = obj.get("index")
+    idx = (int(raw) - 1) if raw not in (None, "") else 0   # tolerate a null/missing index
     idx = max(0, min(idx, len(images) - 1))
     return {"index": idx, "reason": obj.get("reason", "")}
 
