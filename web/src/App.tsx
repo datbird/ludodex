@@ -758,6 +758,21 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           onApplied={() => { refreshStats(); load(true) }} />
       )}
       <div className={'controls' + (optsOpen ? ' opts-open' : '')}>
+        <div className="controls-search">
+          <input
+            className="search"
+            placeholder={aiMode ? 'Ask: "co-op platformers I own"…'
+              : searchMode === 'query' ? 'mario platform:snes genre:racing year:>1990 -tag:multiplayer'
+              : 'Search titles…'}
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => { if (aiMode && e.key === 'Enter') runAi() }}
+          />
+          {aiMode && <button className="go" onClick={runAi}>Ask</button>}
+          {searchMode === 'query' && (
+            <span className="query-hint has-tip" data-tip="platform: system: source: genre: theme: dev: publisher: series: tag: os: device: · year:>1990 · score:>=75 · prefix - to exclude · quote &quot;multi word&quot;">?</span>
+          )}
+        </div>
         <div className="search-mode has-tip"
           data-tip="Basic = title contains, across your whole library. ✨ AI = natural-language (“co-op platformers I own”). ⌘ Query = advanced field:value search.">
           {(['basic', 'ai', 'query'] as const).map((m) => (
@@ -767,19 +782,6 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             </button>
           ))}
         </div>
-        <input
-          className="search"
-          placeholder={aiMode ? 'Ask: "co-op platformers I own"…'
-            : searchMode === 'query' ? 'mario platform:snes genre:racing year:>1990 -tag:multiplayer'
-            : 'Search titles…'}
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => { if (aiMode && e.key === 'Enter') runAi() }}
-        />
-        {aiMode && <button className="go" onClick={runAi}>Ask</button>}
-        {searchMode === 'query' && (
-          <span className="query-hint has-tip" data-tip="platform: system: source: genre: theme: dev: publisher: series: tag: os: device: · year:>1990 · score:>=75 · prefix - to exclude · quote &quot;multi word&quot;">?</span>
-        )}
         <button type="button" className={'opts-toggle' + (optsOpen ? ' on' : '')}
           aria-expanded={optsOpen} onClick={() => setOptsOpen((v) => !v)}>
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
@@ -5478,6 +5480,9 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
   const [order, setOrder] = useState<MediaAsset[]>(() => byRank(assets))
   const [viewing, setViewing] = useState<MediaAsset | null>(null)
   const [drag, setDrag] = useState<number | null>(null)
+  const [over, setOver] = useState<number | null>(null)
+  const dragRef = useRef<number | null>(null)
+  const overRef = useRef<number | null>(null)
   const [busy, setBusy] = useState(false)
   useEffect(() => { setOrder(byRank(assets)) }, [assets])
   // Enlarged view: ← / → step through this category, Esc closes JUST the viewer.
@@ -5498,11 +5503,38 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
     try { onChange(await api.setPins(nk, kind.kind, next.map((a) => a.id))) }
     catch { /* */ } finally { setBusy(false) }
   }
-  const drop = (to: number) => {
-    if (drag === null || drag === to) { setDrag(null); return }
-    const next = [...order]
-    next.splice(to, 0, next.splice(drag, 1)[0])
-    setOrder(next); setDrag(null); persist(next)
+  // Pointer-based reorder — works with mouse AND touch (HTML5 `draggable` doesn't fire on
+  // touch, so on mobile the drag was being read as a scroll). The handle has
+  // touch-action:none so grabbing it never scrolls the overlay underneath.
+  const startDrag = (i: number, e: React.PointerEvent) => {
+    e.preventDefault(); e.stopPropagation()
+    dragRef.current = i; overRef.current = i
+    setDrag(i); setOver(i)
+    const move = (ev: PointerEvent) => {
+      ev.preventDefault()
+      const el = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null
+      const item = el?.closest('[data-mko-idx]') as HTMLElement | null
+      if (item) {
+        const idx = Number(item.dataset.mkoIdx)
+        if (!Number.isNaN(idx)) { overRef.current = idx; setOver(idx) }
+      }
+    }
+    const end = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+      const from = dragRef.current, to = overRef.current
+      dragRef.current = null; overRef.current = null
+      setDrag(null); setOver(null)
+      if (from != null && to != null && from !== to) {
+        const next = [...order]
+        next.splice(to, 0, next.splice(from, 1)[0])
+        setOrder(next); persist(next)
+      }
+    }
+    window.addEventListener('pointermove', move, { passive: false })
+    window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
   }
   const act = async (fn: () => Promise<MediaLibrary>) => {
     setBusy(true)
@@ -5528,7 +5560,7 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
         <h2 className="mko-title">{kind.kind.replace(/_/g, ' ')}
           <span className="dim"> · {order.length}</span>
           {busy && <span className="dim mko-saving"> · saving…</span>}</h2>
-        <p className="mko-desc dim">Drag to set priority — <b>#1 is the one used</b>
+        <p className="mko-desc dim">Drag the ⠿ handle to set priority — <b>#1 is the one used</b>
           · click to enlarge{framable ? ' · ⚙ on #1 frames its position & zoom' : ''}
           {kind.description ? ' · ' + kind.description : ''}</p>
         {order.length === 0
@@ -5536,10 +5568,11 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
           : (
             <div className="mko-grid">
               {order.map((a, i) => (
-                <figure key={a.id} className={'mko-item' + (drag === i ? ' dragging' : '')}
-                  draggable onDragStart={() => setDrag(i)}
-                  onDragOver={(e) => e.preventDefault()} onDrop={() => drop(i)}
-                  onDragEnd={() => setDrag(null)}>
+                <figure key={a.id} data-mko-idx={i}
+                  className={'mko-item' + (drag === i ? ' dragging' : '')
+                    + (over === i && drag !== null && drag !== i ? ' drop-target' : '')}>
+                  <span className="mko-drag" title="Drag to reorder" aria-label="Drag to reorder"
+                    onPointerDown={(e) => startDrag(i, e)}>⠿</span>
                   <div className="mko-media" onClick={() => setViewing(a)} title="Click to enlarge">
                     {thumb(a)}
                     {framable && i === 0 && (
