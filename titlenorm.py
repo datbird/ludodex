@@ -11,6 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
+import platmap                    # platform canonicalization (32x == "Sega 32X")
 
 ROMAN = {"ii": "2", "iii": "3", "iv": "4", "vi": "6", "vii": "7", "viii": "8",
          "ix": "9", "xi": "11", "xii": "12", "xiii": "13", "xiv": "14"}
@@ -31,6 +32,19 @@ _TRAIL_EXT = re.compile(
 _COMMA_ARTICLE = re.compile(
     r",\s*(the|a|an|le|la|les|las|el|los|il|lo|gli|die|der|das|ein|eine)\b")
 
+# Some ROM sets bake the console name into the title itself ("Doom 32X") instead of
+# leaving it to the folder/region tags. A bare trailing hardware token like this is
+# redundant — "Doom 32X" and "Doom" on the Sega 32X are the same game — but it splits
+# them into two catalog entries because the normalized keys differ. So, when a platform
+# is known, drop a TRAILING token that names that very platform. Guarded two ways: the
+# token must canonicalize (via platmap) to the entry's own platform AND be one of the
+# curated pure-hardware-designator tokens platmap recognizes. The canon-match alone
+# already spares "Sonic CD" (platmap has no bare "cd" alias); the allow-set is the extra
+# guard for platform words that ARE title words ("Saturn", "Lynx"). Sourced from
+# platmap.TITLE_PLATFORM so the tokens stripped here EXACTLY match the tokens that
+# re-platform a misplaced ROM in build_library — one source of truth.
+_HW_SUFFIX_SAFE = set(platmap.TITLE_PLATFORM)
+
 _PREFS = None
 
 
@@ -42,7 +56,7 @@ def _prefs():
     return _PREFS
 
 
-def norm(t):
+def norm(t, platform=None):
     preserve_years, strip_editions = _prefs()
     s = (t or "").lower()
     s = _COMMA_ARTICLE.sub(" ", s)          # No-Intro "Title, The" -> "Title"
@@ -74,4 +88,11 @@ def norm(t):
                 continue
             out.append(w)
         toks = out
+    if platform:
+        # Drop a trailing bare hardware token that just names this platform
+        # ("Doom 32X" on the Sega 32X -> "doom"). Never strip the sole token.
+        pc = platmap.canon(platform)
+        while len(toks) > 1 and toks[-1] in _HW_SUFFIX_SAFE \
+                and platmap.canon(toks[-1]) == pc:
+            toks.pop()
     return " ".join(toks).strip()

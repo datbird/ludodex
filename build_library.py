@@ -25,14 +25,17 @@ import splits                   # durable "peel apart" — split a merged-away g
 import console_eras             # hardware timelines — catch era-impossible merges
 import homebrew                 # ROM release-type classifier (homebrew/hack/proto/…)
 import overrides                # durable per-attribute user corrections
+import platmap                  # platform ontology + filename-carried hardware tags
 _MERGE_ALIAS = merges.alias_map()
 _PEEL = splits.overrides()      # {(source, source_id): (to_key, to_title)}
 
 
-def _mkey(title):
+def _mkey(title, platform=None):
     """Dedupe key for a title, with any user 'Fix duplication' merge applied so a
-    merged-away entry folds into its canonical one on every rebuild."""
-    k = norm(title)
+    merged-away entry folds into its canonical one on every rebuild. Pass the entry
+    platform so a ROM whose title bakes in the console name ("Doom 32X") keys the same
+    as the plain title ("Doom") on that platform (titlenorm strips the hardware tag)."""
+    k = norm(title, platform)
     return _MERGE_ALIAS.get(k, k)
 from playnite import LIST_KINDS, SCALAR_KINDS
 from igdb import map_record as igdb_map   # IGDB metadata-provider record mapping
@@ -118,6 +121,20 @@ def _entry_platform(source, platform):
     return platform or source
 
 
+def _emu_ep(source, platform, title):
+    """Entry platform for a folder-based (emulation/archive) ROM, honoring
+    filename > folder: when the TITLE carries an explicit hardware tag ("Doom 32X")
+    that contradicts the folder/system label ("sega genesis"), the filename wins and
+    the ROM is attributed to the tag's platform. Large collections misplace ROMs into
+    the wrong folder far more often than they mis-name the file, so the in-title
+    hardware tag is trusted 100% (detection is conservative — see platmap.TITLE_PLATFORM)."""
+    ep = _entry_platform(source, platform)
+    lbl = platmap.platform_from_title(title)
+    if lbl and platmap.canon(lbl) != platmap.canon(ep):
+        ep = _entry_platform(source, lbl)
+    return ep
+
+
 base_present = set()   # every base norm_key that has an owned/wanted entry (for the
                        # wishlist "already owned?" check, which is title-level)
 
@@ -126,12 +143,18 @@ def add(title, source, platform, sid, detail="", state="have"):
     # "Peel apart": a specific source row the user split off a merged entry goes to
     # its OWN key + title, overriding the natural title-derived key. Applied first so
     # the row lands on the peeled-off game on every rebuild.
+    # entry platform is the identity axis; compute it first so the dedupe key can be
+    # platform-aware (strip a baked-in console tag like "Doom 32X" -> "doom"). For
+    # folder-based ROMs, an in-title hardware tag also re-platforms a misplaced file
+    # (filename > folder) so the 32X "Doom 32X (E)" in a Genesis folder lands on 32X.
+    ep = _emu_ep(source, platform, title) if source in ("emulation", "archive") \
+        else _entry_platform(source, platform)
     peel = _PEEL.get((source, str(sid)))
     if peel:
         title = peel[1] or title
         key = _MERGE_ALIAS.get(peel[0], peel[0])
     else:
-        key = _mkey(title)
+        key = _mkey(title, ep)
     if not key:
         return key
     # Xbox: keep the store identity ('xbox') on the platform and carry the actual
@@ -142,7 +165,7 @@ def add(title, source, platform, sid, detail="", state="have"):
     # entry platform = the identity axis; the row's stored platform becomes it too
     # (every row in an entry shares one platform). Xbox still carries its device
     # list in `detail`, split into os/device attributes at write time.
-    ep = _entry_platform(source, platform)
+    # (`ep` computed above so the dedupe key could be platform-aware.)
     xbox_devs = set()
     if source == "xbox":
         raw = detail if platform in ("", "xbox") else platform
@@ -716,10 +739,10 @@ if config.source_enabled("emulation"):
             for _sys, _game, _fn, _subdir in _rrc.execute(
                     "SELECT system, game, filename, %s FROM roms WHERE ext IN (%s) "
                     "AND game<>''" % (_selsub, _rtph), list(ROM_EXTS)):
-                _k = _mkey(_game)
+                _ep = _emu_ep("emulation", _sys, _game)
+                _k = _mkey(_game, _ep)
                 if not _k:
                     continue
-                _ep = _entry_platform("emulation", _sys)
                 _ek = (_k, _ep)
                 # filename scene tag -> folder-path provenance -> anachronistic year: a
                 # dump under a "…/Homebrew/" tree, or one whose filename year is impossible

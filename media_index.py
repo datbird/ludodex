@@ -31,7 +31,19 @@ DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 import media
+import platmap
 from titlenorm import norm
+
+
+def _file_platform(folder_platform, name):
+    """Filename > folder for media too: a file explicitly named for a platform
+    ("Doom 32X (E)") is that platform's art no matter which system folder it sits in,
+    so it keys the same as the (re-platformed) catalog entry. Mirrors build_library._emu_ep."""
+    lbl = platmap.platform_from_title(name)
+    if lbl and (not folder_platform
+                or platmap.canon(lbl) != platmap.canon(folder_platform)):
+        return lbl
+    return folder_platform
 
 INDEX = os.path.join(DATA, "media-index.sqlite")
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
@@ -150,14 +162,15 @@ def scan_gamelist(con, owned, now, root):
             kind = GAMELIST_ROLE_KIND.get(role.lower())
             if not kind:
                 continue
-            nk = norm(stem)
+            fplat = _file_platform(platform, stem)  # filename > folder
+            nk = norm(stem, fplat)                  # platform-aware: strip baked-in HW tag
             if not nk:
                 continue
             is_match = nk in owned
             con.execute(
                 "INSERT OR REPLACE INTO media(norm_key,system,kind,provider,mount,"
                 "ref_type,ref,ext,matched,indexed_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (nk, platform, kind, "gamelist", "gamelist", "file",
+                (nk, fplat, kind, "gamelist", "gamelist", "file",
                  os.path.join(imgdir, fn), ext.lower().lstrip("."), int(is_match), now))
             rows += 1
             matched += int(is_match)
@@ -199,7 +212,8 @@ def scan_esde(con, owned, now):
                         base, ext = os.path.splitext(fn)
                         if not ext_kind_ok(ext, kind):
                             continue
-                        nk = norm(base)
+                        fplat = _file_platform(platform, base)  # filename > folder
+                        nk = norm(base, fplat)      # platform-aware: strip baked-in HW tag
                         if not nk:
                             continue
                         is_match = nk in owned
@@ -207,7 +221,7 @@ def scan_esde(con, owned, now):
                             "INSERT OR REPLACE INTO media(norm_key,system,kind,"
                             "provider,mount,ref_type,ref,ext,matched,indexed_at)"
                             " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                            (nk, platform, kind, "esde", mount["name"], "file",
+                            (nk, fplat, kind, "esde", mount["name"], "file",
                              os.path.join(dirpath, fn), ext.lower().lstrip("."),
                              int(is_match), now))
                         rows += 1

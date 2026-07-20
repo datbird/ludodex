@@ -75,6 +75,32 @@ _ALIASES = {
 _CANON = {a: c for c, al in _ALIASES.items() for a in al}
 KNOWN = set(_ALIASES)             # canonicals we're confident about
 
+# --- Explicit in-title hardware tags: filename beats folder ---------------------
+# Some ROM sets bake the console name into the title ("Doom 32X"), and large user
+# collections routinely misplace such a ROM into the wrong system folder (a 32X dump
+# dropped in the Genesis folder). When a title carries one of these tokens it names
+# the platform AUTHORITATIVELY and overrides a contradicting folder/path label —
+# end users mislabel folders far more often than filenames, so filename wins 100%.
+# Value = the ludodex platform label to attribute to. Curated to tokens that are pure
+# hardware designators, NEVER a real title word ("cd" is deliberately ABSENT — else
+# "Sonic CD" would be yanked to the Sega CD). Every token here is also stripped from
+# the dedupe key by titlenorm (which imports this set), so "Doom 32X" and "Doom" on
+# the 32X unify. Extend deliberately.
+TITLE_PLATFORM = {
+    "32x": "sega 32x",
+}
+
+
+def platform_from_title(title):
+    """The ludodex platform label named by an explicit hardware token in `title`, or
+    None. Deterministic and conservative — fires only on the curated unambiguous
+    hardware designators in TITLE_PLATFORM, so a coincidental word never re-platforms."""
+    for tok in re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).split():
+        lbl = TITLE_PLATFORM.get(tok)
+        if lbl:
+            return lbl
+    return None
+
 
 def _norm(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
