@@ -4068,11 +4068,13 @@ function ServerOps() {
   const [dbOpen, setDbOpen] = useState(false)   // Databases details — collapsed by default
   const [backups, setBackups] = useState<{ id: string; count: number; size: number }[]>([])
   const [restoreOpen, setRestoreOpen] = useState(false)
+  const [backingCfg, setBackingCfg] = useState(false)   // is a backing store configured?
   // Stay open until an outside click; don't close mid-operation.
   const wrapRef = useClickOutside<HTMLDivElement>(open, () => { if (!busy) setOpen(false) })
 
   const load = useCallback(() => {
     api.opsStatus().then((s) => { setStatus(s); setDbs(s.databases) }).catch(() => {})
+    api.backingStatus().then((b) => setBackingCfg(b.configured)).catch(() => {})
   }, [])
   useEffect(() => { if (open) load() }, [open, load])
 
@@ -4158,6 +4160,29 @@ function ServerOps() {
       waitForRestart(`Restored ${r.restored} databases ✓ (safety backup ${r.safety_backup})`)
     } catch (e) { setMsg((e as Error).message); setBusy('') }
   }
+  const syncBacking = async () => {
+    setBusy('backing'); setMsg('Syncing backing store…')
+    try {
+      await api.backingRun(false)
+      let n = 0
+      const poll = setInterval(async () => {
+        n++
+        try {
+          const s = await api.backingStatus()
+          if (!s.running || n > 90) {
+            clearInterval(poll); setBusy('')
+            const last = s.last
+            if (last?.error) setMsg('Backing-store sync failed: ' + last.error)
+            else if (last?.stores) {
+              const up = last.stores.reduce((a, x) => a + x.pushed + x.pushed_deleted, 0)
+              const down = last.stores.reduce((a, x) => a + x.pulled + x.pulled_deleted, 0)
+              setMsg(`Backing store synced · ↑${up} pushed · ↓${down} pulled`)
+            } else setMsg('Backing store synced ✓')
+          }
+        } catch { /* keep polling */ }
+      }, 1000)
+    } catch (e) { setMsg((e as Error).message); setBusy('') }
+  }
 
   return (
     <div className="ops-wrap filter-wrap" ref={wrapRef}>
@@ -4228,6 +4253,11 @@ function ServerOps() {
                   <button className="ops-btn" disabled={!!busy} onClick={rebuildCatalog}
                     title="Full catalog re-derivation. Wand applies only touch changed games; run this for a global rebuild.">
                     {busy === 'rebuild' ? 'Rebuilding…' : '⟳ Rebuild catalog'}</button>
+                  {backingCfg && (
+                    <button className="ops-btn" disabled={!!busy} onClick={syncBacking}
+                      title="Two-way sync your durable data (tags, ownership, art pins, overrides, framing, manual games) with your PocketBase backing store. SQLite stays your fast local copy.">
+                      {busy === 'backing' ? 'Syncing…' : '☁ Sync backing store'}</button>
+                  )}
                   {broken.length > 0 && (
                     <button className="ops-btn danger" disabled={!!busy}
                       onClick={() => fix(broken[0].id, 'recover')}

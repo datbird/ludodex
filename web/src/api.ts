@@ -533,6 +533,8 @@ export interface OpsDatabase {
   status?: string; detail?: string; reclaimable?: number
 }
 export interface OpsStatus { services: OpsService[]; databases: OpsDatabase[] }
+export interface BackingStore { name: string; local: number; remote: number; pulled: number; pulled_deleted: number; pushed: number; pushed_deleted: number }
+export interface BackingResult { backend?: string; dry_run?: boolean; stores?: BackingStore[]; error?: string; at?: number }
 
 export interface SpotlightItem {
   norm_key: string
@@ -1258,6 +1260,16 @@ export const api = {
     return r.json() as Promise<{ ok: boolean; id: string; count: number; size: number }>
   },
   opsBackups: () => get<{ backups: { id: string; count: number; size: number }[] }>('/api/ops/backups'),
+  // two-way backing-store sync (durable stores <-> PocketBase/etc.)
+  backingStatus: () => get<{ running: boolean; last: BackingResult | null; backend: string; configured: boolean }>('/api/backingstore/status'),
+  backingRun: async (dry = false) => {
+    const r = await fetch('/api/backingstore/run', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ dry_run: dry }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ started: boolean; backend: string; running?: boolean }>
+  },
   opsRestore: async (id: string) => {
     const r = await fetch('/api/ops/restore', {
       method: 'POST', headers: { 'content-type': 'application/json' },

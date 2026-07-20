@@ -7957,9 +7957,24 @@ def games_merge(nk: str, body: dict = Body(...)):
         merges.rekey_user_data(from_key, to_key)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    ok, err = _run_script("build_library.py", timeout=900)
-    if not ok:
-        raise HTTPException(502, "merged, but catalog rebuild failed: %s" % err)
+    # Scoped catalog patch — fold ONLY the two affected games' rows (verified byte-identical
+    # to a full build_library rebuild). No whole-catalog rebuild. Falls back to a full
+    # rebuild if the surgical patch ever raises, so correctness is never at risk.
+    try:
+        import catalog_patch
+        con = sqlite3.connect(LIBRARY_DB)
+        con.execute("PRAGMA busy_timeout=8000")
+        try:
+            catalog_patch.merge(con, from_key, to_key, titles.get(to_key, ""), DATA)
+        finally:
+            con.close()
+    except Exception as e:
+        print("merge: surgical patch failed, full rebuild: %s" % str(e)[:150],
+              file=sys.stderr)
+        ok, err = _run_script("build_library.py", timeout=900)
+        if not ok:
+            raise HTTPException(502, "merged, but catalog reconcile failed: %s" % err)
+    _enqueue_media_reconcile({to_key}, True)     # re-stamp media game_key + re-choose, scoped
     return {"merged": True, "canonical": to_key, "from": from_key}
 
 
@@ -8021,9 +8036,23 @@ def games_split(nk: str, body: dict = Body(...)):
         splits.add_many(picked, to_key, title, nk)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    ok, err = _run_script("build_library.py", timeout=900)
-    if not ok:
-        raise HTTPException(502, "peeled, but catalog rebuild failed: %s" % err)
+    # Scoped catalog patch — peel ONLY the affected sources into the new entry (verified
+    # byte-identical to a full rebuild). Full-rebuild fallback keeps correctness safe.
+    try:
+        import catalog_patch
+        con = sqlite3.connect(LIBRARY_DB)
+        con.execute("PRAGMA busy_timeout=8000")
+        try:
+            catalog_patch.split(con, nk, to_key, title, picked, DATA)
+        finally:
+            con.close()
+    except Exception as e:
+        print("split: surgical patch failed, full rebuild: %s" % str(e)[:150],
+              file=sys.stderr)
+        ok, err = _run_script("build_library.py", timeout=900)
+        if not ok:
+            raise HTTPException(502, "peeled, but catalog reconcile failed: %s" % err)
+    _enqueue_media_reconcile({nk, to_key}, True)
     return {"split": True, "to_key": to_key, "title": title, "peeled": len(picked)}
 
 
@@ -8305,6 +8334,46 @@ def dbsync_run(body: dict = Body(default={})):
                           "step": "Syncing to %s…" % target, "ok": None, "error": ""}
     threading.Thread(target=_dbsync_worker, args=(target,), daemon=True).start()
     return _dbsync_state()
+
+
+# --------------------------------------------------------------------------- #
+#  Backing store: TWO-WAY sync of the durable user stores (tags, ownership, art
+#  pins, overrides, framing, manual games) with an external DB — SQLite stays the
+#  fast local cache; the remote holds the durable truth. Distinct from /api/dbsync
+#  above (that is the one-way OUTBOUND catalog mirror). See dbsync.py.
+# --------------------------------------------------------------------------- #
+_TWOWAY = {"last": None}
+
+
+@app.get("/api/backingstore/status")
+def backingstore_status():
+    cur = _JOBS.get("backingstore")
+    return {"running": bool(cur and cur.get("thread") and cur["thread"].is_alive()),
+            "last": _TWOWAY["last"],
+            "backend": config.get("sync_target") or "pocketbase",
+            "configured": bool(config.get("pocketbase_url")
+                               and config.pocketbase_password())}
+
+
+@app.post("/api/backingstore/run")
+def backingstore_run(body: dict = Body(default={})):
+    """Two-way sync the durable stores against the backing store (PocketBase). Runs in the
+    background; poll /api/backingstore/status. `dry_run` reports the plan without writing."""
+    backend = (body or {}).get("backend") or config.get("sync_target") or "pocketbase"
+    dry = bool((body or {}).get("dry_run"))
+    cur = _JOBS.get("backingstore")
+    if cur and cur.get("thread") and cur["thread"].is_alive():
+        return {"started": False, "running": True}
+
+    def job(_stop):
+        import dbsync
+        try:
+            _TWOWAY["last"] = dbsync.sync_all(backend, dry_run=dry)
+        except Exception as e:
+            _TWOWAY["last"] = {"error": str(e)[:250], "backend": backend}
+            print("backingstore sync: %s" % str(e)[:200], file=sys.stderr)
+    _start_job("backingstore", "backingstore", "Two-way backing-store sync", job)
+    return {"started": True, "backend": backend, "dry_run": dry}
 
 
 # ---------------------------------------------------------------- static SPA (last)
