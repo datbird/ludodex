@@ -4968,6 +4968,153 @@ function showToast(msg: string) {
   }, 4200)
 }
 
+// One tool for every manual matching / association fix (replaces "Fix duplication" +
+// "Peel apart"). Always nudges the user toward the magic wand first — it usually resolves
+// these automatically — but never blocks manual control. Join/Separate delegate to the
+// proven merge/split flows; Manual Match + Associations are handled inline. Every manual
+// change here is durable/pinned (aimeta pin=manual, merges/splits/detach stores).
+function ResolveModal({ nk, title, platform, alsoOwnedOn, onClose, onReload, onGone }: {
+  nk: string; title: string; platform?: string | null
+  alsoOwnedOn?: { entry_key: string; platform: string; title: string; via?: string }[]
+  onClose: () => void; onReload: () => void; onGone: () => void
+}) {
+  useScrollLock()
+  const [mode, setMode] = useState<'hub' | 'match' | 'assoc'>('hub')
+  const [join, setJoin] = useState(false)
+  const [separate, setSeparate] = useState(false)
+  const [q, setQ] = useState('')
+  const [igdbRef, setIgdbRef] = useState('')
+  const [cands, setCands] = useState<IdentifyCandidate[]>([])
+  const [refs, setRefs] = useState('')
+  const [scopeThis, setScopeThis] = useState(false)   // apply to just this platform's entry
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+
+  useEffect(() => {
+    if (!q.trim()) { setCands([]); return }
+    const t = setTimeout(() => api.identify(q).then((r) => setCands(r.candidates.slice(0, 8)))
+      .catch(() => {}), 300)
+    return () => clearTimeout(t)
+  }, [q])
+
+  if (join) return <FixDupModal nk={nk} title={title} onClose={() => setJoin(false)}
+    onMerged={(c) => { setJoin(false); c === nk ? onReload() : onGone() }} />
+  if (separate) return <PeelModal nk={nk} title={title} onClose={() => setSeparate(false)}
+    onPeeled={() => { setSeparate(false); onReload() }} />
+
+  const applyMatch = async (igdb: string) => {
+    setBusy(true); setMsg('')
+    try {
+      await api.aimetaPin({ norm_key: nk, igdb, platform: scopeThis ? (platform || null) : null })
+      if (refs.trim()) await api.setAttributeOverride(nk, 'notes', refs.trim(), 'manual')
+      setMsg('Matched — pinned ✓'); onReload()
+    } catch (e) { setMsg((e as Error).message) } finally { setBusy(false) }
+  }
+  const detach = async (normKey: string, plat: string) => {
+    setBusy(true); setMsg('')
+    try { await api.aimetaPin({ norm_key: normKey, platform: plat, detach: true })
+      setMsg(`Separated the ${plat} entry ✓`); onReload() }
+    catch (e) { setMsg((e as Error).message) } finally { setBusy(false) }
+  }
+  const nkOf = (entryKey: string) => entryKey.includes('@') ? entryKey.slice(0, entryKey.lastIndexOf('@')) : entryKey
+
+  return (
+    <div className="overlay fixdup-overlay" onClick={onClose}>
+      <div className="panel fixdup-panel resolve-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose}>×</button>
+        <h2>Resolve Matching &amp; Associations</h2>
+        <div className="resolve-wand-note">
+          <span className="rwn-ic">✨</span>
+          <span>Give the <b>Magic wand</b> a try first — it usually sorts out matching and
+            associations on its own (including cross-title mix-ups). If it missed this one,
+            fix it by hand below — that's totally fine.</span>
+        </div>
+
+        {mode === 'hub' && (
+          <div className="resolve-cards">
+            <button className="resolve-card" onClick={() => setMode('match')}>
+              <span className="rc-ic">🎯</span>
+              <span className="rc-txt"><b>Fix the match</b>
+                <span className="rc-sub">Set the correct game by hand, with reference links or notes.</span></span></button>
+            <button className="resolve-card" onClick={() => setJoin(true)}>
+              <span className="rc-ic">⧉</span>
+              <span className="rc-txt"><b>Part of another game</b>
+                <span className="rc-sub">These files belong to a different entry — join them into it.</span></span></button>
+            <button className="resolve-card" onClick={() => setSeparate(true)}>
+              <span className="rc-ic">✂</span>
+              <span className="rc-txt"><b>Split off different files</b>
+                <span className="rc-sub">Some files here are a different game — peel them into their own entry.</span></span></button>
+            <button className="resolve-card" onClick={() => setMode('assoc')}>
+              <span className="rc-ic">🔗</span>
+              <span className="rc-txt"><b>Associations (“also on”)</b>
+                <span className="rc-sub">Separate a platform that isn't really the same game.</span></span></button>
+          </div>
+        )}
+
+        {mode === 'match' && (
+          <div className="resolve-match">
+            <button className="fixdup-back" onClick={() => setMode('hub')}>← back</button>
+            <label className="rm-label">Match to a specific game</label>
+            <input className="fixdup-search" autoFocus
+              placeholder="Paste an IGDB link / id, or search by name"
+              value={igdbRef || q}
+              onChange={(e) => { const v = e.target.value
+                if (/igdb\.com|^\d+$/.test(v.trim())) { setIgdbRef(v); setQ('') }
+                else { setQ(v); setIgdbRef('') } }} />
+            {igdbRef.trim() && (
+              <button className="go" disabled={busy} onClick={() => applyMatch(igdbRef.trim())}>
+                Use this IGDB match</button>
+            )}
+            {cands.map((c) => (
+              <div key={c.igdb_id ?? c.name} className="fixdup-row">
+                <span className="fixdup-name">{c.name}{c.year ? ` (${c.year})` : ''}
+                  {c.platforms.length ? <span className="dim"> · {c.platforms.slice(0, 3).join(', ')}</span> : null}</span>
+                <button className="ops-btn" disabled={busy || !c.igdb_id}
+                  onClick={() => applyMatch(String(c.igdb_id))}>Match</button>
+              </div>
+            ))}
+            {platform && alsoOwnedOn && alsoOwnedOn.length > 0 && (
+              <label className="rm-scope">
+                <input type="checkbox" checked={scopeThis}
+                  onChange={(e) => setScopeThis(e.target.checked)} />
+                Apply to just the <b>{platform}</b> entry (leave the others alone)
+              </label>
+            )}
+            <label className="rm-label">Reference links / notes
+              <span className="dim"> · optional — Wikipedia, your own notes, anything</span></label>
+            <textarea className="rm-refs" rows={3} placeholder="Paste URLs or notes for this match…"
+              value={refs} onChange={(e) => setRefs(e.target.value)} />
+          </div>
+        )}
+
+        {mode === 'assoc' && (
+          <div className="resolve-assoc">
+            <button className="fixdup-back" onClick={() => setMode('hub')}>← back</button>
+            <p className="dim">This game is grouped as one across these platforms. If one is
+              actually a <b>different</b> game that just shares the name (the Dune-on-2600
+              case), separate it into its own entry.</p>
+            {platform && (
+              <div className="ra-row"><span className="ra-plat">{platform}</span>
+                <span className="dim">this entry</span>
+                <button className="ops-btn" disabled={busy}
+                  onClick={() => detach(nk, platform)}>Separate</button></div>
+            )}
+            {(alsoOwnedOn || []).filter((s) => !s.via).map((s) => (
+              <div key={s.entry_key} className="ra-row">
+                <span className="ra-plat">{s.platform}</span><span className="dim">also on</span>
+                <button className="ops-btn" disabled={busy}
+                  onClick={() => detach(nkOf(s.entry_key), s.platform)}>Separate</button>
+              </div>
+            ))}
+          </div>
+        )}
+        {busy && <div className="dim fixdup-busy">Working…</div>}
+        {msg && <div className="fixdup-err">{msg}</div>}
+      </div>
+    </div>
+  )
+}
+
 function FixDupModal({ nk, title, onClose, onMerged }: {
   nk: string; title: string; onClose: () => void; onMerged: (canonical: string) => void
 }) {
@@ -5195,8 +5342,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   const [wandOpen, setWandOpen] = useState(false)
   const [heroPref, setHeroPref] = useState<string | null>(null)
   const [frames, setFrames] = useState<Record<string, Frame>>({})
-  const [fixDup, setFixDup] = useState(false)
-  const [peel, setPeel] = useState(false)
+  const [resolve, setResolve] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const toolsRef = useClickOutside<HTMLDivElement>(toolsOpen, () => setToolsOpen(false))
   useEffect(() => { setToolsOpen(false) }, [nk])
@@ -5243,18 +5389,19 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
         {d && (
           <div className="hero-tools" ref={toolsRef}>
             <button className="hero-tools-btn" title="Game tools"
-              aria-label="Game tools" onClick={() => setToolsOpen((o) => !o)}>🧰</button>
+              aria-label="Game tools" onClick={() => setToolsOpen((o) => !o)}>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4 2.6-2.6z" />
+              </svg></button>
             {toolsOpen && (
               <div className="hero-tools-menu">
                 <button onClick={() => { setToolsOpen(false); setWandOpen(true) }}>
                   <span className="htm-ic">✨</span> Magic wand
                   <span className="htm-sub">Identify, fix &amp; find art — all in one</span></button>
-                <button onClick={() => { setToolsOpen(false); setFixDup(true) }}>
-                  <span className="htm-ic">⧉</span> Fix duplication
-                  <span className="htm-sub">Merge a duplicate entry in</span></button>
-                <button onClick={() => { setToolsOpen(false); setPeel(true) }}>
-                  <span className="htm-ic">✂</span> Peel apart
-                  <span className="htm-sub">Split two same-named games</span></button>
+                <button onClick={() => { setToolsOpen(false); setResolve(true) }}>
+                  <span className="htm-ic">🔗</span> Resolve matching &amp; associations
+                  <span className="htm-sub">Manually match, join/split, or fix “also on”</span></button>
               </div>
             )}
           </div>
@@ -5266,13 +5413,12 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
           <MagicWandOverlay target={{ norm_keys: [base], label: d.title }}
             onClose={() => setWandOpen(false)} />
         )}
-        {fixDup && d && (
-          <FixDupModal nk={base} title={d.title} onClose={() => setFixDup(false)}
-            onMerged={(canon) => { setFixDup(false); if (canon === nk) reloadDetail(); else onClose() }} />
-        )}
-        {peel && d && (
-          <PeelModal nk={base} title={d.title} onClose={() => setPeel(false)}
-            onPeeled={() => { setPeel(false); reloadDetail() }} />
+        {resolve && d && (
+          <ResolveModal nk={base} title={d.title} platform={d.platform}
+            alsoOwnedOn={d.also_owned_on}
+            onClose={() => setResolve(false)}
+            onReload={() => reloadDetail()}
+            onGone={() => { setResolve(false); onClose() }} />
         )}
         {!d ? <div className="loading">Loading…</div> : (
           <>
