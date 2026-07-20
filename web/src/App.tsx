@@ -4065,7 +4065,9 @@ function ServerOps() {
   const [busy, setBusy] = useState('')          // db id or 'restart' or 'check'
   const [msg, setMsg] = useState('')
   const [restarting, setRestarting] = useState(false)
-  const [dbOpen, setDbOpen] = useState(false)   // Databases — collapsed by default
+  const [dbOpen, setDbOpen] = useState(false)   // Databases details — collapsed by default
+  const [backups, setBackups] = useState<{ id: string; count: number; size: number }[]>([])
+  const [restoreOpen, setRestoreOpen] = useState(false)
   // Stay open until an outside click; don't close mid-operation.
   const wrapRef = useClickOutside<HTMLDivElement>(open, () => { if (!busy) setOpen(false) })
 
@@ -4091,22 +4093,26 @@ function ServerOps() {
       setDbs((await api.dbCheck('all')).results)
     } catch (e) { setMsg(`${db}: ${(e as Error).message}`) } finally { setBusy('') }
   }
-  const restart = async () => {
-    if (!confirm('Restart the Ludodex server? The app will be briefly unavailable.')) return
-    setBusy('restart'); setRestarting(true); setMsg('Restarting…')
-    try { await api.opsRestart() } catch { /* connection drops as it re-execs */ }
-    // poll until it answers again
+  // Poll /api/ops/status until the server answers with a fresh uptime, then finish.
+  const waitForRestart = (doneMsg: string) => {
+    setRestarting(true)
     let n = 0
     const poll = setInterval(async () => {
       n++
       try {
         const s = await api.opsStatus()
-        if (s.services[0]?.uptime_seconds < 30 || n > 20) {
+        if ((s.services[0]?.uptime_seconds ?? 999) < 30 || n > 20) {
           clearInterval(poll); setStatus(s); setDbs(s.databases)
-          setRestarting(false); setBusy(''); setMsg('Server restarted ✓')
+          setRestarting(false); setBusy(''); setMsg(doneMsg)
         }
       } catch { /* still down */ }
     }, 1000)
+  }
+  const restart = async () => {
+    if (!confirm('Restart the Ludodex server? The app will be briefly unavailable.')) return
+    setBusy('restart'); setMsg('Restarting…')
+    try { await api.opsRestart() } catch { /* connection drops as it re-execs */ }
+    waitForRestart('Server restarted ✓')
   }
 
   const statusDot = (s?: string) =>
@@ -4120,6 +4126,37 @@ function ServerOps() {
                        : 'A rebuild is already running')
     } catch (e) { setMsg((e as Error).message) }
     finally { setBusy('') }
+  }
+  const optimizeAll = async () => {
+    setBusy('optimize'); setMsg('')
+    try {
+      const r = await api.opsOptimize()
+      setMsg(`Optimized ${r.optimized} databases · reclaimed ${fmtBytes(r.reclaimed)}`)
+    } catch { setMsg('Optimize failed') } finally { setBusy('') }
+  }
+  const backupNow = async () => {
+    setBusy('backup'); setMsg('')
+    try {
+      const r = await api.opsBackup()
+      setMsg(`Backed up ${r.count} databases (${fmtBytes(r.size)})`)
+      if (restoreOpen) setBackups((await api.opsBackups()).backups)
+    } catch { setMsg('Backup failed') } finally { setBusy('') }
+  }
+  const openRestore = async () => {
+    setMsg('')
+    try { setBackups((await api.opsBackups()).backups); setRestoreOpen((v) => !v) }
+    catch { setMsg('Could not list backups') }
+  }
+  const restore = async (id: string) => {
+    if (!confirm(`Restore backup "${id}"? Your current data is safety-backed-up first, `
+      + `then the server restarts to load it.`)) return
+    setBusy('restore'); setMsg('Restoring…')
+    try {
+      const r = await api.opsRestore(id)
+      setRestoreOpen(false)
+      await api.opsRestart().catch(() => { /* connection drops */ })
+      waitForRestart(`Restored ${r.restored} databases ✓ (safety backup ${r.safety_backup})`)
+    } catch (e) { setMsg((e as Error).message); setBusy('') }
   }
 
   return (
@@ -4155,55 +4192,90 @@ function ServerOps() {
             </div>
           ))}
 
-          <div className="ops-section">Catalog</div>
-          <div className="ops-svc">
-            <div>
-              <div className="ops-svc-name">Full re-derivation</div>
-              <div className="ops-svc-meta">Wand applies now reconcile only touched games —
-                run this for a global rebuild (regional merge, cross-refs).</div>
-            </div>
-            <button className="ops-btn" disabled={!!busy} onClick={rebuildCatalog}>
-              {busy === 'rebuild' ? '…' : 'Rebuild'}
-            </button>
-          </div>
+          {(() => {
+            const present = dbs.filter((d) => d.exists && d.size > 0)
+            const broken = dbs.filter((d) => d.status === 'error')
+            const totalSize = present.reduce((n, d) => n + d.size, 0)
+            return (
+              <>
+                <div className="ops-section">Data &amp; maintenance</div>
+                <div className="ops-svc">
+                  <div>
+                    <div className="ops-svc-name">
+                      <span className={'ops-dot ' + (broken.length ? 'err' : 'ok')} />
+                      {present.length} database{present.length === 1 ? '' : 's'}
+                      {broken.length ? ` · ${broken.length} need repair` : ''}
+                    </div>
+                    <div className="ops-svc-meta">{fmtBytes(totalSize)} on disk
+                      · your library, media index, tags, ownership &amp; settings</div>
+                  </div>
+                  <button className="ops-link" disabled={!!busy} onClick={checkAll}
+                    title="Run a health check (PRAGMA quick_check) on every database">
+                    {busy === 'check' ? 'checking…' : 'Check health'}
+                  </button>
+                </div>
 
-          <div className="ops-section ops-section-row">
-            <button className="ops-section-toggle" onClick={() => setDbOpen((v) => !v)}>
-              <span className={'sync-chev' + (dbOpen ? ' open' : '')}>▸</span>
-              <span>Databases</span>
-              <span className="ops-db-count">{dbs.length}</span>
-            </button>
-            <button className="ops-link" disabled={!!busy} onClick={checkAll}>
-              {busy === 'check' ? 'checking…' : 'Check all'}
-            </button>
-          </div>
-          {dbOpen && dbs.map((d) => (
-            <div key={d.id} className="ops-db">
-              <span className={'ops-dot ' + statusDot(d.status)} />
-              <div className="ops-db-main">
-                <div className="ops-db-name">{d.name}
-                  <span className="ops-db-role">{d.role}</span>
-                </div>
-                <div className="ops-db-meta">
-                  {d.exists ? fmtBytes(d.size) : 'missing'}
-                  {d.status && d.status !== 'ok' ? ` · ${d.detail}` : ''}
-                </div>
-              </div>
-              {d.exists && d.size > 0 && (
-                <div className="ops-db-actions">
-                  <button className="ops-btn" disabled={!!busy}
-                    onClick={() => fix(d.id, 'optimize')}
-                    title="PRAGMA optimize + REINDEX + VACUUM">
-                    {busy === d.id ? '…' : 'Optimize'}</button>
-                  {d.status === 'error' && (
+                <div className="ops-maint">
+                  <button className="ops-btn" disabled={!!busy} onClick={optimizeAll}
+                    title="Reclaim space + rebuild indexes across all databases (VACUUM/REINDEX)">
+                    {busy === 'optimize' ? 'Optimizing…' : '⚡ Optimize'}</button>
+                  <button className="ops-btn" disabled={!!busy} onClick={backupNow}
+                    title="Snapshot every database (consistent, live-safe)">
+                    {busy === 'backup' ? 'Backing up…' : '⬇ Back up'}</button>
+                  <button className="ops-btn" disabled={!!busy} onClick={openRestore}
+                    title="Restore a previous backup (your current data is snapshotted first)">
+                    ↺ Restore</button>
+                  <button className="ops-btn" disabled={!!busy} onClick={rebuildCatalog}
+                    title="Full catalog re-derivation. Wand applies only touch changed games; run this for a global rebuild.">
+                    {busy === 'rebuild' ? 'Rebuilding…' : '⟳ Rebuild catalog'}</button>
+                  {broken.length > 0 && (
                     <button className="ops-btn danger" disabled={!!busy}
-                      onClick={() => fix(d.id, 'recover')}
-                      title="Rebuild from SQL dump (backs up original)">Repair</button>
+                      onClick={() => fix(broken[0].id, 'recover')}
+                      title={`Repair ${broken[0].name} (rebuilds from a SQL dump, backs up the original)`}>
+                      {busy === broken[0].id ? '…' : `🛠 Repair ${broken[0].name}`}</button>
                   )}
                 </div>
-              )}
-            </div>
-          ))}
+
+                {restoreOpen && (
+                  <div className="ops-restore">
+                    {backups.length === 0
+                      ? <div className="ops-svc-meta">No backups yet — hit “Back up” to make one.</div>
+                      : backups.map((b) => (
+                        <div key={b.id} className="ops-db">
+                          <div className="ops-db-main">
+                            <div className="ops-db-name">{b.id}</div>
+                            <div className="ops-db-meta">{b.count} databases · {fmtBytes(b.size)}</div>
+                          </div>
+                          <button className="ops-btn" disabled={!!busy}
+                            onClick={() => restore(b.id)}>Restore</button>
+                        </div>
+                      ))}
+                  </div>
+                )}
+
+                {present.length > 0 && (
+                  <button className="ops-section ops-section-row ops-details-toggle"
+                    onClick={() => setDbOpen((v) => !v)}>
+                    <span className={'sync-chev' + (dbOpen ? ' open' : '')}>▸</span>
+                    <span>Details</span>
+                    <span className="ops-db-count">{present.length}</span>
+                  </button>
+                )}
+                {dbOpen && present.map((d) => (
+                  <div key={d.id} className="ops-db">
+                    <span className={'ops-dot ' + statusDot(d.status)} />
+                    <div className="ops-db-main">
+                      <div className="ops-db-name">{d.name}
+                        <span className="ops-db-role">{d.role}</span>
+                      </div>
+                      <div className="ops-db-meta">{fmtBytes(d.size)}
+                        {d.status && d.status !== 'ok' ? ` · ${d.detail}` : ''}</div>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )
+          })()}
           {msg && <div className="ops-msg">{msg}</div>}
         </div>
       )}

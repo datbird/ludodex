@@ -1639,6 +1639,12 @@ a.idchip:hover { background: var(--accent-bg); }
 .ops-section-toggle .sync-chev { font-size: 9px; opacity: 0.7; }
 .ops-db-count { font-size: 10px; font-weight: 600; opacity: 0.55; text-transform: none; letter-spacing: 0; }
 .ops-section-row { display: flex; justify-content: space-between; align-items: center; }
+.ops-details-toggle { width: 100%; }
+.ops-maint { display: flex; flex-wrap: wrap; gap: 7px; padding: 4px 0 2px; }
+.ops-maint .ops-btn { flex: 0 0 auto; }
+.ops-restore { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 2px;
+  padding: 6px; border: 1px solid var(--border); border-radius: 8px;
+  background: rgba(127, 127, 127, 0.06); }
 .ops-link { background: none; border: none; cursor: pointer; color: var(--accent);
   font-size: 12px; padding: 0; text-transform: none; letter-spacing: 0; }
 .ops-link:disabled { opacity: 0.5; cursor: default; }

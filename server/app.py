@@ -5759,11 +5759,11 @@ def _db_path(db_id):
     d = DB_BY_ID.get(db_id)
     if not d:
         raise HTTPException(404, "unknown database %r" % db_id)
-    return os.path.join(DIR, d[2])
+    return os.path.join(DATA, d[2])
 
 
 def _db_info(db_id, name, fname, role):
-    path = os.path.join(DIR, fname)
+    path = os.path.join(DATA, fname)     # DBs live in the DATA volume, not the app dir
     exists = os.path.exists(path)
     return {"id": db_id, "name": name, "role": role, "path": fname,
             "exists": exists,
@@ -5885,6 +5885,110 @@ def ops_db_fix(body: dict = Body(...)):
                 "backup": os.path.basename(bak)}
 
     raise HTTPException(400, "unknown action %r (optimize | recover)" % action)
+
+
+# --- whole-fleet maintenance: optimize / backup / restore across all data DBs. The panel
+# surfaces these instead of a per-file inventory (users want maintenance, not a table list). ---
+BACKUP_DIR = os.path.join(DATA, "backups")
+
+
+def _all_db_files():
+    """Every *.sqlite in the data volume (robust to the registry — backs up/optimizes
+    what actually exists, including auth.sqlite and any future store)."""
+    try:
+        return sorted(f for f in os.listdir(DATA)
+                      if f.endswith(".sqlite") and os.path.isfile(os.path.join(DATA, f)))
+    except OSError:
+        return []
+
+
+@app.post("/api/ops/optimize")
+def ops_optimize():
+    """Optimize EVERY database (PRAGMA optimize + REINDEX + VACUUM) — reclaims space and
+    rebuilds indexes across the whole data volume in one action."""
+    reclaimed = ok = 0
+    errors = []
+    for fname in _all_db_files():
+        path = os.path.join(DATA, fname)
+        before = os.path.getsize(path)
+        try:
+            con = sqlite3.connect(path, timeout=10)
+            con.execute("PRAGMA busy_timeout=8000")
+            con.execute("PRAGMA optimize")
+            con.execute("REINDEX")
+            con.execute("VACUUM")
+            con.commit()
+            con.close()
+            reclaimed += max(0, before - os.path.getsize(path))
+            ok += 1
+        except sqlite3.Error as e:
+            errors.append("%s: %s" % (fname, str(e)[:80]))
+    return {"ok": True, "optimized": ok, "reclaimed": reclaimed, "errors": errors}
+
+
+@app.post("/api/ops/backup")
+def ops_backup():
+    """Snapshot every database into data/backups/<timestamp>/ using SQLite's online backup
+    (consistent even while the server is running). Returns the new backup's id."""
+    bid = time.strftime("%Y-%m-%d_%H%M%S", time.localtime())
+    dest = os.path.join(BACKUP_DIR, bid)
+    os.makedirs(dest, exist_ok=True)
+    n = size = 0
+    for fname in _all_db_files():
+        src, dst = os.path.join(DATA, fname), os.path.join(dest, fname)
+        try:
+            s = sqlite3.connect(src, timeout=10)
+            d = sqlite3.connect(dst)
+            with d:
+                s.backup(d)
+            s.close()
+            d.close()
+        except sqlite3.Error:
+            try:
+                shutil.copy2(src, dst)          # fallback: plain copy
+            except OSError:
+                continue
+        n += 1
+        size += os.path.getsize(dst)
+    return {"ok": True, "id": bid, "count": n, "size": size}
+
+
+@app.get("/api/ops/backups")
+def ops_backups():
+    """List available backups (newest first): id, db count, total size."""
+    out = []
+    if os.path.isdir(BACKUP_DIR):
+        for name in sorted(os.listdir(BACKUP_DIR), reverse=True):
+            p = os.path.join(BACKUP_DIR, name)
+            if not os.path.isdir(p):
+                continue
+            files = [f for f in os.listdir(p) if f.endswith(".sqlite")]
+            out.append({"id": name, "count": len(files),
+                        "size": sum(os.path.getsize(os.path.join(p, f)) for f in files)})
+    return {"backups": out}
+
+
+@app.post("/api/ops/restore")
+def ops_restore(body: dict = Body(...)):
+    """Restore a backup over the live databases. Safety-snapshots the CURRENT state first,
+    then copies the backup's files back in. A restart is required afterward so every open
+    connection reopens the restored files — the client should call /api/ops/restart."""
+    bid = (body or {}).get("id")
+    src_dir = os.path.join(BACKUP_DIR, bid or "")
+    if not bid or os.path.basename(bid) != bid or not os.path.isdir(src_dir):
+        raise HTTPException(404, "unknown backup %r" % bid)
+    safety = ops_backup()["id"]                 # never restore without a way back
+    restored = 0
+    for f in os.listdir(src_dir):
+        if not f.endswith(".sqlite"):
+            continue
+        try:
+            shutil.copy2(os.path.join(src_dir, f), os.path.join(DATA, f))
+            restored += 1
+        except OSError:
+            pass
+    return {"ok": True, "restored": restored, "safety_backup": safety,
+            "restart_required": True}
 
 
 # A games entry id is `base_key@platform` (per-platform library entry, DESIGN §11).

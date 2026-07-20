@@ -1246,6 +1246,26 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json()
   },
+  // whole-fleet maintenance
+  opsOptimize: async () => {
+    const r = await fetch('/api/ops/optimize', { method: 'POST' })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{ ok: boolean; optimized: number; reclaimed: number; errors: string[] }>
+  },
+  opsBackup: async () => {
+    const r = await fetch('/api/ops/backup', { method: 'POST' })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{ ok: boolean; id: string; count: number; size: number }>
+  },
+  opsBackups: () => get<{ backups: { id: string; count: number; size: number }[] }>('/api/ops/backups'),
+  opsRestore: async (id: string) => {
+    const r = await fetch('/api/ops/restore', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ ok: boolean; restored: number; safety_backup: string; restart_required: boolean }>
+  },
   // AI natural-language search (phase 3)
   aiSearch: async (q: string) => {
     const r = await fetch('/api/search', {
