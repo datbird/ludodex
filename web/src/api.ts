@@ -1449,6 +1449,13 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ ok: boolean; norm_key: string; has_cover: boolean; chosen: Record<string, number>; web_added: number }>
   },
+  // Full authoritative catalog re-derivation (background). Wand applies reconcile only
+  // the touched games now, so this is the on-demand button for a global rebuild.
+  rebuildCatalog: async () => {
+    const r = await fetch('/api/catalog/rebuild', { method: 'POST' })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ started: boolean; running?: boolean }>
+  },
   // On-demand AI art pick for one game — the wand's "pick nicest art" button. The ONLY
   // place the paid vision pick runs by default (routine apply/rebuild never calls it).
   aimetaPickArt: async (body: { norm_key?: string; entry_key?: string }) => {

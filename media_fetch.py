@@ -447,10 +447,11 @@ def fetch_missing_art(con, now, limit=None):
     return fetch_steamgriddb_targets(con, now, identified_targets(), limit)
 
 
-def fetch_screenscraper(con, now):
+def fetch_screenscraper(con, now, only=None):
     """Ingest media URLs from the local ScreenScraper cache (no API calls — they
     came free with each metadata scrape). Stored as URL refs; downloading them
-    later appends auth via screenscraper.media_url_with_auth."""
+    later appends auth via screenscraper.media_url_with_auth. `only` = a set of
+    norm_keys to restrict to (scoped reconcile after a wand apply); None = all."""
     cache = os.path.join(DATA, "screenscraper-cache.sqlite")
     if not os.path.exists(cache):
         print("media_fetch: screenscraper — no cache yet (run ss_scrape.py)",
@@ -459,12 +460,21 @@ def fetch_screenscraper(con, now):
     import json
     import screenscraper as ss
     sc = sqlite3.connect(cache)
+    q = ("SELECT norm_key, system, payload_json FROM ss_game "
+         "WHERE status='ok' AND payload_json IS NOT NULL")
+    params = ()
+    if only:
+        q += " AND norm_key IN (%s)" % ",".join("?" * len(only))
+        params = tuple(only)
     try:
-        rows = sc.execute("SELECT norm_key, system, payload_json FROM ss_game "
-                          "WHERE status='ok' AND payload_json IS NOT NULL").fetchall()
+        rows = sc.execute(q, params).fetchall()
     except sqlite3.OperationalError:
         rows = []
     sc.close()
+    # scoped reconcile replaces just these games' SS refs so re-runs don't pile up
+    if only and rows:
+        con.executemany("DELETE FROM media WHERE provider='screenscraper' AND norm_key=?",
+                        [(nk,) for nk in only])
     n = 0
     for nk, system, payload in rows:
         try:

@@ -3857,6 +3857,9 @@ def _apply_surgical_meta(touched):
     igdb_names = {}
     title_ids = {}                       # nk -> igdb_id (title-level resolution)
     entry_ids = {}                       # (nk, platform) -> igdb_id (per-entry override)
+    igdb_maps = {}                       # nk -> mapped IGDB attrs (genres/themes/dev/…)
+    entry_maps = {}                      # (nk, platform) -> mapped IGDB attrs (per-entry)
+    ss_maps = {}                         # nk -> mapped ScreenScraper attrs
     if touched:
         mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
         try:
@@ -3885,8 +3888,58 @@ def _apply_surgical_meta(touched):
                     entry_ids[(_nk, _p)] = _iid
             except sqlite3.OperationalError:
                 pass                     # no per-entry overrides table yet
+            # Provider-record ATTRIBUTES (genres/themes/dev/pub/…) mapped straight from the
+            # cached IGDB records — the one thing the eager preview used to leave for the full
+            # rebuild. Writing them here (fill-only, below) makes touched games metadata-
+            # complete instantly, so the ~10-min whole-catalog rebuild is no longer needed
+            # per apply. Mirrors build_library's igdb_map accumulation.
+            try:
+                from igdb import map_record as _igdb_map
+                all_iids = (set(title_ids.values()) | set(entry_ids.values())
+                            | {pm["igdb_id"] for pm in pms.values()})
+                payloads = {}
+                if all_iids:
+                    qi = ",".join("?" * len(all_iids))
+                    for _iid, _pl in mc.execute(
+                            "SELECT igdb_id, payload_json FROM igdb_meta "
+                            "WHERE igdb_id IN (%s)" % qi, tuple(all_iids)):
+                        try:
+                            payloads[_iid] = _igdb_map(json.loads(_pl))
+                        except Exception:
+                            pass
+                for _nk, _i in title_ids.items():
+                    if _i in payloads:
+                        igdb_maps[_nk] = payloads[_i]
+                for pm in pms.values():
+                    if pm["igdb_id"] in payloads:
+                        igdb_maps.setdefault(pm["norm_key"], payloads[pm["igdb_id"]])
+                for _k, _i in entry_ids.items():
+                    if _i in payloads:
+                        entry_maps[_k] = payloads[_i]
+            except Exception as e:
+                print("surgical igdb attrs: %s" % str(e)[:150], file=sys.stderr)
         finally:
             mc.close()
+    # ScreenScraper record attrs for the touched games (title-level), mapped like
+    # build_library so a freshly SS-matched ROM shows genres/players/etc. immediately.
+    if touched:
+        try:
+            from screenscraper import extract_metadata as _ss_map
+            sc = ro(os.path.join(DATA, "screenscraper-cache.sqlite"))
+            try:
+                qs2 = ",".join("?" * len(touched))
+                for _nk, _pl in sc.execute(
+                        "SELECT norm_key, payload_json FROM ss_game WHERE status='ok' "
+                        "AND norm_key IN (%s)" % qs2, tuple(touched)):
+                    if _pl and _nk not in ss_maps:
+                        try:
+                            ss_maps[_nk] = _ss_map(json.loads(_pl))
+                        except Exception:
+                            pass
+            finally:
+                sc.close()
+        except Exception:
+            pass
 
     def _gk(nk, platform, bkey):
         """Mirror build_library._game_key: per-entry override wins, else an era-collision
@@ -3916,6 +3969,7 @@ def _apply_surgical_meta(touched):
                 con.execute("UPDATE games SET game_key=? WHERE id=?",
                             (_gk(nk, plat, bkey), gid))
             gids = [e[0] for e in entries]
+            plat_of = {e[0]: e[1] for e in entries}
             pm = pms.get(nk)
             name = igdb_names.get(nk)
             # A store-locked match applies its IGDB identity only to ROM/archive entries;
@@ -3950,22 +4004,33 @@ def _apply_surgical_meta(touched):
                                 (gid, "screenscraper", str(m["ss_id"]), None,
                                  "https://www.screenscraper.fr/gameinfos.php?gameid=%s"
                                  % m["ss_id"]))
-                # accepted AI attributes — fill only kinds no source already supplied
-                attrs = sup.get(nk)
-                if attrs:
-                    have = {r[0] for r in con.execute(
-                        "SELECT DISTINCT kind FROM game_attributes WHERE game_id=?",
-                        (gid,))}
-                    rows = []
-                    for kind, val in attrs.items():
+                # Metadata completeness (FILL-ONLY): provider records first (IGDB, then
+                # ScreenScraper), then accepted AI supplements — each only filling kinds no
+                # source already supplied. This is what makes the touched games genre/theme/
+                # dev-complete NOW so no full rebuild is needed. IGDB attrs apply only where
+                # the IGDB identity applies (not a store-locked store entry).
+                have = {r[0] for r in con.execute(
+                    "SELECT DISTINCT kind FROM game_attributes WHERE game_id=?", (gid,))}
+                rows = []
+
+                def _fill(mapped, origin):
+                    for kind, val in (mapped or {}).items():
                         if kind in have:
                             continue
+                        wrote = False
                         for v in (val if isinstance(val, list) else [val]):
                             if v not in (None, ""):
-                                rows.append((gid, kind, str(v), "ai"))
-                    if rows:
-                        con.executemany("INSERT INTO game_attributes(game_id,kind,"
-                                        "value,origin) VALUES(?,?,?,?)", rows)
+                                rows.append((gid, kind, str(v), origin))
+                                wrote = True
+                        if wrote:
+                            have.add(kind)      # first provider to supply a kind wins
+                if apply_igdb:
+                    _fill(entry_maps.get((nk, plat_of.get(gid))) or igdb_maps.get(nk), "igdb")
+                _fill(ss_maps.get(nk), "screenscraper")
+                _fill(sup.get(nk), "ai")
+                if rows:
+                    con.executemany("INSERT INTO game_attributes(game_id,kind,value,"
+                                    "origin) VALUES(?,?,?,?)", rows)
         con.commit()
     finally:
         con.close()
@@ -4381,19 +4446,166 @@ def _apply_ss_matches(now):
     sc.close()
 
 
+def _scoped_media_reconcile(touched, media, should_stop):
+    """Background media reconcile for the games a wand apply touched — SCOPED to just
+    those games, never the whole catalog. Pulls their provider art (IGDB + ScreenScraper +
+    SteamGridDB gap-fill), re-chooses the best per kind, materializes the new bytes (content-
+    addressed, so only new art downloads), refreshes scores, and — only if ai_art_auto_pick
+    is on — AI-adjudicates once per game. This replaced the old ~18-min full media_fetch +
+    ~10-min full build_library that ran on every apply."""
+    if not touched:
+        return
+    now = int(time.time())
+    import media_fetch as _mf
+    if media is not False:                     # media:False => skip art entirely
+        con = media_choose.con_index()
+        try:
+            con.execute("PRAGMA busy_timeout=30000")
+            _mf.fetch_igdb(con, now, only=set(touched))            # scoped IGDB art
+            try:
+                _mf.fetch_screenscraper(con, now, only=set(touched))  # scoped SS art
+            except Exception as e:
+                print("scoped reconcile ss: %s" % str(e)[:150], file=sys.stderr)
+            try:                                # SteamGridDB gap-fill (heroes/logos/covers)
+                if _mf.config.steamgriddb_key():
+                    ph = ",".join("?" * len(touched))
+                    lc = ro(LIBRARY_DB)
+                    try:
+                        titles = {r["norm_key"]: r["canonical_title"] for r in lc.execute(
+                            "SELECT norm_key, canonical_title FROM games "
+                            "WHERE norm_key IN (%s)" % ph, tuple(touched))}
+                        appids = {r["norm_key"]: r["source_id"] for r in lc.execute(
+                            "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
+                            "ON s.game_id=g.id WHERE s.source='steam' AND g.norm_key "
+                            "IN (%s)" % ph, tuple(touched))}
+                    finally:
+                        lc.close()
+                    tgts = [(nk, titles.get(nk, ""), appids.get(nk)) for nk in touched]
+                    _mf.fetch_steamgriddb_targets(con, now, tgts)
+            except Exception as e:
+                print("scoped reconcile sgdb: %s" % str(e)[:150], file=sys.stderr)
+            # no global prune_dead() here — it HTTP-probes every speculative URL in the
+            # index (unscoped, slow). _prune_blank_media(touched) below covers these games;
+            # the on-demand/scan rebuild does the whole-library dead-URL sweep.
+            _mf._backfill_game_key(con)
+            media_choose.select(con)                              # re-choose best per group
+            con.commit()
+        finally:
+            con.close()
+        try:
+            _prune_blank_media(list(touched))
+        except Exception:
+            pass
+        # NB: no materialize() here — like the old reconcile, chosen art serves from its
+        # live reference until the separate materialize/publish step. Materializing here
+        # would be a whole-library download (not scoped) and defeat the point.
+    # scores read the cached IGDB ratings (no network) so a new match's score lands now
+    _run_script("scores_fetch.py", args=["igdb"], timeout=180)
+    # AI art adjudication — OFF by default (paid); once per game when on (see _art_adjudicated)
+    if touched and config.get_bool("ai_art_auto_pick", False):
+        lcon = ro(LIBRARY_DB)
+        try:
+            titles = {r["norm_key"]: r["canonical_title"]
+                      for r in lcon.execute("SELECT norm_key, canonical_title FROM games")}
+        finally:
+            lcon.close()
+        for nk in touched:
+            if should_stop():
+                break
+            if _art_adjudicated(nk):
+                continue
+            _ai_adjudicate_game(nk, titles.get(nk, nk))
+            _mark_art_adjudicated(nk, now)
+
+
+# --- scoped media reconcile job (apply path): its own single-flight queue, distinct from
+# the full rebuild+art drain (_ART_*) that the pin/scan paths still use. ---
+_MEDIA_LOCK = threading.Lock()
+_MEDIA_Q = set()
+_MEDIA_SPEC = [True]
+_MEDIA_RUNNING = [False]
+
+
+def _scoped_media_drain(should_stop):
+    while not should_stop():
+        with _MEDIA_LOCK:
+            if not _MEDIA_Q:
+                _MEDIA_RUNNING[0] = False
+                return
+            batch = set(_MEDIA_Q)
+            _MEDIA_Q.clear()
+            media = _MEDIA_SPEC[0]
+        _scoped_media_reconcile(batch, media, should_stop)
+    with _MEDIA_LOCK:
+        _MEDIA_RUNNING[0] = False
+
+
+def _enqueue_media_reconcile(touched, media):
+    """Queue touched games for the SCOPED media reconcile (no whole-catalog rebuild); start
+    the drain if idle. Coalesces a burst of applies into one running job."""
+    if not touched:
+        return
+    start = False
+    with _MEDIA_LOCK:
+        _MEDIA_Q.update(touched)
+        _MEDIA_SPEC[0] = media
+        if not _MEDIA_RUNNING[0]:
+            _MEDIA_RUNNING[0] = True
+            start = True
+            cancel = threading.Event()
+            rec = {"kind": "aimeta-media", "label": "Media reconcile (touched games)",
+                   "cancel": cancel, "thread": None, "error": None, "run_id": None,
+                   "cancelable": False, "started": time.time()}
+
+            def worker():
+                try:
+                    _scoped_media_drain(cancel.is_set)
+                except Exception as e:      # noqa: BLE001 — surface to the monitor
+                    rec["error"] = str(e)[:300]
+            t = threading.Thread(target=worker, daemon=True)
+            rec["thread"] = t
+            with _JOBS_LOCK:
+                _JOBS["aimeta-media"] = rec
+    if start:
+        rec["thread"].start()
+
+
+@app.post("/api/catalog/rebuild")
+def catalog_rebuild():
+    """Full authoritative catalog re-derivation (build_library) in the background. Wand
+    applies no longer trigger this — they reconcile the touched games surgically — so run
+    it on demand when you want a GLOBAL re-derivation (regional-duplicate merge, cross-era
+    regrouping, provider-attribute union across sources). Also runs automatically on scans."""
+    cur = _JOBS.get("catalog-rebuild")
+    if cur and cur.get("thread") and cur["thread"].is_alive():
+        return {"started": False, "running": True}
+
+    def job(stop):
+        ok, err = _run_script("build_library.py", timeout=1800)
+        if ok:
+            _run_script("scores_fetch.py", args=["igdb"], timeout=300)
+        else:
+            print("catalog rebuild: %s" % (err or "")[:200], file=sys.stderr)
+    _start_job("catalog-rebuild", "catalog-rebuild", "Rebuild catalog (full)", job)
+    return {"started": True}
+
+
 def _apply_drain(should_stop, media):
     """Apply accepted findings, then loop while more are accepted — so accepting
-    several games in quick succession coalesces into one running rebuild instead of
-    N. Each pass captures + marks only the findings it processed. Art hydration for all
-    touched games is handed to a SEPARATE background job at the end, so this apply job
-    finishes at the catalog rebuild rather than waiting on the ~30-min media pass."""
+    several games in quick succession coalesces into one running job instead of N.
+    Each pass captures + marks only the findings it processed. The surgical apply above
+    already made the catalog complete for the touched games (identity, game_key, rename,
+    links, provider attributes), so this hands the touched games to a SCOPED media
+    reconcile — NOT a whole-catalog rebuild. Applying a handful of games is now seconds,
+    not the old ~10-20 min. (A full re-derivation is available on demand via
+    /api/catalog/rebuild and still runs on library scans.)"""
     all_touched = set()
     while not should_stop():
         ids = aimeta.accepted_ids()
         if not ids:
             break
         all_touched |= _aimeta_apply(should_stop, only_ids=ids)
-    _enqueue_reconcile(all_touched, media)
+    _enqueue_media_reconcile(all_touched, media)
 
 
 @app.post("/api/aimeta/accept")

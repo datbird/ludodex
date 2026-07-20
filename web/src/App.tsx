@@ -4112,6 +4112,16 @@ function ServerOps() {
   const statusDot = (s?: string) =>
     s === 'ok' ? 'ok' : s === 'error' ? 'err' : 'muted'
 
+  const rebuildCatalog = async () => {
+    setBusy('rebuild'); setMsg('')
+    try {
+      const r = await api.rebuildCatalog()
+      setMsg(r.started ? 'Catalog rebuild started — runs in the background'
+                       : 'A rebuild is already running')
+    } catch (e) { setMsg((e as Error).message) }
+    finally { setBusy('') }
+  }
+
   return (
     <div className="ops-wrap filter-wrap" ref={wrapRef}>
       <button className="icon-btn" title="Server operations" onClick={() => setOpen((v) => !v)}>
@@ -4144,6 +4154,18 @@ function ServerOps() {
               </button>
             </div>
           ))}
+
+          <div className="ops-section">Catalog</div>
+          <div className="ops-svc">
+            <div>
+              <div className="ops-svc-name">Full re-derivation</div>
+              <div className="ops-svc-meta">Wand applies now reconcile only touched games —
+                run this for a global rebuild (regional merge, cross-refs).</div>
+            </div>
+            <button className="ops-btn" disabled={!!busy} onClick={rebuildCatalog}>
+              {busy === 'rebuild' ? '…' : 'Rebuild'}
+            </button>
+          </div>
 
           <div className="ops-section ops-section-row">
             <button className="ops-section-toggle" onClick={() => setDbOpen((v) => !v)}>
