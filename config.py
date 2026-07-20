@@ -206,7 +206,11 @@ SCHEMA = [
     #     durable truth. Pick one; fill its config. Distinct from sync_target (one-way mirror). ---
     ("backingstore_backend", "",
      "Two-way backing store backend: blank (off) | 'pocketbase' | 'postgres' | "
-     "'supabase' | 'mysql'. SQLite stays the fast local cache; this holds the durable data."),
+     "'supabase' | 'mysql' | 'firebase'. SQLite stays the fast local cache; this holds "
+     "the durable data."),
+    ("backingstore_auto_minutes", "0",
+     "Auto-sync the backing store every N minutes (0 = off / manual only). Runs the "
+     "two-way sync in the background; skipped while one is already running."),
     ("postgres_url", "",
      "Postgres connection string (overrides the discrete fields), e.g. "
      "postgresql://user:pass@host:5432/ludodex."),

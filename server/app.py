@@ -8521,6 +8521,8 @@ def _backingstore_configured(backend):
                                                  and config.get(pfx + "_password")))
     if backend == "mysql":
         return bool(config.get("mysql_host") and config.get("mysql_password"))
+    if backend == "firebase":
+        return bool(config.get("firebase_project_id") and config.get("firebase_sa_json"))
     return bool(config.get("pocketbase_url") and config.pocketbase_password())
 
 
@@ -8562,6 +8564,7 @@ _BS_FIELDS = {
                  "postgres_user", "postgres_password"],
     "supabase": ["supabase_url"],
     "mysql": ["mysql_host", "mysql_port", "mysql_db", "mysql_user", "mysql_password"],
+    "firebase": ["firebase_project_id", "firebase_sa_json", "firebase_database"],
 }
 _BS_SECRET = {"pocketbase_admin_password", "postgres_password", "mysql_password",
               "postgres_url", "supabase_url"}      # never echo back; connection URLs hold pw
@@ -8580,16 +8583,23 @@ def backingstore_get_config():
             else:
                 vals[k] = config.get(k) or ""
     return {"backend": config.get("backingstore_backend") or "", "values": vals,
-            "secret_set": secret_set, "fields": _BS_FIELDS}
+            "secret_set": secret_set, "fields": _BS_FIELDS,
+            "auto_minutes": int(config.get("backingstore_auto_minutes") or 0)}
 
 
 @app.post("/api/backingstore/config")
 def backingstore_set_config(body: dict = Body(...)):
-    """Save the backend selection + config. Body: {backend?, values:{<key>:<val>}}. An empty
-    secret value is IGNORED (keeps the existing one) so re-saving needn't retype passwords."""
+    """Save the backend selection + config. Body: {backend?, auto_minutes?, values:{<key>:
+    <val>}}. An empty secret value is IGNORED (keeps the existing one) so re-saving needn't
+    retype passwords."""
     body = body or {}
     if "backend" in body:
         config.set_("backingstore_backend", (body.get("backend") or "").strip())
+    if "auto_minutes" in body:
+        try:
+            config.set_("backingstore_auto_minutes", str(max(0, int(body["auto_minutes"]))))
+        except (TypeError, ValueError):
+            pass
     values = body.get("values") or {}
     allkeys = {k for keys in _BS_FIELDS.values() for k in keys}
     for k, v in values.items():
@@ -8620,6 +8630,44 @@ def backingstore_test(body: dict = Body(default={})):
                 % (n, "ludodex_" + store["name"])}
     except Exception as e:
         return {"ok": False, "backend": backend, "error": str(e)[:250]}
+
+
+def _backingstore_scheduler():
+    """Auto/periodic two-way sync: every backingstore_auto_minutes, run the sync in the
+    background (single-flight — skipped while one is already running). Also runs ~once soon
+    after startup so a machine that was offline pulls remote changes. 0 minutes = off."""
+    last = 0.0
+    while True:
+        time.sleep(60)
+        try:
+            mins = int(config.get("backingstore_auto_minutes") or 0)
+            backend = config.get("backingstore_backend") or ""
+            if mins <= 0 or not backend or not _backingstore_configured(backend):
+                continue
+            now = time.time()
+            if now - last < mins * 60:
+                continue
+            cur = _JOBS.get("backingstore")
+            if cur and cur.get("thread") and cur["thread"].is_alive():
+                continue
+            last = now
+
+            def job(_stop, _b=backend):
+                import dbsync
+                try:
+                    _TWOWAY["last"] = dbsync.sync_all(_b)
+                except Exception as e:
+                    _TWOWAY["last"] = {"error": str(e)[:250], "backend": _b}
+                    print("auto backing-store sync: %s" % str(e)[:200], file=sys.stderr)
+            try:
+                _start_job("backingstore", "backingstore", "Auto backing-store sync", job)
+            except Exception:
+                pass                          # a manual sync raced us — fine, skip
+        except Exception as e:
+            print("backingstore scheduler: %s" % str(e)[:150], file=sys.stderr)
+
+
+threading.Thread(target=_backingstore_scheduler, daemon=True).start()
 
 
 # ---------------------------------------------------------------- static SPA (last)

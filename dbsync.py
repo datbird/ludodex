@@ -375,8 +375,74 @@ class MySQLBackend(_SqlBackend):
                 "ON DUPLICATE KEY UPDATE data = VALUES(data)" % table)
 
 
+class FirestoreBackend:
+    """Firebase/Firestore (document store). Each store is a collection ludodex_<name>; each
+    record a document (id = hash of the key, real key kept in the `k` field) with a `data`
+    field holding the row's JSON blob — same shape as PocketBase, so the merge engine is
+    identical. Reuses sync.py's service-account token minting + Firestore REST."""
+    id = "firebase"
+
+    def __init__(self):
+        pid = config.get("firebase_project_id")
+        sa = config.get("firebase_sa_json")
+        if not (pid and sa):
+            raise RuntimeError("firebase not configured (firebase_project_id + "
+                               "firebase_sa_json)")
+        dbid = config.get("firebase_database") or "(default)"
+        self.hdr = {"Authorization": "Bearer " + _s.fb_token(sa)}
+        self.base = ("https://firestore.googleapis.com/v1/projects/%s/databases/%s"
+                     "/documents" % (pid, dbid))
+
+    def _coll(self, store):
+        return "ludodex_" + store["name"]
+
+    def _doc_id(self, key):
+        return hashlib.sha1(("fs:" + key).encode()).hexdigest()[:40]
+
+    def ensure(self, store, cols):
+        pass                                # Firestore is schemaless — collections autocreate
+
+    def read_all(self, store, cols):
+        coll, out, tok = self._coll(store), {}, ""
+        while True:
+            u = "%s/%s?pageSize=300%s" % (self.base, coll, ("&pageToken=" + tok) if tok else "")
+            st, resp = _s.http("GET", u, headers=self.hdr)
+            if st != 200 or not isinstance(resp, dict):
+                break
+            for d in resp.get("documents", []):
+                f = d.get("fields", {})
+                k = (f.get("k") or {}).get("stringValue")
+                data = (f.get("data") or {}).get("stringValue")
+                if k and data:
+                    try:
+                        out[k] = json.loads(data)
+                    except ValueError:
+                        pass
+            tok = resp.get("nextPageToken") or ""
+            if not tok:
+                break
+        return out
+
+    def write(self, store, cols, upserts, deletes, remote_keys):
+        coll, writes = self._coll(store), []
+        for key, row in upserts.items():
+            data = json.dumps({c: _cell(row.get(c)) for c in cols},
+                              sort_keys=True, ensure_ascii=False)
+            writes.append({"update": {
+                "name": "%s/%s/%s" % (self.base, coll, self._doc_id(key)),
+                "fields": {"k": {"stringValue": key}, "data": {"stringValue": data}}}})
+        for key in deletes:
+            writes.append({"delete": "%s/%s/%s" % (self.base, coll, self._doc_id(key))})
+        for i in range(0, len(writes), 400):
+            st, resp = _s.http("POST", self.base + ":commit", headers=self.hdr,
+                               body={"writes": writes[i:i + 400]})
+            if st != 200:
+                raise RuntimeError("Firestore commit failed (%s): %s" % (st, str(resp)[:150]))
+
+
 BACKENDS = {"pocketbase": PocketBaseBackend, "postgres": PostgresBackend,
-            "supabase": SupabaseBackend, "mysql": MySQLBackend}
+            "supabase": SupabaseBackend, "mysql": MySQLBackend,
+            "firebase": FirestoreBackend}
 
 
 # --------------------------------------------------------------------------- #

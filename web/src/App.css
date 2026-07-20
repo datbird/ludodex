@@ -3758,3 +3758,5 @@ a.idchip:hover { background: var(--accent-bg); }
 .aim-attr-manual .aim-attr-k, .chg-manual .chg-label { color: #e88c1e; opacity: 1; }
 .chg-manual { background: rgba(230,140,30,0.07); border-radius: 7px; }
 .aim-accept-warn { box-shadow: 0 0 0 2px rgba(230,140,30,0.5); }
+.bs-auto { flex: 1 1 auto; display: flex; align-items: center; gap: 8px; }
+.bs-auto input { width: 90px; flex: 0 0 auto; }

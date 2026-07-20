@@ -1413,26 +1413,31 @@ const BS_LABELS: Record<string, string> = {
   supabase_url: 'Supabase connection string',
   mysql_host: 'Host', mysql_port: 'Port', mysql_db: 'Database',
   mysql_user: 'User', mysql_password: 'Password',
+  firebase_project_id: 'Project id', firebase_sa_json: 'Service-account JSON path',
+  firebase_database: 'Database (default: (default))',
 }
 const BS_BACKENDS = [
   { id: '', name: 'Off' }, { id: 'pocketbase', name: 'PocketBase' },
   { id: 'postgres', name: 'Postgres' }, { id: 'supabase', name: 'Supabase' },
-  { id: 'mysql', name: 'MySQL / MariaDB' },
+  { id: 'mysql', name: 'MySQL / MariaDB' }, { id: 'firebase', name: 'Firebase / Firestore' },
 ]
 
 // Two-way backing store: pick the backend + configure it. SQLite stays the local cache;
 // the chosen DB holds the durable truth and syncs both ways (see dbsync.py).
 function BackingStore() {
   type BSCfg = { backend: string; values: Record<string, string>
-    secret_set: Record<string, boolean>; fields: Record<string, string[]> }
+    secret_set: Record<string, boolean>; fields: Record<string, string[]>; auto_minutes: number }
   const [cfg, setCfg] = useState<BSCfg | null>(null)
   const [backend, setBackend] = useState('')
   const [vals, setVals] = useState<Record<string, string>>({})
+  const [auto, setAuto] = useState(0)
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
   const [test, setTest] = useState<{ ok: boolean; detail?: string; error?: string } | null>(null)
 
-  const hydrate = (d: BSCfg) => { setCfg(d); setBackend(d.backend); setVals({ ...d.values }) }
+  const hydrate = (d: BSCfg) => {
+    setCfg(d); setBackend(d.backend); setVals({ ...d.values }); setAuto(d.auto_minutes || 0)
+  }
   useEffect(() => { api.backingConfig().then(hydrate).catch(() => {}) }, [])
 
   if (!cfg) return <div className="loading">Loading…</div>
@@ -1444,7 +1449,8 @@ function BackingStore() {
     try {
       const send: Record<string, string> = {}
       ;(cfg.fields[backend] || []).forEach((k) => { if (vals[k] !== undefined) send[k] = vals[k] })
-      hydrate(await api.backingConfigSet({ backend, values: send })); setMsg('Saved ✓')
+      hydrate(await api.backingConfigSet({ backend, auto_minutes: auto, values: send }))
+      setMsg('Saved ✓')
     } catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
   }
   const runTest = async () => {
@@ -1493,6 +1499,9 @@ function BackingStore() {
         connection string from Project Settings → Database → Connection string.</p>}
       {backend === 'postgres' && <p className="dim bs-hint">Fill the discrete fields, or paste a
         full connection URL to override them.</p>}
+      {backend === 'firebase' && <p className="dim bs-hint">Needs a service-account JSON on the
+        server (path below) with Firestore access. Its own collections (ludodex_*), separate
+        from the one-way catalog mirror.</p>}
       {fields.map((k) => (
         <div key={k} className="bs-row">
           <label>{BS_LABELS[k] || k}</label>
@@ -1501,6 +1510,16 @@ function BackingStore() {
             onChange={(e) => setVals((v) => ({ ...v, [k]: e.target.value }))} />
         </div>
       ))}
+      {backend && (
+        <div className="bs-row">
+          <label>Auto-sync every</label>
+          <span className="bs-auto">
+            <input type="number" min={0} step={5} value={auto}
+              onChange={(e) => setAuto(Math.max(0, parseInt(e.target.value || '0', 10)))} />
+            <span className="dim">minutes · 0 = off (manual only)</span>
+          </span>
+        </div>
+      )}
       <div className="bs-actions">
         <button className="go" disabled={!!busy} onClick={save}>
           {busy === 'save' ? 'Saving…' : 'Save'}</button>
