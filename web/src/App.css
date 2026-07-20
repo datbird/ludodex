@@ -1350,16 +1350,23 @@ button.am-badge { border: 0; background: none; padding: 0; font-family: inherit;
 .mko-media { position: relative; cursor: zoom-in; display: block; }
 /* priority strip directly under each media — makes the ranking obvious (the old
    tiny corner number was easy to miss) and hints it's drag-to-reorder */
-.mko-prio { display: flex; align-items: center; gap: 7px; padding: 5px 9px;
+.mko-prio { display: flex; align-items: center; gap: 7px; padding: 5px 7px 5px 9px;
   font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--muted, #9aa7b8); background: rgba(127, 127, 127, 0.12);
-  border-top: 2px solid var(--border); cursor: grab; }
+  border-top: 2px solid var(--border); }
 .mko-prio.used { color: #fff; border-top-color: var(--accent);
   background: linear-gradient(90deg, var(--accent), rgba(139, 122, 255, 0.35)); }
-.mko-prio-grip { font-size: 13px; opacity: 0.6; letter-spacing: -1px; }
-.mko-prio-label { opacity: 0.85; }
 .mko-prio-num { font-variant-numeric: tabular-nums; font-weight: 800; }
-.mko-prio-used { margin-left: auto; font-weight: 800; letter-spacing: 0.02em; }
+.mko-prio-used { font-weight: 800; letter-spacing: 0.02em; }
+.mko-prio-move { margin-left: auto; display: inline-flex; gap: 4px; }
+.mko-prio-btn { font: inherit; font-size: 12px; line-height: 1; padding: 4px 7px;
+  min-width: 30px; min-height: 28px; border-radius: 6px; cursor: pointer;
+  color: inherit; background: rgba(127, 127, 127, 0.18);
+  border: 1px solid var(--border); touch-action: manipulation; }
+.mko-prio-btn.make { letter-spacing: 0.02em; font-weight: 800; }
+.mko-prio-btn:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: var(--accent); }
+.mko-prio-btn:disabled { opacity: 0.32; cursor: default; }
+.mko-prio.used .mko-prio-btn { border-color: rgba(255, 255, 255, 0.35); }
 .mko-frame-gear { position: absolute; top: 4px; right: 4px; }
 .mko-frame-gear .frame-gear {
   background: rgba(0,0,0,0.72); color: #fff; border: none; border-radius: 4px;

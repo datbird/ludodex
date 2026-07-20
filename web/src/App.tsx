@@ -5503,15 +5503,26 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
     try { onChange(await api.setPins(nk, kind.kind, next.map((a) => a.id))) }
     catch { /* */ } finally { setBusy(false) }
   }
-  // Pointer-based reorder — works with mouse AND touch (HTML5 `draggable` doesn't fire on
-  // touch, so on mobile the drag was being read as a scroll). The handle has
-  // touch-action:none so grabbing it never scrolls the overlay underneath.
+  // The one true reorder primitive — move item `from` to slot `to` and save. Both the
+  // tap controls (▲ ▼ ★, the reliable path on mobile) and the drag handle route through
+  // this, so behaviour is identical however you nudge priority.
+  const moveTo = (from: number, to: number) => {
+    if (from === to || to < 0 || to >= order.length) return
+    const next = [...order]
+    next.splice(to, 0, next.splice(from, 1)[0])
+    setOrder(next); persist(next)
+  }
+  // Drag reorder for pointers that behave (desktop mouse, good touch stacks). We capture
+  // the pointer to the handle so move/up keep flowing to it even as the finger leaves the
+  // handle, and the browser won't hijack the gesture as a scroll. Touch users who'd rather
+  // not fuss with a tiny handle have the ▲ ▼ ★ buttons — same result, no drag.
   const startDrag = (i: number, e: React.PointerEvent) => {
     e.preventDefault(); e.stopPropagation()
+    const handle = e.currentTarget as HTMLElement
+    try { handle.setPointerCapture(e.pointerId) } catch { /* */ }
     dragRef.current = i; overRef.current = i
     setDrag(i); setOver(i)
     const move = (ev: PointerEvent) => {
-      ev.preventDefault()
       const el = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null
       const item = el?.closest('[data-mko-idx]') as HTMLElement | null
       if (item) {
@@ -5520,21 +5531,17 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
       }
     }
     const end = () => {
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', end)
-      window.removeEventListener('pointercancel', end)
+      handle.removeEventListener('pointermove', move)
+      handle.removeEventListener('pointerup', end)
+      handle.removeEventListener('pointercancel', end)
       const from = dragRef.current, to = overRef.current
       dragRef.current = null; overRef.current = null
       setDrag(null); setOver(null)
-      if (from != null && to != null && from !== to) {
-        const next = [...order]
-        next.splice(to, 0, next.splice(from, 1)[0])
-        setOrder(next); persist(next)
-      }
+      if (from != null && to != null) moveTo(from, to)
     }
-    window.addEventListener('pointermove', move, { passive: false })
-    window.addEventListener('pointerup', end)
-    window.addEventListener('pointercancel', end)
+    handle.addEventListener('pointermove', move)
+    handle.addEventListener('pointerup', end)
+    handle.addEventListener('pointercancel', end)
   }
   const act = async (fn: () => Promise<MediaLibrary>) => {
     setBusy(true)
@@ -5560,8 +5567,8 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
         <h2 className="mko-title">{kind.kind.replace(/_/g, ' ')}
           <span className="dim"> · {order.length}</span>
           {busy && <span className="dim mko-saving"> · saving…</span>}</h2>
-        <p className="mko-desc dim">Drag the ⠿ handle to set priority — <b>#1 is the one used</b>
-          · click to enlarge{framable ? ' · ⚙ on #1 frames its position & zoom' : ''}
+        <p className="mko-desc dim">Set priority — <b>#1 is the one used.</b> Tap <b>★ Use</b> to promote,
+          <b> ▲ ▼</b> to nudge, or drag the ⠿ handle · click to enlarge{framable ? ' · ⚙ on #1 frames its position & zoom' : ''}
           {kind.description ? ' · ' + kind.description : ''}</p>
         {order.length === 0
           ? <div className="sync-note dim">No media of this type yet.</div>
@@ -5583,11 +5590,18 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
                     )}
                   </div>
                   <div className={'mko-prio' + (i === 0 ? ' used' : '')}
-                    title="Priority order — the #1 image is the one this game actually uses. Drag tiles to reorder; the top of the list wins.">
-                    <span className="mko-prio-grip" aria-hidden="true">⠿</span>
-                    <span className="mko-prio-label">Priority</span>
+                    title="Priority order — the #1 image is the one this game actually uses. Tap ▲ ▼ to nudge, ★ to make it #1, or drag the ⠿ handle.">
                     <span className="mko-prio-num">#{i + 1}</span>
-                    {i === 0 && <span className="mko-prio-used">★ Used</span>}
+                    {i === 0
+                      ? <span className="mko-prio-used">★ Used</span>
+                      : <button className="mko-prio-btn make" title="Make this #1 (the one used)"
+                          onClick={() => moveTo(i, 0)} disabled={busy}>★ Use</button>}
+                    <span className="mko-prio-move">
+                      <button className="mko-prio-btn" title="Move up in priority"
+                        onClick={() => moveTo(i, i - 1)} disabled={busy || i === 0}>▲</button>
+                      <button className="mko-prio-btn" title="Move down in priority"
+                        onClick={() => moveTo(i, i + 1)} disabled={busy || i === order.length - 1}>▼</button>
+                    </span>
                   </div>
                   <figcaption className="mko-cap">
                     <span>{a.provider}{a.user ? ' · yours' : ''}</span>
