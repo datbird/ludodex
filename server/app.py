@@ -3704,6 +3704,36 @@ def _finding_context(ctx):
             "current_match": (m.get("title") if m else None)}
 
 
+def _manual_edits(nk):
+    """What the user set BY HAND for this game (so the wand review can warn before undoing
+    it). {"identity": bool (a manual identity pin), "attrs": [kinds manually overridden]}."""
+    identity = False
+    try:
+        mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+        try:
+            if mc.execute("SELECT 1 FROM igdb_resolution WHERE norm_key=? AND "
+                          "matched_by='manual'", (nk,)).fetchone():
+                identity = True
+            try:
+                if mc.execute("SELECT 1 FROM entry_resolution WHERE norm_key=? AND "
+                              "matched_by='manual' LIMIT 1", (nk,)).fetchone():
+                    identity = True
+            except sqlite3.OperationalError:
+                pass
+        finally:
+            mc.close()
+    except Exception:
+        pass
+    attrs = []
+    try:
+        import overrides as _ov
+        attrs = [k for k, o in (_ov.overrides_for(nk) or {}).items()
+                 if (o.get("origin") or "") == "manual"]
+    except Exception:
+        pass
+    return {"identity": identity, "attrs": attrs}
+
+
 @app.get("/api/aimeta/findings")
 def aimeta_findings(status: str = Query(None), kind: str = Query(None),
                     run_id: int = Query(None)):
@@ -3711,17 +3741,29 @@ def aimeta_findings(status: str = Query(None), kind: str = Query(None),
     # attach live factual context per game so the review page ALWAYS shows filename /
     # platform / folder / tags — even for findings created before this existed. Bounded
     # so a huge changeset can't stall; the ROM index is cached after first use.
-    if len(findings) <= 60:
-        seen = {}
-        for f in findings:
-            nk = f.get("norm_key")
-            if nk and nk not in seen:
+    ctx_cache, me_cache = {}, {}
+    for f in findings:
+        nk = f.get("norm_key")
+        if not nk:
+            continue
+        if len(findings) <= 60:
+            if nk not in ctx_cache:
                 try:
-                    ctx = aimeta.game_context(nk)
-                    seen[nk] = _finding_context(ctx) if ctx else None
+                    c = aimeta.game_context(nk)
+                    ctx_cache[nk] = _finding_context(c) if c else None
                 except Exception:
-                    seen[nk] = None
-            f["context"] = seen.get(nk)
+                    ctx_cache[nk] = None
+            f["context"] = ctx_cache.get(nk)
+        # Flag proposed changes that would OVERWRITE a manual edit — the review UI warns
+        # and requires an extra confirm before undoing what the user set by hand.
+        if nk not in me_cache:
+            me_cache[nk] = _manual_edits(nk)
+        me = me_cache[nk]
+        proposed = set((f.get("payload") or {}).get("attributes") or {})
+        attr_conf = sorted(proposed & set(me["attrs"]))
+        id_conf = me["identity"] and f.get("kind") in ("match", "identify")
+        if id_conf or attr_conf:
+            f["manual_conflicts"] = {"identity": bool(id_conf), "attrs": attr_conf}
     return {"findings": findings, "counts": aimeta.findings_counts()}
 
 

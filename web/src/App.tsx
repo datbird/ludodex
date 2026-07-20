@@ -7491,14 +7491,18 @@ function ProviderMatchRows({ p }: { p: AiFindingPayload }) {
   )
 }
 
-function AimAttrList({ attrs }: { attrs: Record<string, string | string[]> }) {
+function AimAttrList({ attrs, manualAttrs }: {
+  attrs: Record<string, string | string[]>; manualAttrs?: string[]
+}) {
   const keys = Object.keys(attrs || {})
   if (!keys.length) return null
+  const man = new Set(manualAttrs || [])
   return (
     <div className="aim-attrs">
       {keys.map((k) => (
-        <div key={k} className="aim-attr">
-          <span className="aim-attr-k">{k.replace(/_/g, ' ')}</span>
+        <div key={k} className={'aim-attr' + (man.has(k) ? ' aim-attr-manual' : '')}>
+          <span className="aim-attr-k">{k.replace(/_/g, ' ')}
+            {man.has(k) && <span className="aim-manual-tag" title="You set this by hand — accepting overwrites it">✋ manual</span>}</span>
           <span className="aim-attr-v">{fmtAttrVal(attrs[k])}</span>
         </div>
       ))}
@@ -7509,8 +7513,17 @@ function AimAttrList({ attrs }: { attrs: Record<string, string | string[]> }) {
 function AimFindingBody({ f }: { f: AiFinding }) {
   const p = f.payload
   const m = p.match || ({} as AiFinding['payload']['match'])
+  const mc = f.manual_conflicts
   return (
     <div className="aim-body">
+      {mc && (mc.identity || mc.attrs.length > 0) && (
+        <div className="aim-callout manual-warn">
+          ✋ <b>You set this by hand.</b> Accepting the wand's proposal would <b>overwrite your
+          manual {[mc.identity ? 'match' : null,
+            mc.attrs.length ? `${mc.attrs.map((a) => a.replace(/_/g, ' ')).join(', ')}` : null]
+            .filter(Boolean).join(' + ')}</b>. Only accept if you're sure.
+        </div>
+      )}
       {f.kind === 'identify' && (
         <div className="aim-callout info">
           No provider match → AI: <b>{m.suggested_title || '—'}</b>
@@ -7528,7 +7541,7 @@ function AimFindingBody({ f }: { f: AiFinding }) {
       <ProviderMatchRows p={p} />
       {f.kind === 'supplement' && Object.keys(p.attributes || {}).length > 0 &&
         <div className="aim-fills-label">Fills gaps:</div>}
-      <AimAttrList attrs={p.attributes} />
+      <AimAttrList attrs={p.attributes} manualAttrs={mc?.attrs} />
       {p.web && (p.sources || []).length > 0 && (
         <details className="aim-sources">
           <summary>🔎 {p.sources!.length} web source{p.sources!.length === 1 ? '' : 's'}</summary>
@@ -7545,9 +7558,20 @@ function AimFindingBody({ f }: { f: AiFinding }) {
 }
 
 function AimActions({ f, onAct }: { f: AiFinding; onAct: (a: 'accept' | 'reject' | 'reset') => void }) {
+  const mc = f.manual_conflicts
+  const accept = () => {
+    if (mc && (mc.identity || mc.attrs.length > 0)) {
+      const what = [mc.identity ? 'the match you set' : null,
+        mc.attrs.length ? `your ${mc.attrs.map((a) => a.replace(/_/g, ' ')).join(', ')}` : null]
+        .filter(Boolean).join(' and ')
+      if (!window.confirm(`This will UNDO ${what} — a change you made by hand — and replace it `
+        + `with the wand's proposal.\n\nAre you SURE you want to undo your manual change?`)) return
+    }
+    onAct('accept')
+  }
   if (f.status === 'proposed') return (
     <div className="aim-actions">
-      <button className="ops-btn go" onClick={() => onAct('accept')}>✓ Accept</button>
+      <button className={'ops-btn go' + (mc ? ' aim-accept-warn' : '')} onClick={accept}>✓ Accept</button>
       <button className="ops-btn" onClick={() => onAct('reject')}>✕ Reject</button>
     </div>
   )
@@ -7941,6 +7965,13 @@ function findingChanges(f: AiFinding): Change[] {
   return out
 }
 
+// Would accepting this change UNDO something the user set by hand? (identity pin / attr override)
+function changeIsManual(f: AiFinding, c: Change): boolean {
+  const mc = f.manual_conflicts
+  if (!mc) return false
+  return c.type === 'match' ? mc.identity : mc.attrs.includes(c.attrKind)
+}
+
 // The factual, non-AI things we KNOW about a ROM (platform, file name, folder, region
 // tags, current match) — shown on the review page so the reviewer can sanity-check the
 // AI's proposal against reality.
@@ -8213,9 +8244,18 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
   }
   // Accept only: queue the changes (no rebuild). Stack up accepts across scans, then a
   // single Apply from the ✦ bar applies them ALL in one catalog rebuild.
+  const selectedManualCount = () => groups.reduce((n, g) =>
+    n + g.changes.filter((c) => sel.has(c.id) && changeIsManual(g.f, c)).length, 0)
+  const confirmManual = (): boolean => {
+    const nm = selectedManualCount()
+    if (!nm) return true
+    return window.confirm(`${nm} of the selected change${nm === 1 ? '' : 's'} would UNDO edits `
+      + `you made BY HAND and replace ${nm === 1 ? 'it' : 'them'} with the wand's proposal.\n\n`
+      + `Are you SURE you want to overwrite your manual change${nm === 1 ? '' : 's'}?`)
+  }
   const acceptOnly = async () => {
     const selections = buildSelections()
-    if (!selections.length) return
+    if (!selections.length || !confirmManual()) return
     setBusy(true); setNote('')
     try {
       await api.aimetaAccept(selections)
@@ -8226,7 +8266,7 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
   // Accept AND apply now: skip waiting — kick the rebuild immediately.
   const acceptAndApply = async () => {
     const selections = buildSelections()
-    if (!selections.length) return
+    if (!selections.length || !confirmManual()) return
     setBusy(true); setNote('')
     try {
       const r = await api.aimetaApply(selections, mediaForScope(reviewScope))
@@ -8312,9 +8352,12 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
               <div className="chg-warn">⚠ current match may be wrong:{' '}
                 <b>{p.current_match?.title || '—'}</b> → <b>{p.match.suggested_title || '—'}</b></div>
             )}
-            {changes.map((c) => (
-              c.type === 'match' ? (
-                <label key={c.id} className="chg-row chg-link">
+            {changes.map((c) => {
+              const man = changeIsManual(f, c)
+              const tag = man && <span className="chg-manual-tag"
+                title="You set this by hand — accepting overwrites your manual change">✋ manual</span>
+              return c.type === 'match' ? (
+                <label key={c.id} className={'chg-row chg-link' + (man ? ' chg-manual' : '')}>
                   <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} />
                   {c.cover && <img className="chg-cover" src={c.cover} alt="" />}
                   <div className="chg-match-body">
@@ -8328,18 +8371,18 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
                     ) : (
                       <div className="chg-rename"><span className="chg-value">{c.value}</span></div>
                     )}
-                    <div className="chg-match-src">{c.label}</div>
+                    <div className="chg-match-src">{c.label}{tag}</div>
                   </div>
                 </label>
               ) : (
-                <label key={c.id} className="chg-row">
+                <label key={c.id} className={'chg-row' + (man ? ' chg-manual' : '')}>
                   <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} />
-                  <span className="chg-label">{c.label}</span>
+                  <span className="chg-label">{c.label}{tag}</span>
                   <span className="chg-arrow">→</span>
                   <span className="chg-value">{c.value}</span>
                 </label>
               )
-            ))}
+            })}
             {p.web && (p.sources || []).length > 0 && (
               <details className="chg-sources">
                 <summary>🔎 {p.sources!.length} web source{p.sources!.length === 1 ? '' : 's'}</summary>
@@ -8402,6 +8445,11 @@ function MetadataReview() {
   }
   const acceptAll = async () => {
     setNote('')
+    const man = (data?.findings || []).filter((f) => f.status === 'proposed'
+      && f.manual_conflicts && (f.manual_conflicts.identity || f.manual_conflicts.attrs.length))
+    if (man.length && !window.confirm(`${man.length} proposal${man.length === 1 ? '' : 's'} would `
+      + `OVERWRITE changes you made by hand (${man.slice(0, 3).map((f) => f.title).join(', ')}`
+      + `${man.length > 3 ? '…' : ''}).\n\nAccept all anyway, undoing those manual changes?`)) return
     try { const r = await api.aimetaAcceptAll(); setNote(`Accepted ${r.accepted} proposal(s).`) }
     catch (e) { setNote((e as Error).message) }
     reload()

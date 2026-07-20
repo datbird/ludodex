@@ -167,6 +167,8 @@ export interface AiFinding {
   payload: AiFindingPayload
   context?: FindingContext | null
   selection?: { attributes: string[] | null; match: boolean } | null
+  // proposed changes that would OVERWRITE the user's manual edits (pin / attr overrides)
+  manual_conflicts?: { identity: boolean; attrs: string[] }
 }
 export interface AiApplySelection {
   finding_id: number
