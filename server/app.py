@@ -3012,9 +3012,11 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
     to resolve AI identities to a real IGDB entry. Stores actionable findings."""
     web = bool(opts.get("web"))
     match_prov = bool(opts.get("match_provider"))
+    want_media = opts.get("want_media", True)  # the wand's media scope (on by default)
     md_kinds = opts.get("metadata_kinds")     # None=all attrs, []=none (media-only)
     model = ai.model_for_area("metadata")
     done = found = skipped = errored = complete = unmatched = 0
+    media_nks = set()                             # identified games -> fill their art after
     lib = aimeta._lib()
     try:
         for nk in norm_keys:
@@ -3025,6 +3027,8 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                 if not ctx:                        # game vanished / no context to analyze
                     skipped += 1
                 else:
+                    if ctx.get("match"):           # already resolved -> the wand fills its art
+                        media_nks.add(nk)
                     if md_kinds is not None:       # restrict which attrs AI fills
                         ctx["missing"] = [k for k in ctx.get("missing", [])
                                           if k in md_kinds]
@@ -3062,6 +3066,15 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
             aimeta.scan_progress(run_id, done, found, skipped, errored, complete, unmatched)
     finally:
         lib.close()
+    # The wand is ONE operation: after identifying, fill/refresh art for the games it
+    # scanned that are already resolved — from every provider, plus open-web discovery
+    # (Wikimedia/Google/LLM) when the user turned on web search. A newly-proposed match
+    # fills its art on apply instead. Never lets a media hiccup fail the scan.
+    try:
+        if want_media:
+            _wand_fill_media(media_nks, web, should_stop)
+    except Exception as e:
+        print("aimeta scan media fill: %s" % str(e)[:200], file=sys.stderr)
     aimeta.scan_progress(run_id, done, found, skipped, errored, complete, unmatched)
     aimeta.scan_finish(run_id, "paused" if done < len(norm_keys) else "done")
 
@@ -3116,7 +3129,8 @@ def aimeta_scan(body: dict = Body(default={})):
         raise HTTPException(400, "no games to scan")
     run_id = aimeta.scan_new(label, keys, web, match_provider, md_kinds)
     _start_aimeta_job(run_id, keys, {"web": web, "match_provider": match_provider,
-                                     "metadata_kinds": md_kinds, "label": label})
+                                     "metadata_kinds": md_kinds, "want_media": want_media,
+                                     "label": label})
     return {"run_id": run_id, "target": label, "count": len(keys), "web": web,
             "match_provider": match_provider}
 
@@ -3970,12 +3984,11 @@ def _fetch_media_web(con, nk, title, now):
     return added
 
 
-def _fetch_media_for(nk, want_web=False):
-    """On-demand media hunt for ONE game, independent of any identity change — the
-    'this game has no art, go find some' action the wand lacks for already-identified
-    games. Pulls from every configured provider (IGDB — incl. per-entry override ids —
-    plus SteamGridDB gap-fill, a huge community art DB that often has what IGDB doesn't),
-    optionally AI web discovery, then re-chooses. Returns a summary."""
+def _pull_media_sources(con, nk, want_web=False):
+    """Fetch (do NOT choose) media for ONE game from every configured provider — IGDB
+    (incl. per-entry override ids) + SteamGridDB (a huge community art DB that often has
+    what IGDB doesn't) — plus AI open-web discovery (Wikimedia/Google/LLM) when want_web.
+    The caller runs media_choose.select once after a batch. Returns web images added."""
     import media_fetch as _mf
     now = int(time.time())
     title, appid = "", None
@@ -3989,21 +4002,29 @@ def _fetch_media_for(nk, want_web=False):
         appid = ar[0] if ar and str(ar[0] or "").isdigit() else None
     finally:
         lc.close()
+    _mf.fetch_igdb(con, now, only={nk})
+    if _mf.config.steamgriddb_key():
+        try:
+            _mf.fetch_steamgriddb_targets(con, now, [(nk, title, appid)])
+        except Exception as e:
+            print("media sgdb %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+    web_n = 0
+    if want_web:
+        try:
+            web_n = _fetch_media_web(con, nk, title, now)
+        except Exception as e:
+            print("media web %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+    return web_n
+
+
+def _fetch_media_for(nk, want_web=False):
+    """One-game media hunt + choose (the wand's media step, also the refresh endpoint)."""
+    import media_fetch as _mf
     con = media_choose.con_index()
     web_n = 0
     try:
         con.execute("PRAGMA busy_timeout=30000")
-        _mf.fetch_igdb(con, now, only={nk})
-        if _mf.config.steamgriddb_key():
-            try:
-                _mf.fetch_steamgriddb_targets(con, now, [(nk, title, appid)])
-            except Exception as e:
-                print("refresh-media sgdb %s: %s" % (nk, str(e)[:150]), file=sys.stderr)
-        if want_web:
-            try:
-                web_n = _fetch_media_web(con, nk, title, now)
-            except Exception as e:
-                print("refresh-media web %s: %s" % (nk, str(e)[:150]), file=sys.stderr)
+        web_n = _pull_media_sources(con, nk, want_web=want_web)
         _mf._backfill_game_key(con)
         media_choose.select(con)
         con.commit()
@@ -4013,6 +4034,44 @@ def _fetch_media_for(nk, want_web=False):
     finally:
         con.close()
     return {"has_cover": bool(have.get("cover")), "chosen": have, "web_added": web_n}
+
+
+def _wand_fill_media(nks, want_web, should_stop):
+    """The wand's media step: fetch + choose art for the games it scanned, from every
+    provider (+ open-web discovery when the user turned on web search). Runs for games that
+    already have a resolution (a newly-proposed match fills its art on apply instead). One
+    choose after the batch. Web discovery is capped so a huge 'scan all' doesn't do
+    thousands of slow web calls — providers still run for every game."""
+    nks = list(nks)
+    if not nks:
+        return
+    import media_fetch as _mf
+    con = media_choose.con_index()
+    try:
+        con.execute("PRAGMA busy_timeout=30000")
+        # only games MISSING a chosen cover — don't re-hit providers for art we already have
+        need = [nk for nk in nks if not con.execute(
+            "SELECT 1 FROM media WHERE norm_key=? AND chosen=1 AND kind='cover' LIMIT 1",
+            (nk,)).fetchone()]
+        if not need:
+            return
+        WEB_CAP = 40
+        do_web = want_web and len(need) <= WEB_CAP
+        if want_web and not do_web:
+            print("aimeta wand: web media discovery skipped (%d games > cap %d); providers "
+                  "only" % (len(need), WEB_CAP), file=sys.stderr)
+        for nk in need:
+            if should_stop():
+                break
+            try:
+                _pull_media_sources(con, nk, want_web=do_web)
+            except Exception as e:
+                print("aimeta wand media %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+        _mf._backfill_game_key(con)
+        media_choose.select(con)
+        con.commit()
+    finally:
+        con.close()
 
 
 def _aimeta_apply_media(touched, media, should_stop):
