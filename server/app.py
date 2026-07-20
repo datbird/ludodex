@@ -3431,6 +3431,39 @@ def aimeta_refresh_media(body: dict = Body(default={})):
     return {"ok": True, "norm_key": nk, **res}
 
 
+@app.post("/api/aimeta/pick-art")
+def aimeta_pick_art(body: dict = Body(default={})):
+    """On-demand AI art pick for ONE game — the wand's 'pick nicest art' button. This is
+    the ONLY place the paid vision pick_art runs unless ai_art_auto_pick is enabled; the
+    routine apply/rebuild path never calls it by default. Vision-picks the best image per
+    kind (kinds with ≥2 candidate providers) and marks the game adjudicated. Synchronous.
+    Body: {norm_key|entry_key}."""
+    body = body or {}
+    nk = (body.get("norm_key") or "").strip()
+    if not nk and body.get("entry_key"):
+        nk = _split_entry_key(body["entry_key"])[0]
+    if not nk:
+        raise HTTPException(400, "norm_key or entry_key required")
+    if not ai.area_available("art"):
+        raise HTTPException(400, "AI art picking isn't configured (set an AI provider "
+                                 "for the 'art' area in Settings › AI).")
+    title = nk
+    lc = ro(LIBRARY_DB)
+    try:
+        r = lc.execute("SELECT canonical_title FROM games WHERE norm_key=? LIMIT 1",
+                       (nk,)).fetchone()
+        if r and r["canonical_title"]:
+            title = r["canonical_title"]
+    finally:
+        lc.close()
+    try:
+        _ai_adjudicate_game(nk, title)
+        _mark_art_adjudicated(nk, int(time.time()))
+    except Exception as e:
+        raise HTTPException(502, "pick-art failed: %s" % str(e)[:200])
+    return {"ok": True, "norm_key": nk}
+
+
 @app.get("/api/aimeta/targets")
 def aimeta_targets():
     """Per-target game counts + whether the metadata provider can search the web."""
@@ -3575,6 +3608,39 @@ def _attr_norm(v):
     if isinstance(v, list):
         return tuple(sorted(str(x).strip().lower() for x in v))
     return str(v).strip().lower()
+
+
+def _art_adjudicated(nk):
+    """Has the AI already vision-picked art for this game? Marker lives in the media
+    index (durable across catalog rebuilds), so a rebuild never re-triggers the paid
+    vision call for a game already adjudicated."""
+    try:
+        c = ro(INDEX_DB)
+        try:
+            return c.execute("SELECT 1 FROM art_adjudicated WHERE norm_key=?",
+                             (nk,)).fetchone() is not None
+        finally:
+            c.close()
+    except Exception:
+        return False
+
+
+def _mark_art_adjudicated(nk, now):
+    """Record that the AI art-pick has run for this game (see _art_adjudicated). Marked
+    on ATTEMPT, not just success, so a persistent provider error can't loop the wand into
+    re-calling — and billing — on every rebuild. The on-demand button re-runs regardless."""
+    try:
+        c = sqlite3.connect(INDEX_DB)
+        try:
+            c.execute("CREATE TABLE IF NOT EXISTS art_adjudicated("
+                      "norm_key TEXT PRIMARY KEY, at INTEGER)")
+            c.execute("INSERT OR REPLACE INTO art_adjudicated(norm_key,at) VALUES(?,?)",
+                      (nk, now))
+            c.commit()
+        finally:
+            c.close()
+    except Exception:
+        pass
 
 
 def _ai_adjudicate_game(nk, title):
@@ -4196,10 +4262,14 @@ def _aimeta_apply_media(touched, media, should_stop):
             print("apply prune-blank: %s" % str(e)[:150], file=sys.stderr)
         args = ["--kinds", ",".join(media)] if isinstance(media, list) and media else []
         _run_script("media_choose.py", args=args, timeout=900)
-    # AI adjudication (per game): now that providers are linked + art fetched, let
-    # the model vision-pick the best image per kind and choose the better provider
-    # per conflicting attribute — for EVERY touched game. Best-effort; never blocks.
-    if touched:
+    # AI adjudication (per game): now that providers are linked + art fetched, the model
+    # can vision-pick the best image per kind and choose the better provider per
+    # conflicting attribute. This is a PAID call per game, so it is OFF by default
+    # (ai_art_auto_pick) — deterministic media_choose above already picks sensible art.
+    # When enabled it runs ONCE per game (marker in the durable media index), so a catalog
+    # rebuild never re-bills already-adjudicated games. The per-game 'AI: pick nicest art'
+    # button (aimeta/pick-art) runs it on demand regardless of the flag.
+    if touched and config.get_bool("ai_art_auto_pick", False):
         lcon = ro(LIBRARY_DB)
         try:
             titles = {r["norm_key"]: r["canonical_title"]
@@ -4209,7 +4279,10 @@ def _aimeta_apply_media(touched, media, should_stop):
         for nk in touched:
             if should_stop():
                 break
+            if _art_adjudicated(nk):       # once per game — never re-bill on rebuild
+                continue
             _ai_adjudicate_game(nk, titles.get(nk, nk))
+            _mark_art_adjudicated(nk, now)
 
 
 # --- background art job: coalesced queue drained on its own thread so metadata apply

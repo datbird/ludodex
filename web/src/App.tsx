@@ -5484,6 +5484,8 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
   const dragRef = useRef<number | null>(null)
   const overRef = useRef<number | null>(null)
   const [busy, setBusy] = useState(false)
+  const [aiBusy, setAiBusy] = useState(false)
+  const [aiMsg, setAiMsg] = useState('')
   useEffect(() => { setOrder(byRank(assets)) }, [assets])
   // Enlarged view: ← / → step through this category, Esc closes JUST the viewer.
   useEffect(() => {
@@ -5502,6 +5504,24 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
     setBusy(true)
     try { onChange(await api.setPins(nk, kind.kind, next.map((a) => a.id))) }
     catch { /* */ } finally { setBusy(false) }
+  }
+  // On-demand AI art pick for THIS kind — the only time the paid vision call fires
+  // (the routine wand apply/rebuild never does unless you turn ai_art_auto_pick on).
+  // Picks the nicest of the candidates and floats it to #1.
+  const aiPick = async () => {
+    setAiBusy(true); setAiMsg('')
+    try {
+      const p = await api.artPick(nk, kind.kind)
+      if (p.recommended_id) {
+        await api.artApply(p.recommended_id, nk, kind.kind)
+        onChange(await api.mediaLibrary(nk))
+        setAiMsg('✨ picked the best ' + kind.kind.replace(/_/g, ' '))
+      } else {
+        setAiMsg(p.reason || 'No clear winner to pick')
+      }
+    } catch {
+      setAiMsg('AI pick unavailable — set an AI provider for “art” in Settings › AI')
+    } finally { setAiBusy(false) }
   }
   // The one true reorder primitive — move item `from` to slot `to` and save. Both the
   // tap controls (▲ ▼ ★, the reliable path on mobile) and the drag handle route through
@@ -5566,7 +5586,13 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
         <button className="close" onClick={onClose}>×</button>
         <h2 className="mko-title">{kind.kind.replace(/_/g, ' ')}
           <span className="dim"> · {order.length}</span>
-          {busy && <span className="dim mko-saving"> · saving…</span>}</h2>
+          {busy && <span className="dim mko-saving"> · saving…</span>}
+          {order.length >= 2 && (
+            <button className="mko-aipick" disabled={aiBusy || busy} onClick={aiPick}
+              title="Have the AI look at the candidates and make the nicest one #1. Uses your configured AI — a paid call that runs only when you click it.">
+              {aiBusy ? '✨ Picking…' : '✨ AI: pick best'}</button>
+          )}
+          {aiMsg && <span className="dim mko-aimsg"> · {aiMsg}</span>}</h2>
         <p className="mko-desc dim">Set priority — <b>#1 is the one used.</b> Tap <b>★ Use</b> to promote,
           <b> ▲ ▼</b> to nudge, or drag the ⠿ handle · click to enlarge{framable ? ' · ⚙ on #1 frames its position & zoom' : ''}
           {kind.description ? ' · ' + kind.description : ''}</p>

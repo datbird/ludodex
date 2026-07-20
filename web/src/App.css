@@ -1331,6 +1331,12 @@ button.am-badge { border: 0; background: none; padding: 0; font-family: inherit;
 /* per-kind media gallery overlay (click a media type in All Media) */
 .mko-panel { max-width: 920px; width: 94vw; max-height: 90vh; overflow: auto; padding: 20px 22px; }
 .mko-title { text-transform: capitalize; margin: 0 0 4px; }
+.mko-aipick { margin-left: 10px; font-size: 12px; text-transform: none; vertical-align: middle;
+  padding: 4px 10px; border-radius: 7px; cursor: pointer; color: #fff;
+  background: var(--accent); border: 1px solid var(--accent); font-weight: 700; }
+.mko-aipick:hover:not(:disabled) { filter: brightness(1.1); }
+.mko-aipick:disabled { opacity: 0.5; cursor: default; }
+.mko-aimsg { text-transform: none; font-style: italic; }
 .mko-desc { margin: 0 0 10px; }
 .mko-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
 .mko-item { position: relative; margin: 0; background: rgba(127,127,127,0.08); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }

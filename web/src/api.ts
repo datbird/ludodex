@@ -1449,6 +1449,16 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ ok: boolean; norm_key: string; has_cover: boolean; chosen: Record<string, number>; web_added: number }>
   },
+  // On-demand AI art pick for one game — the wand's "pick nicest art" button. The ONLY
+  // place the paid vision pick runs by default (routine apply/rebuild never calls it).
+  aimetaPickArt: async (body: { norm_key?: string; entry_key?: string }) => {
+    const r = await fetch('/api/aimeta/pick-art', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ ok: boolean; norm_key: string }>
+  },
   // Manually pin an entry's identity to a specific IGDB game (the human override for
   // odd-ball cases). `igdb` = an IGDB game link, slug, or numeric id. `platform` present
   // → per-entry pin (just that platform); absent → whole title.

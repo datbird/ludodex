@@ -174,6 +174,11 @@ SCHEMA = [
     ("media_steamgriddb_enabled", "0",
      "[media] Resolve SteamGridDB community art (grids/heroes/logos/icons). "
      "Remote; needs an API key (steamgriddb_api_key)."),
+    ("ai_art_auto_pick", "0",
+     "[media] If 1, the wand AI-vision-picks the nicest art per kind automatically the "
+     "FIRST time it touches a game (once per game, not every rebuild). Default 0 — costs "
+     "money per game, so it's off; deterministic ranking still chooses art. Use the "
+     "per-game 'AI: pick nicest art' button to run it on demand regardless of this flag."),
     ("steam_grid_path", "",
      "Steam userdata grid folder for the steamgrid media provider. Blank = "
      "autodetect ~/.steam/steam/userdata/<id>/config/grid."),
