@@ -2894,6 +2894,22 @@ def _era_compatible_emulation_entries(nk, year):
     return {p for p in plats if not console_eras.impossible(p, year)}
 
 
+def _blocked_release_entries(nk):
+    """Entry platforms of `nk` classified Homebrew/Hack/Unlicensed — a different work that
+    shares the name (the Atari 2600 homebrew "Doom"). The wand must not bind these to the
+    commercial game; build_library forfeits them and this keeps the wand from fighting it."""
+    con = ro(LIBRARY_DB)
+    try:
+        return {r[0] for r in con.execute(
+            "SELECT DISTINCT g.platform FROM games g JOIN game_attributes a ON a.game_id=g.id "
+            "WHERE g.norm_key=? AND a.kind='release_type' AND a.value IN "
+            "('Homebrew','Hack','Unlicensed') AND g.platform IS NOT NULL", (nk,))}
+    except Exception:
+        return set()
+    finally:
+        con.close()
+
+
 def _store_locked_igdb(nk, proposed_id):
     """True when norm_key already resolves via a Steam appid (an authoritative
     external_games link) to a DIFFERENT IGDB game — so the wand must NOT overwrite it
@@ -3615,8 +3631,9 @@ def _aimeta_apply(should_stop, only_ids=None):
         nk, iid = pm["norm_key"], pm["igdb_id"]
         if _store_locked_igdb(nk, iid):
             yr = _igdb_year_from_meta(mc, iid)
+            _skip = detached | {(nk, p) for p in _blocked_release_entries(nk)}
             plats = [p for p in _era_compatible_emulation_entries(nk, yr)
-                     if (nk, p) not in detached]
+                     if (nk, p) not in _skip]
             for plat in plats:
                 entry_res.set_entry(mc, nk, plat, iid, "ai_entry")
             if plats:

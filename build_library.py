@@ -711,14 +711,24 @@ if config.source_enabled("emulation"):
         except sqlite3.OperationalError:
             continue
         try:
-            for _sys, _game, _fn in _rrc.execute(
-                    "SELECT system, game, filename FROM roms WHERE ext IN (%s) "
-                    "AND game<>''" % _rtph, list(ROM_EXTS)):
+            _rcols = {_r[1] for _r in _rrc.execute("PRAGMA table_info(roms)")}
+            _selsub = "subdir" if "subdir" in _rcols else "''"
+            for _sys, _game, _fn, _subdir in _rrc.execute(
+                    "SELECT system, game, filename, %s FROM roms WHERE ext IN (%s) "
+                    "AND game<>''" % (_selsub, _rtph), list(ROM_EXTS)):
                 _k = _mkey(_game)
                 if not _k:
                     continue
-                _ek = (_k, _entry_platform("emulation", _sys))
-                _rt = homebrew.classify(_fn)
+                _ep = _entry_platform("emulation", _sys)
+                _ek = (_k, _ep)
+                # filename scene tag -> folder-path provenance -> anachronistic year: a
+                # dump under a "…/Homebrew/" tree, or one whose filename year is impossible
+                # for the console (Atari 2600 "Doom (2011)"), is aftermarket/homebrew.
+                _rt = homebrew.classify(_fn) or homebrew.classify_path(_subdir)
+                if _rt is None:
+                    _yr = homebrew.year_from_name(_fn)
+                    if _yr and console_eras.impossible(_ep, _yr):
+                        _rt = "Homebrew"
                 if _rt is None:
                     rt_map[_ek] = None          # a commercial dump present -> commercial
                 elif _ek not in rt_map:

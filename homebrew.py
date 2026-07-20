@@ -80,6 +80,36 @@ def classify(name):
     return None
 
 
+# Folder-path provenance: a dump filed under a Homebrew / Hacks / Translations / …
+# tree carries that provenance even when its FILENAME has no scene tag — the Atari 2600
+# "Doom (2011) (Mr. Podoboo)" lives under `…/Archive/4 Homebrew/`. Matched as whole words
+# in any path segment so "4 Homebrew", "ROM Hacks", "Aftermarket Games" are all caught.
+# Only the strong, unambiguous folder words (a commercial game's path won't contain them).
+_PATH_RULES = [
+    ("Translation", re.compile(r"\btranslat\w+\b", re.I)),
+    ("Hack", re.compile(r"\b(?:rom[\s_-]*)?hacks\b", re.I)),
+    ("Homebrew", re.compile(r"\b(?:home[\s_-]*brew|homebrews|aftermarket)\b", re.I)),
+    ("Unlicensed", re.compile(r"\b(?:unlicen[cs]ed|bootlegs?|pirates?)\b", re.I)),
+]
+
+
+def classify_path(path):
+    """Release type inferred from a ROM's folder path (its `subdir`), or None."""
+    if not path:
+        return None
+    for label, rx in _PATH_RULES:
+        if rx.search(path):
+            return label
+    return None
+
+
+def year_from_name(name):
+    """A 4-digit release year in a filename parenthetical ('(2011)'), or None — used to
+    catch aftermarket/homebrew dumps whose year is impossible for the console era."""
+    m = re.search(r"\((19|20)\d{2}\)", name or "")
+    return int(m.group(0)[1:5]) if m else None
+
+
 def extract_language(name):
     """Canonical language of a translation/localization from a ROM filename, or None.
     Only returns a language when the name actually looks like a translation patch, so
