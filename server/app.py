@@ -8472,21 +8472,32 @@ def dbsync_run(body: dict = Body(default={})):
 _TWOWAY = {"last": None}
 
 
+def _backingstore_configured(backend):
+    if backend in ("postgres", "supabase"):
+        pfx = backend
+        return bool(config.get(pfx + "_url") or (config.get(pfx + "_host")
+                                                 and config.get(pfx + "_password")))
+    if backend == "mysql":
+        return bool(config.get("mysql_host") and config.get("mysql_password"))
+    return bool(config.get("pocketbase_url") and config.pocketbase_password())
+
+
 @app.get("/api/backingstore/status")
 def backingstore_status():
     cur = _JOBS.get("backingstore")
+    backend = config.get("backingstore_backend") or "pocketbase"
     return {"running": bool(cur and cur.get("thread") and cur["thread"].is_alive()),
-            "last": _TWOWAY["last"],
-            "backend": config.get("sync_target") or "pocketbase",
-            "configured": bool(config.get("pocketbase_url")
-                               and config.pocketbase_password())}
+            "last": _TWOWAY["last"], "backend": backend,
+            "configured": _backingstore_configured(backend)}
 
 
 @app.post("/api/backingstore/run")
 def backingstore_run(body: dict = Body(default={})):
-    """Two-way sync the durable stores against the backing store (PocketBase). Runs in the
-    background; poll /api/backingstore/status. `dry_run` reports the plan without writing."""
-    backend = (body or {}).get("backend") or config.get("sync_target") or "pocketbase"
+    """Two-way sync the durable stores against the selected backing store (PocketBase /
+    Postgres / Supabase / MySQL). Background; poll /api/backingstore/status. `dry_run`
+    reports the plan without writing."""
+    backend = ((body or {}).get("backend") or config.get("backingstore_backend")
+               or "pocketbase")
     dry = bool((body or {}).get("dry_run"))
     cur = _JOBS.get("backingstore")
     if cur and cur.get("thread") and cur["thread"].is_alive():
@@ -8501,6 +8512,72 @@ def backingstore_run(body: dict = Body(default={})):
             print("backingstore sync: %s" % str(e)[:200], file=sys.stderr)
     _start_job("backingstore", "backingstore", "Two-way backing-store sync", job)
     return {"started": True, "backend": backend, "dry_run": dry}
+
+
+_BS_FIELDS = {
+    "pocketbase": ["pocketbase_url", "pocketbase_admin_email", "pocketbase_admin_password"],
+    "postgres": ["postgres_url", "postgres_host", "postgres_port", "postgres_db",
+                 "postgres_user", "postgres_password"],
+    "supabase": ["supabase_url"],
+    "mysql": ["mysql_host", "mysql_port", "mysql_db", "mysql_user", "mysql_password"],
+}
+_BS_SECRET = {"pocketbase_admin_password", "postgres_password", "mysql_password",
+              "postgres_url", "supabase_url"}      # never echo back; connection URLs hold pw
+
+
+@app.get("/api/backingstore/config")
+def backingstore_get_config():
+    """Backing-store backend selection + per-backend config. Secret fields (passwords, and
+    connection URLs which contain them) are never echoed — only a *_set flag."""
+    vals, secret_set = {}, {}
+    for keys in _BS_FIELDS.values():
+        for k in keys:
+            if k in _BS_SECRET:
+                secret_set[k] = bool(config.get(k))
+                vals[k] = ""
+            else:
+                vals[k] = config.get(k) or ""
+    return {"backend": config.get("backingstore_backend") or "", "values": vals,
+            "secret_set": secret_set, "fields": _BS_FIELDS}
+
+
+@app.post("/api/backingstore/config")
+def backingstore_set_config(body: dict = Body(...)):
+    """Save the backend selection + config. Body: {backend?, values:{<key>:<val>}}. An empty
+    secret value is IGNORED (keeps the existing one) so re-saving needn't retype passwords."""
+    body = body or {}
+    if "backend" in body:
+        config.set_("backingstore_backend", (body.get("backend") or "").strip())
+    values = body.get("values") or {}
+    allkeys = {k for keys in _BS_FIELDS.values() for k in keys}
+    for k, v in values.items():
+        if k not in allkeys:
+            continue
+        if k in _BS_SECRET and (v is None or str(v) == ""):
+            continue                              # blank secret -> keep existing
+        config.set_(k, str(v).strip())
+    return backingstore_get_config()
+
+
+@app.post("/api/backingstore/test")
+def backingstore_test(body: dict = Body(default={})):
+    """Connect to the (selected or given) backend and touch a store — proves creds + reach
+    without syncing. Returns {ok, backend, error?}."""
+    backend = ((body or {}).get("backend") or config.get("backingstore_backend")
+               or "pocketbase")
+    import dbsync
+    if backend not in dbsync.BACKENDS:
+        raise HTTPException(400, "unknown backend %r" % backend)
+    try:
+        b = dbsync.BACKENDS[backend]()            # __init__ connects / auths
+        store = dbsync.STORES[0]
+        cols = ["norm_key", "tag", "created"]
+        b.ensure(store, cols)
+        n = len(b.read_all(store, cols))
+        return {"ok": True, "backend": backend, "detail": "connected · %d record(s) in %s"
+                % (n, "ludodex_" + store["name"])}
+    except Exception as e:
+        return {"ok": False, "backend": backend, "error": str(e)[:250]}
 
 
 # ---------------------------------------------------------------- static SPA (last)

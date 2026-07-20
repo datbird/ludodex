@@ -1270,6 +1270,11 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ started: boolean; backend: string; running?: boolean }>
   },
+  backingConfig: () => get<{ backend: string; values: Record<string, string>; secret_set: Record<string, boolean>; fields: Record<string, string[]> }>('/api/backingstore/config'),
+  backingConfigSet: (patch: { backend?: string; values?: Record<string, string> }) =>
+    postJson<{ backend: string; values: Record<string, string>; secret_set: Record<string, boolean>; fields: Record<string, string[]> }>('/api/backingstore/config', patch),
+  backingTest: (backend?: string) =>
+    postJson<{ ok: boolean; backend: string; detail?: string; error?: string }>('/api/backingstore/test', backend ? { backend } : {}),
   opsRestore: async (id: string) => {
     const r = await fetch('/api/ops/restore', {
       method: 'POST', headers: { 'content-type': 'application/json' },

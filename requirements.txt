@@ -15,6 +15,11 @@ google-genai>=0.3    # provider: gemini
 # --- optional sync target ---
 google-auth>=2.0     # only for the Firebase/Firestore sync target (sync.py)
 
+# --- two-way backing-store SQL adapters (dbsync.py) — only used if you pick a SQL
+#     backend (Postgres/Supabase/MySQL); pure-Python drivers, no build tools needed ---
+psycopg[binary]>=3.1  # Postgres + Supabase (Supabase is Postgres)
+PyMySQL>=1.1          # MySQL / MariaDB
+
 # --- Cloudflare Access SSO (verify the Access JWT) ---
 pyjwt[crypto]>=2.8   # cryptography is already present transitively
 

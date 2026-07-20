@@ -1187,6 +1187,7 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
        { id: 'budgets', name: 'Budgets & limits' }, { id: 'report', name: 'Usage report' }],
   connections: [{ id: 'devices', name: 'Devices' },
                 { id: 'credentials', name: 'Stores & providers' },
+                { id: 'backingstore', name: 'Backing store' },
                 { id: 'dbsync', name: 'Database sync' },
                 { id: 'limits', name: 'Rate limits' }],
   library: [{ id: 'preferences', name: 'Preferences' }, { id: 'banned', name: 'Banned media' }],
@@ -1206,6 +1207,7 @@ const SETTINGS_KEYWORDS: Record<string, string> = {
   report: 'usage report cost tokens spend',
   devices: 'device library manager rom media path ssh host master edit folder connection',
   credentials: 'stores providers steam gog epic itch screenscraper igdb ea login accounts credentials',
+  backingstore: 'backing store two-way sync database postgres supabase mysql pocketbase backend cache durable',
   dbsync: 'database sync backup replicate',
   limits: 'rate limit api throttle quota cooldown per minute per day',
   preferences: 'media language ban file operations browse commander manifests apply mode preferences distribution',
@@ -1293,6 +1295,7 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
             {section === 'connections'
               ? (sub === 'devices' ? <DevicesPanel />
                 : sub === 'credentials' ? <Credentials />
+                : sub === 'backingstore' ? <BackingStore />
                 : sub === 'dbsync' ? <DatabaseSync />
                 : sub === 'limits' ? <RateLimits /> : null)
               : section === 'library'
@@ -1397,6 +1400,118 @@ function UsersPanel({ currentUser }: { currentUser: AuthUser | null }) {
             disabled={busy || !nu.username.trim() || nu.password.length < 8}>Add user</button>
         </div>
       </form>
+    </>
+  )
+}
+
+const BS_LABELS: Record<string, string> = {
+  pocketbase_url: 'PocketBase URL', pocketbase_admin_email: 'Admin email',
+  pocketbase_admin_password: 'Admin password',
+  postgres_url: 'Connection URL (optional — overrides fields below)',
+  postgres_host: 'Host', postgres_port: 'Port', postgres_db: 'Database',
+  postgres_user: 'User', postgres_password: 'Password',
+  supabase_url: 'Supabase connection string',
+  mysql_host: 'Host', mysql_port: 'Port', mysql_db: 'Database',
+  mysql_user: 'User', mysql_password: 'Password',
+}
+const BS_BACKENDS = [
+  { id: '', name: 'Off' }, { id: 'pocketbase', name: 'PocketBase' },
+  { id: 'postgres', name: 'Postgres' }, { id: 'supabase', name: 'Supabase' },
+  { id: 'mysql', name: 'MySQL / MariaDB' },
+]
+
+// Two-way backing store: pick the backend + configure it. SQLite stays the local cache;
+// the chosen DB holds the durable truth and syncs both ways (see dbsync.py).
+function BackingStore() {
+  type BSCfg = { backend: string; values: Record<string, string>
+    secret_set: Record<string, boolean>; fields: Record<string, string[]> }
+  const [cfg, setCfg] = useState<BSCfg | null>(null)
+  const [backend, setBackend] = useState('')
+  const [vals, setVals] = useState<Record<string, string>>({})
+  const [busy, setBusy] = useState('')
+  const [msg, setMsg] = useState('')
+  const [test, setTest] = useState<{ ok: boolean; detail?: string; error?: string } | null>(null)
+
+  const hydrate = (d: BSCfg) => { setCfg(d); setBackend(d.backend); setVals({ ...d.values }) }
+  useEffect(() => { api.backingConfig().then(hydrate).catch(() => {}) }, [])
+
+  if (!cfg) return <div className="loading">Loading…</div>
+  const secret = (k: string) => k in cfg.secret_set
+  const fields = backend ? (cfg.fields[backend] || []) : []
+
+  const save = async () => {
+    setBusy('save'); setMsg(''); setTest(null)
+    try {
+      const send: Record<string, string> = {}
+      ;(cfg.fields[backend] || []).forEach((k) => { if (vals[k] !== undefined) send[k] = vals[k] })
+      hydrate(await api.backingConfigSet({ backend, values: send })); setMsg('Saved ✓')
+    } catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
+  }
+  const runTest = async () => {
+    setBusy('test'); setTest(null); setMsg('')
+    try { setTest(await api.backingTest(backend)) }
+    catch (e) { setTest({ ok: false, error: (e as Error).message }) } finally { setBusy('') }
+  }
+  const syncNow = async () => {
+    setBusy('sync'); setMsg('Syncing…')
+    try {
+      await api.backingRun(false)
+      let n = 0
+      const poll = setInterval(async () => {
+        n++
+        try {
+          const s = await api.backingStatus()
+          if (!s.running || n > 120) {
+            clearInterval(poll); setBusy('')
+            const last = s.last
+            if (last?.error) setMsg('Sync failed: ' + last.error)
+            else if (last?.stores) {
+              const up = last.stores.reduce((a, x) => a + x.pushed + x.pushed_deleted, 0)
+              const down = last.stores.reduce((a, x) => a + x.pulled + x.pulled_deleted, 0)
+              setMsg(`Synced · ↑${up} pushed · ↓${down} pulled`)
+            } else setMsg('Synced ✓')
+          }
+        } catch { /* keep polling */ }
+      }, 1000)
+    } catch (e) { setMsg((e as Error).message); setBusy('') }
+  }
+
+  return (
+    <>
+      <h2>Backing store</h2>
+      <p className="dim">Keep your durable data — tags, ownership, art pins, attribute
+        overrides, framing, manual games — in an external database and sync it <b>both ways</b>.
+        SQLite stays your fast local cache; this backend is the durable source of truth, so you
+        can restore or run ludodex from another machine and get your library back.</p>
+      <div className="bs-row">
+        <label>Backend</label>
+        <select value={backend} onChange={(e) => { setBackend(e.target.value); setTest(null) }}>
+          {BS_BACKENDS.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
+      </div>
+      {backend === 'supabase' && <p className="dim bs-hint">Supabase is Postgres — paste the
+        connection string from Project Settings → Database → Connection string.</p>}
+      {backend === 'postgres' && <p className="dim bs-hint">Fill the discrete fields, or paste a
+        full connection URL to override them.</p>}
+      {fields.map((k) => (
+        <div key={k} className="bs-row">
+          <label>{BS_LABELS[k] || k}</label>
+          <input type={secret(k) ? 'password' : 'text'} value={vals[k] ?? ''}
+            placeholder={secret(k) && cfg.secret_set[k] ? '•••••• saved — blank keeps it' : ''}
+            onChange={(e) => setVals((v) => ({ ...v, [k]: e.target.value }))} />
+        </div>
+      ))}
+      <div className="bs-actions">
+        <button className="go" disabled={!!busy} onClick={save}>
+          {busy === 'save' ? 'Saving…' : 'Save'}</button>
+        <button className="ops-btn" disabled={!!busy || !backend} onClick={runTest}>
+          {busy === 'test' ? 'Testing…' : 'Test connection'}</button>
+        <button className="ops-btn" disabled={!!busy || !backend} onClick={syncNow}>
+          {busy === 'sync' ? 'Syncing…' : '☁ Sync now'}</button>
+      </div>
+      {test && <div className={'bs-test ' + (test.ok ? 'ok' : 'bad')}>
+        {test.ok ? '✓ ' + (test.detail || 'connected') : '✗ ' + (test.error || 'failed')}</div>}
+      {msg && <div className="dim bs-msg">{msg}</div>}
     </>
   )
 }

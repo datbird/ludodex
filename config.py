@@ -202,6 +202,27 @@ SCHEMA = [
     ("pocketbase_admin_password", "",
      "PocketBase admin password, stored locally (gitignored). POCKETBASE_PASSWORD "
      "env wins."),
+    # --- two-way BACKING STORE (dbsync.py): SQLite is the local cache, this backend the
+    #     durable truth. Pick one; fill its config. Distinct from sync_target (one-way mirror). ---
+    ("backingstore_backend", "",
+     "Two-way backing store backend: blank (off) | 'pocketbase' | 'postgres' | "
+     "'supabase' | 'mysql'. SQLite stays the fast local cache; this holds the durable data."),
+    ("postgres_url", "",
+     "Postgres connection string (overrides the discrete fields), e.g. "
+     "postgresql://user:pass@host:5432/ludodex."),
+    ("postgres_host", "", "Postgres host (if not using postgres_url)."),
+    ("postgres_port", "5432", "Postgres port."),
+    ("postgres_db", "ludodex", "Postgres database name."),
+    ("postgres_user", "ludodex", "Postgres user."),
+    ("postgres_password", "", "Postgres password (gitignored)."),
+    ("supabase_url", "",
+     "Supabase Postgres connection string (from Project Settings → Database → "
+     "Connection string), e.g. postgresql://postgres:pass@db.<ref>.supabase.co:5432/postgres."),
+    ("mysql_host", "", "MySQL/MariaDB host."),
+    ("mysql_port", "3306", "MySQL port."),
+    ("mysql_db", "ludodex", "MySQL database name."),
+    ("mysql_user", "ludodex", "MySQL user."),
+    ("mysql_password", "", "MySQL password (gitignored)."),
     ("firebase_project_id", "",
      "Firebase/GCP project id for the Firestore sync."),
     ("firebase_sa_json", "",

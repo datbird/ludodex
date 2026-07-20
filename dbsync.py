@@ -253,7 +253,130 @@ class PocketBaseBackend:
         _s.pb_write(self.url, self.hdr, coll, ups, dels, set(remote_keys))
 
 
-BACKENDS = {"pocketbase": PocketBaseBackend}
+# --------------------------------------------------------------------------- #
+#  SQL backend adapters (Postgres / Supabase / MySQL) — one table per store,
+#  ludodex_<name>(k, data) with data = the row's JSON blob (same shape as
+#  PocketBase, so the three-way merge engine is identical across every backend).
+# --------------------------------------------------------------------------- #
+class _SqlBackend:
+    key_type = "TEXT"
+    text_type = "TEXT"
+
+    def _conn(self):                       # subclass: a fresh DB connection
+        raise NotImplementedError
+
+    def _upsert_sql(self, table):          # subclass: dialect INSERT..UPSERT on (k)
+        raise NotImplementedError
+
+    def _table(self, store):
+        return "ludodex_" + store["name"]
+
+    def ensure(self, store, cols):
+        con = self._conn()
+        try:
+            cur = con.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS %s (k %s PRIMARY KEY, data %s)"
+                        % (self._table(store), self.key_type, self.text_type))
+            con.commit()
+        finally:
+            con.close()
+
+    def read_all(self, store, cols):
+        out = {}
+        con = self._conn()
+        try:
+            cur = con.cursor()
+            cur.execute("SELECT k, data FROM %s" % self._table(store))
+            for k, data in cur.fetchall():
+                try:
+                    out[k] = json.loads(data)
+                except (ValueError, TypeError):
+                    pass
+        finally:
+            con.close()
+        return out
+
+    def write(self, store, cols, upserts, deletes, remote_keys):
+        con = self._conn()
+        try:
+            cur = con.cursor()
+            up = self._upsert_sql(self._table(store))
+            for key, row in upserts.items():
+                data = json.dumps({c: _cell(row.get(c)) for c in cols},
+                                  sort_keys=True, ensure_ascii=False)
+                cur.execute(up, (key, data))
+            for key in deletes:
+                cur.execute("DELETE FROM %s WHERE k=%%s" % self._table(store), (key,))
+            con.commit()
+        finally:
+            con.close()
+
+
+class PostgresBackend(_SqlBackend):
+    id = "postgres"
+    url_key = "postgres_url"
+    prefix = "postgres"
+
+    def __init__(self):
+        import psycopg
+        self._drv = psycopg
+        url = config.get(self.url_key)
+        if url:
+            self.conninfo = url
+        else:
+            pw = config.get(self.prefix + "_password")
+            host = config.get(self.prefix + "_host") or "localhost"
+            if not (host and pw):
+                raise RuntimeError("%s not configured (need %s_host + %s_password, or %s)"
+                                   % (self.id, self.prefix, self.prefix, self.url_key))
+            self.conninfo = ("host=%s port=%s dbname=%s user=%s password=%s" % (
+                host, config.get(self.prefix + "_port") or "5432",
+                config.get(self.prefix + "_db") or "ludodex",
+                config.get(self.prefix + "_user") or "ludodex", pw))
+
+    def _conn(self):
+        return self._drv.connect(self.conninfo)
+
+    def _upsert_sql(self, table):
+        return ("INSERT INTO %s (k, data) VALUES (%%s, %%s) "
+                "ON CONFLICT (k) DO UPDATE SET data = EXCLUDED.data" % table)
+
+
+class SupabaseBackend(PostgresBackend):
+    id = "supabase"
+    url_key = "supabase_url"           # Supabase IS Postgres — just a connection string
+    prefix = "supabase"
+
+
+class MySQLBackend(_SqlBackend):
+    id = "mysql"
+    key_type = "VARCHAR(500)"
+    text_type = "LONGTEXT"
+
+    def __init__(self):
+        import pymysql
+        self._drv = pymysql
+        pw = config.get("mysql_password")
+        host = config.get("mysql_host") or "localhost"
+        if not (host and pw):
+            raise RuntimeError("mysql not configured (need mysql_host + mysql_password)")
+        self.cfg = dict(host=host, port=int(config.get("mysql_port") or 3306),
+                        database=config.get("mysql_db") or "ludodex",
+                        user=config.get("mysql_user") or "ludodex",
+                        password=pw, charset="utf8mb4", autocommit=False)
+
+    def _conn(self):
+        return self._drv.connect(**self.cfg)
+
+    def _upsert_sql(self, table):
+        # `VALUES(col)` in ON DUPLICATE is deprecated in 8.0.20+ but still works on mysql:8
+        # and is the widest-compatible form (also MariaDB).
+        return ("INSERT INTO %s (k, data) VALUES (%%s, %%s) "
+                "ON DUPLICATE KEY UPDATE data = VALUES(data)" % table)
+
+
+BACKENDS = {"pocketbase": PocketBaseBackend, "postgres": PostgresBackend,
+            "supabase": SupabaseBackend, "mysql": MySQLBackend}
 
 
 # --------------------------------------------------------------------------- #
