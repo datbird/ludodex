@@ -3219,18 +3219,82 @@ def _resolve_igdb_ref(raw):
     return None
 
 
+def _map_igdb_attrs(iid):
+    """Mapped IGDB attribute dict (genres/themes/dev/…) for one igdb id from the metadata
+    cache, or {}. Shared by the surgical pin/apply paths so a corrected identity's metadata
+    lands without a rebuild — mirrors build_library's igdb_map."""
+    if not iid:
+        return {}
+    try:
+        from igdb import map_record as _igdb_map
+        mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+        try:
+            r = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?",
+                           (iid,)).fetchone()
+        finally:
+            mc.close()
+        if r and r["payload_json"]:
+            return _igdb_map(json.loads(r["payload_json"])) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _map_ss_attrs(nk):
+    """Mapped ScreenScraper attribute dict for a game from the SS cache, or {}."""
+    try:
+        from screenscraper import extract_metadata as _ss_map
+        sc = ro(os.path.join(DATA, "screenscraper-cache.sqlite"))
+        try:
+            r = sc.execute("SELECT payload_json FROM ss_game WHERE norm_key=? AND "
+                           "status='ok' AND payload_json IS NOT NULL LIMIT 1",
+                           (nk,)).fetchone()
+        finally:
+            sc.close()
+        if r and r["payload_json"]:
+            return _ss_map(json.loads(r["payload_json"])) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _fill_provider_attrs(con, gid, *mapped_origins):
+    """Fill-only write of provider attributes for one entry: each (mapped, origin) fills
+    only kinds no source already supplied (first provider to supply a kind wins). Mirrors
+    build_library's provider accumulation so the surgical paths are metadata-complete."""
+    have = {r[0] for r in con.execute(
+        "SELECT DISTINCT kind FROM game_attributes WHERE game_id=?", (gid,))}
+    rows = []
+    for mapped, origin in mapped_origins:
+        for kind, val in (mapped or {}).items():
+            if kind in have:
+                continue
+            wrote = False
+            for v in (val if isinstance(val, list) else [val]):
+                if v not in (None, ""):
+                    rows.append((gid, kind, str(v), origin))
+                    wrote = True
+            if wrote:
+                have.add(kind)
+    if rows:
+        con.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                        "VALUES(?,?,?,?)", rows)
+
+
 def _pin_live(nk, iid, plat, name, detach=False):
     """Write a manual identity decision straight into the LIVE catalog for the affected
-    entries. Pin: game_key = igdb:<iid>, the IGDB link, and (ROM/archive-only) the rename.
-    Detach: the entry forfeits the title's game → game_key = title:<nk> and its IGDB link
-    is removed (a homebrew/different game sharing the name). A per-entry decision (`plat`)
-    touches only that platform's entry; a title pin touches every non-era-separated entry.
-    The background reconcile re-derives this canonically after."""
+    entries. Pin: game_key = igdb:<iid>, the IGDB link, the rename, AND the provider-record
+    attributes — so a pinned game is fully complete instantly (no rebuild). Detach: the
+    entry forfeits the title's game → game_key = title:<nk> and its IGDB link is removed
+    (a homebrew/different game sharing the name). A per-entry decision (`plat`) touches only
+    that platform's entry; a title pin touches every non-era-separated entry."""
     con = sqlite3.connect(LIBRARY_DB)
     try:
         con.execute("PRAGMA busy_timeout=8000")
         if not _has_col(con, "games", "game_key"):
             return
+        igdb_attrs = {} if detach else _map_igdb_attrs(iid)
+        ss_attrs = {} if detach else _map_ss_attrs(nk)
         for gid, gplat, bkey in con.execute(
                 "SELECT id, platform, base_key FROM games WHERE norm_key=?", (nk,)).fetchall():
             if plat:
@@ -3253,6 +3317,7 @@ def _pin_live(nk, iid, plat, name, detach=False):
                 con.execute("UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
                             "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
                             "('emulation','archive'))", (name, gid, gid))
+            _fill_provider_attrs(con, gid, (igdb_attrs, "igdb"), (ss_attrs, "screenscraper"))
         con.commit()
     finally:
         con.close()
@@ -3398,15 +3463,16 @@ def aimeta_pin(body: dict = Body(default={})):
         mc.commit()
     finally:
         mc.close()
-    # instant surgical reconcile (identity link/title/game_key + cover), then enqueue the
-    # authoritative whole-catalog rebuild for cross-refs/associations.
+    # Surgical, SCOPED reconcile — identity link/title/game_key + provider attrs land
+    # synchronously, then media for just this game hydrates in the background. A single
+    # manual pin no longer rebuilds the whole catalog (associations are read-time on
+    # game_key, already correct). For a global re-derivation use the Rebuild button.
     try:
         _pin_live(nk, iid, plat, name, detach=detach)
         _reconcile_media_now({nk}, now)
     except Exception as e:
-        print("aimeta pin: reconcile failed (rebuild will apply): %s"
-              % str(e)[:200], file=sys.stderr)
-    _enqueue_reconcile({nk}, True)
+        print("aimeta pin: reconcile failed: %s" % str(e)[:200], file=sys.stderr)
+    _enqueue_media_reconcile({nk}, True)
     return {"ok": True, "norm_key": nk, "platform": plat, "detached": detach,
             "igdb_id": iid, "title": name,
             "url": ("https://www.igdb.com/games/%d" % iid) if iid else None}
