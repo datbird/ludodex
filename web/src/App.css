@@ -3132,7 +3132,19 @@ a.idchip:hover { background: var(--accent-bg); }
 .refine-field select { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); max-width: 240px; }
 .refine-web { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text); }
 .refine-note { font-size: 12px; }
+.refine-note.ok { color: #22c55e; }
 .refine-err { font-size: 12px; color: #ef4444; }
+.refine-pin { border-top: 1px dashed var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.refine-pin-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim, #9aa); }
+.refine-pin-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.refine-pin-in { flex: 1; min-width: 180px; font: inherit; font-size: 12px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
+.refine-pin-scope { font-size: 12px; padding: 5px 7px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
+.refine-cands { display: flex; flex-wrap: wrap; gap: 6px; }
+.refine-cand { font-size: 12px; padding: 5px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text-h); cursor: pointer; }
+.refine-cand:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg); }
+.refine-cand:disabled { opacity: 0.5; cursor: default; }
+.refine-detach { align-self: flex-start; font-size: 12px; padding: 5px 9px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text-dim, #9aa); cursor: pointer; }
+.refine-detach:hover:not(:disabled) { border-color: #ef4444; color: #ef4444; }
 .chg-bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; margin-top: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 -2px 10px rgba(0,0,0,0.15); }
 .chg-summary { flex: 1; font-size: 13px; color: var(--text); }
 

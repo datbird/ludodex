@@ -7555,22 +7555,60 @@ function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onR
 }) {
   const [open, setOpen] = useState(false)
   const [hint, setHint] = useState('')
+  const [refs, setRefs] = useState('')
   const [model, setModel] = useState(escalationModel || currentModel || '')
   const [web, setWeb] = useState(webCapable)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [note, setNote] = useState('')
+  // manual pin state
+  const [pinInput, setPinInput] = useState('')
+  const systems = f.context?.systems || []
+  const [pinPlat, setPinPlat] = useState<string>('')     // '' = whole title
+  const [cands, setCands] = useState<{ igdb_id: number | null; name: string; year: number | null; platforms: string[] }[] | null>(null)
+  const refList = () => refs.split(/[\s,]+/).map((s) => s.trim()).filter((s) => /^https?:\/\//i.test(s))
   const run = async () => {
-    setBusy(true); setErr('')
+    setBusy(true); setErr(''); setNote('')
     try {
       const r = await api.aimetaRefine({
-        norm_key: f.norm_key, hint: hint.trim(), model: model || undefined,
+        norm_key: f.norm_key, hint: hint.trim(), refs: refList(), model: model || undefined,
         web, run_id: f.run_id })
-      if (!r.finding) setErr('Re-run found nothing to change — try a stronger model or more specific context.')
+      if (r.used_refs?.length) setNote(`Grounded on ${r.used_refs.length} reference link${r.used_refs.length > 1 ? 's' : ''}.`)
+      if (!r.finding) setErr('Re-run found nothing to change — try a stronger model, more specific context, or pin it manually below.')
       else onRefined()
     } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
+  const doPin = async (igdb: string) => {
+    setBusy(true); setErr(''); setNote('')
+    try {
+      const r = await api.aimetaPin({ norm_key: f.norm_key, igdb, platform: pinPlat || undefined })
+      setNote(`Pinned to ${r.title || 'IGDB ' + r.igdb_id}${r.platform ? ` — ${r.platform} only` : ' — whole title'}. Cover + metadata applied.`)
+      setCands(null); setPinInput('')
+      onRefined()
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+  const doDetach = async () => {
+    setBusy(true); setErr(''); setNote('')
+    try {
+      const r = await api.aimetaPin({ norm_key: f.norm_key, platform: pinPlat, detach: true })
+      setNote(`Separated the ${r.platform} entry — it no longer inherits this game's identity or art.`)
+      setCands(null)
+      onRefined()
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+  const pinOrSearch = async () => {
+    const v = pinInput.trim()
+    if (!v) return
+    if (/igdb\.com\/games\//i.test(v) || /^\d+$/.test(v)) { doPin(v); return }
+    setBusy(true); setErr(''); setCands(null)
+    try {
+      const r = await api.identify(v)
+      setCands(r.candidates || [])
+      if (!(r.candidates || []).length) setErr('No IGDB matches for that name — try an IGDB link or id.')
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
   if (!open) return (
-    <button className="refine-toggle" onClick={() => setOpen(true)}>🔁 Not right? Add context &amp; re-run</button>
+    <button className="refine-toggle" onClick={() => setOpen(true)}>🔁 Not right? Add context, links, or pin it manually</button>
   )
   const extra = [currentModel, escalationModel].filter((m): m is string => !!m && !models.includes(m))
   const opts = [...new Set([...extra, ...models])]
@@ -7580,6 +7618,9 @@ function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onR
       <textarea className="refine-hint" rows={2} value={hint} autoFocus
         placeholder="Tell the AI what it got wrong or what this really is — e.g. “this is the Brazilian Tec Toy 20-in-1 pack-in compilation, list its 20 minigames”."
         onChange={(e) => setHint(e.target.value)} />
+      <textarea className="refine-hint" rows={2} value={refs}
+        placeholder="Reference links (optional) — paste URLs you found (Wikipedia, MobyGames, a store or IGDB page), one per line. The AI reads them as authoritative sources."
+        onChange={(e) => setRefs(e.target.value)} />
       <div className="refine-row">
         <label className="refine-field" title="Pick a larger / stronger model for a tough game">
           <span>Model</span>
@@ -7592,9 +7633,46 @@ function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onR
           <input type="checkbox" checked={web} disabled={!webCapable} onChange={(e) => setWeb(e.target.checked)} /> Web
         </label>
         <button className="ops-btn go" disabled={busy} onClick={run}>{busy ? 'Re-running…' : '✨ Re-run'}</button>
-        <button className="ops-btn" disabled={busy} onClick={() => { setOpen(false); setErr('') }}>Cancel</button>
+        <button className="ops-btn" disabled={busy} onClick={() => { setOpen(false); setErr(''); setNote('') }}>Cancel</button>
       </div>
-      {busy && <div className="refine-note dim">Sending back through the pipeline{web ? ' with web search' : ''}{model && model !== currentModel ? ` on ${model}` : ''}…</div>}
+      <div className="refine-pin">
+        <div className="refine-pin-h">Still wrong? Pin the identity yourself</div>
+        <div className="refine-pin-row">
+          <input className="refine-pin-in" value={pinInput}
+            placeholder="Paste an IGDB game link or id, or type a game name to search"
+            onChange={(e) => setPinInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') pinOrSearch() }} />
+          {systems.length > 0 && (
+            <select className="refine-pin-scope" value={pinPlat} onChange={(e) => setPinPlat(e.target.value)}
+              title="Pin just one platform's entry, or the whole title">
+              <option value="">Whole title</option>
+              {systems.map((s) => <option key={s} value={s}>{s} only</option>)}
+            </select>
+          )}
+          <button className="ops-btn go" disabled={busy || !pinInput.trim()} onClick={pinOrSearch}>
+            {/igdb\.com\/games\/|^\d+$/i.test(pinInput.trim()) ? 'Pin' : 'Search'}
+          </button>
+        </div>
+        {cands && cands.length > 0 && (
+          <div className="refine-cands">
+            {cands.slice(0, 8).map((c) => (
+              <button key={c.igdb_id ?? c.name} className="refine-cand" disabled={busy || !c.igdb_id}
+                onClick={() => c.igdb_id && doPin(String(c.igdb_id))}
+                title={c.platforms?.join(', ')}>
+                {c.name}{c.year ? ` (${c.year})` : ''}<span className="dim"> · #{c.igdb_id}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {pinPlat && (
+          <button className="refine-detach" disabled={busy} onClick={doDetach}
+            title="This entry is a homebrew / different game that only shares the name — keep it separate, unmatched">
+            ✕ Not this game — separate the “{pinPlat}” entry (homebrew / different game)
+          </button>
+        )}
+      </div>
+      {busy && <div className="refine-note dim">Working…</div>}
+      {note && <div className="refine-note ok">{note}</div>}
       {err && <div className="refine-err">{err}</div>}
     </div>
   )

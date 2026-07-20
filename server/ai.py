@@ -1589,6 +1589,13 @@ def _metadata_user(game):
         lines.append("\nIMPORTANT — CONTEXT PROVIDED BY THE USER (they know this game; "
                      "treat it as authoritative and reconcile your answer with it): "
                      + hint)
+    # Reference material the user pulled from the web (Wikipedia/MobyGames/store/IGDB
+    # pages, already fetched server-side). Ground truth — stronger than a blind web search.
+    for r in (game.get("user_refs") or []):
+        txt = (r.get("text") or "").strip()
+        if txt:
+            lines.append("\nAUTHORITATIVE REFERENCE the user provided (%s) — treat as "
+                         "ground truth:\n%s" % (r.get("url", "link"), txt[:4000]))
     return "\n".join(lines)
 
 

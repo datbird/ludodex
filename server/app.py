@@ -3087,6 +3087,111 @@ def aimeta_scan(body: dict = Body(default={})):
             "match_provider": match_provider}
 
 
+def _fetch_ref_text(url, max_bytes=500_000, max_chars=6000):
+    """Fetch one user-provided reference URL → readable text (best-effort). HTML is
+    stripped to text; empty string on any failure. Used to ground a wand re-run in the
+    exact sources the user found, instead of the model's own blind web search."""
+    import re as _re
+    import html as _html
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (ludodex reference fetcher)"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            data = resp.read(max_bytes)
+        text = data.decode("utf-8", "replace")
+        if "html" in ctype.lower() or "<html" in text[:2000].lower():
+            text = _re.sub(r"(?is)<(script|style|nav|footer|header|aside)[^>]*>.*?</\1>",
+                           " ", text)
+            text = _re.sub(r"(?is)<[^>]+>", " ", text)
+            text = _html.unescape(text)
+        return _re.sub(r"\s+", " ", text).strip()[:max_chars]
+    except Exception as e:
+        print("ref fetch %s: %s" % (url, str(e)[:120]), file=sys.stderr)
+        return ""
+
+
+def _fetch_refs(refs):
+    """Normalize the request's `refs` (list or newline/comma string) → [{url,text}] for the
+    valid, fetchable http(s) links (cap 5)."""
+    import re as _re
+    if isinstance(refs, str):
+        refs = _re.split(r"[\s,]+", refs)
+    out = []
+    for u in (refs or [])[:8]:
+        u = (u or "").strip()
+        if not u.startswith(("http://", "https://")):
+            continue
+        t = _fetch_ref_text(u)
+        if t:
+            out.append({"url": u, "text": t})
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _resolve_igdb_ref(raw):
+    """A user-provided IGDB reference — a game URL (…/games/<id-or-slug>), a bare slug, or
+    a numeric id — resolved to the numeric IGDB id (or None). The manual-pin escape hatch."""
+    import re as _re
+    raw = (raw or "").strip()
+    m = _re.search(r"igdb\.com/games/([^/?#]+)", raw, _re.I)
+    token = (m.group(1) if m else raw).strip().strip("/")
+    if token.isdigit():
+        return int(token)
+    cid, tok = _igdb_token()
+    if not tok or not token:
+        return None
+    import igdb as _ig
+    safe = token.replace('"', "").replace("\\", "")
+    try:
+        for g in _ig.query("games", 'fields id; where slug="%s"; limit 1;' % safe, cid, tok):
+            return g.get("id")
+    except Exception:
+        pass
+    return None
+
+
+def _pin_live(nk, iid, plat, name, detach=False):
+    """Write a manual identity decision straight into the LIVE catalog for the affected
+    entries. Pin: game_key = igdb:<iid>, the IGDB link, and (ROM/archive-only) the rename.
+    Detach: the entry forfeits the title's game → game_key = title:<nk> and its IGDB link
+    is removed (a homebrew/different game sharing the name). A per-entry decision (`plat`)
+    touches only that platform's entry; a title pin touches every non-era-separated entry.
+    The background reconcile re-derives this canonically after."""
+    con = sqlite3.connect(LIBRARY_DB)
+    try:
+        con.execute("PRAGMA busy_timeout=8000")
+        if not _has_col(con, "games", "game_key"):
+            return
+        for gid, gplat, bkey in con.execute(
+                "SELECT id, platform, base_key FROM games WHERE norm_key=?", (nk,)).fetchall():
+            if plat:
+                if gplat != plat:
+                    continue
+            elif "\x1f" in (bkey or ""):
+                continue                       # title pin leaves era-separated entries alone
+            if detach:                         # "not this game" — own identity, drop the link
+                con.execute("UPDATE games SET game_key=? WHERE id=?", ("title:%s" % nk, gid))
+                con.execute("DELETE FROM metadata_links WHERE game_id=? AND provider='igdb'",
+                            (gid,))
+                continue
+            con.execute("UPDATE games SET game_key=? WHERE id=?", ("igdb:%d" % iid, gid))
+            con.execute("DELETE FROM metadata_links WHERE game_id=? AND provider='igdb'",
+                        (gid,))
+            con.execute("INSERT INTO metadata_links(game_id,provider,provider_id,slug,url) "
+                        "VALUES(?,?,?,?,?)", (gid, "igdb", str(iid), None,
+                        "https://www.igdb.com/games/%d" % iid))
+            if name:
+                con.execute("UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
+                            "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
+                            "('emulation','archive'))", (name, gid, gid))
+        con.commit()
+    finally:
+        con.close()
+
+
 @app.post("/api/aimeta/refine")
 def aimeta_refine(body: dict = Body(default={})):
     """Re-run the pipeline for ONE game with user-supplied context and (optionally) a
@@ -3108,9 +3213,12 @@ def aimeta_refine(body: dict = Body(default={})):
     if not ctx:
         raise HTTPException(404, "no such game / no context to analyze")
     ctx["user_hint"] = (body.get("hint") or "").strip()
+    refs = _fetch_refs(body.get("refs"))       # user-supplied web links → fetched grounding
+    ctx["user_refs"] = refs
     try:
         # force_web: an explicit web-checked re-run always grounds (bypass the escalation
-        # heuristic — the user asked for the web pass on purpose).
+        # heuristic — the user asked for the web pass on purpose). User-provided reference
+        # material is always injected as ground truth regardless of the web toggle.
         res = ai.analyze_game(ctx, provider=provider, model=model, web=web,
                               force_web=web)
     except Exception as e:                      # surface the failure to the reviewer
@@ -3132,6 +3240,7 @@ def aimeta_refine(body: dict = Body(default={})):
     fresh = next((f for f in aimeta.findings_list("proposed", run_id=run_id)
                   if f["norm_key"] == nk), None)
     return {"kind": kind, "finding": fresh, "used_web": bool(res.get("web")),
+            "used_refs": [r["url"] for r in refs],
             "model": model, "context": _finding_context(ctx)}
 
 
@@ -3147,6 +3256,94 @@ def _refine_run_id(nk):
     rid = aimeta.scan_new("refine — %s" % nk, [nk], False, True, None)
     aimeta.scan_finish(rid, "done")
     return rid
+
+
+@app.post("/api/aimeta/pin")
+def aimeta_pin(body: dict = Body(default={})):
+    """Manually pin an entry's identity to a specific IGDB game — the human override for
+    odd-ball cases the AI can't get. Body: {norm_key, igdb, platform?}. `igdb` = an IGDB
+    game URL (…/games/<id-or-slug>), a bare slug, or a numeric id. `platform` present → a
+    PER-ENTRY override (just that platform's entry — e.g. pin the Amiga ROM while the store
+    entry keeps its own game); absent → title-level (the whole game). Writes the resolution
+    directly (matched_by='manual', so a later New sync won't silently re-resolve it), then
+    runs the surgical reconcile so identity + cover land immediately; the authoritative
+    background rebuild is enqueued after."""
+    body = body or {}
+    nk = (body.get("norm_key") or "").strip()
+    plat = (body.get("platform") or "").strip() or None
+    detach = bool(body.get("detach"))     # "not this game" — separate the entry, no id needed
+    if not nk:
+        raise HTTPException(400, "norm_key required")
+    if detach:
+        if not plat:
+            raise HTTPException(400, "separating an entry requires a platform")
+        iid = None
+    else:
+        iid = _resolve_igdb_ref(body.get("igdb"))
+        if not iid:
+            raise HTTPException(400, "could not resolve an IGDB game from %r — paste an "
+                                "IGDB game link, slug, or numeric id" % (body.get("igdb") or ""))
+    if plat:                         # resolve a raw system label to this game's actual entry
+        _lc = ro(LIBRARY_DB)         # platform (games.platform is norm_system'd)
+        try:
+            _plats = [r[0] for r in _lc.execute(
+                "SELECT DISTINCT platform FROM games WHERE norm_key=? AND platform IS NOT NULL",
+                (nk,))]
+        finally:
+            _lc.close()
+        if plat not in _plats:
+            _np = media.norm_system(plat)
+            plat = next((p for p in _plats if p == _np or p == plat), plat)
+    now = int(time.time())
+    name = None
+    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    mc = sqlite3.connect(cache)
+    try:
+        mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY KEY, "
+                   "igdb_id INTEGER, slug TEXT, matched_by TEXT, resolved_at INTEGER)")
+        mc.execute("CREATE TABLE IF NOT EXISTS igdb_meta(igdb_id INTEGER PRIMARY KEY, "
+                   "payload_json TEXT, fetched_at INTEGER)")
+        entry_res.ensure(mc)
+        if detach:
+            entry_res.set_detach(mc, nk, plat)     # this entry is NOT the title's game
+        else:
+            row = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?",
+                             (iid,)).fetchone()
+            if not row:                        # fetch the trusted record (name + for media)
+                cid, tok = _igdb_token()
+                if tok:
+                    import igdb as _ig
+                    q = "fields %s; where id=(%d); limit 1;" % (_ig.GAME_FIELDS, iid)
+                    for g in _ig.query("games", q, cid, tok):
+                        mc.execute("INSERT OR REPLACE INTO igdb_meta VALUES(?,?,?)",
+                                   (g["id"], json.dumps(g, ensure_ascii=False), now))
+                        row = (json.dumps(g),)
+            if row and row[0]:
+                try:
+                    name = (json.loads(row[0]).get("name") or "").strip() or None
+                except ValueError:
+                    pass
+            if plat:
+                entry_res.set_entry(mc, nk, plat, iid, "manual")
+            else:
+                mc.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,slug,"
+                           "matched_by,resolved_at) VALUES(?,?,?,?,?)",
+                           (nk, iid, None, "manual", now))
+        mc.commit()
+    finally:
+        mc.close()
+    # instant surgical reconcile (identity link/title/game_key + cover), then enqueue the
+    # authoritative whole-catalog rebuild for cross-refs/associations.
+    try:
+        _pin_live(nk, iid, plat, name, detach=detach)
+        _reconcile_media_now({nk}, now)
+    except Exception as e:
+        print("aimeta pin: reconcile failed (rebuild will apply): %s"
+              % str(e)[:200], file=sys.stderr)
+    _enqueue_reconcile({nk}, True)
+    return {"ok": True, "norm_key": nk, "platform": plat, "detached": detach,
+            "igdb_id": iid, "title": name,
+            "url": ("https://www.igdb.com/games/%d" % iid) if iid else None}
 
 
 @app.get("/api/aimeta/targets")
@@ -3413,11 +3610,13 @@ def _aimeta_apply(should_stop, only_ids=None):
     # is applied PER ENTRY to the era-compatible emulation entries (entry_resolution),
     # leaving the store entry's title-level identity intact. Everything else writes
     # title-level as before.
+    detached = entry_res.load_detached(mc)     # user "not this game" — the AI must not undo it
     for pm in pms:
         nk, iid = pm["norm_key"], pm["igdb_id"]
         if _store_locked_igdb(nk, iid):
             yr = _igdb_year_from_meta(mc, iid)
-            plats = _era_compatible_emulation_entries(nk, yr)
+            plats = [p for p in _era_compatible_emulation_entries(nk, yr)
+                     if (nk, p) not in detached]
             for plat in plats:
                 entry_res.set_entry(mc, nk, plat, iid, "ai_entry")
             if plats:

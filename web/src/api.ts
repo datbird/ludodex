@@ -1430,14 +1430,25 @@ export const api = {
     return r.json() as Promise<{ run_id: number; target: string; count: number; web: boolean; match_provider: boolean }>
   },
   aimetaRefine: async (
-    body: { norm_key: string; hint?: string; model?: string; web?: boolean; run_id?: number },
+    body: { norm_key: string; hint?: string; refs?: string[]; model?: string; web?: boolean; run_id?: number },
   ) => {
     const r = await fetch('/api/aimeta/refine', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ kind: string | null; finding: AiFinding | null; used_web: boolean; model: string; context: FindingContext | null }>
+    return r.json() as Promise<{ kind: string | null; finding: AiFinding | null; used_web: boolean; used_refs: string[]; model: string; context: FindingContext | null }>
+  },
+  // Manually pin an entry's identity to a specific IGDB game (the human override for
+  // odd-ball cases). `igdb` = an IGDB game link, slug, or numeric id. `platform` present
+  // → per-entry pin (just that platform); absent → whole title.
+  aimetaPin: async (body: { norm_key: string; igdb?: string; platform?: string | null; detach?: boolean }) => {
+    const r = await fetch('/api/aimeta/pin', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ ok: boolean; norm_key: string; platform: string | null; detached: boolean; igdb_id: number | null; title: string | null; url: string | null }>
   },
   aimetaFindingAction: async (id: number, action: 'accept' | 'reject' | 'reset') => {
     const r = await fetch('/api/aimeta/finding/' + id + '/' + action, { method: 'POST' })

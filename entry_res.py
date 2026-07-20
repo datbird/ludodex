@@ -27,6 +27,26 @@ def set_entry(con, norm_key, platform, igdb_id, matched_by="ai_entry"):
         (norm_key, platform, int(igdb_id), matched_by, int(time.time())))
 
 
+def set_detach(con, norm_key, platform):
+    """Mark an entry as NOT the title's game — a homebrew/demake or a different game that
+    merely shares the name (the Atari 2600 homebrew "Doom" vs id's real Doom). It forfeits
+    the title-level resolution and stays its own identity (the title bucket / unmatched),
+    so it never inherits the official game's metadata or art. Stored as igdb_id=0 so it's
+    excluded from load()'s override map; read separately via load_detached()."""
+    ensure(con)
+    con.execute(
+        "INSERT OR REPLACE INTO entry_resolution(norm_key,platform,igdb_id,matched_by,"
+        "resolved_at) VALUES(?,?,?,?,?)",
+        (norm_key, platform, 0, "detached", int(time.time())))
+
+
+def load_detached(con):
+    """{(norm_key, platform)} for entries explicitly detached from the title's game."""
+    ensure(con)
+    return {(r[0], r[1]) for r in con.execute(
+        "SELECT norm_key, platform FROM entry_resolution WHERE matched_by='detached'")}
+
+
 def clear_entry(con, norm_key, platform):
     ensure(con)
     con.execute("DELETE FROM entry_resolution WHERE norm_key=? AND platform=?",

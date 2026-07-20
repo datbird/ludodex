@@ -514,7 +514,27 @@ def _entry_igdb_ids():
     return out
 
 
+def _entry_detached_set():
+    """{(norm_key, platform)} explicitly detached from the title's game — a homebrew/demake
+    sharing the name (the Atari 2600 "Doom") that must NOT inherit the title's identity."""
+    out = set()
+    _cache = os.path.join(DATA, "metadata-cache.sqlite")
+    if not os.path.exists(_cache):
+        return out
+    _c = sqlite3.connect(_cache)
+    try:
+        for _nk, _p in _c.execute("SELECT norm_key, platform FROM entry_resolution "
+                                  "WHERE matched_by='detached'"):
+            out.add((_nk, _p))
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        _c.close()
+    return out
+
+
 _entry_ids = _entry_igdb_ids()   # (norm_key, platform) -> igdb_id (per-entry override)
+_entry_detached = _entry_detached_set()   # entries forced to their own (title) identity
 
 
 def _game_key(nk, platform, bkey):
@@ -526,6 +546,8 @@ def _game_key(nk, platform, bkey):
     resolved igdb id (the port IS that game). Everything else (unidentified) falls to the
     title bucket. Suffix-free `title:<nk>` mirrors media_fetch.game_key so entry and media
     identities meet on a plain string match at serve time (see the format note there)."""
+    if (nk, platform) in _entry_detached:     # homebrew/different game sharing the name
+        return "title:%s" % nk                # → its own identity, never the title's game
     eid = _entry_ids.get((nk, platform))
     if eid:
         return "igdb:%s" % eid
