@@ -3145,6 +3145,7 @@ a.idchip:hover { background: var(--accent-bg); }
 .refine-cand:disabled { opacity: 0.5; cursor: default; }
 .refine-detach { align-self: flex-start; font-size: 12px; padding: 5px 9px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text-dim, #9aa); cursor: pointer; }
 .refine-detach:hover:not(:disabled) { border-color: #ef4444; color: #ef4444; }
+.find-media-msg { font-size: 12px; padding: 4px 12px; }
 .chg-bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; margin-top: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 -2px 10px rgba(0,0,0,0.15); }
 .chg-summary { flex: 1; font-size: 13px; color: var(--text); }
 

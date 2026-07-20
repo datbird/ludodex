@@ -5072,8 +5072,21 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   const [fixDup, setFixDup] = useState(false)
   const [peel, setPeel] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
+  const [findingMedia, setFindingMedia] = useState(false)
+  const [mediaMsg, setMediaMsg] = useState('')
   const toolsRef = useClickOutside<HTMLDivElement>(toolsOpen, () => setToolsOpen(false))
-  useEffect(() => { setToolsOpen(false) }, [nk])
+  useEffect(() => { setToolsOpen(false); setMediaMsg('') }, [nk])
+  const findMedia = async (web: boolean) => {
+    setToolsOpen(false); setFindingMedia(true); setMediaMsg('')
+    try {
+      const r = await api.aimetaRefreshMedia({ norm_key: base, web })
+      setMediaMsg(r.has_cover
+        ? `Found media${web && r.web_added ? ` (+${r.web_added} from the web)` : ''}.`
+        : (web ? 'No media found on any provider or the web.' : 'No media on the providers — try “+ search web”.'))
+      setMedia(null); api.mediaLibrary(nk).then(setMedia).catch(() => {})
+      reloadDetail(); setMediaDirty(true)
+    } catch (e) { setMediaMsg((e as Error).message) } finally { setFindingMedia(false) }
+  }
 
   const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
   useEffect(() => { reloadDetail() }, [reloadDetail])
@@ -5123,6 +5136,12 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                 <button onClick={() => { setToolsOpen(false); setWandOpen(true) }}>
                   <span className="htm-ic">✨</span> Magic wand
                   <span className="htm-sub">AI-enrich (review in Jobs)</span></button>
+                <button disabled={findingMedia} onClick={() => findMedia(false)}>
+                  <span className="htm-ic">🖼</span> Find media
+                  <span className="htm-sub">Pull art from IGDB + SteamGridDB now</span></button>
+                <button disabled={findingMedia} onClick={() => findMedia(true)}>
+                  <span className="htm-ic">🌐</span> Find media + search web
+                  <span className="htm-sub">Also let the AI hunt the open web (slower)</span></button>
                 <button onClick={() => { setToolsOpen(false); setFixDup(true) }}>
                   <span className="htm-ic">⧉</span> Fix duplication
                   <span className="htm-sub">Merge a duplicate entry in</span></button>
@@ -5132,6 +5151,9 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
               </div>
             )}
           </div>
+        )}
+        {(findingMedia || mediaMsg) && (
+          <div className="find-media-msg dim">{findingMedia ? '🔎 Finding media…' : mediaMsg}</div>
         )}
         {wandOpen && d && (
           // The ONE wand, pre-scoped to this game. Scan by the BARE norm_key (base),

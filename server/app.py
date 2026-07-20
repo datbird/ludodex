@@ -3380,6 +3380,25 @@ def aimeta_pin(body: dict = Body(default={})):
             "url": ("https://www.igdb.com/games/%d" % iid) if iid else None}
 
 
+@app.post("/api/aimeta/refresh-media")
+def aimeta_refresh_media(body: dict = Body(default={})):
+    """Hunt media for ONE already-identified game on demand — the button for a game the
+    wand leaves alone because its identity is already correct but it simply has no art.
+    Pulls IGDB + SteamGridDB (+ optional AI open-web discovery when web:true), then
+    re-chooses. Body: {norm_key|entry_key, web?}. Synchronous; returns what it landed."""
+    body = body or {}
+    nk = (body.get("norm_key") or "").strip()
+    if not nk and body.get("entry_key"):
+        nk = _split_entry_key(body["entry_key"])[0]
+    if not nk:
+        raise HTTPException(400, "norm_key or entry_key required")
+    try:
+        res = _fetch_media_for(nk, want_web=bool(body.get("web")))
+    except Exception as e:
+        raise HTTPException(502, "media fetch failed: %s" % str(e)[:200])
+    return {"ok": True, "norm_key": nk, **res}
+
+
 @app.get("/api/aimeta/targets")
 def aimeta_targets():
     """Per-target game counts + whether the metadata provider can search the web."""
@@ -3872,6 +3891,90 @@ def _reconcile_media_now(touched, now):
         con.commit()
     finally:
         con.close()
+
+
+def _fetch_media_web(con, nk, title, now):
+    """Validate + add AI-discovered OPEN-WEB image URLs for a game (provider='web', ranked
+    below every real provider so it's a last resort). Each candidate url is fetched and must
+    be a live image of a plausible size before it's trusted — the AI returns dead/wrong/
+    hotlink-blocked links often. Returns the count actually added."""
+    import media_fetch as _mf
+    import urllib.request
+    ctx = aimeta.game_context(nk) or {}
+    cands = ai.find_media_urls(title, systems=ctx.get("systems"), year=ctx.get("year"))
+    if not cands:
+        return 0
+    gkey = None
+    lc = ro(LIBRARY_DB)
+    try:
+        r = lc.execute("SELECT game_key FROM games WHERE norm_key=? LIMIT 1", (nk,)).fetchone()
+        gkey = r[0] if r else None
+    finally:
+        lc.close()
+    n = 0
+    for c in cands:
+        url = (c.get("url") or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 (ludodex media finder)"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                blob = resp.read(4_000_000)
+            if "image" not in ctype or len(blob) < 2000:
+                continue                       # not a real image (webpage / dead / tiny)
+        except Exception:
+            continue                           # unreachable / hotlink-blocked
+        ext = "png" if "png" in ctype else ("webp" if "webp" in ctype else "jpg")
+        _mf.put(con, nk, c["kind"], "web", url, now, ext=ext, gkey=gkey)
+        n += 1
+    return n
+
+
+def _fetch_media_for(nk, want_web=False):
+    """On-demand media hunt for ONE game, independent of any identity change — the
+    'this game has no art, go find some' action the wand lacks for already-identified
+    games. Pulls from every configured provider (IGDB — incl. per-entry override ids —
+    plus SteamGridDB gap-fill, a huge community art DB that often has what IGDB doesn't),
+    optionally AI web discovery, then re-chooses. Returns a summary."""
+    import media_fetch as _mf
+    now = int(time.time())
+    title, appid = "", None
+    lc = ro(LIBRARY_DB)
+    try:
+        r = lc.execute("SELECT canonical_title FROM games WHERE norm_key=? LIMIT 1",
+                       (nk,)).fetchone()
+        title = (r[0] if r else "") or ""
+        ar = lc.execute("SELECT s.source_id FROM games g JOIN sources s ON s.game_id=g.id "
+                        "WHERE g.norm_key=? AND s.source='steam' LIMIT 1", (nk,)).fetchone()
+        appid = ar[0] if ar and str(ar[0] or "").isdigit() else None
+    finally:
+        lc.close()
+    con = media_choose.con_index()
+    web_n = 0
+    try:
+        con.execute("PRAGMA busy_timeout=30000")
+        _mf.fetch_igdb(con, now, only={nk})
+        if _mf.config.steamgriddb_key():
+            try:
+                _mf.fetch_steamgriddb_targets(con, now, [(nk, title, appid)])
+            except Exception as e:
+                print("refresh-media sgdb %s: %s" % (nk, str(e)[:150]), file=sys.stderr)
+        if want_web:
+            try:
+                web_n = _fetch_media_web(con, nk, title, now)
+            except Exception as e:
+                print("refresh-media web %s: %s" % (nk, str(e)[:150]), file=sys.stderr)
+        _mf._backfill_game_key(con)
+        media_choose.select(con)
+        con.commit()
+        have = {r[0]: r[1] for r in con.execute(
+            "SELECT kind, COUNT(*) FROM media WHERE norm_key=? AND chosen=1 GROUP BY kind",
+            (nk,))}
+    finally:
+        con.close()
+    return {"has_cover": bool(have.get("cover")), "chosen": have, "web_added": web_n}
 
 
 def _aimeta_apply_media(touched, media, should_stop):

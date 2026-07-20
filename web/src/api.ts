@@ -1439,6 +1439,16 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ kind: string | null; finding: AiFinding | null; used_web: boolean; used_refs: string[]; model: string; context: FindingContext | null }>
   },
+  // Hunt media for an already-identified game on demand (IGDB + SteamGridDB, + optional
+  // AI open-web discovery when web:true). The trigger the wand lacks for matched games.
+  aimetaRefreshMedia: async (body: { norm_key?: string; entry_key?: string; web?: boolean }) => {
+    const r = await fetch('/api/aimeta/refresh-media', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ ok: boolean; norm_key: string; has_cover: boolean; chosen: Record<string, number>; web_added: number }>
+  },
   // Manually pin an entry's identity to a specific IGDB game (the human override for
   // odd-ball cases). `igdb` = an IGDB game link, slug, or numeric id. `platform` present
   // → per-entry pin (just that platform); absent → whole title.

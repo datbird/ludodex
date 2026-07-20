@@ -1294,6 +1294,52 @@ def _resolve(provider, model=None):
     return provider, key, (model or model_for(provider))
 
 
+def find_media_urls(title, systems=None, year=None, provider=None, model=None):
+    """Best-effort OPEN-WEB image discovery: ask the web-search model for DIRECT image-file
+    URLs (cover + a few screenshots) for a game. Returns [{"kind","url"}]. The CALLER must
+    validate each url is a live image — models return dead/wrong/hotlink-blocked links
+    routinely. Returns [] when the provider has no web search."""
+    provider = provider or provider_for_area("metadata")
+    if not supports_web(provider):
+        return []
+    try:
+        provider, key, model = _resolve(provider, model or model_for_area("metadata"))
+    except RuntimeError:
+        return []
+    sysline = (" (the %s version specifically, if its art differs)" % systems[0]) if systems else ""
+    yline = (" released %s" % year) if year else ""
+    system = ("You locate REAL, hotlinkable box-art and screenshot IMAGE-FILE urls for video "
+              "games from the open web. Prefer Wikipedia / Wikimedia Commons, MobyGames, "
+              "TheGamesDB, archive.org, and established fan wikis. Return ONLY direct links to "
+              "image files (.jpg/.jpeg/.png/.webp) that actually resolve — NEVER a webpage "
+              "url, NEVER a guessed or invented url.")
+    user = ('Find the cover/box art and up to 4 in-game screenshots for the video game "%s"%s%s.\n'
+            'Respond as STRICT JSON only: {"cover":"<direct image url or empty>",'
+            '"screenshots":["<direct image url>", ...]}' % (title, yline, sysline))
+    fn = _web_gemini if provider == "gemini" else _web_anthropic
+    try:
+        txt = _retry(lambda: fn(key, model, system, user))[0]
+    except Exception:
+        return []
+    import re as _re
+    m = _re.search(r"\{.*\}", txt or "", _re.S)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+    except (ValueError, TypeError):
+        return []
+    out = []
+    cov = (data.get("cover") or "").strip()
+    if cov:
+        out.append({"kind": "cover", "url": cov})
+    for s in (data.get("screenshots") or [])[:4]:
+        s = (s or "").strip()
+        if s:
+            out.append({"kind": "screenshot", "url": s})
+    return out
+
+
 _TRANSIENT = ("503", "429", "500", "unavailable", "overloaded", "rate limit",
               "timeout", "timed out", "temporarily", "try again")
 
