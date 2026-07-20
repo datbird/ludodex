@@ -3894,16 +3894,16 @@ def _reconcile_media_now(touched, now):
 
 
 def _fetch_media_web(con, nk, title, now):
-    """Validate + add AI-discovered OPEN-WEB image URLs for a game (provider='web', ranked
-    below every real provider so it's a last resort). Each candidate url is fetched and must
-    be a live image of a plausible size before it's trusted — the AI returns dead/wrong/
-    hotlink-blocked links often. Returns the count actually added."""
+    """Add validated OPEN-WEB images for a game (provider='web', ranked below every real
+    provider so it's a last resort): Wikimedia lead image (reliable, keyless) → Google image
+    search with an AI vision PICK of the right result (needs a configured key) → LLM-proposed
+    urls (low-yield). Every url is fetched and must be a live image of plausible size before
+    it's trusted. Private-use catalog art (self-hosted, single user). Returns count added."""
     import media_fetch as _mf
+    import media_web
     import urllib.request
     ctx = aimeta.game_context(nk) or {}
-    cands = ai.find_media_urls(title, systems=ctx.get("systems"), year=ctx.get("year"))
-    if not cands:
-        return 0
+    systems, year = ctx.get("systems"), ctx.get("year")
     gkey = None
     lc = ro(LIBRARY_DB)
     try:
@@ -3911,25 +3911,63 @@ def _fetch_media_web(con, nk, title, now):
         gkey = r[0] if r else None
     finally:
         lc.close()
-    n = 0
-    for c in cands:
-        url = (c.get("url") or "").strip()
-        if not url.lower().startswith(("http://", "https://")):
-            continue
+
+    def _fetch_img(url):                       # -> (mime, bytes) if a live image, else None
+        if not (url or "").lower().startswith(("http://", "https://")):
+            return None
         try:
             req = urllib.request.Request(
                 url, headers={"User-Agent": "Mozilla/5.0 (ludodex media finder)"})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 ctype = (resp.headers.get("Content-Type") or "").lower()
-                blob = resp.read(4_000_000)
-            if "image" not in ctype or len(blob) < 2000:
-                continue                       # not a real image (webpage / dead / tiny)
+                blob = resp.read(6_000_000)
+            if "image" in ctype and len(blob) >= 2000:
+                return ctype, blob
         except Exception:
-            continue                           # unreachable / hotlink-blocked
+            pass
+        return None
+
+    def _add(url, kind, ctype):
         ext = "png" if "png" in ctype else ("webp" if "webp" in ctype else "jpg")
-        _mf.put(con, nk, c["kind"], "web", url, now, ext=ext, gkey=gkey)
-        n += 1
-    return n
+        _mf.put(con, nk, kind, "web", url, now, ext=ext, gkey=gkey)
+
+    added, seen = 0, set()
+    # 1) Wikimedia lead image — reliable, keyless
+    for c in media_web.wikimedia(title, year):
+        if c["url"] in seen:
+            continue
+        img = _fetch_img(c["url"])
+        if img:
+            _add(c["url"], "cover", img[0]); seen.add(c["url"]); added += 1
+    # 2) Google image search + AI vision pick (needs a configured key + cx)
+    gcse_key, cx = config.get("google_cse_key"), config.get("google_cse_cx")
+    if gcse_key and cx:
+        sys0 = (systems or [""])[0] if systems else ""
+        query = " ".join(x for x in (title, sys0, "cover art") if x)
+        imgs, urls = [], []
+        for c in media_web.google_images(query, gcse_key, cx, n=6):
+            if c["url"] in seen:
+                continue
+            img = _fetch_img(c["url"])
+            if img:
+                imgs.append(img); urls.append(c["url"])
+        if imgs:
+            pick = 0
+            if len(imgs) > 1:
+                try:
+                    pick = int(ai.pick_art(title, "cover", imgs).get("index", 0))
+                except Exception:
+                    pick = 0
+            _add(urls[pick], "cover", imgs[pick][0]); seen.add(urls[pick]); added += 1
+    # 3) LLM-proposed direct urls (low-yield last resort)
+    for c in ai.find_media_urls(title, systems=systems, year=year):
+        u = (c.get("url") or "").strip()
+        if u in seen:
+            continue
+        img = _fetch_img(u)
+        if img:
+            _add(u, c["kind"], img[0]); seen.add(u); added += 1
+    return added
 
 
 def _fetch_media_for(nk, want_web=False):
@@ -5941,6 +5979,15 @@ SERVICES = [
      "hint": "steamgriddb.com/profile/preferences/api",
      "creds": [{"key": "steamgriddb_api_key", "label": "API key", "secret": True}],
      "limits": _limits("steamgriddb", cooldown="200")},
+    {"id": "google_images", "name": "Google image search", "role": "provider",
+     "hint": "Optional last-resort cover finder for the wand's 'Find media + search web'. "
+             "Create a Google API key (console.cloud.google.com — enable the Custom Search "
+             "API) and a Programmable Search Engine that searches the whole web "
+             "(programmablesearchengine.google.com) — paste its key + Search engine ID. "
+             "Results are AI-picked and validated; art is for your own private catalog.",
+     "creds": [{"key": "google_cse_key", "label": "API key", "secret": True},
+               {"key": "google_cse_cx", "label": "Search engine ID (cx)", "secret": False}],
+     "limits": _limits("google_images", cooldown="500")},
     {"id": "steamspy", "name": "SteamSpy", "role": "provider",
      "hint": "steamspy.com — Steam community tags for your owned Steam games. "
              "No account or API key needed (SteamSpy's API is public). Rate-limited "
