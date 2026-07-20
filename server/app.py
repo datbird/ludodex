@@ -4002,14 +4002,58 @@ def _fetch_media_web(con, nk, title, now):
     return added
 
 
+def _pull_ss_media(con, nk, systems, queries, now):
+    """Match + scrape ScreenScraper for a game and add its media. SS is media-rich for the
+    retro/console long-tail (box art, screenshots, wheels, marquees) that IGDB/SGDB often
+    lack — exactly what a TurboGrafx/arcade game needs. Caches the jeuInfos in ss_game (so
+    build_library also unions SS metadata) + extracts the media into the index, tagged with
+    the game's console so it serves as own-platform art. Returns media rows added."""
+    creds = config.screenscraper_creds()
+    if not creds or not config.get_bool("screenscraper_media", True):
+        return 0
+    m = _ss_match(queries, systems, None)
+    if not m:
+        return 0
+    import screenscraper as ss
+    import media_fetch as _mf
+    try:
+        jeu, _ = ss.jeu_infos(creds, gameid=m["ss_id"])
+    except Exception as e:
+        print("ss jeu_infos %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+        return 0
+    if not jeu:
+        return 0
+    system = m.get("system")
+    try:                                       # cache for build_library's metadata union
+        sc = sqlite3.connect(os.path.join(DATA, "screenscraper-cache.sqlite"))
+        sc.execute("CREATE TABLE IF NOT EXISTS ss_game(norm_key TEXT, system TEXT, "
+                   "ss_id INTEGER, status TEXT, payload_json TEXT, fetched_at INTEGER, "
+                   "PRIMARY KEY(norm_key, system))")
+        sc.execute("INSERT OR REPLACE INTO ss_game(norm_key,system,ss_id,status,"
+                   "payload_json,fetched_at) VALUES(?,?,?,?,?,?)",
+                   (nk, system, m["ss_id"], "ok", json.dumps(jeu, ensure_ascii=False), now))
+        sc.commit()
+        sc.close()
+    except Exception as e:
+        print("ss cache %s: %s" % (nk, str(e)[:100]), file=sys.stderr)
+    n = 0
+    for md in ss.extract_media(jeu):
+        _mf.put(con, nk, md["kind"], "screenscraper", md["url"], now,
+                ext=(md.get("format") or "jpg"), system=system,
+                attrs={"type": md.get("type"), "region": md.get("region"),
+                       "format": md.get("format")})
+        n += 1
+    return n
+
+
 def _pull_media_sources(con, nk, want_web=False):
     """Fetch (do NOT choose) media for ONE game from every configured provider — IGDB
-    (incl. per-entry override ids) + SteamGridDB (a huge community art DB that often has
-    what IGDB doesn't) — plus AI open-web discovery (Wikimedia/Google/LLM) when want_web.
-    The caller runs media_choose.select once after a batch. Returns web images added."""
+    (incl. per-entry override ids), SteamGridDB (a huge community art DB), and ScreenScraper
+    (media-rich for the retro/console long-tail) — plus AI open-web discovery (Wikimedia/
+    Google/LLM) when want_web. The caller runs media_choose.select once after a batch."""
     import media_fetch as _mf
     now = int(time.time())
-    title, appid = "", None
+    title, appid, plats = "", None, []
     lc = ro(LIBRARY_DB)
     try:
         r = lc.execute("SELECT canonical_title FROM games WHERE norm_key=? LIMIT 1",
@@ -4018,9 +4062,18 @@ def _pull_media_sources(con, nk, want_web=False):
         ar = lc.execute("SELECT s.source_id FROM games g JOIN sources s ON s.game_id=g.id "
                         "WHERE g.norm_key=? AND s.source='steam' LIMIT 1", (nk,)).fetchone()
         appid = ar[0] if ar and str(ar[0] or "").isdigit() else None
+        plats = [x[0] for x in lc.execute(
+            "SELECT DISTINCT g.platform FROM games g JOIN sources s ON s.game_id=g.id "
+            "WHERE g.norm_key=? AND s.source IN ('emulation','archive') "
+            "AND g.platform IS NOT NULL AND g.platform!=''", (nk,))]
     finally:
         lc.close()
     _mf.fetch_igdb(con, now, only={nk})
+    if plats:                                  # ScreenScraper media (retro/console-rich)
+        try:
+            _pull_ss_media(con, nk, plats, [title], now)
+        except Exception as e:
+            print("media ss %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
     if _mf.config.steamgriddb_key():
         try:
             _mf.fetch_steamgriddb_targets(con, now, [(nk, title, appid)])
@@ -4067,10 +4120,17 @@ def _wand_fill_media(nks, want_web, should_stop):
     con = media_choose.con_index()
     try:
         con.execute("PRAGMA busy_timeout=30000")
-        # only games MISSING a chosen cover — don't re-hit providers for art we already have
-        need = [nk for nk in nks if not con.execute(
-            "SELECT 1 FROM media WHERE norm_key=? AND chosen=1 AND kind='cover' LIMIT 1",
-            (nk,)).fetchone()]
+        # ENRICH vs FILL: a single-game (or handful) wand run pulls art from EVERY provider
+        # for every scanned game — so a game with only a thin IGDB cover still gets its SGDB
+        # heroes/logos and ScreenScraper box art. A big "scan all" only fills games MISSING a
+        # cover (don't re-hit providers for thousands of games that already have art).
+        ENRICH_CAP = 8
+        if len(nks) <= ENRICH_CAP:
+            need = nks
+        else:
+            need = [nk for nk in nks if not con.execute(
+                "SELECT 1 FROM media WHERE norm_key=? AND chosen=1 AND kind='cover' LIMIT 1",
+                (nk,)).fetchone()]
         if not need:
             return
         WEB_CAP = 40
