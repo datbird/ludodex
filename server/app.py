@@ -798,17 +798,29 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         # (its game_key is title:<nk>, the neutral art's is igdb:<id>) forfeits it — the
         # identity match replaces the old base_key era-marker test. (g.* outer refs are
         # legal in a subquery WHERE; only ORDER BY forbids them.)
-        _gk_gate = (" AND md.game_key=g.game_key"
-                    if _has_col(con, "games", "game_key") else "")
+        _hasgk = _has_col(con, "games", "game_key")
+        _gk_gate = (" AND md.game_key=g.game_key" if _hasgk else "")
         _neutral = " AND COALESCE(md.system,'')=''" + _gk_gate
-        cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ") AS cover_v, ")
+        # Neutral art is ALSO reachable by game IDENTITY across norm_keys: a game whose title
+        # parsed into two norm_keys (International Karate "+"/"plus"/gb — same igdb id) shares
+        # its one fetched cover. game_key self-restricts an unresolved title (title:<nk>), so
+        # there is no cross-title bleed. Own-console art stays strictly per-norm_key. Added as
+        # a COALESCE fallback so a game with its own neutral art is byte-for-byte unchanged.
+        _mc_gk = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.game_key=g.game_key "
+                  "AND md.chosen=1 AND md.kind='cover' AND COALESCE(md.system,'')='' LIMIT 1)")
+        _neu_gk_ex = (" OR EXISTS(SELECT 1 FROM m.media md WHERE md.game_key=g.game_key AND "
+                      "md.chosen=1 AND md.kind='cover' AND COALESCE(md.system,'')='')"
+                      if _hasgk else "")
+        _cv = [_um, _mc % _own, _mc % _neutral] + ([_mc_gk] if _hasgk else [])
+        cover_v = "COALESCE(" + ",".join(_cv) + ") AS cover_v, "
         # has_cover reflects SERVABLE art (own console or gated neutral), so a card with
         # only another console's art shows the placeholder, not a broken/foreign image.
         has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
                    "md.chosen=1 AND md.kind='cover'" + _own + ") OR EXISTS(SELECT 1 FROM "
                    "m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 AND "
-                   "md.kind='cover'" + _neutral + ")) OR EXISTS(SELECT 1 FROM u.user_media "
-                   "um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
+                   "md.kind='cover'" + _neutral + ")" + _neu_gk_ex + ") OR EXISTS(SELECT 1 "
+                   "FROM u.user_media um WHERE um.norm_key=g.norm_key AND um.kind='cover')) "
+                   "AS has_cover, ")
     else:
         cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v, "
         has_cov = ("(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
@@ -967,16 +979,22 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
     # g.game_key, DESIGN §11.9): an era-collision entry (game_key title:<nk>) forfeits the
     # resolved game's igdb:<id> neutral cover, a stray port (adopts igdb:<id>) keeps it.
     _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
-    _neutral = (" AND COALESCE(md.system,'')=''"
-                + (" AND md.game_key=g.game_key"
-                   if _has_col(con, "games", "game_key") else ""))
+    _hasgk = _has_col(con, "games", "game_key")
+    _neutral = " AND COALESCE(md.system,'')=''" + (" AND md.game_key=g.game_key" if _hasgk else "")
+    # neutral art also reachable by game identity across norm_keys (see _query_games note).
+    _mc_gk = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.game_key=g.game_key "
+              "AND md.chosen=1 AND md.kind='cover' AND COALESCE(md.system,'')='' LIMIT 1)")
+    _neu_gk_ex = (" OR EXISTS(SELECT 1 FROM m.media md WHERE md.game_key=g.game_key AND "
+                  "md.chosen=1 AND md.kind='cover' AND COALESCE(md.system,'')='')"
+                  if _hasgk else "")
     if has_ek:
-        cover_v = ("COALESCE(" + _um + "," + _mc % _own + "," + _mc % _neutral + ") AS cover_v ")
+        _cv = [_um, _mc % _own, _mc % _neutral] + ([_mc_gk] if _hasgk else [])
+        cover_v = "COALESCE(" + ",".join(_cv) + ") AS cover_v "
         has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
                    "md.chosen=1 AND md.kind='cover'" + _own + ") OR EXISTS(SELECT 1 FROM "
                    "m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 AND md.kind='cover'"
-                   + _neutral + ")) OR EXISTS(SELECT 1 FROM u.user_media um WHERE "
-                   "um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
+                   + _neutral + ")" + _neu_gk_ex + ") OR EXISTS(SELECT 1 FROM u.user_media um "
+                   "WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
     else:
         cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v "
         has_cov = ("(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
@@ -4353,13 +4371,18 @@ def game_detail(norm_key: str):
         # (game_key title:<nk>) thus forfeits the resolved game's neutral art; a stray port
         # (adopts igdb:<id>) keeps it. Own-console art is always matched by norm_key+system.
         _gk = g["game_key"] if "game_key" in _keys and g["game_key"] else None
-        _neu = " OR (COALESCE(system,'')='' AND game_key=?)" if _gk \
-            else " OR COALESCE(system,'')=''"
-        _mk_args = (base, platform or "") + ((_gk,) if _gk else ())
-        media_kinds = [r["kind"] for r in con.execute(
-            "SELECT DISTINCT kind FROM m.media WHERE norm_key=? AND chosen=1 "
-            "AND (COALESCE(system,'')=?" + _neu + ") ORDER BY kind",
-            _mk_args)]
+        if _gk:
+            # own-console art per norm_key; neutral art by game IDENTITY across norm_keys
+            # (a title split into two norm_keys shares its one fetched art set).
+            _mk_sql = ("SELECT DISTINCT kind FROM m.media WHERE chosen=1 AND ("
+                       "(norm_key=? AND COALESCE(system,'')=?) "
+                       "OR (COALESCE(system,'')='' AND game_key=?)) ORDER BY kind")
+            _mk_args = (base, platform or "", _gk)
+        else:
+            _mk_sql = ("SELECT DISTINCT kind FROM m.media WHERE norm_key=? AND chosen=1 "
+                       "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') ORDER BY kind")
+            _mk_args = (base, platform or "")
+        media_kinds = [r["kind"] for r in con.execute(_mk_sql, _mk_args)]
         return {
             "norm_key": base,
             "entry_key": g["entry_key"] if "entry_key" in _keys else base,
@@ -5349,12 +5372,17 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
             except sqlite3.OperationalError:
                 gkey = None         # pre-rebuild catalog without game_key column
             if gkey:
+                # own-console art is strictly this norm_key + system; neutral (store/IGDB)
+                # art is matched by game IDENTITY (game_key) across norm_keys, so a game
+                # whose title parsed into two norm_keys (Intl Karate "+"/"plus") still serves
+                # its one fetched cover. Own-console preferred via the ORDER BY.
                 r = rcon.execute(
                     "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
-                    "WHERE norm_key=? AND kind=? AND chosen=1 "
-                    "AND (COALESCE(system,'')=? OR (COALESCE(system,'')='' AND game_key=?)) "
-                    "ORDER BY (COALESCE(system,'')=?) DESC LIMIT 1",
-                    (base, kind, platform, gkey, platform)).fetchone()
+                    "WHERE kind=? AND chosen=1 AND ("
+                    "(norm_key=? AND COALESCE(system,'')=?) "
+                    "OR (COALESCE(system,'')='' AND game_key=?)) "
+                    "ORDER BY (norm_key=? AND COALESCE(system,'')=?) DESC LIMIT 1",
+                    (kind, base, platform, gkey, base, platform)).fetchone()
             else:
                 # pre-migration fallback: own console art, or any platform-neutral art.
                 r = rcon.execute(

@@ -257,11 +257,12 @@ def fetch_igdb(con, now, only=None):
         return
     import igdb
     mc = sqlite3.connect(META_CACHE)
-    res = {}                                # igdb_id -> nk (title-level resolution)
-    for nk, iid in mc.execute(
-            "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0"):
-        if only is None or nk in only:
-            res[iid] = nk
+    res = {}                                # igdb_id -> [nk, ...] title-level resolutions.
+    for nk, iid in mc.execute(              # a MULTIMAP: two different norm_keys can share an
+            "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0"):  # id (Intl
+        if only is None or nk in only:      # Karate + as "international karate" AND "…plus"),
+            res.setdefault(iid, []).append(nk)   # and BOTH must get the fetched art, not just
+                                            # whichever won a dict slot (the media-loss bug).
     eres = {}                               # igdb_id -> [nk, ...] per-entry overrides
     try:
         for nk, iid in mc.execute(
@@ -307,13 +308,14 @@ def fetch_igdb(con, now, only=None):
                 % ",".join(str(x) for x in batch))
         for g in igdb.query("games", body, cid, tok):
             gid = g["id"]
-            if gid in res:                  # title-level: default game_key(nk)
-                n += _emit(res[gid], g, None)
+            for nk in res.get(gid, ()):     # title-level: EVERY norm_key sharing this id
+                n += _emit(nk, g, None)
             for nk in eres.get(gid, ()):    # per-entry override: pinned game_key
                 n += _emit(nk, g, "igdb:%d" % gid)
         con.commit()
     print("media_fetch: igdb — %d image URLs from %d resolved + %d override entries"
-          % (n, len(res), sum(len(v) for v in eres.values())), file=sys.stderr)
+          % (n, sum(len(v) for v in res.values()),
+             sum(len(v) for v in eres.values())), file=sys.stderr)
 
 
 def _sgdb_get(path, key):
