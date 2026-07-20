@@ -3084,6 +3084,18 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
             aimeta.scan_progress(run_id, done, found, skipped, errored, complete, unmatched)
     finally:
         lib.close()
+    # The wand also AUDITS for cross-title CONTAMINATION: an entry bound to the WRONG game's
+    # identity because they share a title (Atari-2600 "Dune" vs the 1992 Cryo "Dune"). The
+    # algorithmic filter (platmap generation gap) flags suspects, the AI confirms, and
+    # confirmed ones are DETACHED to their own identity — so running the wand actually FIXES
+    # these instead of reporting "already identified, nothing to do".
+    try:
+        det = _auto_fix_contamination(list(norm_keys), should_stop)
+        if det:
+            print("aimeta scan: detached %d contaminated entries" % len(det),
+                  file=sys.stderr)
+    except Exception as e:
+        print("aimeta scan contamination: %s" % str(e)[:200], file=sys.stderr)
     # The wand is ONE operation: after identifying, fill/refresh art for the games it
     # scanned that are already resolved — from every provider, plus open-web discovery
     # (Wikimedia/Google/LLM) when the user turned on web search. A newly-proposed match
@@ -3095,6 +3107,189 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
         print("aimeta scan media fill: %s" % str(e)[:200], file=sys.stderr)
     aimeta.scan_progress(run_id, done, found, skipped, errored, complete, unmatched)
     aimeta.scan_finish(run_id, "paused" if done < len(norm_keys) else "done")
+
+
+def _contamination_suspects(nks):
+    """Emulation entries among `nks` that are cross-title CONTAMINATION suspects: bound to an
+    IGDB identity whose platform set + hardware generation the entry's console predates (see
+    platmap.contamination_suspect — the algorithmic pre-filter). Returns the item dicts the AI
+    adjudicator consumes (title, platform, igdb_name/year/platforms/summary)."""
+    import platmap
+    out = []
+    if not nks:
+        return out
+    lc = ro(LIBRARY_DB)
+    try:
+        ph = ",".join("?" * len(nks))
+        rows = lc.execute(
+            "SELECT norm_key, platform, game_key, canonical_title FROM games "
+            "WHERE has_emulation=1 AND game_key LIKE 'igdb:%%' AND platform IS NOT NULL "
+            "AND norm_key IN (%s)" % ph, list(nks)).fetchall()
+    finally:
+        lc.close()
+    if not rows:
+        return out
+    mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+    try:
+        for nk, platform, gk, title in rows:
+            try:
+                iid = int(gk.split(":")[1])
+            except (ValueError, IndexError):
+                continue
+            r = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?",
+                           (iid,)).fetchone()
+            if not r or not r[0]:
+                continue
+            g = json.loads(r[0])
+            if not platmap.contamination_suspect(platform, g.get("platforms")):
+                continue
+            yr = None
+            ts = g.get("first_release_date")
+            if ts:
+                yr = time.gmtime(ts).tm_year
+            out.append({"norm_key": nk, "platform": platform, "igdb_id": iid, "title": title,
+                        "igdb_name": g.get("name"), "igdb_year": yr,
+                        "igdb_platforms": [x.get("name") for x in (g.get("platforms") or [])],
+                        "summary": g.get("summary")})
+    finally:
+        mc.close()
+    return out
+
+
+def _detach_entry(nk, platform, now):
+    """Detach one emulation entry from its title's shared identity (scoped) — its own
+    game_key title:<nk>, IGDB link removed. Durable via entry_resolution."""
+    mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    try:
+        entry_res.ensure(mc)
+        entry_res.set_detach(mc, nk, platform)
+        mc.commit()
+    finally:
+        mc.close()
+    _pin_live(nk, None, platform, None, detach=True)
+
+
+def _adjudicate_suspects(suspects, chunk=20, should_stop=lambda: False):
+    """AI-adjudicate contamination suspects in CHUNKS (a huge single prompt is unreliable).
+    Returns {suspect_index: verdict}."""
+    out = {}
+    for start in range(0, len(suspects), chunk):
+        if should_stop():
+            break
+        batch = suspects[start:start + chunk]
+        items = [{"n": j + 1, **s} for j, s in enumerate(batch)]
+        try:
+            for v in ai.detect_contamination(items):
+                n = v.get("n")
+                if isinstance(n, int) and 1 <= n <= len(batch):
+                    out[start + n - 1] = v
+        except Exception as e:
+            print("contamination adjudicate chunk: %s" % str(e)[:120], file=sys.stderr)
+    return out
+
+
+def _auto_fix_contamination(nks, should_stop=lambda: False, threshold=0.75):
+    """AI-adjudicate the contamination suspects among `nks` and DETACH the confirmed ones
+    (confidence >= threshold). Scoped media reconcile per touched game. Best-effort; a
+    failure never aborts the wand. Returns [{norm_key, platform, reason}] detached."""
+    detached = []
+    if not ai.area_available("metadata"):
+        return detached
+    suspects = _contamination_suspects(nks)
+    if not suspects:
+        return detached
+    verdicts = _adjudicate_suspects(suspects, should_stop=should_stop)
+    now = int(time.time())
+    touched = set()
+    for i, s in enumerate(suspects):
+        v = verdicts.get(i) or {}
+        if v.get("contaminated") and float(v.get("confidence") or 0) >= threshold:
+            try:
+                _detach_entry(s["norm_key"], s["platform"], now)
+                detached.append({"norm_key": s["norm_key"], "platform": s["platform"],
+                                 "reason": v.get("reason")})
+                touched.add(s["norm_key"])
+            except Exception as e:
+                print("contamination detach %s@%s: %s"
+                      % (s["norm_key"], s["platform"], str(e)[:120]), file=sys.stderr)
+    for nk in touched:
+        try:
+            _reconcile_media_now({nk}, now)
+        except Exception:
+            pass
+    if touched:
+        _enqueue_media_reconcile(touched, True)
+    return detached
+
+
+@app.post("/api/contamination/scan")
+def contamination_scan(body: dict = Body(default={})):
+    """Library-wide cross-title contamination sweep — find suspects (algorithmic pre-filter)
+    and AI-adjudicate them, returning the CONFIRMED contaminations for review. Changes
+    nothing. Runs as a background job; poll /api/contamination/status. Body: {limit?}."""
+    if not ai.area_available("metadata"):
+        raise HTTPException(400, "AI metadata area not configured")
+    limit = max(1, min(int((body or {}).get("limit") or 600), 3000))
+    cur = _JOBS.get("contamination")
+    if cur and cur.get("thread") and cur["thread"].is_alive():
+        return {"started": False, "running": True}
+
+    def job(stop):
+        lc = ro(LIBRARY_DB)
+        try:
+            nks = [r[0] for r in lc.execute(
+                "SELECT DISTINCT norm_key FROM games WHERE has_emulation=1 "
+                "AND game_key LIKE 'igdb:%'")]
+        finally:
+            lc.close()
+        suspects = _contamination_suspects(nks)[:limit]
+        verdicts = _adjudicate_suspects(suspects, should_stop=stop)
+        confirmed = [{"norm_key": s["norm_key"], "platform": s["platform"],
+                      "title": s["title"], "igdb_name": s["igdb_name"],
+                      "confidence": (verdicts.get(i) or {}).get("confidence"),
+                      "reason": (verdicts.get(i) or {}).get("reason")}
+                     for i, s in enumerate(suspects)
+                     if (verdicts.get(i) or {}).get("contaminated")]
+        _CONTAM["last"] = {"scanned": len(suspects), "confirmed": confirmed,
+                           "at": int(time.time())}
+    _start_job("contamination", "contamination", "Contamination sweep", job)
+    return {"started": True}
+
+
+@app.get("/api/contamination/status")
+def contamination_status():
+    cur = _JOBS.get("contamination")
+    return {"running": bool(cur and cur.get("thread") and cur["thread"].is_alive()),
+            "last": _CONTAM["last"]}
+
+
+@app.post("/api/contamination/apply")
+def contamination_apply(body: dict = Body(...)):
+    """Detach the selected contaminated entries. Body: {entries:[{norm_key, platform}]}."""
+    entries = (body or {}).get("entries") or []
+    now = int(time.time())
+    touched = set()
+    for e in entries:
+        nk = (e.get("norm_key") or "").strip()
+        plat = (e.get("platform") or "").strip()
+        if nk and plat:
+            try:
+                _detach_entry(nk, plat, now)
+                touched.add(nk)
+            except Exception as ex:
+                print("contamination apply %s@%s: %s" % (nk, plat, str(ex)[:120]),
+                      file=sys.stderr)
+    for nk in touched:
+        try:
+            _reconcile_media_now({nk}, now)
+        except Exception:
+            pass
+    if touched:
+        _enqueue_media_reconcile(touched, True)
+    return {"detached": len(touched)}
+
+
+_CONTAM = {"last": None}
 
 
 def _start_aimeta_job(run_id, keys, opts):

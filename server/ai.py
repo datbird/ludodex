@@ -1485,6 +1485,38 @@ def adjudicate_attributes(title, conflicts, provider=None, model=None):
     return obj if isinstance(obj, dict) else {}
 
 
+# ---------------------------------------------------- cross-title contamination audit
+def detect_contamination(items, provider=None, model=None):
+    """Decide, per suspect, whether an emulation ROM is REALLY the IGDB game it was bound to
+    or a DIFFERENT game that merely shares the title (the Atari-2600 "Dune" vs the 1992 Cryo
+    "Dune"). `items` = [{n, title, platform, igdb_name, igdb_year, igdb_platforms:[..],
+    summary}]. Returns [{n, contaminated: bool, confidence: 0..1, reason}]. Raises on error."""
+    provider, key, model = _resolve(provider or provider_for_area("metadata"),
+                                    model or model_for_area("metadata"))
+    listing = "\n".join(
+        '%d. ROM "%s" on %s  ->  bound to IGDB "%s" (%s; IGDB platforms: %s). Summary: %s'
+        % (it["n"], it["title"], it["platform"], it.get("igdb_name", ""),
+           it.get("igdb_year", "?"), ", ".join(it.get("igdb_platforms") or []) or "none",
+           (it.get("summary") or "")[:220])
+        for it in items)
+    system = (
+        "You audit a retro-game library for CROSS-CONTAMINATION: an emulation ROM bound to "
+        "the WRONG game's identity because they share a title. For each item you get a ROM "
+        "(title + the console it runs on) and the IGDB game it was matched to (name, year, "
+        "the platforms IGDB lists, a summary). Decide if the ROM really IS that IGDB game, or "
+        "a DIFFERENT game sharing the name. Contamination is when the console is a hardware "
+        "generation that game never released on AND could not run — e.g. a 1992 CD-ROM "
+        "adventure/RTS cannot be an Atari 2600 cartridge. But a legitimate port to a "
+        "contemporary or later console is NOT contamination, and IGDB platform lists are "
+        "OFTEN INCOMPLETE, so only flag contaminated when you're confident that console "
+        "could not be that game. Respond ONLY with a JSON array of "
+        '{"n": <num>, "contaminated": true|false, "confidence": 0..1, "reason": "<short>"}.')
+    text = _complete_text(provider, key, model, system, "Items:\n" + listing)
+    obj = _json(text)
+    rows = obj if isinstance(obj, list) else (obj or {}).get("results", [])
+    return rows if isinstance(rows, list) else []
+
+
 # ------------------------------------------------------------------- dedupe assist
 def dedupe_pairs(pairs, provider=None, model=None):
     """Adjudicate candidate duplicate pairs. `pairs`=[{a,b,a_src,b_src}].
