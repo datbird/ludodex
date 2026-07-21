@@ -163,6 +163,7 @@ function buildFilterSections(facets: Facets | null): FilterSection[] {
       { id: 'matched', name: 'Matched (identified)' },
       { id: 'has_cover', name: 'Has cover' },
       { id: 'cross_source', name: 'Cross-source' },
+      { id: 'low_confidence', name: 'Low confidence' },
     ].sort(byName) },
     { title: 'Sources', rows: [
       ...srcs.map((s) => ({ id: 'source:' + s, name: srcLabel(s) })),
