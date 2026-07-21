@@ -10,28 +10,33 @@ Last reviewed: 2026-07-21.
 
 ## Open
 
-| # | Task | Notes |
+Nothing is open pending code. Two items are **data-gated** — the work shipped, but the
+remaining half can only be done against a populated catalog with a configured AI provider:
+
+| # | Task | What's left |
 |---|---|---|
-| 2 | Firebase two-way backing-store adapter + live test | The merge engine and SQL/PocketBase adapters are done; Firebase is the remaining backend. Also unbuilt: auto/periodic sync, conflict log/UI. |
-| 3 | Contamination confidence-threshold tuning | Detach fires at AI confidence ≥ 0.75. Revisit only if false positives/negatives show up in real use. |
-| 4 | Live cover-view preview | Preview a cover change before committing it. |
-| 10 | Tap-to-enlarge review thumbnails | Wand review strip thumbs are too small to judge art. |
-| 11 | Hero-expand to all overlays | The hero-expand interaction currently applies to a subset of overlays. |
-| 12 | Compilation auto-detection | AI detects collections during a metadata scan today; make it a systematic pass rather than incidental. |
-| 14 | Hook-after-early-return sweep + React error boundary | `17be9ce` fixed one instance (React #310, Settings → Library white-screen). Sweep for siblings and add a boundary so a single bad component can't blank the app. |
-| 15 | Files → Browse defaults to server root | Fresh-install UX: opening at `/` is unhelpful. Default to a configured library path. |
-| 16 | "Backing store" vs "Database sync" naming | Two distinct external-DB features with confusingly similar names. Backing store = two-way durable sync of user stores; Database sync = one-way catalog mirror. Rename and/or merge the Settings surfaces. |
+| 2 | Firebase backing store | Adapter is written, registered, and protocol-tested offline (`test_dbsync_firestore.py`). A **live round-trip** needs a Firebase project id + service-account key entered in Settings → Connections → Backup & restore. |
+| 3 | Auto-fix confidence tuning | The gate is now a setting (Settings → Library → "Automatic fixes") instead of a hardcoded 0.75. Choosing the *right* value needs a real library to observe false positives against. |
 
 ## Recently completed
 
 | # | Task | Commit |
 |---|---|---|
+| 2 | Firestore adapter protocol test (pagination, batching, doc ids, no-op re-sync) | `21d7da3` |
+| 3 | `auto_fix_confidence` setting driving all three AI-gated auto-fixes | `93982dc` |
+| 4 | Live cover preview before applying a smart art pick | `11b66c9` |
+| 10 | Click-to-enlarge review thumbnails (`ImageLightbox`, ← / → / Esc) | `b6658bb` |
+| 11 | Entrance animation on every overlay, not just game detail | `b6658bb` |
+| 12 | Systematic compilation detection during a wand scan | `5a6313e` |
+| 14 | Error boundaries + `hooksweep.mjs` build guard | `3f76969` |
+| 15 | Files → Browse opens at a remembered/library path, not `/` | `b9b130f` |
+| 16 | "Backup & restore" vs "Publish catalog" renaming | `b9b130f` |
 | 5 | Amiga CD32 hardware-token strip / re-platform | `84d2ecf` |
 | 6 | Wand provenance + release-type + mismatch warning in review | `9cfdcd1` |
 | 8 | Per-entry identity resolution wired into the wand scan | `bc5cd8f` |
 | 9 | Legacy fuzzy-match scrub (`igdb_enrich --scrub-fuzzy`) | `b34eb63` |
-| 13 | Match confidence (score, facet, dashboard card, chips, settings) | `4ca9dda` `8327ea6` `37d85f6` `7c26ef6` `88da2ac` `9641575` |
-| — | First-run fixes: catalog-seed 500, phantom Sources count, Settings → Library white-screen | `6d757c4` `6019cbb` `17be9ce` |
+| 13 | Match confidence (score, facet, dashboard card, chips, settings) | `4ca9dda` … `9641575` |
+| — | First-run fixes: catalog-seed 500, phantom Sources count, Settings white-screen | `6d757c4` `6019cbb` `17be9ce` |
 
 Task IDs 1 and 7 are not recorded in any surviving note — treat those numbers as retired
 rather than assuming there is missing work behind them.
@@ -45,6 +50,15 @@ the first sync + build:
 - Match-confidence rule-based baseline across all identified entries (#13)
 - CD32 re-key (#5)
 - Fuzzy-match scrub results (#9)
+
+## Guards
+
+- `web/scripts/hooksweep.mjs` runs inside `pnpm build`: a React hook after an early return
+  (or in a conditional/loop/callback) fails the build. It exists because oxlint has no
+  `react-hooks/rules-of-hooks` rule and this repo has no eslint, so nothing caught the
+  white-screen bug of `17be9ce`. Run it alone with `pnpm lint:hooks`.
+- Error boundaries wrap the app root and each settings panel, so a render error degrades to
+  a recoverable inline message rather than a blank page.
 
 ## Parked / blocked
 
