@@ -1466,22 +1466,28 @@ function BackingStore() {
   const secret = (k: string) => k in cfg.secret_set
   const fields = backend ? (cfg.fields[backend] || []) : []
 
+  // Persist whatever is currently in the form. Test and Sync both call this FIRST: they
+  // act on the SAVED config server-side, so testing without saving silently checked the
+  // previous (often empty) settings and reported "not configured" while the screen showed
+  // a filled-in form — which reads as "my credentials are wrong" rather than "not saved".
+  const persist = async () => {
+    const send: Record<string, string> = {}
+    ;(cfg.fields[backend] || []).forEach((k) => { if (vals[k] !== undefined) send[k] = vals[k] })
+    hydrate(await api.backingConfigSet({ backend, auto_minutes: auto, values: send }))
+  }
   const save = async () => {
     setBusy('save'); setMsg(''); setTest(null)
-    try {
-      const send: Record<string, string> = {}
-      ;(cfg.fields[backend] || []).forEach((k) => { if (vals[k] !== undefined) send[k] = vals[k] })
-      hydrate(await api.backingConfigSet({ backend, auto_minutes: auto, values: send }))
-      setMsg('Saved ✓')
-    } catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
+    try { await persist(); setMsg('Saved ✓') }
+    catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
   }
   const runTest = async () => {
     setBusy('test'); setTest(null); setMsg('')
-    try { setTest(await api.backingTest(backend)) }
+    try { await persist(); setTest(await api.backingTest(backend)) }
     catch (e) { setTest({ ok: false, error: (e as Error).message }) } finally { setBusy('') }
   }
   const syncNow = async () => {
     setBusy('sync'); setMsg('Syncing…')
+    try { await persist() } catch { /* surfaced by the sync call itself */ }
     try {
       await api.backingRun(false)
       let n = 0
