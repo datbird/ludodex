@@ -950,7 +950,7 @@ _PLAT_LABEL = {
 
 
 def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
-                    include_homebrew=False):
+                    include_homebrew=False, include_collections=False):
     # spotlight is a games showcase — never surface applications/tools/mods/etc.
     clauses = [where] if where else []
     args = list(args)
@@ -966,6 +966,14 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
         clauses.append("NOT EXISTS(SELECT 1 FROM game_attributes ga WHERE "
                        "ga.game_id=g.id AND ga.kind='release_type' "
                        "AND ga.value<>'Translation')")
+    # A compilation ("DOOM + DOOM II") is a bundle, not a single decade game, and its
+    # member games already appear on their own — keep them out unless asked for.
+    if not include_collections:
+        colls = [c["coll_key"] for c in compilations.all_collections(DATA)]
+        if colls:
+            _bcol = "g.base_key" if _has_col(con, "games", "base_key") else "g.norm_key"
+            clauses.append(_bcol + " NOT IN (" + ",".join("?" * len(colls)) + ")")
+            args += colls
     clause = ("WHERE " + " AND ".join("(%s)" % c for c in clauses) + " ") if clauses else ""
     has_ek = _has_col(con, "games", "entry_key")
     eksel = ("g.entry_key AS entry_key, g.platform AS platform, " if has_ek
@@ -1000,22 +1008,33 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
         has_cov = ("(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
                    "md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media "
                    "um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
-    # one showcase row per game (a title shouldn't repeat once per platform); GROUP BY
-    # the cross-ref base_key picks a representative entry, its platform driving the cover.
-    grp = ("GROUP BY g.base_key " if _has_col(con, "games", "base_key")
-           else "GROUP BY g.norm_key " if has_ek else "")
-    sql = ("SELECT g.norm_key, " + eksel + "g.canonical_title AS title, gs.universal AS score, "
+    # Collapse to ONE showcase row per GAME by resolved identity: igdb:<id> when the
+    # entry is identified (so a title's platform ports — the five Doom ports — fold
+    # together), else base_key (two UNidentified same-title entries can't be safely
+    # merged). Representative = a cover-bearing member first, then best universal score,
+    # so a collapsed tile never shows a placeholder when any member has art. Group is
+    # ranked by the representative's remapped score columns (theme order strings use
+    # gs.*; the CTE exposes them as sc_*).
+    _bkey = ("g.base_key" if _has_col(con, "games", "base_key")
+             else ("g.norm_key" if has_ek else None))
+    _grpkey = (("(CASE WHEN g.game_key LIKE 'igdb:%' THEN g.game_key ELSE " + _bkey + " END)")
+               if (_hasgk and _bkey) else (_bkey or "g.norm_key"))
+    _order = order.replace("gs.", "sc_")
+    sql = ("WITH base AS (SELECT g.norm_key, " + eksel + "g.canonical_title AS title, "
+           "gs.universal AS sc_universal, gs.critic AS sc_critic, gs.user AS sc_user, "
            "g.sources_summary AS sources, "
            "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
-           + has_cov
-           + cover_v +
-           "FROM games g LEFT JOIN sco.game_scores gs ON gs.norm_key=g.norm_key "
-           + clause + grp
-           + "ORDER BY " + order + ", g.canonical_title LIMIT ?")
+           + has_cov + cover_v + ", " + _grpkey + " AS grpkey "
+           "FROM games g LEFT JOIN sco.game_scores gs ON gs.norm_key=g.norm_key " + clause + "), "
+           "ranked AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY grpkey "
+           "ORDER BY has_cover DESC, sc_universal DESC, title) AS rn, "
+           "COUNT(*) OVER (PARTITION BY grpkey) AS n_platforms FROM base) "
+           "SELECT * FROM ranked WHERE rn=1 ORDER BY " + _order + ", title LIMIT ?")
     return [{"norm_key": r["norm_key"], "entry_key": r["entry_key"],
-             "platform": r["platform"], "title": r["title"], "score": r["score"],
+             "platform": r["platform"], "title": r["title"], "score": r["sc_universal"],
              "sources": r["sources"], "matched": bool(r["matched"]),
-             "has_cover": bool(r["has_cover"]), "cover_v": r["cover_v"] or None}
+             "has_cover": bool(r["has_cover"]), "cover_v": r["cover_v"] or None,
+             "n_platforms": r["n_platforms"]}
             for r in con.execute(sql, args + [limit])]
 
 
@@ -1190,7 +1209,9 @@ def spotlight(kind: str = Query("random"), exclude: str = Query(None)):
             kind = random.choice(pool) if pool else "overall"
         title, subtitle, where, args, order = _resolve_spotlight(kind)
         items = _spotlight_rows(con, where, args, order,
-                                include_homebrew=(kind == "homebrew"))
+                                include_homebrew=(kind == "homebrew"),
+                                include_collections=config.get_bool(
+                                    "spotlight_include_collections", False))
         if len(items) < 4 and kind != "overall":         # thin theme -> fall back
             kind = "overall"
             title, subtitle, where, args, order = _resolve_spotlight(kind)

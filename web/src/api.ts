@@ -359,6 +359,7 @@ export interface Prefs {
   hide_non_games: boolean
   spotlight_seconds: number
   spotlight_disabled?: string[]
+  spotlight_include_collections?: boolean
   media_mode: MediaMode
   media_language: string       // '' = any; else the preferred media language (legacy single)
   media_languages: string[]    // ordered 1st,2nd,3rd preferred media languages
@@ -548,6 +549,7 @@ export interface SpotlightItem {
   matched: boolean
   has_cover: boolean
   cover_v?: string | null
+  n_platforms?: number      // how many platform entries this collapsed tile represents
 }
 export interface Spotlight {
   kind: string

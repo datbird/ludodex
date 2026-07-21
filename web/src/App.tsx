@@ -19,6 +19,9 @@ import type {
 } from './api'
 import { providerColor, providerLabel, providerMark } from './providers'
 import { providerIconPath, providerIconViewBox, providerIconWide } from './provider-icons'
+import { useReveal, byKey } from './reveal'
+import { sparkleFrom } from './sparkle'
+import { honorReducedMotion, setHonorReducedMotion } from './motion'
 import './App.css'
 
 const PAGE_OPTIONS = [25, 50, 100, 500, 1000]
@@ -987,7 +990,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           </button>
           <button className="filter-btn wand-btn"
             title="Let AI enrich and supplement metadata and media for your library"
-            onClick={() => { setWandTarget(null); setShowWand(true) }}>
+            onClick={(e) => { sparkleFrom(e.currentTarget); setWandTarget(null); setShowWand(true) }}>
             <span className="wand-spark">✨</span> Magic wand
           </button>
           <button className="filter-btn add-game" title="Add a game"
@@ -1005,6 +1008,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
         <div className={'grid' + (selectMode ? ' selecting' : '')}>
           {items.map((g) => (
             <button key={g.entry_key ?? g.norm_key} onClick={() => onCard(g)}
+              data-reveal-key={g.entry_key ?? g.norm_key}
               className={'card'
                 + (selectMode && picked.has(g.entry_key ?? g.norm_key) ? ' picked' : '')}>
               {selectMode && (
@@ -1087,7 +1091,8 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
         <div className="select-bar">
           <span className="sel-count">{picked.size} selected</span>
           <span className="sel-hint dim">✨ Magic wand: any game · Add to device: ROM-only wishlist (no transfer)</span>
-          <button className="go" disabled={!picked.size} onClick={wandPicked}
+          <button className="go" disabled={!picked.size}
+            onClick={(e) => { sparkleFrom(e.currentTarget); wandPicked() }}
             title="AI-enrich every selected game — findings land in the Jobs monitor to review & accept">
             ✨ Magic wand</button>
           <div className="sel-add">
@@ -1836,6 +1841,7 @@ function BannedMediaPanel() {
 function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
   const [prefs, setPrefs] = useState<Prefs | null>(null)
   const [busy, setBusy] = useState(false)
+  const [honorRM, setHonorRM] = useState(honorReducedMotion())   // per-device (localStorage)
   const load = () => api.prefs().then(setPrefs).catch(() => {})
   useEffect(() => { load() }, [])
   const running = prefs?.media_job?.running
@@ -1892,6 +1898,22 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
 
   return (
     <div className="lib-prefs">
+      <div className="pref-row">
+        <label className="switch">
+          <input type="checkbox" checked={honorRM}
+            onChange={(e) => { setHonorRM(e.target.checked); setHonorReducedMotion(e.target.checked) }} />
+          <span className="track"><span className="knob" /></span>
+        </label>
+        <div className="pref-text">
+          <span className="pref-name">Respect system “Reduce Motion”</span>
+          <span className="pref-hint">
+            When on, ludodex disables its UI animations (the hero-expand open/close and the
+            wand sparkles) if your operating system has Reduce Motion enabled. Off = always
+            play them. Saved on this device.
+          </span>
+        </div>
+      </div>
+
       <div className="pref-row">
         <label className="switch">
           <input type="checkbox" checked={prefs.hide_non_games}
@@ -2043,9 +2065,15 @@ const SPOTLIGHT_PRESETS = [5, 8, 12, 20, 30, 45, 60]
 
 function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
   const [secs, setSecs] = useState<number | null>(null)
+  const [inclColl, setInclColl] = useState(false)
   const [themes, setThemes] = useState<SpotlightTheme[] | null>(null)
   const [themesOpen, setThemesOpen] = useState(false)
-  useEffect(() => { api.prefs().then((p) => setSecs(p.spotlight_seconds)).catch(() => {}) }, [])
+  useEffect(() => {
+    api.prefs().then((p) => {
+      setSecs(p.spotlight_seconds)
+      setInclColl(!!p.spotlight_include_collections)
+    }).catch(() => {})
+  }, [])
   useEffect(() => {
     if (themesOpen && themes === null)
       api.spotlightThemes().then((r) => setThemes(r.themes)).catch(() => setThemes([]))
@@ -2055,6 +2083,12 @@ function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
     const clamped = Math.max(3, Math.min(300, Math.round(v)))
     setSecs(clamped)
     try { await api.setPrefs({ spotlight_seconds: clamped }); onChanged() }
+    catch { /* keep optimistic value */ }
+  }
+
+  const toggleColl = async (v: boolean) => {
+    setInclColl(v)
+    try { await api.setPrefs({ spotlight_include_collections: v }); onChanged() }
     catch { /* keep optimistic value */ }
   }
 
@@ -2091,6 +2125,22 @@ function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
               className={'preset' + (p === secs ? ' on' : '')}
               onClick={() => commit(p)}>{p}s</button>
           ))}
+        </div>
+      </div>
+
+      <div className="pref-block">
+        <div className="pref-row">
+          <label className="switch">
+            <input type="checkbox" checked={inclColl}
+              onChange={(e) => toggleColl(e.target.checked)} />
+            <span className="track"><span className="knob" /></span>
+          </label>
+          <div className="pref-text">
+            <span className="pref-name">Include collections</span>
+            <span className="pref-hint">Show compilations (e.g. “DOOM + DOOM II”) in the
+              Spotlight. Off by default — a bundle shouldn’t compete against its own member
+              games. (Only compilations ludodex has recorded are affected.)</span>
+          </div>
         </div>
       </div>
 
@@ -5466,11 +5516,17 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   // base title key, so derive it for those.
   const base = nk.includes('@') ? nk.slice(0, nk.lastIndexOf('@')) : nk
   const [mediaDirty, setMediaDirty] = useState(false)
-  // close, but first refresh the grid/spotlight if the media (e.g. chosen cover)
-  // changed here — so a re-pinned cover shows without a hard refresh.
-  const close = () => { if (mediaDirty) onMediaChanged?.(); onClose() }
-  useScrollLock()
   const [d, setD] = useState<GameDetail | null>(null)
+  // hero-expand reveal: the panel grows out of the clicked grid tile on open and
+  // shrinks back into it on close (tile discovered live via its data-reveal-key).
+  // Gated on `d` so it stays hidden until the detail loads, then grows the REAL
+  // window in — instead of an empty shell that then pops full of content.
+  const { overlayRef, panelRef, requestClose } = useReveal(() => byKey(nk), !!d)
+  // close, but first refresh the grid/spotlight if the media (e.g. chosen cover)
+  // changed here — so a re-pinned cover shows without a hard refresh. The reveal
+  // exit animation plays before the real unmount (onClose).
+  const close = () => { if (mediaDirty) onMediaChanged?.(); requestClose(onClose) }
+  useScrollLock()
   const [media, setMedia] = useState<MediaLibrary | null>(null)
   const [kinds, setKinds] = useState<MediaKind[]>([])
   const [wandOpen, setWandOpen] = useState(false)
@@ -5517,8 +5573,8 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   const marquee = bg ? [] : assets.filter((a) => a.is_image && a.kind !== 'logo')
 
   return (
-    <div className="overlay" onClick={close}>
-      <div className="panel game-panel" onClick={(e) => e.stopPropagation()}>
+    <div className="overlay" ref={overlayRef} onClick={close}>
+      <div className="panel game-panel" ref={panelRef} onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={close}>×</button>
         {d && (
           <div className="hero-tools" ref={toolsRef}>
@@ -5530,7 +5586,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
               </svg></button>
             {toolsOpen && (
               <div className="hero-tools-menu">
-                <button onClick={() => { setToolsOpen(false); setWandOpen(true) }}>
+                <button onClick={(e) => { sparkleFrom(e.currentTarget); setToolsOpen(false); setWandOpen(true) }}>
                   <span className="htm-ic">✨</span> Magic wand
                   <span className="htm-sub">Identify, fix &amp; find art — all in one</span></button>
                 <button onClick={() => { setToolsOpen(false); setResolve(true) }}>
@@ -6300,6 +6356,12 @@ function SpotlightSection({ onOpen, prefsTick, mediaTick, onOpenSettings }: {
             <span className="sl-rank">{i + 1}</span>
             <div className="sl-art"><Cover g={g} compact /></div>
             {g.score != null && <span className={'sl-score ' + scoreClass(g.score)}>{g.score}</span>}
+            {(g.n_platforms ?? 1) > 1 && (
+              <span className="sl-plat-badge"
+                title={`One of ${g.n_platforms} platforms you own this on`}>
+                {g.n_platforms}◆
+              </span>
+            )}
             <div className="sl-name">{g.title}</div>
           </button>
         ))}
@@ -7788,7 +7850,8 @@ function MagicWandOverlay({ filterQuery, filterCount, target, onClose }: {
         {msg ? (
           <>
             <div className="sync-note wand-ok">{msg}</div>
-            <div className="settings-actions"><button className="go" onClick={onClose}>Done</button></div>
+            <div className="settings-actions"><button className="go"
+              onClick={(e) => { sparkleFrom(e.currentTarget, 30); onClose() }}>Done</button></div>
           </>
         ) : (
           <>
@@ -7847,7 +7910,8 @@ function MagicWandOverlay({ filterQuery, filterCount, target, onClose }: {
 
             {err && <div className="fo-warn">⚠ {err}</div>}
             <div className="settings-actions wand-actions">
-              <button className="go wand-go" disabled={busy || nothingToDo} onClick={wave}>
+              <button className="go wand-go" disabled={busy || nothingToDo}
+                onClick={(e) => { sparkleFrom(e.currentTarget, 56, true); wave() }}>
                 {busy ? 'Starting…' : '✨ Wave the wand'}</button>
             </div>
           </>
@@ -8438,7 +8502,8 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
         <button className="ops-btn" disabled={busy || selectedCount === 0} onClick={acceptOnly}
           title="Queue these changes without rebuilding — apply them later, batched with your other accepts">
           {busy ? '…' : '✓ Accept'}</button>
-        <button className="ops-btn go" disabled={busy || selectedCount === 0} onClick={acceptAndApply}
+        <button className="ops-btn go" disabled={busy || selectedCount === 0}
+          onClick={(e) => { sparkleFrom(e.currentTarget, 30); acceptAndApply() }}
           title="Accept and rebuild now">
           {busy ? 'Applying…' : '✨ Accept & apply'}</button>
       </div>
@@ -8883,6 +8948,13 @@ function JobOverlay({ onClose, onOpen, pendingApply = 0, onApply }: { onClose: (
     try { await api.clearJobs() } catch { /* */ }
     setClearing(false); load()
   }
+  // Order: running/paused first, then anything awaiting review, then finished — each
+  // newest-first. So the live job is always at the TOP and finished ones sink below.
+  const jobRank = (j: Job) =>
+    j.status === 'running' || j.status === 'paused' ? 0 : reviewable(j) ? 1 : 2
+  const ordered = [...jobs].sort(
+    (a, b) => jobRank(a) - jobRank(b) || (b.when ?? 0) - (a.when ?? 0),
+  )
   return (
     <div className="overlay" onClick={onClose}>
       <div className="job-overlay" ref={wrapRef} onClick={(e) => e.stopPropagation()}>
@@ -8904,7 +8976,7 @@ function JobOverlay({ onClose, onOpen, pendingApply = 0, onApply }: { onClose: (
         )}
         {jobs.length === 0 && pendingApply === 0 && <div className="sync-note dim">No jobs.</div>}
         <div className="job-table">
-          {jobs.map((j) => (
+          {ordered.map((j) => (
             <div key={j.id} className={'job-trow' + (j.kind === 'fileops' ? ' clickable' : '')}
               onClick={() => { if (j.kind === 'fileops' && j.run_id) setOpenRun(j.run_id) }}>
               <JobLabel j={j} cls="job-label" onOpen={onOpen ? (k) => { onClose(); onOpen(k) } : undefined} />
