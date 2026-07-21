@@ -158,6 +158,8 @@ export interface FindingContext {
   provenance?: string | null
   release_type?: string | null
   release_block?: boolean
+  match_confidence?: number | null   // 0-100 identity certainty (task #13)
+  match_reason?: string | null
 }
 export interface AiFinding {
   id: number

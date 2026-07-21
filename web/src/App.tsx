@@ -4770,6 +4770,9 @@ function About({ attrs, scores, prov }: {
   const released = first('release_date') || first('release_year')
   const dev = attrs['developers']?.join(', ')
   const pub = attrs['publishers']?.join(', ')
+  const confRaw = first('match_confidence')
+  const confN = confRaw != null && confRaw !== '' ? Number(confRaw) : null
+  const confReason = first('match_reason')
   const ludodex = scores?.ludodex ?? null
   const critic = scores?.critic ?? null
   const players = scores?.players ?? null
@@ -4780,11 +4783,15 @@ function About({ attrs, scores, prov }: {
   if (pub) facts.push(['Publisher', pub])
 
   const hasTags = TAG_GROUPS.some(([k]) => attrs[k]?.length)
-  if (!desc && !facts.length && ludodex == null && !hasTags) return null
+  if (!desc && !facts.length && ludodex == null && !hasTags && confN == null) return null
 
   return (
     <section className="about">
-      <h3>About</h3>
+      <h3>About{confN != null && (
+        <span className={'conf-pill ' + (confN < 40 ? 'conf-low' : confN < 70 ? 'conf-mid' : 'conf-high')}
+          title={'Match confidence — how sure we are this is the right game'
+            + (confReason ? ' · ' + confReason : '')}>◎ {confN}% match</span>
+      )}</h3>
       {desc && <p className="about-desc">{desc}</p>}
       {ludodex != null && (
         <div className="score-row">
@@ -8171,6 +8178,12 @@ function FindingContextStrip({ ctx }: { ctx?: FindingContext | null }) {
   if (ctx.release_type) bits.push(
     <span key="rt" className={'fc-chip fc-release' + (ctx.release_block ? ' fc-release-block' : '')}
       title="Release type (from the ROM's scene tags)">🏷 {ctx.release_type}</span>)
+  if (ctx.match_confidence != null) {
+    const c = ctx.match_confidence
+    const band = c < 40 ? 'fc-conf-low' : c < 70 ? 'fc-conf-mid' : 'fc-conf-high'
+    bits.push(<span key="mc" className={'fc-chip fc-conf ' + band}
+      title={'Match confidence — how sure we are this is the right game' + (ctx.match_reason ? ' (' + ctx.match_reason + ')' : '')}>◎ {c}% sure</span>)
+  }
   const paths = ctx.paths || []
   if (!bits.length && !paths.length) return null
   return (

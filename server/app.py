@@ -4050,6 +4050,7 @@ def _identity_provenance(nk):
     except Exception:
         pass
     rtype = None
+    conf = conf_reason = None
     try:
         lib = ro(LIBRARY_DB)
         try:
@@ -4058,11 +4059,22 @@ def _identity_provenance(nk):
                 "WHERE g.norm_key=? AND ga.kind='release_type' AND ga.value<>'' LIMIT 1",
                 (nk,)).fetchone()
             rtype = r[0] if r and r[0] else None
+            r = lib.execute(
+                "SELECT MIN(CAST(ga.value AS INT)) FROM game_attributes ga "
+                "JOIN games g ON ga.game_id=g.id "
+                "WHERE g.norm_key=? AND ga.kind='match_confidence'", (nk,)).fetchone()
+            conf = r[0] if r and r[0] is not None else None
+            if conf is not None:
+                rr = lib.execute(
+                    "SELECT ga.value FROM game_attributes ga JOIN games g ON ga.game_id=g.id "
+                    "WHERE g.norm_key=? AND ga.kind='match_reason' LIMIT 1", (nk,)).fetchone()
+                conf_reason = rr[0] if rr and rr[0] else None
         finally:
             lib.close()
     except Exception:
         pass
     return {"provenance": prov, "release_type": rtype,
+            "match_confidence": conf, "match_reason": conf_reason,
             "release_block": rtype in _BLOCK_RELEASE_TYPES}
 
 
