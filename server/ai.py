@@ -1517,6 +1517,51 @@ def detect_contamination(items, provider=None, model=None):
     return rows if isinstance(rows, list) else []
 
 
+def adjudicate_entry(items, provider=None, model=None):
+    """Per-entry identity adjudication (task #8). For each entry (a title on a specific
+    console) given the exact-title IGDB CANDIDATES, decide whether it's the group's
+    primary game, a DIFFERENT same-title candidate (which id), or a different game not in
+    the list (detach). `items` = [{n, title, platform, filename?, year?, primary_id,
+    candidates:[{id, name, year, platforms:[..]}]}]. Returns [{n, same_as_group: bool,
+    correct_igdb_id: int|null, detach: bool, confidence: 0..1, reason}]. Raises on error."""
+    provider, key, model = _resolve(provider or provider_for_area("metadata"),
+                                    model or model_for_area("metadata"))
+
+    def _cands(it):
+        return "; ".join(
+            '[id %s] "%s" (%s; platforms: %s)'
+            % (c.get("id"), c.get("name", ""), c.get("year", "?"),
+               ", ".join(c.get("platforms") or []) or "none")
+            for c in (it.get("candidates") or [])) or "none"
+
+    listing = "\n".join(
+        '%d. ROM "%s" on console "%s"%s%s. Group primary game id: %s. '
+        'Candidate games sharing this title: %s'
+        % (it["n"], it["title"], it["platform"],
+           (' file "%s"' % it["filename"]) if it.get("filename") else "",
+           (" (~%s)" % it["year"]) if it.get("year") else "",
+           it.get("primary_id"), _cands(it))
+        for it in items)
+    system = (
+        "You resolve the IDENTITY of each entry in a retro-game library. Different games can "
+        "share a title across eras (Tomb Raider 1996 vs the 2013 reboot; Alice in Wonderland "
+        "the 1985 text-adventure vs the 2010 movie game). For each item you get a ROM (title + "
+        "the console it runs on, maybe a filename/year) and the candidate IGDB games that "
+        "share its title (each with id, year, the platforms IGDB lists). The group's 'primary' "
+        "game id is given. For THIS console decide: is the entry the SAME game as the primary, "
+        "a DIFFERENT candidate (give its id), or a different game not among the candidates "
+        "(detach)? A legitimate port to a contemporary or later console is the SAME game, and "
+        "IGDB platform lists are OFTEN INCOMPLETE, so DEFAULT to same_as_group unless you are "
+        "confident it is different. Only detach when it plainly cannot be any candidate on "
+        "that console (e.g. a 1993 SNES game 'ported' to a 1977 Atari 2600). Respond ONLY with "
+        'a JSON array of {"n": <num>, "same_as_group": true|false, "correct_igdb_id": <id or '
+        'null>, "detach": true|false, "confidence": 0..1, "reason": "<short>"}.')
+    text = _complete_text(provider, key, model, system, "Items:\n" + listing)
+    obj = _json(text)
+    rows = obj if isinstance(obj, list) else (obj or {}).get("results", [])
+    return rows if isinstance(rows, list) else []
+
+
 # ------------------------------------------------------------------- dedupe assist
 def dedupe_pairs(pairs, provider=None, model=None):
     """Adjudicate candidate duplicate pairs. `pairs`=[{a,b,a_src,b_src}].

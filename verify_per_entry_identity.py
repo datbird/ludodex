@@ -39,6 +39,23 @@ def main():
     only_ps1 = {"id": 800, "name": "X", "year": 1996, "platforms": [{"name": "PlayStation"}]}
     r2 = R([only_ps1], "sega saturn", 800)
     assert r2["kind"] == "none_uncertain", "compatible-era no-fit -> uncertain (AI), not detach"
+
+    # --- combine_verdict: deterministic result + (mocked) AI verdict -> final action ---
+    C = E.combine_verdict
+    uniq = R(trs, "ps3", 1164)                      # deterministic unique -> 2013, no AI
+    assert C(uniq, None, 1164) == {"action": "set", "igdb_id": 2013}, "unique applies w/o AI"
+    ambig = R(trs, "pc", 1164)
+    yes = {"same_as_group": False, "correct_igdb_id": 2013, "detach": False, "confidence": 0.9}
+    assert C(ambig, yes, 1164)["igdb_id"] == 2013, "ambiguous: AI picks the release"
+    low = {"same_as_group": False, "correct_igdb_id": 2013, "detach": False, "confidence": 0.4}
+    assert C(ambig, low, 1164) == {"action": "keep", "igdb_id": 1164}, "low-conf AI -> keep (guard)"
+    imp = R([SF_SNES], "atari 2600", 700)
+    det = {"same_as_group": False, "correct_igdb_id": None, "detach": True, "confidence": 0.95}
+    assert C(imp, det, 700) == {"action": "detach", "igdb_id": None}, "impossible+AI-confirm -> detach"
+    assert C(imp, None, 700) == {"action": "keep", "igdb_id": 700}, "impossible w/o AI -> keep (guard)"
+    unc = R([only_ps1], "sega saturn", 800)
+    same = {"same_as_group": True, "correct_igdb_id": None, "detach": False, "confidence": 0.9}
+    assert C(unc, same, 800) == {"action": "keep", "igdb_id": 800}, "uncertain+same-game -> keep port"
     print("verify_per_entry_identity: OK")
 
 

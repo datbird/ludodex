@@ -289,6 +289,34 @@ def per_entry_resolve(candidates, platform, primary_id):
     return {"kind": "none_uncertain", "igdb_id": None, "fit_ids": []}
 
 
+def combine_verdict(det, ai_verdict, primary_id, threshold=0.75):
+    """Combine a deterministic `per_entry_resolve` result with an optional AI verdict
+    into a final action for one entry: {"action", "igdb_id"} where action is:
+      - "set"    -> give this entry its own igdb_id (a per-entry override).
+      - "detach" -> separate this entry (a different game we can't confidently name).
+      - "keep"   -> inherit the group/title-level identity (primary_id); no override.
+
+    Gate logic: a UNIQUE deterministic fit is applied directly (no AI). Every non-unique
+    case is decided by the AI verdict, and the OVER-SEPARATION GUARD makes 'keep' the
+    default whenever the AI is missing or below `threshold` confidence — so a legit port
+    or an uncertain call is never auto-separated.
+
+    `ai_verdict` shape: {same_as_group: bool, correct_igdb_id: int|None, detach: bool,
+    confidence: float}."""
+    if det["kind"] == "unique":
+        return {"action": "set", "igdb_id": det["igdb_id"]}
+    v = ai_verdict or {}
+    if float(v.get("confidence") or 0) < threshold:
+        return {"action": "keep", "igdb_id": primary_id}      # guard: default keep
+    if v.get("same_as_group"):
+        return {"action": "keep", "igdb_id": primary_id}
+    if v.get("detach"):
+        return {"action": "detach", "igdb_id": None}
+    if v.get("correct_igdb_id"):
+        return {"action": "set", "igdb_id": int(v["correct_igdb_id"])}
+    return {"action": "keep", "igdb_id": primary_id}
+
+
 def _consoles_by_norm():
     """{norm_key: {console, ...}} — every EMULATION console each game has a ROM on, for
     the era gate. ONLY emulation sources: console_eras is keyed by emulation platform
