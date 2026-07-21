@@ -3111,12 +3111,12 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
     # confirmed ones are DETACHED to their own identity — so running the wand actually FIXES
     # these instead of reporting "already identified, nothing to do".
     try:
-        det = _auto_fix_contamination(list(norm_keys), should_stop)
-        if det:
-            print("aimeta scan: detached %d contaminated entries" % len(det),
-                  file=sys.stderr)
+        r = resolve_per_entry_identity(list(norm_keys), should_stop)
+        if r["set"] or r["detached"]:
+            print("aimeta scan: per-entry identity — %d re-identified, %d detached"
+                  % (len(r["set"]), len(r["detached"])), file=sys.stderr)
     except Exception as e:
-        print("aimeta scan contamination: %s" % str(e)[:200], file=sys.stderr)
+        print("aimeta scan per-entry identity: %s" % str(e)[:200], file=sys.stderr)
     # The wand is ONE operation: after identifying, fill/refresh art for the games it
     # scanned that are already resolved — from every provider, plus open-web discovery
     # (Wikimedia/Google/LLM) when the user turned on web search. A newly-proposed match
@@ -3243,6 +3243,134 @@ def _auto_fix_contamination(nks, should_stop=lambda: False, threshold=0.75):
     return detached
 
 
+def _adjudicate_entries(items, should_stop=lambda: False, chunk=20):
+    """Chunked ai.adjudicate_entry for the per-entry resolver. `items` carry their own `n`
+    (assigned by plan_title); we renumber within each chunk for the model, then map the
+    verdicts back to the original `n`. Returns a flat list of verdicts."""
+    out = []
+    for start in range(0, len(items), chunk):
+        if should_stop():
+            break
+        batch = items[start:start + chunk]
+        local = [{**it, "n": j} for j, it in enumerate(batch)]
+        try:
+            for v in ai.adjudicate_entry(local):
+                n = v.get("n")
+                if isinstance(n, int) and 0 <= n < len(batch):
+                    out.append({**v, "n": batch[n]["n"]})
+        except Exception as e:
+            print("adjudicate_entry chunk: %s" % str(e)[:120], file=sys.stderr)
+    return out
+
+
+def resolve_per_entry_identity(nks, should_stop=lambda: False, threshold=0.75, apply=True):
+    """Per-entry identity resolution (task #8): for each IDENTIFIED title among `nks`,
+    resolve each emulation platform entry to its OWN correct IGDB id — re-identify a
+    different same-title game when confident (PS3 "Tomb Raider" -> the 2013 reboot),
+    detach the impossible (Atari-2600 "Star Fox"), keep legit ports. Deterministic-first
+    (IGDB platform membership); AI (ai.adjudicate_entry) only for ambiguous/no-fit entries,
+    with an over-separation guard (keep unless confident it's different). Subsumes the old
+    backport-only contamination pass. `apply=False` computes plans WITHOUT writing (the
+    copy-test). Best-effort. Returns {"set":[...], "detached":[...], "plans":[...]}."""
+    result = {"set": [], "detached": [], "plans": []}
+    if not nks or not ai.area_available("metadata"):
+        return result
+    lc = ro(LIBRARY_DB)
+    try:
+        ph = ",".join("?" * len(nks))
+        rows = lc.execute(
+            "SELECT norm_key, platform, canonical_title FROM games "
+            "WHERE has_emulation=1 AND platform IS NOT NULL AND norm_key IN (%s)" % ph,
+            list(nks)).fetchall()
+    finally:
+        lc.close()
+    groups = {}
+    for nk, plat, title in rows:
+        groups.setdefault(nk, []).append({"platform": plat, "title": title})
+    if not groups:
+        return result
+    mcp = os.path.join(DATA, "metadata-cache.sqlite")
+    mc_ro = ro(mcp)
+    try:
+        detached_set = entry_res.load_detached(mc_ro)
+        manual = {(r[0], r[1]) for r in mc_ro.execute(
+            "SELECT norm_key, platform FROM entry_resolution WHERE matched_by='manual'")}
+        now = int(time.time())
+        for nk, entries in groups.items():
+            if should_stop():
+                break
+            pr = mc_ro.execute(
+                "SELECT igdb_id FROM igdb_resolution WHERE norm_key=?", (nk,)).fetchone()
+            primary_id = pr[0] if pr and pr[0] else None
+            if not primary_id:
+                continue
+            pm = mc_ro.execute(
+                "SELECT payload_json FROM igdb_meta WHERE igdb_id=?", (primary_id,)).fetchone()
+            try:
+                pname = json.loads(pm[0]).get("name") if pm and pm[0] else None
+            except Exception:
+                pname = None
+            if not pname:
+                continue
+            cands = [{"id": h["igdb_id"], "name": h["name"], "year": h["year"],
+                      "platforms": [{"name": a} for a in (h.get("platforms") or [])]}
+                     for h in _igdb_by_name(pname, limit=20)
+                     if h.get("igdb_id") and titlenorm.norm(h.get("name") or "") == nk]
+            if not cands:
+                continue
+            plan_entries = [e for e in entries
+                            if (nk, e["platform"]) not in detached_set
+                            and (nk, e["platform"]) not in manual]
+            if not plan_entries:
+                continue
+            plan = igdb_enrich.plan_title(
+                nk, primary_id, plan_entries, cands,
+                adjudicate=lambda items: _adjudicate_entries(items, should_stop),
+                threshold=threshold)
+            result["plans"].append({
+                "norm_key": nk, "primary_id": primary_id,
+                "candidates": [{"id": c["id"], "name": c["name"], "year": c["year"]}
+                               for c in cands],
+                "plan": plan})
+            if not apply:
+                continue
+            cand_name = {c["id"]: c["name"] for c in cands}
+            touched = set()
+            for pe in plan:
+                plat = pe["platform"]
+                if pe["action"] == "set" and pe["igdb_id"] and pe["igdb_id"] != primary_id:
+                    try:
+                        mc = sqlite3.connect(mcp)
+                        try:
+                            entry_res.set_entry(mc, nk, plat, pe["igdb_id"])
+                            mc.commit()
+                        finally:
+                            mc.close()
+                        _pin_live(nk, pe["igdb_id"], plat, cand_name.get(pe["igdb_id"]))
+                        result["set"].append({"norm_key": nk, "platform": plat,
+                                              "igdb_id": pe["igdb_id"]})
+                        touched.add(nk)
+                    except Exception as e:
+                        print("per-entry set %s@%s: %s" % (nk, plat, str(e)[:120]),
+                              file=sys.stderr)
+                elif pe["action"] == "detach":
+                    try:
+                        _detach_entry(nk, plat, now)
+                        result["detached"].append({"norm_key": nk, "platform": plat})
+                        touched.add(nk)
+                    except Exception as e:
+                        print("per-entry detach %s@%s: %s" % (nk, plat, str(e)[:120]),
+                              file=sys.stderr)
+            for tnk in touched:
+                try:
+                    _reconcile_media_now({tnk}, now)
+                except Exception:
+                    pass
+            if touched:
+                _enqueue_media_reconcile(touched, True)
+    finally:
+        mc_ro.close()
+    return result
 
 
 def _start_aimeta_job(run_id, keys, opts):

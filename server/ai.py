@@ -1531,7 +1531,7 @@ def adjudicate_entry(items, provider=None, model=None):
         return "; ".join(
             '[id %s] "%s" (%s; platforms: %s)'
             % (c.get("id"), c.get("name", ""), c.get("year", "?"),
-               ", ".join(c.get("platforms") or []) or "none")
+               ", ".join(p.get("name") or "" for p in (c.get("platforms") or [])) or "none")
             for c in (it.get("candidates") or [])) or "none"
 
     listing = "\n".join(
