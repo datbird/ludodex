@@ -3835,3 +3835,44 @@ a.idchip:hover { background: var(--accent-bg); }
   border-left: 2px solid var(--border); padding-left: 10px;
   margin-top: -4px; font-size: 13px;
 }
+
+/* click-to-enlarge affordance on wand-review thumbnails (#10) */
+.chg-zoom {
+  padding: 0; border: none; background: none; cursor: zoom-in;
+  display: inline-flex; line-height: 0; border-radius: 6px;
+}
+.chg-zoom:hover { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chg-zoom:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.lb-caption {
+  margin-top: 10px; text-align: center; font-size: 13px; color: var(--text-h);
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+}
+
+/* --- overlay open animation (#11) ------------------------------------------
+   The game-detail panel gets the full container-transform reveal (reveal.ts):
+   it grows out of the clicked grid tile. Every OTHER overlay had no entrance at
+   all, so opening one was an abrupt cut. reveal.ts already defines the no-origin
+   case as a scale-pop, so that same pop is applied here in CSS — matching its
+   300ms / --ease-reveal timing — giving every overlay a consistent entrance
+   without JS or ref plumbing.
+
+   `.game-panel` is excluded: reveal.ts drives it with inline transforms and the
+   two would fight. */
+@keyframes overlay-pop {
+  from { transform: scale(0.7); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+@keyframes overlay-fade { from { opacity: 0; } to { opacity: 1; } }
+
+.overlay { animation: overlay-fade 300ms var(--ease-reveal) both; }
+/* NB deliberately no `will-change: transform` here: it would make every panel a
+   containing block for position:fixed descendants, which would re-anchor the
+   FrameEditor popover (fixed so it can escape the panel's overflow:hidden) to the
+   panel instead of the viewport. The animation is 300ms and cheap without it. */
+.overlay > *:not(.game-panel) { animation: overlay-pop 300ms var(--ease-reveal) both; }
+/* The detail overlay animates itself; don't double up on the backdrop either. */
+.overlay:has(> .game-panel) { animation: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay, .overlay > * { animation: none; }
+}

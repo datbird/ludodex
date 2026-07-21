@@ -7826,10 +7826,62 @@ function mediaForScope(scope: ReviewScope): ScopeValue {
 
 // Per-finding before/after cover strip — the visual media diff. "before" is the
 // entry's currently-served cover; "after" is the matched provider cover it adopts.
+// Enlarge overlay for plain image URLs. The wand review shows art at ~60px, which is
+// far too small to judge whether a cover is the right game — clicking one opens it here.
+// (MediaKindOverlay has its own asset-based viewer that also handles video/pdf; this
+// one is images only, but reuses its classes so the two look identical.)
+type Shot = { url: string; label: string }
+function ImageLightbox({ shots, index, onIndex, onClose }: {
+  shots: Shot[]; index: number; onIndex: (i: number) => void; onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+      else if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1)
+      else if (e.key === 'ArrowRight' && index < shots.length - 1) onIndex(index + 1)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [index, shots.length, onIndex, onClose])
+
+  const cur = shots[index]
+  if (!cur) return null
+  const step = (e: ReactMouseEvent, d: number) => { e.stopPropagation(); onIndex(index + d) }
+  return (
+    <div className="overlay mko-view" onClick={(e) => { e.stopPropagation(); onClose() }}>
+      <button className="close" onClick={(e) => { e.stopPropagation(); onClose() }}>×</button>
+      {index > 0 && (
+        <button className="mko-nav prev" title="Previous (←)" onClick={(e) => step(e, -1)}>‹</button>)}
+      {index < shots.length - 1 && (
+        <button className="mko-nav next" title="Next (→)" onClick={(e) => step(e, 1)}>›</button>)}
+      <div className="mko-view-inner" onClick={(e) => e.stopPropagation()}>
+        <img src={cur.url} alt={cur.label} />
+        <div className="lb-caption">{cur.label}</div>
+      </div>
+    </div>
+  )
+}
+
 function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
+  // Hook must stay above the early return below (see scripts/hooksweep.mjs).
+  const [zoom, setZoom] = useState<number | null>(null)
   const changed = diff.platforms.filter((p) => p.change !== 'none')
   const art: MediaAdd[] = diff.added_art || []
   const newCount = art.filter((a) => a.new).length
+
+  // One flat list so ← / → step through every image in the review, art then covers.
+  const shots: Shot[] = [
+    ...art.map((a) => ({ url: a.url, label: `${a.new ? 'New' : 'Already have'} — ${a.kind.replace(/_/g, ' ')}` })),
+    ...changed.flatMap((p) => {
+      const plat = p.platform || 'all platforms'
+      const out: Shot[] = []
+      if (p.has_before) out.push({ url: api.mediaUrl(p.entry_key, 'cover', true), label: `${plat} — current cover` })
+      if (diff.after_cover) out.push({ url: diff.after_cover, label: `${plat} — cover after apply` })
+      return out
+    }),
+  ]
+  const shotAt = (url: string) => shots.findIndex((s) => s.url === url)
+
   if (!changed.length && !newCount) return null
   return (
     <div className="chg-media">
@@ -7840,8 +7892,10 @@ function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
           <div className="chg-art-gallery">
             {art.map((a, i) => (
               <div key={i} className={'chg-art' + (a.new ? '' : ' have')}
-                title={a.new ? `New ${a.kind}` : `Already have ${a.kind}`}>
-                <img className="chg-art-thumb" src={a.url} alt="" loading="lazy" />
+                title={(a.new ? `New ${a.kind}` : `Already have ${a.kind}`) + ' — click to enlarge'}>
+                <button type="button" className="chg-zoom" onClick={() => setZoom(shotAt(a.url))}>
+                  <img className="chg-art-thumb" src={a.url} alt="" loading="lazy" />
+                </button>
                 <span className="chg-art-kind">{a.kind.replace(/_/g, ' ')}{a.new ? '' : ' ✓'}</span>
               </div>
             ))}
@@ -7858,12 +7912,18 @@ function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
                 <span className="chg-media-plat">{p.platform || 'all'}</span>
                 <div className="chg-media-pair">
                   {p.has_before
-                    ? <img className="chg-media-thumb" loading="lazy" alt=""
-                        src={api.mediaUrl(p.entry_key, 'cover', true)} />
+                    ? <button type="button" className="chg-zoom" title="Click to enlarge"
+                        onClick={() => setZoom(shotAt(api.mediaUrl(p.entry_key, 'cover', true)))}>
+                        <img className="chg-media-thumb" loading="lazy" alt=""
+                          src={api.mediaUrl(p.entry_key, 'cover', true)} />
+                      </button>
                     : <span className="chg-media-thumb none">none</span>}
                   <span className="chg-media-arrow">→</span>
                   {diff.after_cover
-                    ? <img className="chg-media-thumb" loading="lazy" alt="" src={diff.after_cover} />
+                    ? <button type="button" className="chg-zoom" title="Click to enlarge"
+                        onClick={() => setZoom(shotAt(diff.after_cover!))}>
+                        <img className="chg-media-thumb" loading="lazy" alt="" src={diff.after_cover} />
+                      </button>
                     : <span className="chg-media-thumb none">—</span>}
                 </div>
                 <span className={'chg-media-tag ' + p.change}>
@@ -7874,6 +7934,9 @@ function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
         </>
       )}
       <div className="chg-media-note dim">Fetched on apply{sgdb ? '; SteamGridDB may add hero/logo art too' : ''}. Blank covers are cleaned up automatically.</div>
+      {zoom !== null && zoom >= 0 && (
+        <ImageLightbox shots={shots} index={zoom} onIndex={setZoom} onClose={() => setZoom(null)} />
+      )}
     </div>
   )
 }
