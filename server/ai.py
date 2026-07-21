@@ -1517,6 +1517,46 @@ def detect_contamination(items, provider=None, model=None):
     return rows if isinstance(rows, list) else []
 
 
+def detect_collections(items, provider=None, model=None):
+    """Decide, per candidate, whether a catalog entry is a COMPILATION that bundles several
+    otherwise-standalone games, and if so list its members (task #12). `items` =
+    [{n, title, platform, year?}]. Returns [{n, is_collection: bool, name, confidence: 0..1,
+    members: [{title, platform, year}], reason}]. Raises on error.
+
+    This is the systematic counterpart to the `collection` block in the per-game metadata
+    prompt: that one only runs for games the scan flagged for an attribute/match gap, so a
+    fully-enriched compilation was never asked about."""
+    provider, key, model = _resolve(provider or provider_for_area("metadata"),
+                                    model or model_for_area("metadata"))
+    listing = "\n".join(
+        '%d. "%s"%s%s' % (it["n"], it["title"],
+                          " on %s" % it["platform"] if it.get("platform") else "",
+                          " (%s)" % it["year"] if it.get("year") else "")
+        for it in items)
+    system = (
+        "You identify COMPILATIONS in a video-game library. A compilation is ONE owned "
+        "product that bundles multiple games which each also exist standalone — e.g. "
+        "'Sega Genesis Classics', 'Sonic Mega Collection', 'Mega Man Legacy Collection', "
+        "'Castlevania Anniversary Collection', 'Super Mario All-Stars'. "
+        "NOT a compilation: a single game plus DLC or a season pass; an 'Anniversary' / "
+        "'HD' / 'Definitive' / 'Remastered' edition of ONE game; a franchise or series "
+        "name; a multi-disc release of one game; a 'Game of the Year' edition. "
+        "A pirate/bootleg '150-in-1' cartridge IS a bundle, but its contents are unknowable "
+        "— return is_collection false for those rather than inventing members. "
+        "When it IS a compilation, list the standalone games it contains, using each game's "
+        "own original platform and release year. List only members you are confident about; "
+        "an incomplete member list is much better than an invented one. If unsure whether "
+        "something is a real multi-game bundle, answer false. "
+        'Respond ONLY with a JSON array of {"n": <num>, "is_collection": true|false, '
+        '"name": "<compilation name>", "confidence": 0..1, '
+        '"members": [{"title": "<game>", "platform": "<original system>", "year": <int|null>}], '
+        '"reason": "<short>"}.')
+    text = _complete_text(provider, key, model, system, "Entries:\n" + listing)
+    obj = _json(text)
+    rows = obj if isinstance(obj, list) else (obj or {}).get("results", [])
+    return rows if isinstance(rows, list) else []
+
+
 def adjudicate_entry(items, provider=None, model=None):
     """Per-entry identity adjudication (task #8). For each entry (a title on a specific
     console) given the exact-title IGDB CANDIDATES, decide whether it's the group's

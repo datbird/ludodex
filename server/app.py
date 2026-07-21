@@ -3259,6 +3259,17 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                   % (len(r["set"]), len(r["detached"])), file=sys.stderr)
     except Exception as e:
         print("aimeta scan per-entry identity: %s" % str(e)[:200], file=sys.stderr)
+    # The wand also detects COMPILATIONS systematically (task #12): owning "Sonic Mega
+    # Collection" should credit its member games. Detection used to ride along inside the
+    # per-game metadata prompt, which only runs when a game has an attribute/match gap — so
+    # a fully-enriched bundle was never asked about. This pass asks about every scanned
+    # title that looks like a bundle. Wand-internal, no separate button.
+    try:
+        colls = _auto_detect_collections(list(norm_keys), should_stop)
+        if colls:
+            print("aimeta scan: recorded %d compilation(s)" % len(colls), file=sys.stderr)
+    except Exception as e:
+        print("aimeta scan collections: %s" % str(e)[:200], file=sys.stderr)
     # Refine gray-zone match confidence with the AI (task #13, phase 4) — only the band
     # games the scan already touched, so no extra scan-cost surface.
     try:
@@ -3278,6 +3289,97 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
         print("aimeta scan media fill: %s" % str(e)[:200], file=sys.stderr)
     aimeta.scan_progress(run_id, done, found, skipped, errored, complete, unmatched)
     aimeta.scan_finish(run_id, "paused" if done < len(norm_keys) else "done")
+
+
+# Words that mark a title as a probable multi-game bundle. Deliberately conservative and
+# whole-word matched: this is only a pre-filter to keep AI cost proportional to how many
+# titles LOOK like compilations, and the AI is the actual gate. "Edition"/"Remastered" are
+# absent on purpose — they describe one game, not a bundle.
+_COLL_WORDS = ("collection", "classics", "anthology", "compilation", "bundle", "trilogy",
+               "quadrilogy", "double pack", "triple pack", "all-stars", "all stars",
+               "megamix", "arcade classics", "legacy collection", "anniversary collection")
+_COLL_NUMERIC = re.compile(r"\b\d+[\s.-]*(?:in|n)[\s.-]*1\b", re.I)   # "6 in 1", "150-in-1"
+
+
+def _looks_like_collection(title):
+    t = (title or "").lower()
+    if _COLL_NUMERIC.search(t):
+        return True
+    return any(re.search(r"\b%s\b" % re.escape(w), t) for w in _COLL_WORDS)
+
+
+def _collection_candidates(nks):
+    """Titles among `nks` whose NAME suggests a compilation and that aren't already recorded
+    as a collection. Returns the item dicts ai.detect_collections consumes."""
+    if not nks:
+        return []
+    known = {c["coll_key"] for c in compilations.all_collections(DATA)}
+    out = []
+    lc = ro(LIBRARY_DB)
+    try:
+        ph = ",".join("?" * len(nks))
+        rows = lc.execute(
+            "SELECT DISTINCT norm_key, canonical_title, platform FROM games "
+            "WHERE norm_key IN (%s)" % ph, list(nks)).fetchall()
+    finally:
+        lc.close()
+    seen = set()
+    for nk, title, platform in rows:
+        if nk in seen or nk in known or not _looks_like_collection(title):
+            continue
+        seen.add(nk)
+        out.append({"n": len(out), "norm_key": nk, "title": title, "platform": platform})
+    return out
+
+
+def _auto_detect_collections(nks, should_stop=lambda: False, threshold=0.7, chunk=20):
+    """Systematically detect COMPILATIONS among the scanned games and record their members
+    (task #12).
+
+    Detection already existed, but only as a `collection` block inside the per-game metadata
+    prompt — which the scan only runs for games that have an attribute/match GAP. A
+    fully-enriched compilation therefore never got asked, so detection was incidental. This
+    pass asks about every scanned title that LOOKS like a bundle, regardless of gaps.
+
+    Wand-internal by design (same call as contamination): no separate 'scan for collections'
+    button. Best-effort — a failure never aborts the wand. Ownership credit is computed at
+    READ time, so a recorded collection takes effect with no rebuild.
+    Returns [{norm_key, name, members}] recorded."""
+    recorded = []
+    if not ai.area_available("metadata"):
+        return recorded
+    cands = _collection_candidates(nks)
+    if not cands:
+        return recorded
+    for start in range(0, len(cands), chunk):
+        if should_stop():
+            break
+        batch = cands[start:start + chunk]
+        local = [{**it, "n": j} for j, it in enumerate(batch)]
+        try:
+            verdicts = ai.detect_collections(local)
+        except Exception as e:
+            print("collection detect chunk: %s" % str(e)[:150], file=sys.stderr)
+            continue
+        for v in verdicts:
+            n = v.get("n")
+            if not isinstance(n, int) or not (0 <= n < len(batch)):
+                continue
+            if not v.get("is_collection") or float(v.get("confidence") or 0) < threshold:
+                continue
+            members = [m for m in (v.get("members") or []) if (m or {}).get("title")]
+            if not members:
+                continue                      # a bundle with no known members records nothing
+            it = batch[n]
+            try:
+                compilations.set_collection(DATA, it["norm_key"],
+                                            v.get("name") or it["title"], members, origin="ai")
+                recorded.append({"norm_key": it["norm_key"], "name": v.get("name"),
+                                 "members": len(members)})
+            except Exception as e:
+                print("collection record %s: %s" % (it["norm_key"], str(e)[:120]),
+                      file=sys.stderr)
+    return recorded
 
 
 def _contamination_suspects(nks):
