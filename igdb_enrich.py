@@ -317,6 +317,40 @@ def combine_verdict(det, ai_verdict, primary_id, threshold=0.75):
     return {"action": "keep", "igdb_id": primary_id}
 
 
+def plan_title(nk, primary_id, entries, candidates, adjudicate=None, threshold=0.75):
+    """Plan per-entry identity for one title group. Pure orchestration — the caller
+    supplies real IGDB candidates and an `adjudicate` callable; this fetches nothing and
+    writes nothing.
+
+      entries    = [{platform, title?, filename?, year?}] — one per platform entry.
+      candidates = [{id, name, year, platforms:[name,..]}] — the exact-title IGDB games.
+      adjudicate = callable(items)->[{n, same_as_group, correct_igdb_id, detach,
+                   confidence}] (e.g. ai.adjudicate_entry), or None.
+
+    Returns [{platform, kind, action, igdb_id}] — action in {"set","detach","keep"}.
+    Only NON-unique entries are sent to `adjudicate` (deterministic uniques never cost AI),
+    batched in a single call."""
+    dets = [per_entry_resolve(candidates, e["platform"], primary_id) for e in entries]
+    verdicts = [None] * len(entries)
+    need = [i for i, d in enumerate(dets) if d["kind"] != "unique"]
+    if need and adjudicate:
+        items = [{"n": k, "title": entries[i].get("title", nk),
+                  "platform": entries[i]["platform"],
+                  "filename": entries[i].get("filename"),
+                  "year": entries[i].get("year"),
+                  "primary_id": primary_id, "candidates": candidates}
+                 for k, i in enumerate(need)]
+        for v in (adjudicate(items) or []):
+            n = v.get("n")
+            if isinstance(n, int) and 0 <= n < len(need):
+                verdicts[need[n]] = v
+    out = []
+    for i, e in enumerate(entries):
+        vr = combine_verdict(dets[i], verdicts[i], primary_id, threshold)
+        out.append({"platform": e["platform"], "kind": dets[i]["kind"], **vr})
+    return out
+
+
 def _consoles_by_norm():
     """{norm_key: {console, ...}} — every EMULATION console each game has a ROM on, for
     the era gate. ONLY emulation sources: console_eras is keyed by emulation platform

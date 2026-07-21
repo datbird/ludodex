@@ -56,6 +56,29 @@ def main():
     unc = R([only_ps1], "sega saturn", 800)
     same = {"same_as_group": True, "correct_igdb_id": None, "detach": False, "confidence": 0.9}
     assert C(unc, same, 800) == {"action": "keep", "igdb_id": 800}, "uncertain+same-game -> keep port"
+
+    # --- plan_title: orchestrate over a whole title's entries (mocked adjudicate) ---
+    P = E.plan_title
+
+    def adj_pc(items):  # the only ambiguous TR entry (PC) -> call it the 1996 original
+        return [{"n": it["n"], "same_as_group": False, "correct_igdb_id": 1164,
+                 "detach": False, "confidence": 0.9} for it in items]
+    tr_entries = [{"platform": "psx"}, {"platform": "ps3"}, {"platform": "pc"},
+                  {"platform": "gameboy color"}]
+    plan = {p["platform"]: p for p in P("tomb raider", 1164, tr_entries, trs, adj_pc)}
+    assert plan["psx"]["igdb_id"] == 1164 and plan["psx"]["kind"] == "unique", "PS1 unique 1996"
+    assert plan["ps3"]["igdb_id"] == 2013 and plan["ps3"]["action"] == "set", "PS3 -> 2013 (no AI)"
+    assert plan["gameboy color"]["igdb_id"] == 5555, "GBC -> GB game"
+    assert plan["pc"]["kind"] == "ambiguous" and plan["pc"]["igdb_id"] == 1164, "PC AI-resolved to 1996"
+
+    def adj_detach(items):
+        return [{"n": it["n"], "same_as_group": False, "correct_igdb_id": None,
+                 "detach": True, "confidence": 0.95} for it in items]
+    sf_plan = {p["platform"]: p for p in
+               P("star fox", 700, [{"platform": "snes"}, {"platform": "atari 2600"}],
+                 [SF_SNES], adj_detach)}
+    assert sf_plan["snes"]["action"] == "set" and sf_plan["snes"]["igdb_id"] == 700, "SNES kept"
+    assert sf_plan["atari 2600"]["action"] == "detach", "2600 Star Fox detached via AI"
     print("verify_per_entry_identity: OK")
 
 
