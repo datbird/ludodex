@@ -1562,6 +1562,35 @@ def adjudicate_entry(items, provider=None, model=None):
     return rows if isinstance(rows, list) else []
 
 
+def rate_match_confidence(items, provider=None, model=None):
+    """Refine identity confidence for gray-zone matches (task #13). `items` =
+    [{n, title, matched_name, platform, year?}] where `title` is the library/ROM title and
+    `matched_name` is the IGDB game it's currently matched to. Returns [{n, confidence: 0..100,
+    reason}] — how likely the entry really IS that game. Raises on error."""
+    provider, key, model = _resolve(provider or provider_for_area("metadata"),
+                                    model or model_for_area("metadata"))
+    listing = "\n".join(
+        '%d. Library entry "%s" on console "%s"%s is currently matched to IGDB game "%s".'
+        % (it["n"], it["title"], it.get("platform", "?"),
+           (" (~%s)" % it["year"]) if it.get("year") else "",
+           it.get("matched_name", ""))
+        for it in items)
+    system = (
+        "You judge whether each retro-game library entry is matched to the RIGHT game. For "
+        "each item you get the library title (often a ROM filename), the console it's on, and "
+        "the IGDB game it's currently matched to. Rate 0-100 how confident you are they are "
+        "the SAME game. A shortened, regional, or translated title of the same game is a GOOD "
+        'match (high). A common word matched into an unrelated longer title ("journey" -> '
+        '"The Sims 4: Journey to Batuu"; "ball" -> "Dragon Ball Z") is a BAD match (low). A '
+        "platform mismatch alone is weak evidence — IGDB platform lists are often incomplete, "
+        "so don't punish it heavily on its own. Respond ONLY with a JSON array of "
+        '{"n": <num>, "confidence": 0-100, "reason": "<short>"}.')
+    text = _complete_text(provider, key, model, system, "Items:\n" + listing)
+    obj = _json(text)
+    rows = obj if isinstance(obj, list) else (obj or {}).get("results", [])
+    return rows if isinstance(rows, list) else []
+
+
 # ------------------------------------------------------------------- dedupe assist
 def dedupe_pairs(pairs, provider=None, model=None):
     """Adjudicate candidate duplicate pairs. `pairs`=[{a,b,a_src,b_src}].

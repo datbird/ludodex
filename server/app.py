@@ -3090,6 +3090,98 @@ def _ss_match(queries, systems, year=None):
             "system": systems[0] if systems else None}
 
 
+def _score_confidence_ai(nks, should_stop=lambda: False, chunk=20):
+    """AI-refine gray-zone match confidence for scanned games (task #13, phase 4). Each
+    identified entry's rule-based confidence is computed; those in the [lo,hi] band get an
+    AI 0-100 score, cached in match_confidence_ai AND written to the match_confidence
+    attribute (so it shows without a full rebuild). Returns {'scored': n}."""
+    nks = [nk for nk in (nks or []) if nk]
+    if not nks or not config.metadata_enabled("igdb"):
+        return {"scored": 0}
+    try:
+        lo = int(config.get("match_ai_band_lo") or 40)
+        hi = int(config.get("match_ai_band_hi") or 70)
+    except (TypeError, ValueError):
+        lo, hi = 40, 70
+    import matchconf
+    mcpath = os.path.join(DATA, "metadata-cache.sqlite")
+    band = []                                   # entries whose base confidence is gray-zone
+    try:
+        lib, mc = ro(LIBRARY_DB), ro(mcpath)
+    except Exception:
+        return {"scored": 0}
+    try:
+        ph = ",".join("?" * len(nks))
+        mb = {k: m for k, m in mc.execute(
+            "SELECT norm_key, matched_by FROM igdb_resolution WHERE norm_key IN (%s)" % ph, nks)}
+        recs = {}
+        for nk in nks:
+            for gid, plat, gkey, title in lib.execute(
+                    "SELECT id, platform, game_key, canonical_title FROM games "
+                    "WHERE norm_key=? AND game_key LIKE 'igdb:%'", (nk,)):
+                try:
+                    iid = int(str(gkey).split(":")[1])
+                except (IndexError, ValueError):
+                    continue
+                if iid not in recs:
+                    row = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?",
+                                     (iid,)).fetchone()
+                    try:
+                        recs[iid] = json.loads(row[0]) if row and row[0] else {}
+                    except Exception:
+                        recs[iid] = {}
+                rec = recs[iid]
+                base, _ = matchconf.match_confidence(mb.get(nk), nk, rec, plat)
+                if lo <= base <= hi:
+                    band.append({"gid": gid, "nk": nk, "iid": iid, "title": title,
+                                 "platform": plat, "matched_name": rec.get("name") or ""})
+    finally:
+        lib.close()
+        mc.close()
+    if not band:
+        return {"scored": 0}
+    results = {}                                # gid -> (score, reason, band-entry)
+    for i in range(0, len(band), chunk):
+        if should_stop():
+            break
+        part = band[i:i + chunk]
+        items = [{"n": j, "title": b["title"], "matched_name": b["matched_name"],
+                  "platform": b["platform"]} for j, b in enumerate(part)]
+        try:
+            for r in (ai.rate_match_confidence(items) or []):
+                j = r.get("n")
+                if isinstance(j, int) and 0 <= j < len(part):
+                    sc = max(0, min(100, int(r.get("confidence", 0))))
+                    results[part[j]["gid"]] = (sc, (r.get("reason") or "")[:200], part[j])
+        except Exception as e:
+            print("aimeta confidence AI: %s" % str(e)[:200], file=sys.stderr)
+    if not results:
+        return {"scored": 0}
+    now = int(time.time())
+    lc, cc = sqlite3.connect(LIBRARY_DB, timeout=30), sqlite3.connect(mcpath, timeout=30)
+    try:
+        cc.execute("CREATE TABLE IF NOT EXISTS match_confidence_ai("
+                   "norm_key TEXT, igdb_id INTEGER, score INTEGER, reason TEXT, "
+                   "model TEXT, at INTEGER, PRIMARY KEY(norm_key, igdb_id))")
+        for gid, (sc, reason, b) in results.items():
+            cc.execute("INSERT OR REPLACE INTO match_confidence_ai"
+                       "(norm_key,igdb_id,score,reason,model,at) VALUES(?,?,?,?,?,?)",
+                       (b["nk"], b["iid"], sc, reason, "", now))
+            lc.execute("DELETE FROM game_attributes WHERE game_id=? AND "
+                       "kind IN ('match_confidence','match_reason')", (gid,))
+            lc.execute("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                       "VALUES(?,?,?,?)", (gid, "match_confidence", str(sc), "ai"))
+            lc.execute("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                       "VALUES(?,?,?,?)", (gid, "match_reason",
+                       ("AI: " + reason) if reason else "AI-scored", "ai"))
+        cc.commit()
+        lc.commit()
+    finally:
+        cc.close()
+        lc.close()
+    return {"scored": len(results)}
+
+
 def _aimeta_scan(run_id, norm_keys, opts, should_stop):
     """Background scan body: analyze each game; when match_provider is on, also try
     to resolve AI identities to a real IGDB entry. Stores actionable findings."""
@@ -3161,6 +3253,14 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                   % (len(r["set"]), len(r["detached"])), file=sys.stderr)
     except Exception as e:
         print("aimeta scan per-entry identity: %s" % str(e)[:200], file=sys.stderr)
+    # Refine gray-zone match confidence with the AI (task #13, phase 4) — only the band
+    # games the scan already touched, so no extra scan-cost surface.
+    try:
+        c = _score_confidence_ai(list(norm_keys), should_stop)
+        if c["scored"]:
+            print("aimeta scan: AI-scored %d gray-zone match(es)" % c["scored"], file=sys.stderr)
+    except Exception as e:
+        print("aimeta scan confidence: %s" % str(e)[:200], file=sys.stderr)
     # The wand is ONE operation: after identifying, fill/refresh art for the games it
     # scanned that are already resolved — from every provider, plus open-web discovery
     # (Wikimedia/Google/LLM) when the user turned on web search. A newly-proposed match
