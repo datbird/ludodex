@@ -283,3 +283,41 @@ def due_jobs(now=None):
         if now - (j.get("last_run") or 0) >= every * 60:
             out.append(j)
     return out
+
+
+def list_archives(job):
+    """Archives this job has written to its destination, newest first."""
+    import devices
+    dest = (job.get("dest_path") or "").rstrip("/")
+    if not dest:
+        return []
+    dev_id = job["device_id"] if job.get("dest_kind") == "device" else None
+    prefix = "ludodex-%s-" % _slug(job.get("name"))
+    try:
+        names = devices.list_names(dev_id, dest)
+    except Exception:
+        return []
+    return sorted((n for n in names if n.startswith(prefix) and n.endswith(".zip")),
+                  reverse=True)
+
+
+def fetch_archive(job, name, into):
+    """Bring one archive back to this server so it can be unpacked."""
+    import devices
+    dest = (job.get("dest_path") or "").rstrip("/")
+    dev_id = job["device_id"] if job.get("dest_kind") == "device" else None
+    return devices.pull_file(dev_id, "%s/%s" % (dest, name), into)
+
+
+def unpack(zip_path, into, passphrase=""):
+    """Extract an archive (encrypted or not) into `into`. Returns the db filenames found."""
+    os.makedirs(into, exist_ok=True)
+    if passphrase:
+        import pyzipper
+        with pyzipper.AESZipFile(zip_path) as z:
+            z.setpassword(passphrase.encode())
+            z.extractall(into)
+    else:
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(into)
+    return sorted(f for f in os.listdir(into) if f.endswith(".sqlite"))

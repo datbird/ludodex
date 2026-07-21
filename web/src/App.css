@@ -3899,7 +3899,7 @@ a.idchip:hover { background: var(--accent-bg); }
 .link-inline:hover { filter: brightness(1.15); }
 
 /* --- snapshot backup jobs (Settings → Database → Backup & restore) --- */
-.snapshots { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--border); }
+.snapshots { margin-top: 4px; }
 .bk-job { border: 1px solid var(--border); border-radius: 10px; margin: 10px 0;
   background: var(--panel); overflow: hidden; }
 .bk-job.off { opacity: 0.6; }
@@ -3936,3 +3936,16 @@ a.idchip:hover { background: var(--accent-bg); }
 .bk-add { margin-top: 6px; }
 .bk-running { margin-top: 10px; padding: 10px 12px; border-radius: 8px;
   background: var(--accent-bg); border: 1px solid var(--accent); font-size: 13px; }
+
+/* restore blocks (Backup \& Restore → Database / Snapshot) */
+.restore-box {
+  margin-top: 22px; padding: 14px 16px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--panel);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.restore-preview {
+  border-left: 2px solid var(--accent); padding-left: 12px;
+  display: flex; flex-direction: column; gap: 3px; font-size: 13px;
+}
+.restore-row { display: flex; gap: 10px; }
+.restore-store { min-width: 130px; color: var(--text-h); }

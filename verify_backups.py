@@ -162,6 +162,48 @@ print("10. delete")
 backups.delete_job(bad)
 check(backups.get_job(bad) is None, "job deleted")
 
+print("11. restore from an archive round-trips real data")
+# Wipe a live database, then restore it from the archive the job wrote.
+rest_dest = os.path.join(scratch, "rdest")
+rj = backups.set_job({"name": "Roundtrip", "contents": ["tags.sqlite"],
+                      "dest_kind": "local", "dest_path": rest_dest, "retention": 3})
+backups.run_job(rj)
+arcs = backups.list_archives(backups.get_job(rj))
+check(len(arcs) == 1, "archive listed back from the destination (got %d)" % len(arcs))
+
+c = sqlite3.connect(os.path.join(scratch, "tags.sqlite"))
+c.execute("DELETE FROM t")                       # simulate the bad change
+c.commit(); c.close()
+c = sqlite3.connect(os.path.join(scratch, "tags.sqlite"))
+check(c.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0, "data destroyed")
+c.close()
+
+j = backups.get_job(rj, with_secret=True)
+got = backups.fetch_archive(j, arcs[0], os.path.join(scratch, "fetch"))
+names = backups.unpack(got, os.path.join(scratch, "unpacked"))
+check(names == ["tags.sqlite"], "archive unpacked (%s)" % names)
+shutil.copy2(os.path.join(scratch, "unpacked", "tags.sqlite"),
+             os.path.join(scratch, "tags.sqlite"))
+c = sqlite3.connect(os.path.join(scratch, "tags.sqlite"))
+check(c.execute("SELECT v FROM t WHERE k='mario'").fetchone()[0] == "favourite",
+      "data restored from the archive")
+c.close()
+
+print("12. encrypted archive restore needs the passphrase")
+ej = backups.set_job({"name": "Enc", "contents": ["tags.sqlite"], "dest_kind": "local",
+                      "dest_path": rest_dest, "passphrase": "s3cret", "retention": 1})
+backups.run_job(ej)
+ea = backups.list_archives(backups.get_job(ej))[0]
+ejob = backups.get_job(ej, with_secret=True)
+ez2 = backups.fetch_archive(ejob, ea, os.path.join(scratch, "fetch2"))
+try:
+    backups.unpack(ez2, os.path.join(scratch, "u2"))
+    check(False, "unpacking an encrypted archive without a passphrase fails")
+except Exception:
+    check(True, "unpacking an encrypted archive without a passphrase fails")
+ok = backups.unpack(ez2, os.path.join(scratch, "u3"), "s3cret")
+check(ok == ["tags.sqlite"], "unpacks with the right passphrase")
+
 live.close()
 shutil.rmtree(scratch, ignore_errors=True)
 print()

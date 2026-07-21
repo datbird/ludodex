@@ -9003,6 +9003,74 @@ def backup_import(body: dict = Body(...)):
     return {"ok": True, "id": bid, "databases": n}
 
 
+@app.get("/api/backups/archives")
+def backup_archives(job_id: int):
+    """Archives this job has written, newest first — read from the destination itself, so it
+    also lists ones written before you rebuilt this machine."""
+    j = backups.get_job(job_id)
+    if not j:
+        raise HTTPException(404, "unknown backup job")
+    return {"archives": backups.list_archives(j), "encrypted": j["encrypted"],
+            "dest": j["dest_path"], "dest_kind": j["dest_kind"]}
+
+
+@app.post("/api/backups/restore")
+def backup_restore(body: dict = Body(...)):
+    """Restore from one of a job's archives: fetch it back (device or local), unpack it,
+    safety-snapshot the CURRENT databases, then copy the archived ones over the live set.
+    Requires a restart afterward so open connections reopen the restored files."""
+    body = body or {}
+    j = backups.get_job(body.get("job_id"), with_secret=True)
+    if not j:
+        raise HTTPException(404, "unknown backup job")
+    name = body.get("name") or ""
+    if not name or os.path.basename(name) != name:
+        raise HTTPException(400, "bad archive name")
+    pw = body.get("passphrase") or j.get("passphrase") or ""
+    stage = os.path.join(DATA, "tmp", "restore-stage")
+    shutil.rmtree(stage, ignore_errors=True)
+    os.makedirs(stage, exist_ok=True)
+    try:
+        local_zip = backups.fetch_archive(j, name, stage)
+        try:
+            found = backups.unpack(local_zip, os.path.join(stage, "dbs"), pw)
+        except Exception as e:
+            raise HTTPException(400, "could not read the archive — wrong passphrase? (%s)"
+                                % str(e)[:120])
+        if not found:
+            raise HTTPException(400, "the archive contains no databases")
+        safety = ops_backup()["id"]             # never restore without a way back
+        restored = []
+        for f in found:
+            try:
+                shutil.copy2(os.path.join(stage, "dbs", f), os.path.join(DATA, f))
+                restored.append(f)
+            except OSError as e:
+                print("restore %s: %s" % (f, e), file=sys.stderr)
+        return {"ok": True, "restored": restored, "count": len(restored),
+                "safety_backup": safety, "restart_required": True}
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+@app.post("/api/backingstore/restore")
+def backingstore_restore(body: dict = Body(...)):
+    """Rebuild the local durable stores FROM the backing store — a one-way pull.
+
+    Not the same as pressing sync: a two-way merge on a machine whose local stores are empty
+    would read every missing row as a local delete and wipe the remote copy you are trying to
+    restore from. This only ever writes locally. `dry_run` reports what it would pull."""
+    body = body or {}
+    backend = config.get("backingstore_backend") or ""
+    if not backend:
+        raise HTTPException(400, "no backing store configured")
+    import dbsync
+    try:
+        return dbsync.restore_from_remote(backend, dry_run=bool(body.get("dry_run")))
+    except Exception as e:
+        raise HTTPException(400, str(e)[:250])
+
+
 def _backup_scheduler():
     """Run each job on its own interval. Single-flight, and never on the minute a manual
     run is already going."""

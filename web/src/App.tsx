@@ -1184,7 +1184,7 @@ const KEY_FIELD: Record<string, string> = {
 const SECTIONS = [
   { id: 'ai', name: 'AI settings', icon: '✨' },
   { id: 'connections', name: 'Connections', icon: '🔌' },
-  { id: 'database', name: 'Database', icon: '🗄️' },
+  { id: 'backup', name: 'Backup & Restore', icon: '🗄️' },
   { id: 'library', name: 'Library', icon: '📚' },
   { id: 'dashboard', name: 'Dashboard', icon: '🎛️' },
   { id: 'metadata', name: 'AI Metadata', icon: '🔎' },
@@ -1197,10 +1197,11 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
   connections: [{ id: 'devices', name: 'Devices' },
                 { id: 'credentials', name: 'Stores & providers' },
                 { id: 'limits', name: 'Rate limits' }],
-  // Database = where ludodex's OWN data lives and goes. Named by what each one DOES —
-  // "Backing store" vs "Database sync" read as the same feature and got picked
-  // interchangeably, which matters because only one of them can restore you.
-  database: [{ id: 'backingstore', name: 'Backup & restore' }],
+  // Two ways to protect the same data, each with its own backup AND restore:
+  // Database = a live external copy, continuously reconciled.
+  // Snapshot = point-in-time zips you can roll back to.
+  backup: [{ id: 'dbstore', name: 'Database' },
+           { id: 'snapshot', name: 'Snapshot' }],
   library: [{ id: 'preferences', name: 'Preferences' }, { id: 'banned', name: 'Banned media' }],
   dashboard: [{ id: 'spotlight', name: 'Spotlight' }],
   metadata: [{ id: 'scan', name: 'Scan' },
@@ -1220,7 +1221,8 @@ const SETTINGS_KEYWORDS: Record<string, string> = {
   credentials: 'stores providers steam gog epic itch screenscraper igdb ea login accounts credentials',
   // Old names ("backing store", "database sync") stay as search terms so anyone who
   // learned them still lands on the right panel.
-  backingstore: 'backup restore backing store two-way sync database postgres supabase mysql pocketbase backend cache durable migrate another machine',
+  dbstore: 'backup restore backing store two-way sync database postgres supabase mysql pocketbase firebase backend durable migrate another machine pull',
+  snapshot: 'snapshot zip archive schedule retention encrypt passphrase restore rollback backup device folder',
   limits: 'rate limit api throttle quota cooldown per minute per day',
   preferences: 'media language ban file operations browse commander manifests apply mode preferences distribution',
   banned: 'banned media unban hidden',
@@ -1315,8 +1317,8 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
               ? (sub === 'devices' ? <DevicesPanel />
                 : sub === 'credentials' ? <Credentials />
                 : sub === 'limits' ? <RateLimits /> : null)
-              : section === 'database'
-              ? <BackingStore />
+              : section === 'backup'
+              ? (sub === 'snapshot' ? <SnapshotBackups /> : <BackingStore />)
               : section === 'library'
               ? (sub === 'banned' ? <BannedMediaPanel /> : <LibraryPrefs onChanged={onPrefsChanged} />)
               : section === 'dashboard'
@@ -1551,8 +1553,137 @@ function BackingStore() {
       {test && <div className={'bs-test ' + (test.ok ? 'ok' : 'bad')}>
         {test.ok ? '✓ ' + (test.detail || 'connected') : '✗ ' + (test.error || 'failed')}</div>}
       {msg && <div className="dim bs-msg">{msg}</div>}
-      <SnapshotBackups />
+      <RestoreFromDatabase configured={!!backend} />
     </>
+  )
+}
+
+// Pull the durable stores back OUT of the backing store. Deliberately separate from
+// "Sync now": on a machine whose local stores are empty, a two-way merge would read every
+// missing row as a deliberate delete and wipe the remote copy you're restoring from.
+function RestoreFromDatabase({ configured }: { configured: boolean }) {
+  const [preview, setPreview] = useState<{ restored: number
+    stores: { name: string; remote: number; local_before: number; written: number }[] } | null>(null)
+  const [busy, setBusy] = useState('')
+  const [msg, setMsg] = useState('')
+  const [done, setDone] = useState<number | null>(null)
+
+  const check = async () => {
+    setBusy('check'); setMsg(''); setDone(null)
+    try { setPreview(await api.restoreBackingStore(true)) }
+    catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
+  }
+  const run = async () => {
+    if (!confirm('Restore your tags, ownership, art pins, overrides, framing and manual '
+      + 'games from the backing store?\n\nLocal copies of those records are overwritten by '
+      + 'the remote version. Nothing is deleted from the remote.')) return
+    setBusy('run'); setMsg('')
+    try { const r = await api.restoreBackingStore(false); setDone(r.restored); setPreview(null) }
+    catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
+  }
+
+  return (
+    <div className="restore-box">
+      <div className="pref-name">Restore from the database</div>
+      <span className="pref-hint">Rebuild this machine&rsquo;s data from the backing store —
+        for a fresh install, or after losing the local files. This only ever writes locally:
+        it never pushes or deletes anything on the remote, unlike a normal sync.</span>
+      <div className="bk-actions">
+        <button className="ops-btn" disabled={!configured || !!busy} onClick={check}
+          title={configured ? '' : 'Configure a backing store above first'}>
+          {busy === 'check' ? 'Checking…' : 'See what would be restored'}</button>
+        <button className="ops-btn primary" disabled={!configured || !!busy} onClick={run}>
+          {busy === 'run' ? 'Restoring…' : '↓ Restore now'}</button>
+      </div>
+      {preview && (
+        <div className="restore-preview">
+          {preview.stores.filter((x) => x.remote || x.written).map((x) => (
+            <div key={x.name} className="restore-row">
+              <span className="restore-store">{x.name.replace(/_/g, ' ')}</span>
+              <span className="dim">{x.remote} on the remote · {x.written} would change here</span>
+            </div>
+          ))}
+          <div className="dim">{preview.restored
+            ? `${preview.restored} record(s) would be written locally.`
+            : 'Everything here already matches the remote — nothing to restore.'}</div>
+        </div>
+      )}
+      {done !== null && <div className="bs-test ok">✓ Restored {done} record(s) from the backing store.</div>}
+      {msg && <div className="bs-test bad">✗ {msg}</div>}
+    </div>
+  )
+}
+
+// Restore from one of a job's archives — including archives written before this machine
+// existed, since the list is read from the destination itself.
+function RestoreFromArchive({ jobs }: { jobs: BackupJob[] }) {
+  const [jobId, setJobId] = useState<number | null>(null)
+  const [list, setList] = useState<{ archives: string[]; encrypted: boolean; dest: string } | null>(null)
+  const [pick, setPick] = useState('')
+  const [pass, setPass] = useState('')
+  const [busy, setBusy] = useState('')
+  const [msg, setMsg] = useState('')
+  const [done, setDone] = useState<{ count: number; safety: string } | null>(null)
+
+  const load = async (id: number) => {
+    setJobId(id); setList(null); setPick(''); setDone(null); setMsg('')
+    if (!id) return
+    setBusy('list')
+    try { const r = await api.backupArchives(id); setList(r); setPick(r.archives[0] || '') }
+    catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
+  }
+  const run = async () => {
+    if (!jobId || !pick) return
+    if (!confirm(`Restore from ${pick}?\n\nThe databases inside it replace the live ones. `
+      + 'Your current data is snapshotted first, and the server restarts afterwards.')) return
+    setBusy('run'); setMsg('')
+    try {
+      const r = await api.restoreBackup(jobId, pick, pass || undefined)
+      setDone({ count: r.count, safety: r.safety_backup })
+      await api.opsRestart().catch(() => { /* the connection drops as it re-execs */ })
+    } catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
+  }
+
+  return (
+    <div className="restore-box">
+      <div className="pref-name">Restore from an archive</div>
+      <span className="pref-hint">Roll back to a point in time. The archive list is read from
+        the destination itself, so backups made by a previous install show up here too.</span>
+      <div className="bk-row">
+        <label>Backup</label>
+        <select value={jobId ?? ''} onChange={(e) => load(Number(e.target.value))}>
+          <option value="">Choose a backup…</option>
+          {jobs.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
+        </select>
+        {busy === 'list' && <span className="dim">Reading…</span>}
+      </div>
+      {list && (
+        <>
+          <div className="bk-row">
+            <label>Archive</label>
+            <select value={pick} onChange={(e) => setPick(e.target.value)}>
+              {list.archives.length
+                ? list.archives.map((a) => <option key={a} value={a}>{a}</option>)
+                : <option value="">No archives found in {list.dest}</option>}
+            </select>
+          </div>
+          {list.encrypted && (
+            <div className="bk-row">
+              <label>Passphrase</label>
+              <input type="password" value={pass} onChange={(e) => setPass(e.target.value)}
+                placeholder="the job's stored passphrase is used if you leave this blank" />
+            </div>
+          )}
+          <div className="bk-actions">
+            <button className="ops-btn danger" disabled={!pick || !!busy} onClick={run}>
+              {busy === 'run' ? 'Restoring…' : '↓ Restore this archive'}</button>
+          </div>
+        </>
+      )}
+      {done && <div className="bs-test ok">✓ Restored {done.count} database(s). Your previous
+        data was saved as “{done.safety}” first. The server is restarting — reload in a moment.</div>}
+      {msg && <div className="bs-test bad">✗ {msg}</div>}
+    </div>
   )
 }
 
@@ -1783,6 +1914,7 @@ function SnapshotBackups() {
       {st?.job && !st.job.running && st.job.ok === false && (
         <div className="bs-test bad">✗ {st.job.error}</div>)}
       {msg && <div className="dim bs-msg">{msg}</div>}
+      <RestoreFromArchive jobs={st?.jobs || []} />
     </section>
   )
 }

@@ -504,6 +504,39 @@ def sync_all(backend_id="pocketbase", dry_run=False, only=None):
     return report
 
 
+def restore_from_remote(backend_id="pocketbase", only=None, dry_run=False):
+    """One-way PULL: rebuild the local stores from the remote, pushing NOTHING back.
+
+    Deliberately not sync_all(). Restoring onto a machine whose local stores are empty or
+    stale is exactly the case a two-way merge gets dangerously wrong: with a shadow that
+    still remembers the old rows, every missing local record reads as a deliberate local
+    DELETE, and a "restore" would erase the remote copy you were restoring from. So this
+    only ever writes locally, and then rewrites the shadow to match what it pulled, leaving
+    the next ordinary sync a clean no-op.
+
+    Returns a per-store summary of what would be / was written."""
+    if backend_id not in BACKENDS:
+        raise RuntimeError("unknown backend %r" % backend_id)
+    backend = BACKENDS[backend_id]()
+    shadow_key = "2way:" + backend_id
+    stores = [s for s in STORES if not only or s["name"] in only]
+    report = {"backend": backend_id, "dry_run": dry_run, "stores": [],
+              "at": int(time.time()), "restored": 0}
+    for store in stores:
+        local, cols = _local_read(store)
+        remote = backend.read_all(store, cols)       # raises on a failed read, never partial
+        new_rows = {k: v for k, v in remote.items()
+                    if k not in local or _hash(local[k], cols) != _hash(v, cols)}
+        if not dry_run and remote:
+            _local_apply(store, cols, remote, [])
+            _shadow_save(shadow_key, store["name"],
+                         {k: _hash(v, cols) for k, v in remote.items()})
+        report["stores"].append({"name": store["name"], "remote": len(remote),
+                                 "local_before": len(local), "written": len(new_rows)})
+        report["restored"] += len(new_rows)
+    return report
+
+
 if __name__ == "__main__":
     import sys
     dry = "--dry-run" in sys.argv

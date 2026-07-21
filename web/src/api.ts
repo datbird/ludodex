@@ -1050,6 +1050,16 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)
     return r.json() as Promise<{ device: string; results: { manager: string; kind: string; ok: boolean; roms?: number; media?: string; error?: string }[] }>
   },
+  backupArchives: (jobId: number) =>
+    get<{ archives: string[]; encrypted: boolean; dest: string; dest_kind: string }>(
+      `/api/backups/archives?job_id=${jobId}`),
+  restoreBackup: (job_id: number, name: string, passphrase?: string) =>
+    postJson<{ ok: boolean; count: number; restored: string[]; safety_backup: string }>(
+      '/api/backups/restore', { job_id, name, passphrase }),
+  restoreBackingStore: (dry_run?: boolean) =>
+    postJson<{ backend: string; dry_run: boolean; restored: number
+      stores: { name: string; remote: number; local_before: number; written: number }[] }>(
+      '/api/backingstore/restore', { dry_run }),
   backups: () => get<BackupsState>('/api/backups/jobs'),
   backupStatus: () => get<{ job: BackupRun | null; jobs: BackupJob[] }>('/api/backups/status'),
   setBackupJob: (j: Partial<BackupJob> & { passphrase?: string | null }) =>

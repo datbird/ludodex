@@ -295,6 +295,24 @@ def push_file(dev_id, local_path, dest_dir, timeout=3600):
     return "%s/%s" % (dest_dir.rstrip("/"), os.path.basename(local_path))
 
 
+def pull_file(dev_id, remote_path, local_dir, timeout=3600):
+    """Fetch ONE file from a device (or another path on this server) into local_dir.
+    The mirror of push_file — used to bring a backup archive home for restoring."""
+    os.makedirs(local_dir, exist_ok=True)
+    dst = os.path.join(local_dir, os.path.basename(remote_path))
+    dev = dict(_device(dev_id)) if dev_id else None
+    if not dev or dev.get("transport") == "local":
+        if os.path.abspath(remote_path) != os.path.abspath(dst):
+            shutil.copy2(remote_path, dst)
+        return dst
+    if dev.get("auth") == "password":
+        dev["password"] = _dev_password(dev["id"])
+    r = _rsync(_spec(dev, remote_path), dst, dev, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "pull failed")[:200])
+    return dst
+
+
 def list_names(dev_id, path):
     """Bare filenames in `path` on a device (or this server). [] when it doesn't exist."""
     r = _dev_run(dev_id, "ls -1 %s 2>/dev/null || true" % shlex.quote(path))
