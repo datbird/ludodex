@@ -699,7 +699,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             onApplied={() => { refreshStats(); load(true) }} />
         </div>
         <div className="header-actions">
-          <SyncMenu />
+          <SyncMenu onOpenSettings={openSettings} />
           <button className="icon-btn" title="Settings" onClick={() => openSettings()}>
             <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1235,9 +1235,12 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
   onClose: () => void; onPrefsChanged: () => void; user: AuthUser | null
   initialSection?: string | null
 }) {
-  const [section, setSection] = useState(initialSection || 'ai')
+  // initialSection may be "section" or "section/sub" — deep links (e.g. the sync menu's
+  // "Stores & providers" link) need to land on an exact subsection, not just the first one.
+  const [initSec, initSub] = (initialSection || '').split('/')
+  const [section, setSection] = useState(initSec || 'ai')
   const [sub, setSub] = useState(
-    initialSection ? ((SUBSECTIONS[initialSection] ?? [])[0]?.id ?? '') : 'usage')
+    initSec ? (initSub || (SUBSECTIONS[initSec] ?? [])[0]?.id || '') : 'usage')
   const [q, setQ] = useState('')   // settings search
   const [cfg, setCfg] = useState<AiConfig | null>(null)
 
@@ -4050,7 +4053,7 @@ function fmtUptime(s: number) {
 // Library sync: pull owned games per store, then rebuild the catalog. Stores that
 // need a browser sign-in (Epic/EA) surface their connect flow inline and sync the
 // moment auth completes.
-function SyncMenu() {
+function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => void }) {
   const [open, setOpen] = useState(false)
   const [svcs, setSvcs] = useState<SyncService[]>([])
   const [job, setJob] = useState<SyncJob | null>(null)
@@ -4245,7 +4248,10 @@ function SyncMenu() {
                           </div>
                         )}
                         {!s.ready && !s.needs_auth && (
-                          <div className="sync-note dim">Add credentials in Settings → Stores &amp; providers.</div>
+                          <div className="sync-note dim">Add credentials in{' '}
+                            <button type="button" className="link-inline"
+                              onClick={() => { setOpen(false); onOpenSettings?.('connections/credentials') }}>
+                              Settings → Stores &amp; providers</button>.</div>
                         )}
                         {s.ready && !s.needs_auth && !s.can_media && (
                           <div className="sync-note dim">Syncs which games you own on {s.name}.</div>
