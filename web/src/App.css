@@ -3803,3 +3803,29 @@ a.idchip:hover { background: var(--accent-bg); }
 /* TEMP: reduce-motion gate removed while tuning so it shows on reduce-motion devices.
    Restore `@media (prefers-reduced-motion: reduce) { .spark { display: none; } }`
    together with the JS guards in reveal.ts / sparkle.ts once the feel is locked. */
+
+/* --- error boundary fallback (see ErrorBoundary.tsx) --- */
+.errbound {
+  display: flex; flex-direction: column; gap: 10px; align-items: flex-start;
+  margin: 12px 0; padding: 18px 20px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-left: 3px solid #f87171; border-radius: 12px;
+}
+.errbound-root {
+  min-height: 100vh; margin: 0; border: none; border-radius: 0;
+  align-items: center; justify-content: center; text-align: center;
+  background: var(--bg);
+}
+.errbound-title { font-size: 17px; font-weight: 700; color: var(--text-h); }
+.errbound-msg {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+  color: var(--text); word-break: break-word; max-width: 60ch;
+}
+.errbound-actions { display: flex; gap: 8px; }
+.errbound-btn {
+  padding: 7px 14px; border-radius: 8px; cursor: pointer;
+  background: var(--accent-bg); border: 1px solid var(--accent); color: var(--text-h);
+  font-size: 13px; font-weight: 600;
+}
+.errbound-btn:hover { background: var(--accent); color: #fff; }
+.errbound-hint { font-size: 12px; color: var(--text); opacity: 0.75; }

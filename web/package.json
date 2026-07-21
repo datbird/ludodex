@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "node scripts/hooksweep.mjs && tsc -b && vite build",
     "lint": "oxlint",
+    "lint:hooks": "node scripts/hooksweep.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useMemo, Fragment, type ReactNode, type CSSProperties, type ChangeEvent, type DragEvent, type FormEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { api } from './api'
+import ErrorBoundary from './ErrorBoundary'
 import type {
   GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
   AiUsageModel, AiUsageDay, AiUsageSummary, AiPrice, Currency, Caps,
@@ -1298,6 +1299,10 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
             ))}
           </div>
           <div className="settings-content">
+            {/* Scoped per panel (key resets it on navigation) so one broken settings
+                panel shows an inline error instead of white-screening the whole app. */}
+            <ErrorBoundary key={section + '/' + sub}
+              label={`The ${SECTIONS.find((s) => s.id === section)?.name ?? 'settings'} panel`}>
             {section === 'connections'
               ? (sub === 'devices' ? <DevicesPanel />
                 : sub === 'credentials' ? <Credentials />
@@ -1318,6 +1323,7 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
               : sub === 'budgets' ? <AiBudgets />
               : sub === 'report' ? <AiUsageReport />
               : null}
+            </ErrorBoundary>
           </div>
         </div>
       </div>
