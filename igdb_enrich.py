@@ -27,6 +27,7 @@ sys.path.insert(0, DIR)
 import config
 import console_eras
 import igdb
+import platmap
 from titlenorm import norm
 
 CACHE = os.path.join(DATA, "metadata-cache.sqlite")
@@ -245,6 +246,47 @@ def _pick_era_aware(hits, nk, consoles, require_unique=False):
         ok.sort(key=lambda h: (_year_of(h) is None, _year_of(h) or 9999))
     h = ok[0]
     return h["id"], h.get("slug")
+
+
+# --- per-entry identity resolution (task #8, Phase 1) ------------------------------ #
+# Resolve ONE (entry, platform) against the exact-title candidate set, rather than
+# stamping the whole title group with one id. Deterministic: IGDB is authoritative about
+# which platforms a game released on, so `entry_fits` is pure platform membership. The
+# no-fit classification uses the hardware-GENERATION gap (platmap.GEN) — the same reliable
+# "impossible backport" signal the contamination check used, which the loose console_eras
+# year-buffer misses (Star Fox 1993 is 1yr past the 2600's era end, but gen 2 << gen 4).
+
+def _cand_platform_canons(cand):
+    return platmap.igdb_canons(cand.get("platforms"))
+
+
+def entry_fits(cand, platform):
+    """True when IGDB lists `cand` as released on `platform` (platmap-canon membership)."""
+    return platmap.canon(platform) in _cand_platform_canons(cand)
+
+
+def per_entry_resolve(candidates, platform, primary_id):
+    """Resolve one (entry, platform) against the exact-title `candidates`.
+
+    Returns {"kind", "igdb_id", "fit_ids"}:
+      - "unique"          exactly one candidate lists this platform -> igdb_id = it.
+      - "ambiguous"       >1 candidate lists it -> fit_ids for the Phase-2 AI to decide.
+      - "none_impossible" no candidate lists it AND this platform is an older hardware
+                          GENERATION than every candidate's earliest -> detach-worthy.
+      - "none_uncertain"  no candidate lists it but generation-compatible (maybe a port
+                          IGDB doesn't list) -> Phase-2 AI decides (never auto-separated:
+                          the over-separation guard)."""
+    fits = [c for c in candidates if entry_fits(c, platform)]
+    if len(fits) == 1:
+        return {"kind": "unique", "igdb_id": fits[0]["id"], "fit_ids": [fits[0]["id"]]}
+    if len(fits) > 1:
+        return {"kind": "ambiguous", "igdb_id": None, "fit_ids": [c["id"] for c in fits]}
+    eg = platmap.generation(platform)
+    cand_gens = [platmap.GEN[c] for cand in candidates
+                 for c in _cand_platform_canons(cand) if c in platmap.GEN]
+    if eg is not None and cand_gens and eg < min(cand_gens):
+        return {"kind": "none_impossible", "igdb_id": None, "fit_ids": []}
+    return {"kind": "none_uncertain", "igdb_id": None, "fit_ids": []}
 
 
 def _consoles_by_norm():
