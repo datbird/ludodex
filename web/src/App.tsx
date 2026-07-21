@@ -1184,6 +1184,7 @@ const KEY_FIELD: Record<string, string> = {
 const SECTIONS = [
   { id: 'ai', name: 'AI settings', icon: '✨' },
   { id: 'connections', name: 'Connections', icon: '🔌' },
+  { id: 'database', name: 'Database', icon: '🗄️' },
   { id: 'library', name: 'Library', icon: '📚' },
   { id: 'dashboard', name: 'Dashboard', icon: '🎛️' },
   { id: 'metadata', name: 'AI Metadata', icon: '🔎' },
@@ -1192,14 +1193,15 @@ const SECTIONS = [
 const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
   ai: [{ id: 'usage', name: 'AI Usage' }, { id: 'keys', name: 'API Keys' },
        { id: 'budgets', name: 'Budgets & limits' }, { id: 'report', name: 'Usage report' }],
+  // Connections = things ludodex talks to on your behalf (machines, stores, providers).
   connections: [{ id: 'devices', name: 'Devices' },
                 { id: 'credentials', name: 'Stores & providers' },
-                // Both of these talk to an external database, so name them by what they
-                // DO, not by the mechanism — "Backing store" vs "Database sync" read as
-                // the same feature and users picked the wrong one.
-                { id: 'backingstore', name: 'Backup & restore' },
-                { id: 'dbsync', name: 'Publish catalog' },
                 { id: 'limits', name: 'Rate limits' }],
+  // Database = where ludodex's OWN data lives and goes. Named by what each one DOES —
+  // "Backing store" vs "Database sync" read as the same feature and got picked
+  // interchangeably, which matters because only one of them can restore you.
+  database: [{ id: 'backingstore', name: 'Backup & restore' },
+             { id: 'dbsync', name: 'Publish catalog' }],
   library: [{ id: 'preferences', name: 'Preferences' }, { id: 'banned', name: 'Banned media' }],
   dashboard: [{ id: 'spotlight', name: 'Spotlight' }],
   metadata: [{ id: 'scan', name: 'Scan' },
@@ -1314,9 +1316,9 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
             {section === 'connections'
               ? (sub === 'devices' ? <DevicesPanel />
                 : sub === 'credentials' ? <Credentials />
-                : sub === 'backingstore' ? <BackingStore />
-                : sub === 'dbsync' ? <DatabaseSync />
                 : sub === 'limits' ? <RateLimits /> : null)
+              : section === 'database'
+              ? (sub === 'dbsync' ? <DatabaseSync /> : <BackingStore />)
               : section === 'library'
               ? (sub === 'banned' ? <BannedMediaPanel /> : <LibraryPrefs onChanged={onPrefsChanged} />)
               : section === 'dashboard'
