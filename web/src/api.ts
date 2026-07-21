@@ -363,6 +363,25 @@ export interface SpotlightTheme {
   subtitle: string
   enabled: boolean
 }
+export interface BackupJob {
+  id: number; name: string; enabled: number
+  contents: string[]; all_contents: boolean
+  dest_kind: 'local' | 'device'; dest_path: string; device_id: number | null
+  every_minutes: number; retention: number; encrypted: boolean
+  last_run: number; last_ok: number | null; last_error: string
+  last_file: string; last_size: number
+}
+export interface BackupItem { file: string; id: string; name: string; role: string; size: number }
+export interface BackupRun {
+  running: boolean; id: number; name: string; log: string[]
+  ok: boolean | null; error?: string; scheduled?: boolean
+  result?: { file: string; size: number; databases: number; pruned: number; dest: string }
+}
+export interface BackupsState {
+  jobs: BackupJob[]; available: BackupItem[]; job: BackupRun | null
+  devices: { id: number; name: string; transport: string }[]
+}
+
 export interface Prefs {
   hide_non_games: boolean
   spotlight_seconds: number
@@ -1049,6 +1068,15 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)
     return r.json() as Promise<{ device: string; results: { manager: string; kind: string; ok: boolean; roms?: number; media?: string; error?: string }[] }>
   },
+  backups: () => get<BackupsState>('/api/backups/jobs'),
+  backupStatus: () => get<{ job: BackupRun | null; jobs: BackupJob[] }>('/api/backups/status'),
+  setBackupJob: (j: Partial<BackupJob> & { passphrase?: string | null }) =>
+    postJson<{ ok: boolean; id: number }>('/api/backups/jobs', j),
+  deleteBackupJob: (id: number) => mutate<{ ok: boolean }>(`/api/backups/jobs/${id}`, 'DELETE'),
+  runBackupJob: (id: number) => postJson<{ ok: boolean }>(`/api/backups/jobs/${id}/run`, {}),
+  importBackup: (path: string, passphrase?: string) =>
+    postJson<{ ok: boolean; id: string; databases: number }>('/api/backups/import',
+      { path, passphrase }),
   setManager: async (m: Partial<LibraryManager>) => {
     const r = await fetch('/api/devices/managers', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(m) })
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)

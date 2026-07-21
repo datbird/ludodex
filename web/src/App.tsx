@@ -5,7 +5,7 @@ import type {
   GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
   AiUsageModel, AiUsageDay, AiUsageSummary, AiPrice, Currency, Caps,
   DedupeSuggestion, ArtPick, Service, ServiceConnect, Achievements as AchData,
-  MediaLibrary, MediaAsset, MediaKind, BannedMedia,
+  MediaLibrary, MediaAsset, MediaKind, BannedMedia, BackupsState, BackupJob,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device, LibraryManager,
@@ -1506,7 +1506,7 @@ function BackingStore() {
 
   return (
     <>
-      <h2>Backup &amp; restore</h2>
+      <h2>Database Sync</h2>
       <p className="dim">Keep your durable data — tags, ownership, art pins, attribute
         overrides, framing, manual games — in an external database and sync it <b>both ways</b>.
         SQLite stays your fast local cache; this backend is the durable source of truth, so you
@@ -1556,7 +1556,239 @@ function BackingStore() {
       {test && <div className={'bs-test ' + (test.ok ? 'ok' : 'bad')}>
         {test.ok ? '✓ ' + (test.detail || 'connected') : '✗ ' + (test.error || 'failed')}</div>}
       {msg && <div className="dim bs-msg">{msg}</div>}
+      <SnapshotBackups />
     </>
+  )
+}
+
+const SCHEDULES = [
+  { m: 0, name: 'Manual only' }, { m: 60, name: 'Hourly' }, { m: 360, name: 'Every 6 hours' },
+  { m: 1440, name: 'Daily' }, { m: 10080, name: 'Weekly' },
+]
+
+// Point-in-time archives, as opposed to the live mirror above. Several independent jobs:
+// each picks its own contents, destination, timing and retention.
+function SnapshotBackups() {
+  const [st, setSt] = useState<BackupsState | null>(null)
+  const [open, setOpen] = useState<number | null>(null)
+  const [draft, setDraft] = useState<Record<number, Partial<BackupJob> & { passphrase?: string }>>({})
+  const [busy, setBusy] = useState('')
+  const [msg, setMsg] = useState('')
+
+  const load = useCallback(() => { api.backups().then(setSt).catch(() => {}) }, [])
+  useEffect(() => { load() }, [load])
+  // poll only while a run is in flight
+  useEffect(() => {
+    if (!st?.job?.running) return
+    const t = setInterval(() => api.backupStatus()
+      .then((r) => setSt((s) => (s ? { ...s, job: r.job, jobs: r.jobs } : s)))
+      .catch(() => {}), 1500)
+    return () => clearInterval(t)
+  }, [st?.job?.running])
+
+  const patch = (id: number, p: Partial<BackupJob> & { passphrase?: string }) =>
+    setDraft((d) => ({ ...d, [id]: { ...d[id], ...p } }))
+  const merged = (j: BackupJob) => ({ ...j, ...(draft[j.id] || {}) })
+
+  const save = async (j: BackupJob) => {
+    const d = merged(j)
+    setBusy('save' + j.id); setMsg('')
+    try {
+      await api.setBackupJob({
+        id: j.id, name: d.name, enabled: d.enabled, contents: d.all_contents ? [] : d.contents,
+        dest_kind: d.dest_kind, dest_path: d.dest_path, device_id: d.device_id,
+        every_minutes: d.every_minutes, retention: d.retention,
+        ...(draft[j.id]?.passphrase !== undefined ? { passphrase: draft[j.id]!.passphrase } : {}),
+      })
+      setDraft((x) => { const c = { ...x }; delete c[j.id]; return c })
+      load(); setMsg('Saved ✓')
+    } catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
+  }
+  const addJob = async () => {
+    setBusy('add')
+    try {
+      const r = await api.setBackupJob({ name: 'New backup', dest_kind: 'local', retention: 7 })
+      const s2 = await api.backups(); setSt(s2); setOpen(r.id)
+    } catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
+  }
+  const remove = async (j: BackupJob) => {
+    if (!confirm(`Delete the backup job “${j.name}”? Archives it already wrote are left alone.`)) return
+    setBusy('del' + j.id)
+    try { await api.deleteBackupJob(j.id); load() }
+    catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
+  }
+  const runNow = async (j: BackupJob) => {
+    setBusy('run' + j.id); setMsg('')
+    try { await api.runBackupJob(j.id); const r = await api.backupStatus(); setSt((s) => (s ? { ...s, job: r.job } : s)) }
+    catch (e) { setMsg((e as Error).message) } finally { setBusy('') }
+  }
+
+  const running = st?.job?.running ? st.job : null
+  const byRole = (role: string) => (st?.available || []).filter((a) => a.role === role)
+
+  return (
+    <section className="snapshots">
+      <h2>Snapshot backups</h2>
+      <p className="dim">Roll the databases you choose into a zip and drop it somewhere safe,
+        on a schedule. This is the counterpart to Database Sync above: a live mirror protects
+        you from losing the machine, a snapshot protects you from a change you regret — a
+        mirror faithfully copies mistakes, a snapshot doesn’t.</p>
+
+      {(st?.jobs || []).map((j) => {
+        const d = merged(j)
+        const dirty = !!draft[j.id]
+        const isOpen = open === j.id
+        return (
+          <div key={j.id} className={'bk-job' + (d.enabled ? '' : ' off')}>
+            <div className="bk-head" onClick={() => setOpen(isOpen ? null : j.id)}>
+              <span className="bk-caret">{isOpen ? '▾' : '▸'}</span>
+              <span className="bk-name">{d.name || 'Untitled'}</span>
+              {d.encrypted && <span className="bk-tag" title="Encrypted with a passphrase">🔒</span>}
+              <span className="dim bk-sched">
+                {(SCHEDULES.find((x) => x.m === d.every_minutes)?.name)
+                  || `Every ${d.every_minutes} min`}</span>
+              <span className="bk-last dim">
+                {j.last_run
+                  ? (j.last_ok
+                      ? `✓ ${new Date(j.last_run * 1000).toLocaleString()} · ${fmtBytes(j.last_size)}`
+                      : `✗ ${j.last_error || 'failed'}`)
+                  : 'never run'}</span>
+            </div>
+            {isOpen && (
+              <div className="bk-body">
+                <div className="bk-row">
+                  <label>Name</label>
+                  <input value={d.name || ''} onChange={(e) => patch(j.id, { name: e.target.value })} />
+                  <label className="switch bk-en">
+                    <input type="checkbox" checked={!!d.enabled}
+                      onChange={(e) => patch(j.id, { enabled: e.target.checked ? 1 : 0 })} />
+                    <span className="track"><span className="knob" /></span>
+                  </label>
+                  <span className="dim">{d.enabled ? 'Enabled' : 'Disabled'}</span>
+                </div>
+
+                <div className="bk-row bk-top">
+                  <label>Include</label>
+                  <div className="bk-contents">
+                    <label className="bk-check">
+                      <input type="checkbox" checked={!!d.all_contents}
+                        onChange={(e) => patch(j.id, { all_contents: e.target.checked })} />
+                      <b>Everything</b>
+                      <span className="dim"> — every database, including any added by future updates</span>
+                    </label>
+                    {!d.all_contents && ['durable', 'output', 'cache'].map((role) => (
+                      byRole(role).length ? (
+                        <div key={role} className="bk-group">
+                          <div className="bk-group-h dim">
+                            {role === 'durable' ? 'Your data (irreplaceable)'
+                              : role === 'output' ? 'Rebuildable from your data'
+                              : 'Caches (re-fetchable)'}
+                          </div>
+                          {byRole(role).map((a) => (
+                            <label key={a.file} className="bk-check">
+                              <input type="checkbox"
+                                checked={(d.contents || []).includes(a.file)}
+                                onChange={(e) => {
+                                  const cur = new Set(d.contents || [])
+                                  e.target.checked ? cur.add(a.file) : cur.delete(a.file)
+                                  patch(j.id, { contents: [...cur] })
+                                }} />
+                              {a.name} <span className="dim">{fmtBytes(a.size)}</span>
+                            </label>
+                          ))}
+                        </div>
+                      ) : null
+                    ))}
+                  </div>
+                </div>
+
+                <div className="bk-row">
+                  <label>Send to</label>
+                  <select value={d.dest_kind}
+                    onChange={(e) => patch(j.id, { dest_kind: e.target.value as 'local' | 'device' })}>
+                    <option value="local">A folder on this server</option>
+                    <option value="device">A device from Connections</option>
+                  </select>
+                  {d.dest_kind === 'device' && (
+                    <select value={d.device_id ?? ''}
+                      onChange={(e) => patch(j.id, { device_id: Number(e.target.value) || null })}>
+                      <option value="">Choose a device…</option>
+                      {(st?.devices || []).map((dv) => (
+                        <option key={dv.id} value={dv.id}>{dv.name}</option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+                <div className="bk-row">
+                  <label>Folder</label>
+                  <input className="bk-path" placeholder="<backup-share>/ludodex"
+                    value={d.dest_path || ''}
+                    onChange={(e) => patch(j.id, { dest_path: e.target.value })} />
+                </div>
+
+                <div className="bk-row">
+                  <label>How often</label>
+                  <select value={d.every_minutes}
+                    onChange={(e) => patch(j.id, { every_minutes: Number(e.target.value) })}>
+                    {SCHEDULES.map((x) => <option key={x.m} value={x.m}>{x.name}</option>)}
+                  </select>
+                  <label className="bk-sub">Keep</label>
+                  <input type="number" min={0} max={999} className="bk-num"
+                    value={d.retention}
+                    onChange={(e) => patch(j.id, { retention: Number(e.target.value) })} />
+                  <span className="dim">newest (0 = keep every one)</span>
+                </div>
+
+                <div className="bk-row">
+                  <label>Passphrase</label>
+                  <input type="password" placeholder={d.encrypted ? '•••••••• (set)' : 'optional — leave blank for an unencrypted zip'}
+                    value={draft[j.id]?.passphrase ?? ''}
+                    onChange={(e) => patch(j.id, { passphrase: e.target.value })} />
+                  {d.encrypted && (
+                    <button className="ops-btn" onClick={() => patch(j.id, { passphrase: '' })}
+                      title="Clear the passphrase (future archives will be unencrypted)">Clear</button>
+                  )}
+                </div>
+                <p className="dim bk-hint">Encrypted archives use AES-256 and open in 7-Zip,
+                  Keka or WinRAR with the passphrase — you don’t need ludodex to get your data
+                  back. Lose the passphrase and the archive is unrecoverable. Note a full
+                  backup includes your stored store logins and API keys, so encrypt it if the
+                  destination isn’t somewhere you’d keep passwords.</p>
+
+                <div className="bk-actions">
+                  <button className="ops-btn primary" disabled={busy === 'save' + j.id || !dirty}
+                    onClick={() => save(j)}>{busy === 'save' + j.id ? 'Saving…' : dirty ? 'Save changes' : 'Saved'}</button>
+                  <button className="ops-btn" disabled={!!running || dirty}
+                    title={dirty ? 'Save your changes first' : 'Run this backup now'}
+                    onClick={() => runNow(j)}>▶ Back up now</button>
+                  <button className="ops-btn danger" onClick={() => remove(j)}>Delete job</button>
+                </div>
+                {!j.last_ok && j.last_error && (
+                  <div className="bs-test bad">✗ {j.last_error}</div>)}
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      <button className="ops-btn bk-add" disabled={busy === 'add'} onClick={addJob}>
+        + Add a backup</button>
+
+      {running && (
+        <div className="bk-running">
+          <b>Running “{running.name}”{running.scheduled ? ' (scheduled)' : ''}…</b>
+          {running.log.map((l, i) => <div key={i} className="dim">{l}</div>)}
+        </div>
+      )}
+      {st?.job && !st.job.running && st.job.ok === true && st.job.result && (
+        <div className="bs-test ok">✓ {st.job.result.file} · {fmtBytes(st.job.result.size)} ·
+          {' '}{st.job.result.databases} database(s) → {st.job.result.dest}
+          {st.job.result.pruned ? ` · removed ${st.job.result.pruned} old` : ''}</div>
+      )}
+      {st?.job && !st.job.running && st.job.ok === false && (
+        <div className="bs-test bad">✗ {st.job.error}</div>)}
+      {msg && <div className="dim bs-msg">{msg}</div>}
+    </section>
   )
 }
 

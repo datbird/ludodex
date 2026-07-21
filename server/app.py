@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,6 +41,7 @@ import fileops         # noqa: E402  file-operations engine (profiles + runbooks
 import aimeta          # noqa: E402  AI metadata audit/supplement store + context
 import overrides       # noqa: E402  per-attribute provenance overrides (re-pointing)
 import ownership       # noqa: E402  durable per-format ownership (physical + per-platform wants)
+import backups         # noqa: E402  scheduled snapshot backups (zip + push)
 import compilations    # noqa: E402  durable collections/compilations store (ownership fan-out)
 import igdb_enrich      # noqa: E402  IGDB cache resolvers (cross-platform releases + systems)
 import console_eras     # noqa: E402  emulation platform era windows (year-plausibility gate)
@@ -9147,6 +9149,134 @@ def _backingstore_scheduler():
 
 
 threading.Thread(target=_backingstore_scheduler, daemon=True).start()
+
+# ------------------------------------------------------------ snapshot backup jobs
+# Point-in-time archives (backups.py), as opposed to the live two-way mirror above.
+# Several independent jobs, each with its own contents / destination / timing.
+_BACKUP_JOB = {"job": None}
+
+
+@app.get("/api/backups/jobs")
+def backup_jobs():
+    """Every configured job + the catalogue of things that can go IN one, so the UI can
+    render checkboxes without hardcoding the database list."""
+    present = set(_all_db_files())
+    items = [{"file": f, "id": d[0], "name": d[1], "role": d[3],
+              "size": os.path.getsize(os.path.join(DATA, f)) if f in present else 0}
+             for d in DATABASES for f in (d[2],) if f in present]
+    known = {d[2] for d in DATABASES}
+    for f in sorted(present - known):          # auth.sqlite, backups.sqlite, anything new
+        items.append({"file": f, "id": f[:-7], "name": f[:-7].replace("-", " ").title(),
+                      "role": "durable", "size": os.path.getsize(os.path.join(DATA, f))})
+    return {"jobs": backups.all_jobs(), "available": items,
+            "job": _BACKUP_JOB["job"],
+            "devices": [{"id": d["id"], "name": d["name"], "transport": d["transport"]}
+                        for d in devices.devices_list()]}
+
+
+@app.post("/api/backups/jobs")
+def backup_job_set(body: dict = Body(...)):
+    return {"ok": True, "id": backups.set_job(body or {})}
+
+
+@app.delete("/api/backups/jobs/{job_id}")
+def backup_job_delete(job_id: int):
+    backups.delete_job(job_id)
+    return {"ok": True}
+
+
+@app.post("/api/backups/jobs/{job_id}/run")
+def backup_job_run(job_id: int):
+    """Run one job in the background (single-flight across all jobs — they contend for the
+    same databases and destination bandwidth)."""
+    cur = _BACKUP_JOB["job"]
+    if cur and cur.get("running"):
+        raise HTTPException(409, "a backup is already running")
+    j = backups.get_job(job_id)
+    if not j:
+        raise HTTPException(404, "unknown backup job")
+    st = {"running": True, "id": job_id, "name": j["name"], "log": [], "ok": None,
+          "started": int(time.time())}
+    _BACKUP_JOB["job"] = st
+
+    def work():
+        try:
+            r = backups.run_job(job_id, log=lambda m: st["log"].append(m))
+            st.update(ok=True, result=r)
+        except Exception as e:
+            st.update(ok=False, error=str(e)[:300])
+            print("backup job %s: %s" % (job_id, str(e)[:200]), file=sys.stderr)
+        finally:
+            st["running"] = False
+            st["finished"] = int(time.time())
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True, "started": job_id}
+
+
+@app.get("/api/backups/status")
+def backup_status():
+    return {"job": _BACKUP_JOB["job"], "jobs": backups.all_jobs()}
+
+
+@app.post("/api/backups/import")
+def backup_import(body: dict = Body(...)):
+    """Unpack a backup zip into the local snapshot folder so it appears in Server-ops →
+    Data & maintenance and can be restored with the existing restore button. `path` is a
+    path this server can read; `passphrase` if the zip is encrypted."""
+    path = (body or {}).get("path") or ""
+    if not os.path.isfile(path):
+        raise HTTPException(400, "no such file %r" % path)
+    pw = (body or {}).get("passphrase") or ""
+    bid = "imported_" + os.path.basename(path).replace(".zip", "")[:60]
+    dest = os.path.join(BACKUP_DIR, bid)
+    os.makedirs(dest, exist_ok=True)
+    try:
+        if pw:
+            import pyzipper
+            with pyzipper.AESZipFile(path) as z:
+                z.setpassword(pw.encode())
+                z.extractall(dest)
+        else:
+            with zipfile.ZipFile(path) as z:
+                z.extractall(dest)
+    except Exception as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise HTTPException(400, "could not read the zip: %s" % str(e)[:150])
+    n = len([f for f in os.listdir(dest) if f.endswith(".sqlite")])
+    return {"ok": True, "id": bid, "databases": n}
+
+
+def _backup_scheduler():
+    """Run each job on its own interval. Single-flight, and never on the minute a manual
+    run is already going."""
+    while True:
+        time.sleep(60)
+        try:
+            cur = _BACKUP_JOB["job"]
+            if cur and cur.get("running"):
+                continue
+            due = backups.due_jobs()
+            if not due:
+                continue
+            j = due[0]                          # one per tick; the rest catch the next
+            st = {"running": True, "id": j["id"], "name": j["name"], "log": [],
+                  "ok": None, "started": int(time.time()), "scheduled": True}
+            _BACKUP_JOB["job"] = st
+            try:
+                st.update(ok=True, result=backups.run_job(j["id"],
+                                                          log=lambda m: st["log"].append(m)))
+            except Exception as e:
+                st.update(ok=False, error=str(e)[:300])
+                print("scheduled backup %s: %s" % (j["id"], str(e)[:200]), file=sys.stderr)
+            finally:
+                st["running"] = False
+                st["finished"] = int(time.time())
+        except Exception as e:
+            print("backup scheduler: %s" % str(e)[:150], file=sys.stderr)
+
+
+threading.Thread(target=_backup_scheduler, daemon=True).start()
 
 
 # ---------------------------------------------------------------- static SPA (last)

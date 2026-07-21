@@ -27,3 +27,4 @@ pyjwt[crypto]>=2.8   # cryptography is already present transitively
 legendary-gl>=0.20   # provides the `legendary` binary on PATH
 
 # HTTP to providers uses the standard library (urllib) — no `requests` needed.
+pyzipper>=0.3         # AES-256 zips for encrypted snapshot backups (backups.py)

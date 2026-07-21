@@ -3897,3 +3897,42 @@ a.idchip:hover { background: var(--accent-bg); }
   color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
 }
 .link-inline:hover { filter: brightness(1.15); }
+
+/* --- snapshot backup jobs (Settings → Database → Backup & restore) --- */
+.snapshots { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--border); }
+.bk-job { border: 1px solid var(--border); border-radius: 10px; margin: 10px 0;
+  background: var(--panel); overflow: hidden; }
+.bk-job.off { opacity: 0.6; }
+.bk-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  cursor: pointer; user-select: none; }
+.bk-head:hover { background: var(--accent-bg); }
+.bk-caret { width: 12px; color: var(--text); }
+.bk-name { font-weight: 700; color: var(--text-h); }
+.bk-tag { font-size: 12px; }
+.bk-sched { font-size: 12px; }
+.bk-last { margin-left: auto; font-size: 12px; }
+.bk-body { padding: 6px 14px 16px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 10px; }
+.bk-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.bk-row.bk-top { align-items: flex-start; }
+.bk-row > label:first-child { width: 96px; flex: 0 0 96px; color: var(--text);
+  font-size: 13px; }
+.bk-row input[type="text"], .bk-row input:not([type]), .bk-row input[type="password"] {
+  flex: 1 1 220px; min-width: 180px; }
+.bk-path { flex: 1 1 320px; }
+.bk-num { width: 74px; flex: 0 0 74px; }
+.bk-sub { color: var(--text); font-size: 13px; }
+.bk-en { flex: 0 0 auto; }
+.bk-contents { flex: 1 1 auto; display: flex; flex-direction: column; gap: 4px; }
+.bk-group { margin: 6px 0 2px; padding-left: 2px; }
+.bk-group-h { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 3px; }
+.bk-check { display: flex; align-items: center; gap: 7px; font-size: 13px;
+  color: var(--text-h); padding: 2px 0; }
+.bk-hint { font-size: 12px; margin: 0 0 0 106px; max-width: 62ch; }
+.bk-actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+.ops-btn.danger { border-color: #f87171; color: #f87171; }
+.ops-btn.danger:hover { background: #f87171; color: #fff; }
+.bk-add { margin-top: 6px; }
+.bk-running { margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+  background: var(--accent-bg); border: 1px solid var(--accent); font-size: 13px; }

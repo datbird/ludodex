@@ -17,6 +17,7 @@ SMB is modelled but needs cifs-utils/smbclient on the server (not required for S
 """
 import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -269,6 +270,45 @@ def fs_delete(dev_id, paths):
     r = _dev_run(dev_id, "rm -rf -- " + " ".join(shlex.quote(p) for p in safe))
     if r.returncode != 0:
         raise RuntimeError((r.stderr or "delete failed")[:200])
+
+
+def push_file(dev_id, local_path, dest_dir, timeout=3600):
+    """Copy ONE local file into dest_dir on a device (or another path on this server when
+    dev_id is falsy). Used by the backup jobs, so archives reach anywhere a device can —
+    same transports, same credentials, no second implementation."""
+    fs_mkdir(dev_id, dest_dir)
+    if not dev_id:
+        dst = os.path.join(dest_dir, os.path.basename(local_path))
+        if os.path.abspath(dst) != os.path.abspath(local_path):
+            shutil.copy2(local_path, dst)
+        return dst
+    dev = dict(_device(dev_id))
+    if dev.get("transport") == "local":
+        dst = os.path.join(dest_dir, os.path.basename(local_path))
+        shutil.copy2(local_path, dst)
+        return dst
+    if dev.get("auth") == "password":
+        dev["password"] = _dev_password(dev["id"])
+    r = _rsync(local_path, _spec(dev, dest_dir.rstrip("/") + "/"), dev, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "push failed")[:200])
+    return "%s/%s" % (dest_dir.rstrip("/"), os.path.basename(local_path))
+
+
+def list_names(dev_id, path):
+    """Bare filenames in `path` on a device (or this server). [] when it doesn't exist."""
+    r = _dev_run(dev_id, "ls -1 %s 2>/dev/null || true" % shlex.quote(path))
+    return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+
+
+def remove_paths(dev_id, paths):
+    """Delete specific files (backup retention). Refuses anything that isn't an absolute
+    path with a filename, so a bad prefix can never turn into `rm -rf /`."""
+    safe = [p for p in (paths or [])
+            if p and p.startswith("/") and os.path.basename(p) and p.strip("/")]
+    if safe:
+        fs_delete(dev_id, safe)
+    return len(safe)
 
 
 def _spec(dev, path):
