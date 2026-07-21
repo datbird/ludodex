@@ -1331,6 +1331,9 @@ def get_prefs():
         "fileops_apply_mode": config.get("fileops_apply_mode") or "preview",
         "manifests_enabled": config.get_bool("manifests_enabled", True),
         "xbox_platform": config.get("xbox_platform") or "xbox",
+        "match_confidence_threshold": int(config.get("match_confidence_threshold") or 60),
+        "match_ai_band_lo": int(config.get("match_ai_band_lo") or 40),
+        "match_ai_band_hi": int(config.get("match_ai_band_hi") or 70),
         "media_job": _MEDIA_JOB["job"],
     }
 
@@ -1342,6 +1345,21 @@ def set_prefs(body: dict = Body(...)):
         config.set_("media_mode", body["media_mode"])
     if body.get("xbox_platform") in ("xbox", "pc"):   # bucket for inbound Xbox games
         config.set_("xbox_platform", body["xbox_platform"])
+    def _clamp_int(v, lo=0, hi=100):
+        return max(lo, min(hi, int(v)))
+    if "match_confidence_threshold" in body:          # task #13 — low-confidence cutoff
+        try:
+            config.set_("match_confidence_threshold", str(_clamp_int(body["match_confidence_threshold"])))
+        except (TypeError, ValueError):
+            pass
+    if "match_ai_band_lo" in body and "match_ai_band_hi" in body:  # AI re-score gray zone
+        try:
+            lo, hi = _clamp_int(body["match_ai_band_lo"]), _clamp_int(body["match_ai_band_hi"])
+            if lo < hi:
+                config.set_("match_ai_band_lo", str(lo))
+                config.set_("match_ai_band_hi", str(hi))
+        except (TypeError, ValueError):
+            pass
     if "media_language" in body:                # "" = no preference (any language)
         config.set_("media_language", str(body["media_language"] or "")[:40])
     if "media_languages" in body:               # ordered 1st,2nd,3rd preference

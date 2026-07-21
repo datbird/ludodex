@@ -373,6 +373,9 @@ export interface Prefs {
   fileops_apply_mode: FileopsApplyMode
   manifests_enabled: boolean
   xbox_platform: 'xbox' | 'pc'   // which platform inbound Xbox games are bucketed as
+  match_confidence_threshold?: number   // identity certainty below this = "low confidence"
+  match_ai_band_lo?: number             // gray zone the wand's AI re-scores
+  match_ai_band_hi?: number
   media_job: MediaJob | null
 }
 export interface IdentifyCandidate {

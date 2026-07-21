@@ -1895,6 +1895,18 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
     setPrefs({ ...prefs, xbox_platform: v })
     try { await api.setPrefs({ xbox_platform: v }) } catch { load() }
   }
+  const setThreshold = async (v: number) => {
+    setPrefs({ ...prefs, match_confidence_threshold: v })
+    try { await api.setPrefs({ match_confidence_threshold: v }); onChanged() } catch { load() }
+  }
+  const setBand = async (lo: number, hi: number) => {
+    if (lo >= hi) return
+    setPrefs({ ...prefs, match_ai_band_lo: lo, match_ai_band_hi: hi })
+    try { await api.setPrefs({ match_ai_band_lo: lo, match_ai_band_hi: hi }) } catch { load() }
+  }
+  const thr = prefs.match_confidence_threshold ?? 60
+  const bandLo = prefs.match_ai_band_lo ?? 40
+  const bandHi = prefs.match_ai_band_hi ?? 70
 
   return (
     <div className="lib-prefs">
@@ -1926,6 +1938,27 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
             Exclude Steam apps flagged as applications, tools, soundtracks, videos or
             hardware (from the <code>steam_type</code> signal) everywhere in the library.
           </span>
+        </div>
+      </div>
+
+      <div className="pref-section">
+        <div className="pref-name">Match confidence</div>
+        <span className="pref-hint">How sure ludodex is that each game matched the RIGHT entry
+          (identity certainty — not quality). Games below the threshold surface under
+          “Low confidence” on the dashboard and the <code>confidence:low</code> library filter.</span>
+        <div className="pref-row" style={{ marginTop: 10, gap: 12 }}>
+          <input type="range" min={0} max={100} value={thr} style={{ flex: 1 }}
+            onChange={(e) => setThreshold(Number(e.target.value))} />
+          <span className="pref-name" style={{ minWidth: 118, textAlign: 'right' }}>Low below {thr}%</span>
+        </div>
+        <div className="pref-row" style={{ gap: 8, alignItems: 'center' }}>
+          <span className="pref-hint" style={{ flex: 1 }}>AI re-scores the gray zone during wand scans:</span>
+          <input type="number" min={0} max={100} value={bandLo} style={{ width: 60 }}
+            onChange={(e) => setBand(Number(e.target.value), bandHi)} />
+          <span>–</span>
+          <input type="number" min={0} max={100} value={bandHi} style={{ width: 60 }}
+            onChange={(e) => setBand(bandLo, Number(e.target.value))} />
+          <span className="pref-hint">%</span>
         </div>
       </div>
 
