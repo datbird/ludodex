@@ -13,7 +13,7 @@ import type {
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
   AiFindingPayload, FindingContext, ProviderMatch, ScopeValue, MediaDiff, MediaAdd,
-  AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping, DbSyncState, DbSyncTest,
+  AuthUser, AuthStatus, AuthUserRow, CfAccessState, CfMapping,
   Prefs, MediaMode, FileopsApplyMode, MediaLangMode, MediaLangResult, FsStat, OwnershipFact, Frame,
   SpotlightTheme, SourceRow, SplitSuggestion,
   GameRelease, SystemEntry,
@@ -1200,8 +1200,7 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
   // Database = where ludodex's OWN data lives and goes. Named by what each one DOES —
   // "Backing store" vs "Database sync" read as the same feature and got picked
   // interchangeably, which matters because only one of them can restore you.
-  database: [{ id: 'backingstore', name: 'Backup & restore' },
-             { id: 'dbsync', name: 'Publish catalog' }],
+  database: [{ id: 'backingstore', name: 'Backup & restore' }],
   library: [{ id: 'preferences', name: 'Preferences' }, { id: 'banned', name: 'Banned media' }],
   dashboard: [{ id: 'spotlight', name: 'Spotlight' }],
   metadata: [{ id: 'scan', name: 'Scan' },
@@ -1222,7 +1221,6 @@ const SETTINGS_KEYWORDS: Record<string, string> = {
   // Old names ("backing store", "database sync") stay as search terms so anyone who
   // learned them still lands on the right panel.
   backingstore: 'backup restore backing store two-way sync database postgres supabase mysql pocketbase backend cache durable migrate another machine',
-  dbsync: 'publish catalog export mirror replica database sync read-only one-way pocketbase firestore',
   limits: 'rate limit api throttle quota cooldown per minute per day',
   preferences: 'media language ban file operations browse commander manifests apply mode preferences distribution',
   banned: 'banned media unban hidden',
@@ -1318,7 +1316,7 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
                 : sub === 'credentials' ? <Credentials />
                 : sub === 'limits' ? <RateLimits /> : null)
               : section === 'database'
-              ? (sub === 'dbsync' ? <DatabaseSync /> : <BackingStore />)
+              ? <BackingStore />
               : section === 'library'
               ? (sub === 'banned' ? <BannedMediaPanel /> : <LibraryPrefs onChanged={onPrefsChanged} />)
               : section === 'dashboard'
@@ -1511,9 +1509,6 @@ function BackingStore() {
         overrides, framing, manual games — in an external database and sync it <b>both ways</b>.
         SQLite stays your fast local cache; this backend is the durable source of truth, so you
         can restore or run ludodex from another machine and get your library back.</p>
-      <p className="dim panel-vs">Looking to hand your catalog to <em>another app</em> instead?
-        That’s <b>Publish catalog</b> — a one-way, read-only copy. This page is about not losing
-        your own work.</p>
       <div className="bs-row">
         <label>Backend</label>
         <select value={backend} onChange={(e) => { setBackend(e.target.value); setTest(null) }}>
@@ -1789,165 +1784,6 @@ function SnapshotBackups() {
         <div className="bs-test bad">✗ {st.job.error}</div>)}
       {msg && <div className="dim bs-msg">{msg}</div>}
     </section>
-  )
-}
-
-function DatabaseSync() {
-  const [st, setSt] = useState<DbSyncState | null>(null)
-  const [pb, setPb] = useState({ url: '', email: '', password: '' })
-  const [fb, setFb] = useState({ project_id: '', database: '', prefix: '', sa_json: '' })
-  const [msg, setMsg] = useState<{ pb?: string; fb?: string; run?: string }>({})
-  const [checks, setChecks] = useState<{ pb?: DbSyncTest; fb?: DbSyncTest }>({})
-  const [busy, setBusy] = useState('')
-
-  const hydrate = (d: DbSyncState) => {
-    setSt(d)
-    setPb({ url: d.pocketbase.url, email: d.pocketbase.email, password: '' })
-    setFb({ project_id: d.firebase.project_id, database: d.firebase.database, prefix: d.firebase.prefix, sa_json: '' })
-  }
-  useEffect(() => { api.dbSync().then(hydrate).catch(() => {}) }, [])
-  // poll while a sync job is running so the result updates live
-  const running = st?.job?.running
-  useEffect(() => {
-    if (!running) return
-    const t = setInterval(() => api.dbSync().then(setSt).catch(() => {}), 2000)
-    return () => clearInterval(t)
-  }, [running])
-
-  if (!st) return <div className="loading">Loading…</div>
-  const job = st.job
-
-  const savePb = async () => {
-    setBusy('pb-save'); setMsg((m) => ({ ...m, pb: '' }))
-    try {
-      setSt(await api.dbSyncSet({ pocketbase: { url: pb.url, email: pb.email, ...(pb.password ? { password: pb.password } : {}) } }))
-      setPb((p) => ({ ...p, password: '' })); setMsg((m) => ({ ...m, pb: 'Saved ✓' }))
-    } catch (e) { setMsg((m) => ({ ...m, pb: (e as Error).message })) } finally { setBusy('') }
-  }
-  const saveFb = async () => {
-    setBusy('fb-save'); setMsg((m) => ({ ...m, fb: '' }))
-    try {
-      setSt(await api.dbSyncSet({ firebase: { project_id: fb.project_id, database: fb.database, prefix: fb.prefix, ...(fb.sa_json ? { sa_json: fb.sa_json } : {}) } }))
-      setFb((f) => ({ ...f, sa_json: '' })); setMsg((m) => ({ ...m, fb: 'Saved ✓' }))
-    } catch (e) { setMsg((m) => ({ ...m, fb: (e as Error).message })) } finally { setBusy('') }
-  }
-  const test = async (target: 'pocketbase' | 'firebase') => {
-    const k = target === 'pocketbase' ? 'pb' : 'fb'
-    setBusy(k + '-test'); setChecks((c) => ({ ...c, [k]: undefined }))
-    try { const r = await api.dbSyncTest(target); setChecks((c) => ({ ...c, [k]: r })) }
-    catch (e) { setChecks((c) => ({ ...c, [k]: { ok: false, checks: [], summary: (e as Error).message } })) }
-    finally { setBusy('') }
-  }
-  const checklist = (r?: DbSyncTest) => r && (
-    <div className={'dbsync-check' + (r.ok ? ' ok' : ' bad')}>
-      {r.checks.map((ch, i) => (
-        <div key={i} className="dbsync-check-row">
-          <span className={'dbsync-tick' + (ch.ok ? ' ok' : ' bad')}>{ch.ok ? '✓' : '✗'}</span>
-          <span className="dbsync-check-label">{ch.label}</span>
-          <span className="dbsync-check-detail">{ch.detail}</span>
-        </div>
-      ))}
-      <div className="dbsync-check-summary">{r.summary}</div>
-    </div>
-  )
-  const toggle = async (patch: Record<string, unknown>) => { try { setSt(await api.dbSyncSet(patch)) } catch { /* ignore */ } }
-  const runNow = async () => {
-    setBusy('run'); setMsg((m) => ({ ...m, run: '' }))
-    try { setSt(await api.dbSyncRun()) } catch (e) { setMsg((m) => ({ ...m, run: (e as Error).message })) } finally { setBusy('') }
-  }
-
-  return (
-    <>
-      <h2>Publish catalog</h2>
-      <p className="dim">Mirror your library out to a database that other apps and devices can read.</p>
-      <p className="dim panel-vs">This does <b>not</b> back you up — it only pushes a read-only
-        copy outward, and your edits are never restored from it. For that, use
-        <b> Backup &amp; restore</b>.</p>
-      <div className="dbsync-explain">
-        <div><b>What this does.</b> After each catalog rebuild, ludodex publishes the finished
-          catalog — your <code>games</code> and <code>sources</code> — into the target(s) you enable
-          below. That copy is for <em>other</em> clients to read; it isn’t where ludodex itself
-          stores data.</div>
-        <div><b>Why it’s one-way.</b> ludodex’s own database is a local SQLite file it reads
-          in-process — that’s what makes it fast (microsecond queries, no network). The sync only
-          <em> pushes out</em>, so PocketBase/Firestore become read replicas while your local library
-          stays the single source of truth. Nothing is pulled back, and enabling this never slows the
-          app down.</div>
-        <div><b>Why not just run on PocketBase?</b> PocketBase is itself SQLite behind a web API —
-          making it the primary store would put a network hop on every query for no real gain. Keeping
-          SQLite local and treating PocketBase as a mirror is strictly faster.</div>
-        <div><b>How the push works.</b> Each record gets a stable id (a hash of its natural key) and an
-          idempotent upsert, tracked by a content-hash cache — so only new/changed/removed records are
-          sent, and a re-sync with nothing changed does almost no work. Safe to run repeatedly; it
-          creates the collections on first run.</div>
-      </div>
-
-      <div className="dbsync-card">
-        <div className="dbsync-head">
-          <span className="dbsync-name">PocketBase</span>
-          <label className="switch">
-            <input type="checkbox" checked={st.pb_enabled} onChange={(e) => toggle({ pb_enabled: e.target.checked })} />
-            <span className="track"><span className="knob" /></span>
-            <span className="switch-text">{st.pb_enabled ? 'On' : 'Off'}</span>
-          </label>
-        </div>
-        <div className="dm-form">
-          <label className="dm-field"><span>Server URL</span>
-            <input placeholder="https://pb.example.com" value={pb.url} onChange={(e) => setPb({ ...pb, url: e.target.value })} /></label>
-          <label className="dm-field"><span>Admin email</span>
-            <input value={pb.email} onChange={(e) => setPb({ ...pb, email: e.target.value })} /></label>
-          <label className="dm-field"><span>Admin password {st.pocketbase.password_set && <em>(saved — type to replace)</em>}</span>
-            <input type="password" autoComplete="new-password" placeholder={st.pocketbase.password_set ? '••••••••' : ''}
-              value={pb.password} onChange={(e) => setPb({ ...pb, password: e.target.value })} /></label>
-        </div>
-        <div className="dbsync-actions">
-          <button className="go primary" disabled={busy !== ''} onClick={savePb}>{busy === 'pb-save' ? 'Saving…' : 'Save'}</button>
-          <button className="ops-btn" disabled={busy !== ''} onClick={() => test('pocketbase')}>{busy === 'pb-test' ? 'Testing…' : 'Test connection'}</button>
-          {msg.pb && <span className="dbsync-msg">{msg.pb}</span>}
-        </div>
-        {checklist(checks.pb)}
-      </div>
-
-      <div className="dbsync-card">
-        <div className="dbsync-head">
-          <span className="dbsync-name">Firebase Firestore</span>
-          <label className="switch">
-            <input type="checkbox" checked={st.fb_enabled} onChange={(e) => toggle({ fb_enabled: e.target.checked })} />
-            <span className="track"><span className="knob" /></span>
-            <span className="switch-text">{st.fb_enabled ? 'On' : 'Off'}</span>
-          </label>
-        </div>
-        <div className="dm-form">
-          <label className="dm-field"><span>Project ID</span>
-            <input value={fb.project_id} onChange={(e) => setFb({ ...fb, project_id: e.target.value })} /></label>
-          <label className="dm-field"><span>Database <em>(usually “(default)”)</em></span>
-            <input value={fb.database} onChange={(e) => setFb({ ...fb, database: e.target.value })} /></label>
-          <label className="dm-field"><span>Collection prefix <em>(optional)</em></span>
-            <input placeholder="ludodex_" value={fb.prefix} onChange={(e) => setFb({ ...fb, prefix: e.target.value })} /></label>
-          <label className="dm-field"><span>Service-account key (JSON) {st.firebase.sa_set && <em>(saved — paste to replace)</em>}</span>
-            <textarea className="dbsync-sa" rows={4} placeholder={'{ "type": "service_account", … }'}
-              value={fb.sa_json} onChange={(e) => setFb({ ...fb, sa_json: e.target.value })} /></label>
-        </div>
-        <div className="dbsync-actions">
-          <button className="go primary" disabled={busy !== ''} onClick={saveFb}>{busy === 'fb-save' ? 'Saving…' : 'Save'}</button>
-          <button className="ops-btn" disabled={busy !== ''} onClick={() => test('firebase')}>{busy === 'fb-test' ? 'Testing…' : 'Test connection'}</button>
-          {msg.fb && <span className="dbsync-msg">{msg.fb}</span>}
-        </div>
-        {checklist(checks.fb)}
-      </div>
-
-      <div className="dbsync-run">
-        <button className="go" onClick={runNow}
-          disabled={busy !== '' || (!st.pb_enabled && !st.fb_enabled) || !!job?.running}>
-          {job?.running ? 'Syncing…' : 'Sync now'}</button>
-        {job && <span className={'dbsync-msg' + (job.ok === false ? ' err' : '')}>
-          {job.running ? (job.step || 'Syncing…')
-            : job.ok ? `Synced to ${job.target} ✓`
-            : job.finished ? `Failed: ${job.error || 'see server log'}` : ''}</span>}
-        {msg.run && <span className="dbsync-msg err">{msg.run}</span>}
-        {(!st.pb_enabled && !st.fb_enabled) && <span className="dim">Enable a target above to sync.</span>}
-      </div>
-    </>
   )
 }
 

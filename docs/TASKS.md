@@ -16,6 +16,11 @@ Nothing is open pending code. One item is **data-gated**:
 |---|---|---|
 | 3 | Auto-fix confidence tuning | The gate is now a setting (Settings → Library → "Automatic fixes"), defaulting to 75. Choosing a *different* value needs a real library to observe false positives against — and it may well never need changing. |
 
+The one-way **"Publish catalog"** mirror was **retired** 2026-07-21: nothing ever read what
+it published, and its name was persistently confused with the backing store that actually
+protects your data (that confusion *was* task #16). Its PocketBase/Firestore primitives were
+extracted to `remote_db.py`, which `dbsync.py` is built on.
+
 #2 is **closed**: all four backing-store backends now pass a live two-way round-trip
 (`test_dbsync_live.py`). The only path still unexercised is Google's OAuth token mint
 (`sync.fb_token`) against a real Firebase project — the emulator ignores auth. That code is
@@ -56,6 +61,7 @@ the first sync + build:
 
 ## Backing-store testing
 
+- `remote_db.py` holds the shared PocketBase/Firestore plumbing (ex-`sync.py`).
 - `test_dbsync_firestore.py` — offline, no creds, no container. Fake Firestore REST server.
 - `test_dbsync_live.py <backend>` — real two-way round-trip (push, no-op re-sync, pull,
   delete both ways, convergence) against an isolated `LUDODEX_DATA`. Run it inside the

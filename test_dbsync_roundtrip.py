@@ -5,7 +5,7 @@ import sys
 import os
 import sqlite3
 sys.path.insert(0, "/app")
-import sync as s
+import remote_db as s
 import config
 import dbsync
 

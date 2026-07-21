@@ -26,7 +26,7 @@ os.environ.setdefault("LUDODEX_DATA", "/tmp/ludodex-fs-test")
 os.makedirs(os.environ["LUDODEX_DATA"], exist_ok=True)
 
 import config                                    # noqa: E402
-import sync as _s                                # noqa: E402
+import remote_db as _s                           # noqa: E402
 import dbsync                                    # noqa: E402
 
 FAIL = []

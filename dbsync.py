@@ -18,7 +18,7 @@ import sqlite3
 import time
 
 import config
-import sync as _s                     # reuse http + PocketBase helpers + CACHE_DB
+import remote_db as _s                # http + PocketBase helpers + CACHE_DB
 
 DATA = os.environ.get("LUDODEX_DATA",
                       os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

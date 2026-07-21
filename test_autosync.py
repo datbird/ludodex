@@ -8,7 +8,7 @@ import os
 sys.path.insert(0, "/app")
 import config
 import dbsync
-import sync as _s
+import remote_db as _s
 
 NK = "__autosync_selftest__"
 STORE = next(x for x in dbsync.STORES if x["name"] == "user_tags")
