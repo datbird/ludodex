@@ -8097,16 +8097,10 @@ def _sync_worker(job, services, media_ids=(), full=False):
         # skips games that already have the art.
         job["step"] = "Fetching missing art…"
         _phase("art", "running")
-        # IGDB first: once a game is matched its art is free and needs no extra key, and it
-        # covers the stores with no art CDN of their own (Epic/GOG/PSN/Xbox). Previously the
-        # only unconditional step here was the SteamGridDB backfill, so an install without an
-        # SGDB key imported those stores completely art-starved.
-        # COST: this provider pass drops and refetches all IGDB art rows, so it adds real
-        # minutes on a large library. Acceptable HERE — a sync is an explicit, already-heavy
-        # operation that rebuilds the catalog — but it is exactly why the wand's apply path
-        # uses the scoped fetch_igdb(only=…) instead and must never call this.
-        _run_script("media_fetch.py", args=["--provider", "igdb"], timeout=3600, job=job)
-        # then SteamGridDB fills whatever IGDB couldn't (needs a key; no-ops without one)
+        # --backfill-art now covers IGDB *and* SteamGridDB, and both passes are scoped to
+        # games that currently have NO art — so this costs API calls only for newly-imported
+        # art-less games, not the whole catalog. (It used to be SGDB-only, which left a
+        # keyless install importing Epic/GOG/PSN/Xbox art-starved.)
         _run_script("media_fetch.py", args=["--backfill-art"], timeout=3600, job=job)
         _phase("art", "ok")
         step()

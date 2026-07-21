@@ -85,10 +85,18 @@ check(bool(callers), "_auto_fix_contamination now has caller(s): %s" % (callers 
 check("resolve_per_entry_identity" in callers,
       "reached from the per-entry resolver's no-candidate path (the wand scan)")
 
-print("5. sync fetches IGDB art, not only SteamGridDB (defect #5)")
-check('"--provider", "igdb"' in app, "sync worker runs the IGDB provider pass")
-i_ig, i_bf = app.index('"--provider", "igdb"'), app.index('"--backfill-art"')
-check(i_ig < i_bf, "IGDB runs before the SGDB backfill (free art first)")
+print("5. sync fills art from IGDB too, incrementally (defect #5)")
+mf = open(os.path.join(ROOT, "media_fetch.py")).read()
+check("def art_less_keys(" in mf, "there is a helper for 'games with no art'")
+bf = mf[mf.index("def fetch_missing_art("):]
+bf = bf[:bf.index("\ndef ", 10)]
+check("fetch_igdb(con, now, only=" in bf, "backfill-art fetches IGDB art SCOPED to those games")
+check("fetch_steamgriddb_targets" in bf, "and still falls through to SteamGridDB")
+check("art_less_keys" in bf, "the target set is the art-less games, not the catalog")
+# the sync must NOT use the blunt whole-catalog provider pass
+check('"--provider", "igdb"' not in app,
+      "sync does NOT run the unscoped whole-catalog IGDB refetch")
+check(app.count('"--backfill-art"') == 1, "a single incremental art step in the sync")
 
 print("6. dead reconcile chain is gone (defect #6)")
 for name in ("_enqueue_reconcile", "_reconcile_drain", "_aimeta_apply_media"):
@@ -116,6 +124,46 @@ check("title:<norm_key> — SUFFIX-FREE" in bl, "schema comment matches the real
 tsx = open(os.path.join(ROOT, "web", "src", "App.tsx")).read()
 check("nothing is applied automatically" not in tsx,
       "scan copy no longer claims nothing is applied automatically")
+
+print("10. re-fetching art does NOT re-download it (incremental media)")
+import media_index                                        # noqa: E402
+idx = media_index.index_con()
+media_fetch.invalidate_resmap()
+media_fetch.put(idx, "portal", "cover", "igdb", "http://x/cover.jpg", 1)
+idx.commit()
+# simulate materialization: the bytes are downloaded and the row points at them
+idx.execute("UPDATE media SET sha1='deadbeef' WHERE norm_key='portal'")
+idx.commit()
+before = idx.execute("SELECT sha1 FROM media WHERE norm_key='portal'").fetchone()[0]
+check(before == "deadbeef", "row is materialized (sha1 set)")
+# a later sync re-fetches the very same asset
+media_fetch.put(idx, "portal", "cover", "igdb", "http://x/cover.jpg", 2)
+idx.commit()
+row = idx.execute("SELECT sha1, indexed_at FROM media WHERE norm_key='portal'").fetchone()
+check(row[0] == "deadbeef",
+      "sha1 SURVIVES the re-fetch — the bytes are not re-downloaded (got %r)" % row[0])
+check(row[1] == 2, "but refreshable metadata is still updated")
+check(idx.execute("SELECT COUNT(*) FROM media WHERE norm_key='portal'").fetchone()[0] == 1,
+      "no duplicate row created")
+
+print("11. art gap-fill is scoped to games that lack art")
+lib = os.path.join(scratch, "lib.sqlite")
+import config as _cfg
+_cfg.set_("library_db", lib)
+lc = sqlite3.connect(lib)
+lc.executescript(
+    "CREATE TABLE games (id INTEGER PRIMARY KEY, norm_key TEXT, canonical_title TEXT);"
+    "CREATE TABLE sources (game_id INTEGER, source TEXT, source_id TEXT);"
+    "CREATE TABLE metadata_links (game_id INTEGER, provider TEXT);")
+lc.executescript(
+    "INSERT INTO games VALUES (1,'portal','Portal'),(2,'doom','Doom');"
+    "INSERT INTO sources VALUES (1,'steam','400'),(2,'steam','401');")
+lc.commit(); lc.close()
+targets = media_fetch.art_less_keys(idx)
+keys = sorted(t[0] for t in targets)
+check(keys == ["doom"],
+      "only the art-less game is targeted; the one WITH a cover is skipped (got %s)" % keys)
+idx.close()
 
 print()
 if FAIL:

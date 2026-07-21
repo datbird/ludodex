@@ -231,9 +231,19 @@ def put(con, nk, kind, provider, url, now, ext="jpg", system=None, meta=None,
     # gkey pins an explicit identity — used for per-entry same-title splits (a ROM entry
     # whose igdb id differs from the title-level resolution, DESIGN §11.9); default keys
     # the row by the title-level resolution via game_key(nk).
-    con.execute("INSERT OR REPLACE INTO media(norm_key,system,kind,provider,"
+    # ON CONFLICT ... DO UPDATE, never INSERT OR REPLACE: the unique key is
+    # (provider, kind, ref), and REPLACE deletes the existing row — silently dropping its
+    # `sha1`, which is the pointer to the ALREADY-DOWNLOADED bytes in the media repo. That
+    # made every re-fetch of an unchanged asset re-download it. The ref is identical (it's
+    # part of the conflict key), so the bytes are still valid: keep the sha1 and refresh
+    # only the metadata that can actually change.
+    con.execute("INSERT INTO media(norm_key,system,kind,provider,"
                 "ref_type,ref,ext,matched,meta,indexed_at,game_key) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(provider,kind,ref) DO UPDATE SET "
+                "norm_key=excluded.norm_key, system=excluded.system, ext=excluded.ext, "
+                "matched=excluded.matched, meta=excluded.meta, "
+                "indexed_at=excluded.indexed_at, game_key=excluded.game_key",
                 (nk, system, kind, provider, "url", url, ext, 1, meta, now,
                  gkey or game_key(nk, system)))
 
@@ -450,17 +460,42 @@ def identified_targets():
     return out
 
 
+def art_less_keys(con, kinds=("cover", "hero", "logo", "background")):
+    """Identified games that have NO art at all of the given kinds. The gap-fill set —
+    keeping the sync's art step proportional to what's missing instead of the catalog."""
+    have = {nk for (nk,) in con.execute(
+        "SELECT DISTINCT norm_key FROM media WHERE kind IN (%s)"
+        % ",".join("?" * len(kinds)), tuple(kinds))}
+    return [t for t in identified_targets() if t[0] not in have]
+
+
 def fetch_missing_art(con, now, limit=None):
-    """Built-in art gap-fill: for every identified game still missing a
-    cover/hero/logo, pull it from SteamGridDB by name (or Steam appid). The SGDB
-    fetch already skips games that have those kinds, so this is self-limiting —
-    after the first pass only newly-imported art-less games cost an API call."""
+    """Built-in art gap-fill for every identified game still missing art.
+
+    IGDB first — once a game is matched its art costs nothing extra and no API key, and it
+    covers the stores with no art CDN of their own (Epic/GOG/PSN/Xbox). SteamGridDB then
+    fills whatever IGDB couldn't, if a key is configured.
+
+    INCREMENTAL BY CONSTRUCTION: both passes are scoped to games that currently have no art,
+    so a routine sync costs API calls only for newly-imported art-less games. This is
+    deliberately NOT `fetch_igdb(con, now)` with no scope — that refetches the whole catalog
+    and, combined with put()'s upsert, used to reset every sha1 and re-download the bytes."""
     invalidate_resmap()   # identities may have changed since the last call
+    targets = art_less_keys(con)
+    n = 0
+    if targets and config.media_enabled("igdb"):
+        only = {t[0] for t in targets}
+        try:
+            n += fetch_igdb(con, now, only=only) or 0
+        except Exception as e:
+            print("media_fetch: backfill-art igdb — %s" % str(e)[:150], file=sys.stderr)
     if not config.steamgriddb_key():
-        print("media_fetch: backfill-art — no SteamGridDB key; skipping",
+        print("media_fetch: backfill-art — %d art-less game(s); IGDB filled %d, "
+              "no SteamGridDB key so skipping that pass" % (len(targets), n),
               file=sys.stderr)
-        return 0
-    return fetch_steamgriddb_targets(con, now, identified_targets(), limit)
+        return n
+    still = art_less_keys(con)          # re-read: IGDB may have covered some
+    return n + (fetch_steamgriddb_targets(con, now, still, limit) or 0)
 
 
 def fetch_screenscraper(con, now, only=None):
