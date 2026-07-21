@@ -8419,9 +8419,12 @@ function MetadataScan() {
     <>
       <h2>Metadata scan</h2>
       <p className="dim">Have AI audit provider matches, identify unmatched games, and fill
-        attribute gaps. Results land in the <b>Review</b> tab for you to accept or reject —
-        nothing is applied automatically. Uses the <b>Metadata search &amp; supplement</b> AI area
-        (set its provider/model in AI settings).</p>
+        attribute gaps. Match and attribute proposals land in the <b>Review</b> tab for you to
+        accept or reject. A scan does apply a few high-certainty corrections on its own —
+        detaching an entry bound to the wrong same-named game, resolving a per-platform
+        identity, and recording a compilation — each gated on the confidence set under
+        Library → Automatic fixes, and each reversible. Uses the <b>Metadata search &amp;
+        supplement</b> AI area (set its provider/model in AI settings).</p>
 
       <div className="aim-cards">
         {CARDS.map((c) => (

@@ -6,6 +6,13 @@
 cd "$(dirname "$0")" || exit 1
 export PATH="$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
 
+# Ownership TSVs must land wherever the app keeps its state, NOT beside the scripts.
+# build_library reads them from $LUDODEX_DATA and only falls back to the script dir when
+# NO store TSV exists there — so a CLI run writing here while the app has its own copies
+# produced a split brain: the fresh CLI pull was silently ignored.
+DATA_DIR="${LUDODEX_DATA:-$(pwd)}"
+mkdir -p "$DATA_DIR"
+
 cfg() { python3 config.py get "$1"; }
 enabled() { [ "$(cfg "source_$1_enabled")" != 0 ]; }   # default on
 meta_enabled() { [ "$(cfg "metadata_$1_enabled")" != 0 ]; }   # default on
@@ -23,41 +30,41 @@ echo "== Steam =="
 if ! enabled steam; then echo "  steam: disabled"; else
   KEY=$(python3 config.py steam-key)
   if [ -n "$KEY" ]; then
-    STEAM_API_KEY="$KEY" python3 steam_owned.py > steam_games.tsv 2>steam.err \
-      && echo "  steam: $(wc -l < steam_games.tsv) games" \
+    STEAM_API_KEY="$KEY" python3 steam_owned.py > "$DATA_DIR/steam_games.tsv" 2>steam.err \
+      && echo "  steam: $(wc -l < "$DATA_DIR/steam_games.tsv") games" \
       || echo "  steam FAILED: $(tail -1 steam.err)"
-    STEAM_API_KEY="$KEY" python3 steam_wishlist.py > steam_wishlist.tsv 2>steam_wl.err \
-      && echo "  steam wishlist: $(wc -l < steam_wishlist.tsv) wanted" \
+    STEAM_API_KEY="$KEY" python3 steam_wishlist.py > "$DATA_DIR/steam_wishlist.tsv" 2>steam_wl.err \
+      && echo "  steam wishlist: $(wc -l < "$DATA_DIR/steam_wishlist.tsv") wanted" \
       || echo "  steam wishlist: $(tail -1 steam_wl.err 2>/dev/null)"
   else echo "  steam: no API key (run ./setup.sh, or set steam_api_key)"; fi
 fi
 
 echo "== Epic =="
 if ! enabled epic; then echo "  epic: disabled"; else
-  python3 epic_owned.py 2>epic.err && echo "  epic: $(wc -l < epic_games.tsv) games" \
+  python3 epic_owned.py 2>epic.err && echo "  epic: $(wc -l < "$DATA_DIR/epic_games.tsv") games" \
     || echo "  epic FAILED: $(tail -1 epic.err)"
 fi
 
 echo "== GOG =="
 if ! enabled gog; then echo "  gog: disabled"; else
-  python3 gog_owned.py > gog_games.tsv 2>gog.err && echo "  gog: $(wc -l < gog_games.tsv) games" \
+  python3 gog_owned.py > "$DATA_DIR/gog_games.tsv" 2>gog.err && echo "  gog: $(wc -l < "$DATA_DIR/gog_games.tsv") games" \
     || echo "  gog FAILED: $(tail -1 gog.err)"
-  python3 gog_wishlist.py > gog_wishlist.tsv 2>gog_wl.err && echo "  gog wishlist: $(wc -l < gog_wishlist.tsv) wanted" \
+  python3 gog_wishlist.py > "$DATA_DIR/gog_wishlist.tsv" 2>gog_wl.err && echo "  gog wishlist: $(wc -l < "$DATA_DIR/gog_wishlist.tsv") wanted" \
     || echo "  gog wishlist: $(tail -1 gog_wl.err 2>/dev/null)"
 fi
 
 echo "== itch.io =="
 if ! enabled itch; then echo "  itch: disabled"; else
   if [ -n "$(python3 config.py itch-key)" ]; then
-    python3 itch_owned.py > itch_games.tsv 2>itch.err && echo "  itch: $(wc -l < itch_games.tsv) games" \
+    python3 itch_owned.py > "$DATA_DIR/itch_games.tsv" 2>itch.err && echo "  itch: $(wc -l < "$DATA_DIR/itch_games.tsv") games" \
       || echo "  itch FAILED: $(tail -1 itch.err)"
   else echo "  itch: no API key (run ./setup.sh, or set itch_api_key)"; fi
 fi
 
 echo "== EA =="
 if ! enabled ea; then echo "  ea: disabled"; else
-  if python3 ea_owned.py > ea_games.tsv 2>ea.err; then
-    echo "  ea: $(wc -l < ea_games.tsv) games"
+  if python3 ea_owned.py > "$DATA_DIR/ea_games.tsv" 2>ea.err; then
+    echo "  ea: $(wc -l < "$DATA_DIR/ea_games.tsv") games"
   else echo "  ea: $(tail -1 ea.err 2>/dev/null) (set up once: python3 ea_owned.py --login)"; fi
 fi
 

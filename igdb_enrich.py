@@ -437,7 +437,8 @@ def era_reheal(argv):
     # (store-only games are never era-gated, so skip them).
     cand = []                       # [(norm_key, igdb_id)]
     for nk, iid in con.execute(
-            "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0"):
+            "SELECT norm_key, igdb_id FROM igdb_resolution "
+            "WHERE igdb_id>0 AND matched_by!='manual'"):   # never re-heal a hand pin
         cs = consoles.get(nk)
         if cs and any(console_eras.era(c) for c in cs):
             cand.append((nk, iid))
@@ -663,6 +664,16 @@ def main(argv):
 
     resolved = {}                       # norm_key -> igdb_id (found, >0)
     failed_at = {}                      # norm_key -> when a name-search last failed (id=0)
+    # A hand-pinned identity is the user's explicit decision and outranks anything we can
+    # work out. --all ("Full refresh") re-resolves everything EXCEPT these, otherwise a
+    # routine full sync silently reverts every manual pin — and can even leave one
+    # UNMATCHED if the name search now misses. The wand's own apply already skips them;
+    # this is the CLI/full-sync path catching up.
+    pinned = {nk for (nk,) in con.execute(
+        "SELECT norm_key FROM igdb_resolution WHERE matched_by='manual'")}
+    if pinned:
+        print("igdb: %d manually pinned game(s) left untouched" % len(pinned),
+              file=sys.stderr)
     if not do_all:
         for nk, iid, rat in con.execute(
                 "SELECT norm_key, igdb_id, resolved_at FROM igdb_resolution"):
@@ -677,7 +688,7 @@ def main(argv):
     # call volume ever matters. --all (Full) re-resolves everything regardless.
     fail_ttl = int(config.get("igdb_fail_retry_days") or 0) * 86400
     todo = [nk for nk in games
-            if nk not in resolved
+            if nk not in resolved and nk not in pinned
             and (nk not in failed_at or now - failed_at[nk] >= fail_ttl)]
     print("igdb: %d games | %d already resolved | %d to resolve"
           % (len(games), len(resolved), len(todo)), file=sys.stderr)

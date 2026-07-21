@@ -77,6 +77,19 @@ SGDB = "https://www.steamgriddb.com/api/v2"
 _RESMAP = None
 
 
+def invalidate_resmap():
+    """Drop the cached resolution map.
+
+    MUST be called whenever an identity changes inside a long-running process. As a CLI
+    script the cache was harmless (one process, one pass), but the server imports this
+    module and lives for days: after the first fetch, a wand pin/detach/re-identify would
+    fetch the new art and then stamp it with the STALE game_key, and the media serve-gate
+    would hide precisely the cover the wand just fetched — the "wand says done, cover
+    doesn't appear" failure the one-operation contract forbids."""
+    global _RESMAP
+    _RESMAP = None
+
+
 def _resmap():
     """Cached {norm_key -> igdb_id} for resolved games (igdb_id>0). Empty if the
     metadata cache is absent or unpopulated (fresh install / IGDB disabled)."""
@@ -247,6 +260,7 @@ def fetch_igdb(con, now, only=None):
     DESIGN §11.9) and stamps their rows with the override's own game_key, so a split
     ROM entry (the 1986 Portal) gets ITS game's art instead of the title-level (store)
     game's — otherwise its cover could never be sourced."""
+    invalidate_resmap()   # identities may have changed since the last call
     if not os.path.exists(META_CACHE):
         print("media_fetch: igdb — no metadata-cache yet (run igdb_enrich.py)",
               file=sys.stderr)
@@ -358,6 +372,7 @@ def fetch_steamgriddb_targets(con, now, targets, limit=None):
     """Gap-fill hero/logo/cover/icon from SteamGridDB for arbitrary identified
     games — NOT just Steam. `targets` = [(norm_key, title, steam_appid_or_None)];
     each resolves by appid or by title search. Returns the number of URLs added."""
+    invalidate_resmap()   # identities may have changed since the last call
     key = config.steamgriddb_key()
     if not key:
         print("media_fetch: steamgriddb — no API key; skipping", file=sys.stderr)
@@ -440,6 +455,7 @@ def fetch_missing_art(con, now, limit=None):
     cover/hero/logo, pull it from SteamGridDB by name (or Steam appid). The SGDB
     fetch already skips games that have those kinds, so this is self-limiting —
     after the first pass only newly-imported art-less games cost an API call."""
+    invalidate_resmap()   # identities may have changed since the last call
     if not config.steamgriddb_key():
         print("media_fetch: backfill-art — no SteamGridDB key; skipping",
               file=sys.stderr)
@@ -452,6 +468,7 @@ def fetch_screenscraper(con, now, only=None):
     came free with each metadata scrape). Stored as URL refs; downloading them
     later appends auth via screenscraper.media_url_with_auth. `only` = a set of
     norm_keys to restrict to (scoped reconcile after a wand apply); None = all."""
+    invalidate_resmap()   # identities may have changed since the last call
     cache = os.path.join(DATA, "screenscraper-cache.sqlite")
     if not os.path.exists(cache):
         print("media_fetch: screenscraper — no cache yet (run ss_scrape.py)",

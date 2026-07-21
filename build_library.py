@@ -808,7 +808,7 @@ cur.executescript("""
 CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
   platform TEXT, entry_key TEXT,   -- one entry per (norm_key, platform); entry_key = norm_key@platform
   base_key TEXT,                   -- cross-ref group ("also owned on" + metadata fan-out); = norm_key unless era-separated
-  game_key TEXT,                   -- resolved-identity key (DESIGN §11.9): igdb:<id> when the entry adopts a resolved identity (identified or stray retro-handheld port), else title:<norm_key>@<platform> (era-collision or unidentified). Serve matches this against media.game_key (Phase 3).
+  game_key TEXT,                   -- resolved-identity key (DESIGN §11.9): igdb:<id> when the entry adopts a resolved identity (identified or stray retro-handheld port), else title:<norm_key> — SUFFIX-FREE, matching media_fetch.game_key (era-collision, detached or unidentified). Serve matches this against media.game_key (Phase 3).
   n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
   has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
   has_archive INT, in_playnite INT, in_launchbox INT,
