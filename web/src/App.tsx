@@ -6434,7 +6434,10 @@ function DashStats({ stats, onBrowse, onFilter }: {
 }) {
   const artPct = stats.games ? Math.round((stats.media.games_with_art / stats.games) * 100) : 0
   const pct = (n: number) => stats.games ? Math.round((n / stats.games) * 100) : 0
-  const sources = Object.entries(stats.by_source).sort((a, b) => b[1] - a[1])
+  // Only sources actually contributing games — the static column buckets
+  // (emulation/steam/gog/epic/itch/archive) always exist at 0, so counting them made a
+  // fresh install read "6 Sources" instead of 0.
+  const sources = Object.entries(stats.by_source).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1])
   const kinds = Object.entries(stats.media.by_kind).sort((a, b) => b[1] - a[1])
   return (
     <>
@@ -6485,6 +6488,7 @@ function DashStats({ stats, onBrowse, onFilter }: {
       <div className="dash-cols">
         <section className="dash-panel">
           <h3>By source</h3>
+          {sources.length === 0 && <div className="dim">No sources connected yet.</div>}
           {sources.map(([name, n]) => (
             <div key={name} className="dash-bar-row">
               <span className="dbr-name">{name}</span>
