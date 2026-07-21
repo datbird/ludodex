@@ -3150,6 +3150,10 @@ a.idchip:hover { background: var(--accent-bg); }
 .fc-chip { font-size: 11px; color: var(--text); background: var(--border); border-radius: 6px; padding: 2px 7px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fc-chip.fc-file { font-family: var(--mono, ui-monospace, monospace); }
 .fc-chip.fc-dim { background: transparent; color: var(--text-dim, #9aa); padding-left: 0; }
+.fc-chip.fc-prov { background: color-mix(in srgb, var(--accent, #5b8def) 16%, transparent); color: var(--accent, #5b8def); }
+.fc-chip.fc-release { background: color-mix(in srgb, #7a5bd9 16%, transparent); color: #7a5bd9; }
+.fc-chip.fc-release.fc-release-block { background: color-mix(in srgb, #d98a00 18%, transparent); color: #d98a00; }
+.chg-warn.chg-warn-release { color: #d98a00; }
 
 /* always-on anchor facts (System / Year) with a new/known badge */
 .af-row { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 8px 12px; border-bottom: 1px solid var(--border); }

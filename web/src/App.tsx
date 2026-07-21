@@ -8061,6 +8061,26 @@ function changeIsManual(f: AiFinding, c: Change): boolean {
 // Two anchor facts we ALWAYS state on every game card, whether or not the scan is
 // changing them: the platform/system and the release year. A ✨/✓ badge marks whether
 // the value is new info from this scan or something we already knew.
+// igdb_resolution.matched_by code -> how the reviewer reads it. The "why/how identified"
+// signal that pairs with the proposed match row.
+const PROVENANCE_LABEL: Record<string, { icon: string; label: string }> = {
+  name: { icon: '🔗', label: 'IGDB title match' },
+  ai_name: { icon: '🤖', label: 'AI match' },
+  ai_entry: { icon: '🧩', label: 'AI per-platform match' },
+  steam_appid: { icon: '🎯', label: 'Steam App ID' },
+  era_reheal: { icon: '🕓', label: 'Era-corrected match' },
+  era_reject: { icon: '🚫', label: 'Era-rejected' },
+  manual: { icon: '✋', label: 'Set by hand' },
+  detached: { icon: '⛔', label: 'Separate game' },
+  none: { icon: '❔', label: 'Unmatched' },
+}
+
+// Does the finding propose/hold a commercial IGDB identity? (A block-type homebrew release
+// matched to one of these is the risky case the mismatch warning flags.)
+function hasIgdbMatch(p: AiFindingPayload): boolean {
+  return providerMatches(p).some((m) => m.igdb_id != null || m.provider === 'igdb')
+}
+
 function AnchorFacts({ f }: { f: AiFinding }) {
   const ctx = f.context
   const systems = ctx?.systems || []
@@ -8103,6 +8123,13 @@ function FindingContextStrip({ ctx }: { ctx?: FindingContext | null }) {
   if (ctx.tags?.length) bits.push(<span key="t" className="fc-chip">🏷 {ctx.tags.join(' · ')}</span>)
   if (ctx.sources?.length) bits.push(<span key="s" className="fc-chip fc-dim">via {ctx.sources.join(', ')}</span>)
   if (ctx.current_match) bits.push(<span key="m" className="fc-chip fc-dim">now: {ctx.current_match}</span>)
+  if (ctx.provenance) {
+    const pv = PROVENANCE_LABEL[ctx.provenance] || { icon: '🔎', label: ctx.provenance }
+    bits.push(<span key="pv" className="fc-chip fc-prov" title="How this game is identified">{pv.icon} {pv.label}</span>)
+  }
+  if (ctx.release_type) bits.push(
+    <span key="rt" className={'fc-chip fc-release' + (ctx.release_block ? ' fc-release-block' : '')}
+      title="Release type (from the ROM's scene tags)">🏷 {ctx.release_type}</span>)
   const paths = ctx.paths || []
   if (!bits.length && !paths.length) return null
   return (
@@ -8434,6 +8461,10 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
             {p.match?.status === 'wrong' && (
               <div className="chg-warn">⚠ current match may be wrong:{' '}
                 <b>{p.current_match?.title || '—'}</b> → <b>{p.match.suggested_title || '—'}</b></div>
+            )}
+            {f.context?.release_block && hasIgdbMatch(p) && (
+              <div className="chg-warn chg-warn-release">⚠ <b>{f.context.release_type}</b> release
+                {' '}matched to a commercial title — verify this ROM really is that game.</div>
             )}
             {changes.map((c) => {
               const man = changeIsManual(f, c)

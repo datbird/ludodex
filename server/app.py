@@ -3883,6 +3883,45 @@ def _manual_edits(nk):
     return {"identity": identity, "attrs": attrs}
 
 
+# Homebrew/hack/unlicensed can't legitimately BE a commercial IGDB title — mirror of
+# build_library.BLOCK_RELEASE_TYPES so the review can warn on a block-type→IGDB match.
+_BLOCK_RELEASE_TYPES = {"Homebrew", "Hack", "Unlicensed"}
+
+
+def _identity_provenance(nk):
+    """How this game is currently identified + its release type, for the wand review's
+    factual strip. `provenance` = igdb_resolution.matched_by (name / ai_name / steam_appid /
+    era_reheal / manual / none); `release_type` = the homebrew.py classification attribute
+    (Homebrew / Hack / Prototype / …, or None = commercial); `release_block` marks the types
+    that must never sit on a commercial IGDB identity (drives the mismatch warning)."""
+    prov = None
+    try:
+        mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+        try:
+            r = mc.execute("SELECT matched_by FROM igdb_resolution WHERE norm_key=?",
+                           (nk,)).fetchone()
+            prov = r[0] if r and r[0] else None
+        finally:
+            mc.close()
+    except Exception:
+        pass
+    rtype = None
+    try:
+        lib = ro(LIBRARY_DB)
+        try:
+            r = lib.execute(
+                "SELECT ga.value FROM game_attributes ga JOIN games g ON ga.game_id=g.id "
+                "WHERE g.norm_key=? AND ga.kind='release_type' AND ga.value<>'' LIMIT 1",
+                (nk,)).fetchone()
+            rtype = r[0] if r and r[0] else None
+        finally:
+            lib.close()
+    except Exception:
+        pass
+    return {"provenance": prov, "release_type": rtype,
+            "release_block": rtype in _BLOCK_RELEASE_TYPES}
+
+
 @app.get("/api/aimeta/findings")
 def aimeta_findings(status: str = Query(None), kind: str = Query(None),
                     run_id: int = Query(None)):
@@ -3899,7 +3938,10 @@ def aimeta_findings(status: str = Query(None), kind: str = Query(None),
             if nk not in ctx_cache:
                 try:
                     c = aimeta.game_context(nk)
-                    ctx_cache[nk] = _finding_context(c) if c else None
+                    fc = _finding_context(c) if c else None
+                    if fc is not None:
+                        fc.update(_identity_provenance(nk))  # provenance + release type
+                    ctx_cache[nk] = fc
                 except Exception:
                     ctx_cache[nk] = None
             f["context"] = ctx_cache.get(nk)

@@ -153,6 +153,11 @@ export interface FindingContext {
   tags: string[]
   siblings: string[]
   current_match: string | null
+  // how this game is currently identified (igdb_resolution.matched_by), its homebrew.py
+  // release type (null = commercial), and whether that type must never be a commercial title.
+  provenance?: string | null
+  release_type?: string | null
+  release_block?: boolean
 }
 export interface AiFinding {
   id: number
