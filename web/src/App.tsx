@@ -1194,8 +1194,11 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
        { id: 'budgets', name: 'Budgets & limits' }, { id: 'report', name: 'Usage report' }],
   connections: [{ id: 'devices', name: 'Devices' },
                 { id: 'credentials', name: 'Stores & providers' },
-                { id: 'backingstore', name: 'Backing store' },
-                { id: 'dbsync', name: 'Database sync' },
+                // Both of these talk to an external database, so name them by what they
+                // DO, not by the mechanism — "Backing store" vs "Database sync" read as
+                // the same feature and users picked the wrong one.
+                { id: 'backingstore', name: 'Backup & restore' },
+                { id: 'dbsync', name: 'Publish catalog' },
                 { id: 'limits', name: 'Rate limits' }],
   library: [{ id: 'preferences', name: 'Preferences' }, { id: 'banned', name: 'Banned media' }],
   dashboard: [{ id: 'spotlight', name: 'Spotlight' }],
@@ -1214,8 +1217,10 @@ const SETTINGS_KEYWORDS: Record<string, string> = {
   report: 'usage report cost tokens spend',
   devices: 'device library manager rom media path ssh host master edit folder connection',
   credentials: 'stores providers steam gog epic itch screenscraper igdb ea login accounts credentials',
-  backingstore: 'backing store two-way sync database postgres supabase mysql pocketbase backend cache durable',
-  dbsync: 'database sync backup replicate',
+  // Old names ("backing store", "database sync") stay as search terms so anyone who
+  // learned them still lands on the right panel.
+  backingstore: 'backup restore backing store two-way sync database postgres supabase mysql pocketbase backend cache durable migrate another machine',
+  dbsync: 'publish catalog export mirror replica database sync read-only one-way pocketbase firestore',
   limits: 'rate limit api throttle quota cooldown per minute per day',
   preferences: 'media language ban file operations browse commander manifests apply mode preferences distribution',
   banned: 'banned media unban hidden',
@@ -1496,11 +1501,14 @@ function BackingStore() {
 
   return (
     <>
-      <h2>Backing store</h2>
+      <h2>Backup &amp; restore</h2>
       <p className="dim">Keep your durable data — tags, ownership, art pins, attribute
         overrides, framing, manual games — in an external database and sync it <b>both ways</b>.
         SQLite stays your fast local cache; this backend is the durable source of truth, so you
         can restore or run ludodex from another machine and get your library back.</p>
+      <p className="dim panel-vs">Looking to hand your catalog to <em>another app</em> instead?
+        That’s <b>Publish catalog</b> — a one-way, read-only copy. This page is about not losing
+        your own work.</p>
       <div className="bs-row">
         <label>Backend</label>
         <select value={backend} onChange={(e) => { setBackend(e.target.value); setTest(null) }}>
@@ -1613,8 +1621,11 @@ function DatabaseSync() {
 
   return (
     <>
-      <h2>Database sync</h2>
+      <h2>Publish catalog</h2>
       <p className="dim">Mirror your library out to a database that other apps and devices can read.</p>
+      <p className="dim panel-vs">This does <b>not</b> back you up — it only pushes a read-only
+        copy outward, and your edits are never restored from it. For that, use
+        <b> Backup &amp; restore</b>.</p>
       <div className="dbsync-explain">
         <div><b>What this does.</b> After each catalog rebuild, ludodex publishes the finished
           catalog — your <code>games</code> and <code>sources</code> — into the target(s) you enable
@@ -4387,7 +4398,7 @@ function ServerOps() {
     } catch (e) { setMsg((e as Error).message); setBusy('') }
   }
   const syncBacking = async () => {
-    setBusy('backing'); setMsg('Syncing backing store…')
+    setBusy('backing'); setMsg('Backing up (two-way sync)…')
     try {
       await api.backingRun(false)
       let n = 0
@@ -4481,8 +4492,8 @@ function ServerOps() {
                     {busy === 'rebuild' ? 'Rebuilding…' : '⟳ Rebuild catalog'}</button>
                   {backingCfg && (
                     <button className="ops-btn" disabled={!!busy} onClick={syncBacking}
-                      title="Two-way sync your durable data (tags, ownership, art pins, overrides, framing, manual games) with your PocketBase backing store. SQLite stays your fast local copy.">
-                      {busy === 'backing' ? 'Syncing…' : '☁ Sync backing store'}</button>
+                      title="Two-way sync your durable data (tags, ownership, art pins, overrides, framing, manual games) with your backup database. SQLite stays your fast local copy.">
+                      {busy === 'backing' ? 'Backing up…' : '☁ Back up now'}</button>
                   )}
                   {broken.length > 0 && (
                     <button className="ops-btn danger" disabled={!!busy}
@@ -6627,6 +6638,40 @@ type Staged = {
 type Side = 'left' | 'right'
 const newPane = (deviceId: number): PaneState =>
   ({ deviceId, path: '/', dirs: [], files: [], loading: false, sel: new Set(), anchor: null })
+
+// Where a pane opens. Landing on the server's filesystem root is useless — on a
+// fresh install it's a wall of /bin /boot /dev. Prefer, in order: wherever the user
+// last was, then a configured library path, then root as the last resort.
+type PaneLoc = { deviceId: number; path: string }
+const paneMemKey = (side: Side) => `ludodex-files-${side}`
+const readPaneLoc = (side: Side): PaneLoc | null => {
+  try {
+    const raw = localStorage.getItem(paneMemKey(side))
+    if (!raw) return null
+    const v = JSON.parse(raw)
+    return typeof v?.path === 'string' && typeof v?.deviceId === 'number' ? v : null
+  } catch { return null }
+}
+const writePaneLoc = (side: Side, loc: PaneLoc) => {
+  try { localStorage.setItem(paneMemKey(side), JSON.stringify(loc)) } catch { /* private mode */ }
+}
+// First enabled library manager with a path — ROMs for the left pane, media for the
+// right, so the default layout is "my games | my art" rather than "/ | /".
+const libraryLocs = (devices: Device[]): { left: PaneLoc; right: PaneLoc } | null => {
+  for (const d of devices) {
+    if (!d.enabled) continue
+    for (const m of d.managers ?? []) {
+      if (!m.enabled) continue
+      const roms = (m.rom_path || '').trim()
+      const media = (m.media_path || '').trim()
+      if (!roms && !media) continue
+      const left = { deviceId: m.device_id ?? d.id, path: roms || media }
+      const right = { deviceId: m.device_id ?? d.id, path: media || roms }
+      return { left, right }
+    }
+  }
+  return null
+}
 const orderedNames = (p: PaneState) => [...p.dirs.map((d) => d.name), ...p.files.map((f) => f.name)]
 const parentPath = (p: string) => {
   const q = p.replace(/\/+$/, ''); const i = q.lastIndexOf('/')
@@ -6808,6 +6853,9 @@ function Commander() {
     setPane(side, (s) => ({ ...s, deviceId, path: p, loading: true, error: '', sel: new Set(), anchor: null }))
     try {
       const r = await api.browseEntries(deviceId, p)
+      // Only remember locations that actually resolved, so a bad path can't strand
+      // the pane there on the next visit.
+      if (r.ok) writePaneLoc(side, { deviceId, path: p })
       setPane(side, (s) => (s.deviceId === deviceId && s.path === p
         ? { ...s, dirs: r.dirs, files: r.files, loading: false, error: r.ok ? '' : r.error } : s))
     } catch (e) {
@@ -6816,8 +6864,26 @@ function Commander() {
     }
   }, [])
 
-  // initial + on-mount load of both panes at their device root
-  useEffect(() => { loadPane('left', 0, '/'); loadPane('right', 0, '/') }, [loadPane])
+  // Initial load: last-visited location per pane, else a configured library path,
+  // else the device root. Runs once (booted guard) — devices are fetched here rather
+  // than read from useDevices so an empty/failed fetch still boots the panes.
+  const booted = useRef(false)
+  useEffect(() => {
+    if (booted.current) return
+    booted.current = true
+    ;(async () => {
+      const l = readPaneLoc('left'), r = readPaneLoc('right')
+      let def: { left: PaneLoc; right: PaneLoc } | null = null
+      if (!l || !r) {
+        try { def = libraryLocs((await api.devices()).devices) } catch { /* fall through to root */ }
+      }
+      const root = { deviceId: 0, path: '/' }
+      const pick = (mem: PaneLoc | null, side: Side) => mem ?? def?.[side] ?? root
+      const li = pick(l, 'left'), ri = pick(r, 'right')
+      loadPane('left', li.deviceId, li.path)
+      loadPane('right', ri.deviceId, ri.path)
+    })()
+  }, [loadPane])
 
   const onDevice = (side: Side, id: number) => loadPane(side, id, '/')
   const onNavigate = (side: Side, path: string) => loadPane(side, paneOf(side).deviceId, path)

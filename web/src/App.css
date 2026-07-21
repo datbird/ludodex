@@ -3829,3 +3829,9 @@ a.idchip:hover { background: var(--accent-bg); }
 }
 .errbound-btn:hover { background: var(--accent); color: #fff; }
 .errbound-hint { font-size: 12px; color: var(--text); opacity: 0.75; }
+
+/* "not to be confused with the other one" pointer — Backup & restore vs Publish catalog */
+.panel-vs {
+  border-left: 2px solid var(--border); padding-left: 10px;
+  margin-top: -4px; font-size: 13px;
+}
