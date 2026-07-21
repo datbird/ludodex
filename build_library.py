@@ -1041,20 +1041,33 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
     mc = sqlite3.connect(CACHE_DB)
     try:
         rows = mc.execute(
-            "SELECT r.norm_key, r.igdb_id, r.slug, m.payload_json "
+            "SELECT r.norm_key, r.igdb_id, r.slug, m.payload_json, r.matched_by "
             "FROM igdb_resolution r JOIN igdb_meta m ON m.igdb_id=r.igdb_id "
             "WHERE r.igdb_id>0").fetchall()
     except sqlite3.OperationalError:
         rows = []                   # cache exists but enrich hasn't populated it
     try:
         erows = mc.execute(
-            "SELECT er.norm_key, er.platform, er.igdb_id, m.payload_json "
+            "SELECT er.norm_key, er.platform, er.igdb_id, m.payload_json, er.matched_by "
             "FROM entry_resolution er JOIN igdb_meta m ON m.igdb_id=er.igdb_id "
             "WHERE er.igdb_id>0").fetchall()
     except sqlite3.OperationalError:
         erows = []                  # no per-entry overrides yet
+    # AI-refined confidence for gray-zone matches (task #13, Phase 4) — nk -> (igdb_id,score)
+    try:
+        ai_conf = {nk: (iid, sc) for nk, iid, sc in mc.execute(
+            "SELECT norm_key, igdb_id, score FROM match_confidence_ai")}
+    except sqlite3.OperationalError:
+        ai_conf = {}                # AI layer not present yet
     mc.close()
-    for nk, iid, slug, payload in rows:
+    # match confidence (task #13): identity certainty per identified entry, stored as an
+    # attribute so `confidence:low` is a normal library filter. Title-level first; a
+    # per-entry resolution (erows) overrides with that entry's own source + record. AI
+    # band scores (match_confidence_ai) win when present + still pointing at the same id.
+    import matchconf
+    gid_platform = {gid: plat for (nk, plat), gid in key_to_gid.items()}
+    _conf = {}                      # gid -> (score:int, reason:str)
+    for nk, iid, slug, payload, matched_by in rows:
         gids = base_to_gids.get(nk)          # metadata is title-level → every platform entry
         if not gids:
             continue
@@ -1068,6 +1081,10 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
         for gid in gids:
             if gid in blocked_gids:          # homebrew/hack/unlicensed: NOT this game
                 continue
+            _sc, _rs = matchconf.match_confidence(matched_by, nk, rec, gid_platform.get(gid))
+            if nk in ai_conf and ai_conf[nk][0] == iid:   # AI band score wins (same id)
+                _sc, _rs = ai_conf[nk][1], "AI-scored"
+            _conf[gid] = (_sc, _rs)
             cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
                         "slug,url) VALUES(?,?,?,?,?)",
                         (gid, "igdb", str(iid), slug, url))
@@ -1086,7 +1103,7 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
     # per-entry resolutions: a same-title split entry (the 1986 Portal ROMs, whose store
     # sibling stays Valve's Portal) gets ITS OWN game's link + metadata, on just that
     # entry's gid — keyed by (norm_key, platform), overriding the era-collision forfeit.
-    for nk, plat, iid, payload in erows:
+    for nk, plat, iid, payload, matched_by in erows:
         gid = key_to_gid.get((nk, plat))
         if not gid or gid in blocked_gids:
             continue
@@ -1094,6 +1111,10 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
             rec = json.loads(payload)
         except ValueError:
             continue
+        _sc, _rs = matchconf.match_confidence(matched_by, nk, rec, plat)  # entry override
+        if nk in ai_conf and ai_conf[nk][0] == iid:
+            _sc, _rs = ai_conf[nk][1], "AI-scored"
+        _conf[gid] = (_sc, _rs)
         cur.execute("DELETE FROM metadata_links WHERE game_id=? AND provider='igdb'", (gid,))
         cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,slug,url) "
                     "VALUES(?,?,?,?,?)", (gid, "igdb", str(iid), None,
@@ -1106,6 +1127,18 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
                         "('emulation','archive'))", (name, gid, gid))
         for kind, val in igdb_map(rec).items():
             _accum(gid, kind, val, "igdb")
+    # persist the confidence + reason as attributes (one value per entry)
+    if _conf:
+        _crows = []
+        for _gid, (_sc, _rs) in _conf.items():
+            _crows.append((_gid, "match_confidence", str(_sc), "derived"))
+            _crows.append((_gid, "match_reason", _rs, "derived"))
+        cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                        "VALUES(?,?,?,?)", _crows)
+        _low = sum(1 for _s, _ in _conf.values()
+                   if _s < int(config.get("match_confidence_threshold") or 60))
+        print("# match confidence: scored %d identified entr(y/ies), %d low-confidence"
+              % (len(_conf), _low), file=sys.stderr)
 
 # ScreenScraper (emulation metadata; one scrape yields metadata + media, media is
 # indexed separately). Unioned with IGDB per the merge above.
