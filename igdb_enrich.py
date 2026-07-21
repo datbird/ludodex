@@ -211,6 +211,45 @@ def _title_matches(h, nk):
     return False
 
 
+def _contig_start(sub, seq):
+    """Start index of `sub` as a contiguous sublist of `seq`, else -1."""
+    if not sub or len(sub) > len(seq):
+        return -1
+    for i in range(len(seq) - len(sub) + 1):
+        if seq[i:i + len(sub)] == sub:
+            return i
+    return -1
+
+
+def _name_anchor_class(nk, names):
+    """How a stored igdb match's name(s) relate to the norm_key — used to find LEGACY
+    fuzzy mis-matches (the pre-2026-07-15 top-hit matcher bound e.g. 'journey' -> 'The
+    Sims 4: Journey to Batuu'). Best (most-anchored) class across all names wins:
+      exact    — a name normalizes exactly to nk (current strict matcher; always fine)
+      anchored — nk is a contiguous run at the START or END of a name (subtitle/prefix
+                 variant like '1943' -> '1943: The Battle of Midway'; legit, keep)
+      interior — nk is a contiguous run BURIED mid-title ('journey' inside 'the sims 4
+                 journey to batuu'); a common word in an unrelated title -> suspect
+      norun    — nk isn't a contiguous run at all (reorder/semantic; murky, left alone)"""
+    nkt = nk.split()
+    best = "norun"
+    order = {"norun": 0, "interior": 1, "anchored": 2, "exact": 3}
+    for x in names:
+        mt = norm(x or "").split()
+        if mt == nkt:
+            return "exact"
+        idx = _contig_start(nkt, mt)
+        if idx == 0 or (idx >= 0 and idx + len(nkt) == len(mt)):
+            cls = "anchored"
+        elif idx > 0:
+            cls = "interior"
+        else:
+            cls = "norun"
+        if order[cls] > order[best]:
+            best = cls
+    return best
+
+
 def _pick_era_aware(hits, nk, consoles, require_unique=False):
     """From IGDB `search` hits, pick the best EXACT normalized-title match that is
     era-plausible for `consoles`. Returns (igdb_id, slug) or (0, None).
@@ -486,9 +525,69 @@ def era_reheal(argv):
              "  (dry-run: no changes written)" if dry else ""), file=sys.stderr)
 
 
+def scrub_fuzzy(argv):
+    """One-time cleanup for LEGACY fuzzy mis-matches — `matched_by='name'` resolutions
+    left by the pre-2026-07-15 top-hit matcher, where the norm_key sits only as an
+    INTERIOR word of an unrelated longer IGDB title ('journey' -> 'The Sims 4: Journey to
+    Batuu', 'ball' -> 'Dragon Ball Z'). A normal resolve pass never revisits these (they're
+    already 'resolved'), so they need an explicit sweep. Anchored subtitle/prefix variants
+    ('1943' -> '1943: The Battle of Midway') are KEPT — the strict matcher would wrongly
+    drop those. Dry-run by default; --apply resets the hits to unmatched so a rebuild
+    re-derives game_key and the strict resolver retries.
+
+      --max-tokens N   only norm_keys with <= N tokens (default 1 = single common words,
+                       the highest-precision egregious class; multi-word interior can be a
+                       real match, e.g. 'ghost recon future soldier')
+      --include-norun  also clear non-contiguous 'norun' matches (riskier; default off)
+      --apply          write the changes (default: print what WOULD change)"""
+    max_tokens = int(argv[argv.index("--max-tokens") + 1]) if "--max-tokens" in argv else 1
+    include_norun = "--include-norun" in argv
+    do_apply = "--apply" in argv
+    con = cache_con()
+    meta = {}
+    for iid, pj in con.execute("SELECT igdb_id, payload_json FROM igdb_meta"):
+        try:
+            meta[iid] = json.loads(pj)
+        except Exception:
+            pass
+    hit = []
+    for nk, iid in con.execute("SELECT norm_key, igdb_id FROM igdb_resolution "
+                               "WHERE igdb_id>0 AND matched_by='name'"):
+        if len(nk.split()) > max_tokens:
+            continue
+        g = meta.get(iid)
+        if not g:
+            continue
+        names = [g.get("name", "")] + [
+            (a.get("name") if isinstance(a, dict) else a)
+            for a in (g.get("alternative_names") or [])]
+        cls = _name_anchor_class(nk, names)
+        if cls == "interior" or (include_norun and cls == "norun"):
+            hit.append((nk, iid, g.get("name"), cls))
+    hit.sort()
+    for nk, iid, name, cls in hit:
+        print("  %-8s %-30s -> igdb:%-8s %s" % (cls, nk, iid, name))
+    print("scrub-fuzzy: %d legacy fuzzy mis-match(es) [max_tokens=%d, include_norun=%s]"
+          % (len(hit), max_tokens, include_norun), file=sys.stderr)
+    if do_apply and hit:
+        now = int(time.time())
+        for nk, _iid, _name, _cls in hit:
+            con.execute("UPDATE igdb_resolution SET igdb_id=0, slug=NULL, "
+                        "matched_by='scrubbed', resolved_at=? WHERE norm_key=?", (now, nk))
+        _commit(con)
+        print("scrub-fuzzy: cleared %d -> unmatched. Rebuild the catalog to re-derive "
+              "game_key (build_library), then they read as their filename title." % len(hit),
+              file=sys.stderr)
+    elif hit:
+        print("scrub-fuzzy: DRY-RUN — pass --apply to clear these.", file=sys.stderr)
+    con.close()
+
+
 def main(argv):
     if "--era-reheal" in argv:
         return era_reheal(argv)
+    if "--scrub-fuzzy" in argv:
+        return scrub_fuzzy(argv)
     do_all = "--all" in argv
     limit = int(argv[argv.index("--limit") + 1]) if "--limit" in argv else None
 
