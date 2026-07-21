@@ -1924,6 +1924,11 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
     setPrefs({ ...prefs, match_ai_band_lo: lo, match_ai_band_hi: hi })
     try { await api.setPrefs({ match_ai_band_lo: lo, match_ai_band_hi: hi }) } catch { load() }
   }
+  const setAutoFix = async (v: number) => {
+    setPrefs({ ...prefs, auto_fix_confidence: v })
+    try { await api.setPrefs({ auto_fix_confidence: v }) } catch { load() }
+  }
+  const autoFix = prefs.auto_fix_confidence ?? 75
   const thr = prefs.match_confidence_threshold ?? 60
   const bandLo = prefs.match_ai_band_lo ?? 40
   const bandHi = prefs.match_ai_band_hi ?? 70
@@ -1979,6 +1984,21 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
           <input type="number" min={0} max={100} value={bandHi} style={{ width: 60 }}
             onChange={(e) => setBand(bandLo, Number(e.target.value))} />
           <span className="pref-hint">%</span>
+        </div>
+      </div>
+
+      <div className="pref-section">
+        <div className="pref-name">Automatic fixes</div>
+        <span className="pref-hint">How certain the AI must be before the magic wand changes
+          something on its own — detaching an entry bound to the wrong same-named game,
+          re-identifying a per-platform match, or recording a compilation. Raise it to make the
+          wand more conservative (fewer wrong auto-fixes, more left for you to catch); lower it
+          to let it act on weaker hunches. Every automatic change is reversible.</span>
+        <div className="pref-row" style={{ marginTop: 10, gap: 12 }}>
+          <input type="range" min={50} max={100} value={autoFix} style={{ flex: 1 }}
+            onChange={(e) => setAutoFix(Number(e.target.value))} />
+          <span className="pref-name" style={{ minWidth: 118, textAlign: 'right' }}>
+            Act at {autoFix}%+</span>
         </div>
       </div>
 

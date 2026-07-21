@@ -378,6 +378,7 @@ export interface Prefs {
   match_confidence_threshold?: number   // identity certainty below this = "low confidence"
   match_ai_band_lo?: number             // gray zone the wand's AI re-scores
   match_ai_band_hi?: number
+  auto_fix_confidence?: number   // 50-100; AI certainty the wand needs to auto-fix
   media_job: MediaJob | null
 }
 export interface IdentifyCandidate {

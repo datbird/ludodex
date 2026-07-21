@@ -1340,6 +1340,7 @@ def get_prefs():
         "match_confidence_threshold": int(config.get("match_confidence_threshold") or 60),
         "match_ai_band_lo": int(config.get("match_ai_band_lo") or 40),
         "match_ai_band_hi": int(config.get("match_ai_band_hi") or 70),
+        "auto_fix_confidence": int(round(_auto_fix_threshold() * 100)),
         "media_job": _MEDIA_JOB["job"],
     }
 
@@ -1356,6 +1357,11 @@ def set_prefs(body: dict = Body(...)):
     if "match_confidence_threshold" in body:          # task #13 — low-confidence cutoff
         try:
             config.set_("match_confidence_threshold", str(_clamp_int(body["match_confidence_threshold"])))
+        except (TypeError, ValueError):
+            pass
+    if "auto_fix_confidence" in body:                 # task #3 — auto-fix certainty gate
+        try:
+            config.set_("auto_fix_confidence", str(_clamp_int(body["auto_fix_confidence"], 50, 100)))
         except (TypeError, ValueError):
             pass
     if "match_ai_band_lo" in body and "match_ai_band_hi" in body:  # AI re-score gray zone
@@ -3291,6 +3297,21 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
     aimeta.scan_finish(run_id, "paused" if done < len(norm_keys) else "done")
 
 
+def _auto_fix_threshold(default=0.75):
+    """How certain the AI must be before the wand CHANGES something on its own — detaching a
+    contaminated entry, re-identifying a per-entry match, recording a compilation (task #3).
+
+    Was hardcoded at 0.75 in three places, so tuning it meant editing code and rebuilding
+    the image. It's a judgement call that depends on a real library (how noisy the ROM set
+    is, how much the user minds a wrong auto-detach vs. a missed one), so it belongs in
+    config. Stored 50-100, used as 0.50-1.00. Raise it to make the wand more conservative."""
+    try:
+        v = int(config.get("auto_fix_confidence") or 0)
+    except (TypeError, ValueError):
+        return default
+    return (max(50, min(100, v)) / 100.0) if v else default
+
+
 # Words that mark a title as a probable multi-game bundle. Deliberately conservative and
 # whole-word matched: this is only a pre-filter to keep AI cost proportional to how many
 # titles LOOK like compilations, and the AI is the actual gate. "Edition"/"Remastered" are
@@ -3332,7 +3353,7 @@ def _collection_candidates(nks):
     return out
 
 
-def _auto_detect_collections(nks, should_stop=lambda: False, threshold=0.7, chunk=20):
+def _auto_detect_collections(nks, should_stop=lambda: False, threshold=None, chunk=20):
     """Systematically detect COMPILATIONS among the scanned games and record their members
     (task #12).
 
@@ -3345,6 +3366,7 @@ def _auto_detect_collections(nks, should_stop=lambda: False, threshold=0.7, chun
     button. Best-effort — a failure never aborts the wand. Ownership credit is computed at
     READ time, so a recorded collection takes effect with no rebuild.
     Returns [{norm_key, name, members}] recorded."""
+    threshold = _auto_fix_threshold(0.7) if threshold is None else threshold
     recorded = []
     if not ai.area_available("metadata"):
         return recorded
@@ -3461,10 +3483,11 @@ def _adjudicate_suspects(suspects, chunk=20, should_stop=lambda: False):
     return out
 
 
-def _auto_fix_contamination(nks, should_stop=lambda: False, threshold=0.75):
+def _auto_fix_contamination(nks, should_stop=lambda: False, threshold=None):
     """AI-adjudicate the contamination suspects among `nks` and DETACH the confirmed ones
     (confidence >= threshold). Scoped media reconcile per touched game. Best-effort; a
     failure never aborts the wand. Returns [{norm_key, platform, reason}] detached."""
+    threshold = _auto_fix_threshold() if threshold is None else threshold
     detached = []
     if not ai.area_available("metadata"):
         return detached
@@ -3515,7 +3538,7 @@ def _adjudicate_entries(items, should_stop=lambda: False, chunk=20):
     return out
 
 
-def resolve_per_entry_identity(nks, should_stop=lambda: False, threshold=0.75, apply=True):
+def resolve_per_entry_identity(nks, should_stop=lambda: False, threshold=None, apply=True):
     """Per-entry identity resolution (task #8): for each IDENTIFIED title among `nks`,
     resolve each emulation platform entry to its OWN correct IGDB id — re-identify a
     different same-title game when confident (PS3 "Tomb Raider" -> the 2013 reboot),
@@ -3524,6 +3547,7 @@ def resolve_per_entry_identity(nks, should_stop=lambda: False, threshold=0.75, a
     with an over-separation guard (keep unless confident it's different). Subsumes the old
     backport-only contamination pass. `apply=False` computes plans WITHOUT writing (the
     copy-test). Best-effort. Returns {"set":[...], "detached":[...], "plans":[...]}."""
+    threshold = _auto_fix_threshold() if threshold is None else threshold
     result = {"set": [], "detached": [], "plans": []}
     if not nks or not ai.area_available("metadata"):
         return result
