@@ -317,6 +317,19 @@ function Cover({ g, compact }: {
   return fs ? <div className="frame-box" style={fs}>{img}</div> : img
 }
 
+// Sources that don't identify a game to an external catalogue — a loose ROM or a manual
+// entry has nothing to link out to.
+const NON_ID_SOURCES = new Set(['emulation', 'archive', 'physical', 'rom', 'digital', 'manual'])
+
+// Deep link to a store's page for this game, where the id maps to a stable public URL.
+// Stores whose ids don't (GOG product ids, Epic/Xbox/PSN catalogue ids) still get a chip —
+// it just isn't clickable, which is honest rather than a guessed link that 404s.
+function storeUrl(source: string, id: string): string {
+  if (source === 'steam' && /^\d+$/.test(id)) return `https://store.steampowered.com/app/${id}`
+  if (source === 'itch' && /^https?:\/\//.test(id)) return id
+  return ''
+}
+
 // Default frame + the inline style that positions/zooms an image inside its
 // viewport. Returns undefined for an unframed (identity) frame.
 const DEFAULT_FRAME: Frame = { top: 0, right: 0, bottom: 0, left: 0, zoom: 1 }
@@ -6073,25 +6086,43 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                   </section>
                 )}
 
-                {d.metadata_links.length > 0 && (
-                  <section className="idvia">
-                    <h3>Identified via
-                      <span className="sec-help">metadata providers this game was matched against</span>
-                    </h3>
-                    <div className="idvia-chips">
-                      {d.metadata_links.map((l, i) => (
-                        l.url
-                          ? <a key={i} className="idchip" href={l.url}
-                               target="_blank" rel="noreferrer">
-                              {l.provider}{l.provider_id ? ` #${l.provider_id}` : ''}
-                            </a>
-                          : <span key={i} className="idchip">
-                              {l.provider}{l.provider_id ? ` #${l.provider_id}` : ''}
-                            </span>
-                      ))}
-                    </div>
-                  </section>
-                )}
+                {(() => {
+                  // EVERY provider that identifies this game, metadata and store alike —
+                  // IGDB, ScreenScraper and the stores it's owned on can all be true at
+                  // once, and each is a different claim worth seeing. Previously only
+                  // metadata_links rendered, so a Steam-owned game showed no Steam chip.
+                  const chips = [
+                    ...d.metadata_links.map((l) => ({
+                      provider: l.provider, id: l.provider_id, url: l.url })),
+                    ...Array.from(new Map(
+                      d.sources
+                        .filter((sc) => !NON_ID_SOURCES.has(sc.source) && sc.source_id)
+                        .map((sc) => [sc.source, {
+                          provider: sc.source, id: sc.source_id,
+                          url: storeUrl(sc.source, sc.source_id) }])).values()),
+                  ]
+                  if (!chips.length) return null
+                  return (
+                    <section className="idvia">
+                      <h3>Identified via
+                        <span className="sec-help">every provider and store that identifies this game</span>
+                      </h3>
+                      <div className="idvia-chips">
+                        {chips.map((c, i) => {
+                          const style = { '--chip': providerColor(c.provider) } as CSSProperties
+                          const body = <>{providerLabel(c.provider)}
+                            {c.id ? <span className="idchip-id">#{c.id}</span> : null}</>
+                          return c.url
+                            ? <a key={i} className="idchip" style={style} href={c.url}
+                                 target="_blank" rel="noreferrer"
+                                 title={`Open on ${providerLabel(c.provider)}`}>{body}</a>
+                            : <span key={i} className="idchip" style={style}
+                                    title={`Identified on ${providerLabel(c.provider)}`}>{body}</span>
+                        })}
+                      </div>
+                    </section>
+                  )
+                })()}
               </div>
           </>
         )}

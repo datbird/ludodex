@@ -1615,8 +1615,13 @@ button.am-badge { border: 0; background: none; padding: 0; font-family: inherit;
   border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px;
   text-decoration: none;
 }
-a.idchip { color: var(--accent); border-color: var(--accent); }
-a.idchip:hover { background: var(--accent-bg); }
+/* each chip carries its provider's colour (--chip, set inline from providers.ts) so
+   IGDB / ScreenScraper / a store are distinguishable at a glance */
+.idchip { border-color: color-mix(in srgb, var(--chip, var(--border)) 55%, transparent); }
+.idchip-id { opacity: 0.6; margin-left: 5px; font-variant-numeric: tabular-nums; }
+a.idchip { color: var(--chip, var(--accent)); border-color: var(--chip, var(--accent)); }
+a.idchip:hover { background: color-mix(in srgb, var(--chip, var(--accent)) 16%, transparent); }
+span.idchip { color: color-mix(in srgb, var(--chip, var(--text)) 80%, var(--text-h)); }
 
 .os-cell { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .os-badge {
