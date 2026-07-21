@@ -12,7 +12,7 @@ _ALIASES = {
     "atari7800": ["atari7800"],
     "atari8bit": ["atari8bit", "atari800", "atari8bitfamily"],
     "amiga": ["amiga", "commodoreamiga"],
-    "amigacd32": ["amigacd32"],
+    "amigacd32": ["amigacd32", "cd32"],
     "apple2": ["apple2", "appleii", "appleiigs"],
     "c64": ["c64", "commodorec64128max", "commodore64"],
     "3do": ["3do", "3dointeractivemultiplayer"],
@@ -88,6 +88,7 @@ KNOWN = set(_ALIASES)             # canonicals we're confident about
 # the 32X unify. Extend deliberately.
 TITLE_PLATFORM = {
     "32x": "sega 32x",
+    "cd32": "amigacd32",   # Amiga CD32; unambiguous, never a title word (unlike bare "cd")
 }
 
 
