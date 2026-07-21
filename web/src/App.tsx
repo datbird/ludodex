@@ -1843,6 +1843,9 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
   const [prefs, setPrefs] = useState<Prefs | null>(null)
   const [busy, setBusy] = useState(false)
   const [honorRM, setHonorRM] = useState(honorReducedMotion())   // per-device (localStorage)
+  // MUST stay above the `if (!prefs) return` below — a hook after a conditional early
+  // return changes the hook count between renders (React error #310, white-screens the app).
+  const [langResult, setLangResult] = useState<MediaLangResult | null>(null)
   const load = () => api.prefs().then(setPrefs).catch(() => {})
   useEffect(() => { load() }, [])
   const running = prefs?.media_job?.running
@@ -1874,7 +1877,6 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
     setPrefs({ ...prefs, media_lang_mode: m })
     try { await api.setPrefs({ media_lang_mode: m }) } catch { load() }
   }
-  const [langResult, setLangResult] = useState<MediaLangResult | null>(null)
   const applyLangFilter = async () => {
     setBusy(true)
     try { setLangResult(await api.mediaLanguageFilter()) } finally { setBusy(false) }
