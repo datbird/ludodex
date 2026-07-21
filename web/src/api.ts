@@ -226,6 +226,7 @@ export interface Stats {
   wanted?: number
   cross_source: number
   unmatched: number
+  low_confidence?: number
   no_media: number
   by_source: Record<string, number>
   media: { games_with_art: number; by_kind: Record<string, number> }

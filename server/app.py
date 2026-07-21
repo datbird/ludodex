@@ -482,6 +482,12 @@ def stats():
         no_media = con.execute(
             "SELECT COUNT(*) FROM games g WHERE NOT EXISTS("
             "SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key)" + and_w).fetchone()[0]
+        # matched-but-low-confidence identity (task #13) — its own review facet
+        _thr = int(config.get("match_confidence_threshold") or 60)
+        low_conf = con.execute(
+            "SELECT COUNT(*) FROM games g WHERE EXISTS(SELECT 1 FROM game_attributes ga "
+            "WHERE ga.game_id=g.id AND ga.kind='match_confidence' "
+            "AND CAST(ga.value AS INT) < ?)" + and_w, (_thr,)).fetchone()[0]
         by_source = {}
         for s in COLUMN_SOURCES:
             by_source[s] = con.execute(
@@ -503,6 +509,7 @@ def stats():
             "wanted": wanted_ct,
             "cross_source": cross,
             "unmatched": unmatched,
+            "low_confidence": low_conf,
             "no_media": no_media,
             "by_source": by_source,
             "media": {"games_with_art": total_with, "by_kind": coverage},
@@ -530,7 +537,8 @@ def facets():
         attributes = {}
         kinds = [r["kind"] for r in con.execute(
             "SELECT DISTINCT kind FROM game_attributes "
-            "WHERE kind NOT IN ('description') ORDER BY kind")]
+            "WHERE kind NOT IN ('description','match_confidence','match_reason') "
+            "ORDER BY kind")]
         for k in kinds:
             vals = [r["value"] for r in con.execute(
                 "SELECT value, COUNT(*) c FROM game_attributes WHERE kind=? "
@@ -678,6 +686,20 @@ def _parse_query(qstr):
                           "WHERE gs.norm_key=g.norm_key)", val)
             if num:
                 clause, cargs = num[0], [num[1]]
+        elif field == "confidence":
+            # identity certainty (task #13). `low`/`high` split on the settings threshold;
+            # a numeric form (confidence:<50) compares directly. Only matched entries have
+            # the attribute, so unmatched games are excluded (that's the `unmatched` facet).
+            _at = "EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id " \
+                  "AND ga.kind='match_confidence' AND %s)"
+            if val in ("low", "high"):
+                thr = int(config.get("match_confidence_threshold") or 60)
+                clause = _at % ("CAST(ga.value AS INT) %s ?" % ("<" if val == "low" else ">="))
+                cargs = [thr]
+            else:
+                num = _ql_num("CAST(ga.value AS INT)", val)
+                if num:
+                    clause, cargs = _at % num[0], [num[1]]
         elif field in _QL_ATTR:
             clause, cargs = ("EXISTS(SELECT 1 FROM game_attributes ga WHERE "
                              "ga.game_id=g.id AND ga.kind=? AND ga.value LIKE ?)"), \
@@ -721,6 +743,10 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         and 'system:<x>' match the sources table dynamically."""
         if tok in FLAG_SQL:
             return FLAG_SQL[tok], []
+        if tok == "low_confidence":              # task #13 — threshold is a live config value
+            thr = int(config.get("match_confidence_threshold") or 60)
+            return ("EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
+                    "AND ga.kind='match_confidence' AND CAST(ga.value AS INT) < ?)", [thr])
         if tok.startswith("source:"):
             return ("EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
                     "AND s.source=?)", [tok[7:]])

@@ -6431,6 +6431,14 @@ function DashStats({ stats, onBrowse, onFilter }: {
           <div className="dc-num">{stats.no_media.toLocaleString()}</div>
           <div className="dc-label">No media · {pct(stats.no_media)}% <span className="dc-go">view →</span></div>
         </button>
+        {stats.low_confidence != null && (
+          <button className={'dash-card attn' + (stats.low_confidence ? ' warn' : ' good')}
+            onClick={() => onFilter({ low_confidence: 'include' })}
+            title="Matched, but we're not confident it's the right game — click to review in Library">
+            <div className="dc-num">{stats.low_confidence.toLocaleString()}</div>
+            <div className="dc-label">Low confidence · {pct(stats.low_confidence)}% <span className="dc-go">review →</span></div>
+          </button>
+        )}
       </div>
 
       <div className="dash-cols">
