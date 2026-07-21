@@ -3876,3 +3876,17 @@ a.idchip:hover { background: var(--accent-bg); }
 @media (prefers-reduced-motion: reduce) {
   .overlay, .overlay > * { animation: none; }
 }
+
+/* --- smart art pick: live cover preview (#4) --- */
+.artpick-split { display: flex; gap: 18px; align-items: flex-start; }
+.artpick-preview { flex: 0 0 190px; display: flex; flex-direction: column; gap: 8px; }
+.artpick-preview .cover { width: 190px; border-radius: 10px; border: 1px solid var(--border); }
+.artpick-preview-cap { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.apply-btn.wide { width: 100%; }
+.artpick-split .cand-row { flex: 1 1 auto; }
+.artpick-split .cand-row figure { cursor: pointer; }
+.artpick-split .cand-row figure.shown { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 700px) {
+  .artpick-split { flex-direction: column; }
+  .artpick-preview { flex: 0 0 auto; }
+}

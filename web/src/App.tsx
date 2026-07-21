@@ -3930,14 +3930,19 @@ function Dedupe({ onClose }: { onClose: () => void }) {
   )
 }
 
-function ArtPicker({ nk }: { nk: string }) {
+// `frame` is the game's saved cover framing, so the preview crops/zooms exactly the
+// way the library poster will — otherwise you'd approve art that looks different once
+// applied.
+function ArtPicker({ nk, frame }: { nk: string; frame?: Frame }) {
   const [res, setRes] = useState<ArtPick | null>(null)
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
   const [applied, setApplied] = useState<number | null>(null)
+  // Which candidate the preview is showing; null = follow the AI recommendation.
+  const [preview, setPreview] = useState<number | null>(null)
 
   async function run() {
-    setLoading(true); setErr(''); setRes(null); setApplied(null)
+    setLoading(true); setErr(''); setRes(null); setApplied(null); setPreview(null)
     try { setRes(await api.artPick(nk, 'cover')) }
     catch (e) { setErr('Art pick unavailable (' + e + ')') }
     finally { setLoading(false) }
@@ -3956,23 +3961,54 @@ function ArtPicker({ nk }: { nk: string }) {
       {err && <div className="dim">{err}</div>}
       {res && (res.candidates.length < 2
         ? <div className="dim">{res.reason}</div>
-        : (
+        : (() => {
+          const shownId = preview ?? res.recommended_id ?? res.candidates[0]?.id
+          const shown = res.candidates.find((c) => c.id === shownId)
+          const fs = frameStyle(frame)
+          return (
           <>
-            <div className="cand-row">
-              {res.candidates.map((c) => (
-                <figure key={c.id}
-                  className={(c.id === res.recommended_id ? 'rec ' : '') + (c.id === applied ? 'applied' : '')}>
-                  <img loading="lazy" src={api.assetUrl(c.id, true)} alt={c.provider} />
-                  <figcaption>{c.provider}
-                    {c.id === res.recommended_id && <span className="rec-tag">AI pick</span>}</figcaption>
-                  <button className="apply-btn" onClick={() => apply(c.id)}>
-                    {c.id === applied ? 'Set ✓' : 'Use'}</button>
-                </figure>
-              ))}
+            <div className="artpick-split">
+              {/* Live preview: the candidate rendered in the real poster box, with the
+                  game's own framing — what the library card will actually look like. */}
+              <div className="artpick-preview">
+                <div className="cover">
+                  {shown
+                    ? (fs
+                        ? <div className="frame-box" style={fs}>
+                            <img src={api.assetUrl(shown.id, true)} alt="" /></div>
+                        : <img src={api.assetUrl(shown.id, true)} alt="" />)
+                    : null}
+                </div>
+                <div className="artpick-preview-cap dim">
+                  Preview{shown ? ` — ${shown.provider}` : ''}
+                  {shown && shown.id === res.recommended_id && <span className="rec-tag">AI pick</span>}
+                </div>
+                {shown && (
+                  <button className="apply-btn wide" onClick={() => apply(shown.id)}>
+                    {shown.id === applied ? 'Set ✓' : 'Use this cover'}</button>
+                )}
+              </div>
+              <div className="cand-row">
+                {res.candidates.map((c) => (
+                  <figure key={c.id}
+                    className={(c.id === res.recommended_id ? 'rec ' : '')
+                      + (c.id === applied ? 'applied ' : '')
+                      + (c.id === shownId ? 'shown' : '')}
+                    onMouseEnter={() => setPreview(c.id)}
+                    onClick={() => setPreview(c.id)}>
+                    <img loading="lazy" src={api.assetUrl(c.id, true)} alt={c.provider} />
+                    <figcaption>{c.provider}
+                      {c.id === res.recommended_id && <span className="rec-tag">AI pick</span>}</figcaption>
+                    <button className="apply-btn" onClick={(e) => { e.stopPropagation(); apply(c.id) }}>
+                      {c.id === applied ? 'Set ✓' : 'Use'}</button>
+                  </figure>
+                ))}
+              </div>
             </div>
             <div className="dim artpick-reason">{res.reason}</div>
           </>
-        ))}
+          )
+        })())}
     </section>
   )
 }
@@ -5951,7 +5987,7 @@ function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links
             )}
             <AllMedia nk={nk} kinds={kinds} assets={assets} onChange={onChange}
               frames={frames} onFrame={onFrame} />
-            <ArtPicker nk={nk} />
+            <ArtPicker nk={nk} frame={frames?.cover} />
           </div>
         </div>
       )}
