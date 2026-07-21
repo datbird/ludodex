@@ -420,13 +420,19 @@ def _ensure_catalog():
     if os.path.exists(LIBRARY_DB):
         return
     con = sqlite3.connect(LIBRARY_DB)
+    # Mirror build_library's schema EXACTLY (a real build drops+recreates the file, so no
+    # drift risk) — every column/table the read paths reference must exist so the empty
+    # first-run library, dashboard stats (IDENTIFIED_SQL reads `wanted`), and filters all
+    # return cleanly instead of 500ing on a missing table/column.
     con.executescript("""
     CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
+      platform TEXT, entry_key TEXT, base_key TEXT, game_key TEXT,
       n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
       has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
-      has_archive INT, in_playnite INT, in_launchbox INT);
+      has_archive INT, in_playnite INT, in_launchbox INT, wanted INT DEFAULT 0);
     CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
-      source_id TEXT, title_raw TEXT, detail TEXT);
+      source_id TEXT, title_raw TEXT, detail TEXT, state TEXT DEFAULT 'have');
+    CREATE TABLE wanted (game_id INTEGER, store TEXT, store_id TEXT, title_raw TEXT);
     CREATE TABLE source_attrs (game_id INTEGER, source TEXT, source_id TEXT,
       attrs_json TEXT);
     CREATE TABLE game_attributes (game_id INTEGER, kind TEXT, value TEXT,
