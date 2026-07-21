@@ -229,8 +229,13 @@ class PocketBaseBackend:
         while True:
             st, resp = _s.http("GET", "%s/api/collections/%s/records?perPage=500&page=%d"
                                % (self.url, coll, page), headers=self.hdr)
+            if st == 404 and page == 1:
+                return {}                   # collection not created yet — genuinely empty
             if st != 200 or not isinstance(resp, dict):
-                break
+                # MUST raise, never return partial. A short read looks to the merge engine
+                # like "the remote deleted these records", and it would delete them locally.
+                raise RuntimeError("PocketBase read failed (%s) on %s page %d: %s"
+                                   % (st, coll, page, str(resp)[:150]))
             for it in (resp.get("items") or []):
                 try:
                     row = json.loads(it.get("data") or "{}")
@@ -423,8 +428,15 @@ class FirestoreBackend:
         while True:
             u = "%s/%s?pageSize=300%s" % (self.base, coll, ("&pageToken=" + tok) if tok else "")
             st, resp = _s.http("GET", u, headers=self.hdr)
+            if st == 404 and not tok:
+                return {}                   # collection doesn't exist yet — genuinely empty
             if st != 200 or not isinstance(resp, dict):
-                break
+                # MUST raise, never return what we have so far. A truncated read is
+                # indistinguishable from "the remote deleted the rest", and the merge engine
+                # would delete those records locally. An expired token (Google's last ~1h)
+                # is exactly how this would fire in production.
+                raise RuntimeError("Firestore read failed (%s) on %s: %s"
+                                   % (st, coll, str(resp)[:150]))
             for d in resp.get("documents", []):
                 f = d.get("fields", {})
                 k = (f.get("k") or {}).get("stringValue")

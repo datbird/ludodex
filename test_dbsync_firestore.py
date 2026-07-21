@@ -168,6 +168,79 @@ except RuntimeError:
     check(True, "commit failure raises RuntimeError")
 dbsync._s.http = fake_http
 
+print("10. a failed READ raises instead of looking like an empty remote")
+# This is the data-loss case: if read_all swallowed an error and returned {}, the merge
+# engine would see "remote lost every record" and delete them locally. An expired Google
+# token (they last ~1h) is exactly how that would fire.
+def read_401(method, url, headers=None, body=None, tries=4):
+    if method == "GET":
+        return 401, {"error": {"code": 401, "message": "Request had invalid credentials."}}
+    return fake_http(method, url, headers, body, tries)
+dbsync._s.http = read_401
+try:
+    be.read_all(STORE, COLS)
+    check(False, "401 on read raises")
+except RuntimeError as e:
+    check("401" in str(e), "401 on read raises RuntimeError (%s)" % str(e)[:50])
+
+# A failure PART-WAY through pagination must not return the pages it already had.
+state = {"n": 0}
+def read_flaky(method, url, headers=None, body=None, tries=4):
+    if method == "GET":
+        state["n"] += 1
+        if state["n"] > 1:
+            return 500, {"error": "boom"}
+    return fake_http(method, url, headers, body, tries)
+dbsync._s.http = read_flaky
+try:
+    be.read_all(STORE, COLS)
+    check(False, "mid-pagination failure raises")
+except RuntimeError:
+    check(True, "mid-pagination failure raises rather than returning a partial set")
+
+# A collection that does not exist yet IS legitimately empty, and must not raise.
+def read_404(method, url, headers=None, body=None, tries=4):
+    return (404, {"error": "not found"}) if method == "GET" else fake_http(
+        method, url, headers, body, tries)
+dbsync._s.http = read_404
+try:
+    check(be.read_all(STORE, COLS) == {}, "404 (collection not created yet) reads as empty")
+except RuntimeError:
+    check(False, "404 (collection not created yet) reads as empty")
+dbsync._s.http = fake_http
+
+print("11. service-account token mint builds a valid signed assertion")
+# Can't call Google, but the whole local half — parsing the key, scopes, and signing the
+# JWT assertion that gets exchanged for a token — runs offline against a generated key.
+try:
+    import json as _j, base64, tempfile as _tf
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from google.oauth2 import service_account
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(serialization.Encoding.PEM,
+                            serialization.PrivateFormat.PKCS8,
+                            serialization.NoEncryption()).decode()
+    sa = {"type": "service_account", "project_id": "test-proj",
+          "private_key_id": "k1", "private_key": pem,
+          "client_email": "ludodex@test-proj.iam.gserviceaccount.com",
+          "client_id": "1", "token_uri": "https://oauth2.googleapis.com/token"}
+    f = _tf.NamedTemporaryFile("w", suffix=".json", delete=False)
+    _j.dump(sa, f); f.close()
+    creds = service_account.Credentials.from_service_account_file(
+        f.name, scopes=["https://www.googleapis.com/auth/datastore"])
+    check(creds.service_account_email == sa["client_email"], "SA email parsed")
+    assertion = creds._make_authorization_grant_assertion()
+    payload = _j.loads(base64.urlsafe_b64decode(
+        assertion.split(b".")[1] + b"=" * (-len(assertion.split(b".")[1]) % 4)))
+    check(payload.get("iss") == sa["client_email"], "assertion iss = service account")
+    check(payload.get("scope") == "https://www.googleapis.com/auth/datastore",
+          "assertion carries the datastore scope (got %r)" % payload.get("scope"))
+    check(payload.get("aud") == sa["token_uri"], "assertion aud = token endpoint")
+    os.unlink(f.name)
+except ImportError as e:
+    print("  skip  google-auth/cryptography not installed here (%s)" % str(e)[:40])
+
 print()
 if FAIL:
     print("FAILED (%d): %s" % (len(FAIL), "; ".join(FAIL)))

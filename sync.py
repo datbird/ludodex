@@ -339,8 +339,10 @@ def fb_token(sa_path):
         from google.oauth2 import service_account
         import google.auth.transport.requests as gar
     except ImportError:
-        sys.exit("Firebase sync needs google-auth: "
-                 "python3 -m pip install --user -r requirements-firebase.txt")
+        # RuntimeError, not sys.exit: this is called from the server's backing-store job
+        # too, where exiting would take down the worker instead of reporting a failure.
+        raise RuntimeError("Firebase needs google-auth: "
+                           "python3 -m pip install -r requirements-firebase.txt")
     creds = service_account.Credentials.from_service_account_file(
         sa_path, scopes=["https://www.googleapis.com/auth/datastore"])
     creds.refresh(gar.Request())
