@@ -10,19 +10,22 @@ Last reviewed: 2026-07-21.
 
 ## Open
 
-Nothing is open pending code. Two items are **data-gated** — the work shipped, but the
-remaining half can only be done against a populated catalog with a configured AI provider:
+Nothing is open pending code. One item is **data-gated**:
 
 | # | Task | What's left |
 |---|---|---|
-| 2 | Firebase backing store | Adapter is written, registered, and protocol-tested offline (`test_dbsync_firestore.py`). A **live round-trip** needs a Firebase project id + service-account key entered in Settings → Connections → Backup & restore. |
-| 3 | Auto-fix confidence tuning | The gate is now a setting (Settings → Library → "Automatic fixes") instead of a hardcoded 0.75. Choosing the *right* value needs a real library to observe false positives against. |
+| 3 | Auto-fix confidence tuning | The gate is now a setting (Settings → Library → "Automatic fixes"), defaulting to 75. Choosing a *different* value needs a real library to observe false positives against — and it may well never need changing. |
+
+#2 is **closed**: all four backing-store backends now pass a live two-way round-trip
+(`test_dbsync_live.py`). The only path still unexercised is Google's OAuth token mint
+(`sync.fb_token`) against a real Firebase project — the emulator ignores auth. That code is
+shared with the long-standing one-way Firestore mirror.
 
 ## Recently completed
 
 | # | Task | Commit |
 |---|---|---|
-| 2 | Firestore adapter protocol test (pagination, batching, doc ids, no-op re-sync) | `21d7da3` |
+| 2 | Firestore adapter protocol test + live round-trips vs Postgres / MySQL / Firestore emulator; fixed a real resource-name bug in Firestore writes | `21d7da3`, `HEAD` |
 | 3 | `auto_fix_confidence` setting driving all three AI-gated auto-fixes | `93982dc` |
 | 4 | Live cover preview before applying a smart art pick | `11b66c9` |
 | 10 | Click-to-enlarge review thumbnails (`ImageLightbox`, ← / → / Esc) | `b6658bb` |
@@ -50,6 +53,17 @@ the first sync + build:
 - Match-confidence rule-based baseline across all identified entries (#13)
 - CD32 re-key (#5)
 - Fuzzy-match scrub results (#9)
+
+## Backing-store testing
+
+- `test_dbsync_firestore.py` — offline, no creds, no container. Fake Firestore REST server.
+- `test_dbsync_live.py <backend>` — real two-way round-trip (push, no-op re-sync, pull,
+  delete both ways, convergence) against an isolated `LUDODEX_DATA`. Run it inside the
+  container, where the psycopg/PyMySQL drivers live:
+  `docker exec -e LUDODEX_DATA=/tmp/dbsync-live ludodex python3 /app/test_dbsync_live.py postgres`
+- For Firestore without a Google project, run a Firestore emulator and set
+  `FIRESTORE_EMULATOR_HOST=<host:port>` (also settable as config `firestore_emulator_host`).
+  The adapter skips service-account token minting in that mode.
 
 ## Guards
 

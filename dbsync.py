@@ -385,13 +385,29 @@ class FirestoreBackend:
     def __init__(self):
         pid = config.get("firebase_project_id")
         sa = config.get("firebase_sa_json")
-        if not (pid and sa):
-            raise RuntimeError("firebase not configured (firebase_project_id + "
-                               "firebase_sa_json)")
         dbid = config.get("firebase_database") or "(default)"
-        self.hdr = {"Authorization": "Bearer " + _s.fb_token(sa)}
-        self.base = ("https://firestore.googleapis.com/v1/projects/%s/databases/%s"
-                     "/documents" % (pid, dbid))
+        # Point at a local Firestore emulator instead of Google, for testing without a real
+        # project or service account. Same env var the official SDKs use, so it also picks
+        # up an emulator the surrounding tooling already exported. The emulator ignores
+        # auth, so no service-account key is needed (or minted) in that mode.
+        emu = os.environ.get("FIRESTORE_EMULATOR_HOST") or config.get("firestore_emulator_host")
+        if emu:
+            if not pid:
+                pid = "ludodex-emulator"
+            self.hdr = {"Authorization": "Bearer owner"}   # emulator accepts any token
+            root = "http://%s/v1" % emu.replace("http://", "").rstrip("/")
+        else:
+            if not (pid and sa):
+                raise RuntimeError("firebase not configured (firebase_project_id + "
+                                   "firebase_sa_json)")
+            self.hdr = {"Authorization": "Bearer " + _s.fb_token(sa)}
+            root = "https://firestore.googleapis.com/v1"
+        # TWO different things, easy to conflate: `base` is the URL we call, `docpath` is the
+        # RESOURCE NAME prefix. A commit's update.name / delete must be the resource name
+        # ("projects/../databases/../documents/coll/id") — passing the full URL there is a
+        # 400 "Document name ... is not valid".
+        self.docpath = "projects/%s/databases/%s/documents" % (pid, dbid)
+        self.base = "%s/%s" % (root, self.docpath)
 
     def _coll(self, store):
         return "ludodex_" + store["name"]
@@ -429,10 +445,10 @@ class FirestoreBackend:
             data = json.dumps({c: _cell(row.get(c)) for c in cols},
                               sort_keys=True, ensure_ascii=False)
             writes.append({"update": {
-                "name": "%s/%s/%s" % (self.base, coll, self._doc_id(key)),
+                "name": "%s/%s/%s" % (self.docpath, coll, self._doc_id(key)),
                 "fields": {"k": {"stringValue": key}, "data": {"stringValue": data}}}})
         for key in deletes:
-            writes.append({"delete": "%s/%s/%s" % (self.base, coll, self._doc_id(key))})
+            writes.append({"delete": "%s/%s/%s" % (self.docpath, coll, self._doc_id(key))})
         for i in range(0, len(writes), 400):
             st, resp = _s.http("POST", self.base + ":commit", headers=self.hdr,
                                body={"writes": writes[i:i + 400]})

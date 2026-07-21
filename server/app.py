@@ -3366,7 +3366,7 @@ def _auto_detect_collections(nks, should_stop=lambda: False, threshold=None, chu
     button. Best-effort — a failure never aborts the wand. Ownership credit is computed at
     READ time, so a recorded collection takes effect with no rebuild.
     Returns [{norm_key, name, members}] recorded."""
-    threshold = _auto_fix_threshold(0.7) if threshold is None else threshold
+    threshold = _auto_fix_threshold() if threshold is None else threshold
     recorded = []
     if not ai.area_available("metadata"):
         return recorded

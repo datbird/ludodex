@@ -1,9 +1,8 @@
 """Offline protocol test for the Firestore backing-store adapter (task #2).
 
-The live round-trip (test_dbsync_roundtrip.py's Firestore twin) needs a real project and
-service-account key, which only the user can supply through Settings. This test proves
-everything that does NOT need credentials, by standing a fake Firestore REST server in
-front of sync.http:
+Fast, no-dependency companion to test_dbsync_live.py (which does a real round-trip against
+a Firestore emulator, or a real project). This one stands a fake Firestore REST server in
+front of sync.http, so it runs anywhere with no container and no creds:
 
   - read_all follows nextPageToken to the end (a >300-record store is one page in the
     API's eyes and would otherwise silently truncate, which the merge engine would read
@@ -13,6 +12,8 @@ front of sync.http:
   - the stored shape ({k, data:<json blob>}) round-trips byte-identically, so a re-sync
     with nothing changed is a genuine no-op rather than an endless re-push
   - deletes are emitted as delete writes
+  - update.name / delete are RESOURCE NAMES, not URLs (a real 400 once slipped past an
+    earlier, laxer version of this fake server)
 
 Usage: python3 test_dbsync_firestore.py     (no network, no creds)
 """
@@ -72,12 +73,22 @@ def fake_http(method, url, headers=None, body=None, tries=4):
         for w in writes:
             if "update" in w:
                 name = w["update"]["name"]
+                # Firestore requires a RESOURCE NAME here, not a URL. Being lax about this
+                # is how a real 400 ("Document name ... is not valid") slipped past this
+                # test once — so reject anything URL-shaped, exactly as the API does.
+                if name.startswith("http") or not name.startswith("projects/"):
+                    return 400, {"error": {"code": 400,
+                                           "message": 'Document name "%s" is not valid' % name}}
                 coll, did = name.split("/documents/")[1].rsplit("/", 1)
                 f = w["update"]["fields"]
                 DOCS.setdefault(coll, {})[did] = {"k": f["k"]["stringValue"],
                                                   "data": f["data"]["stringValue"]}
             elif "delete" in w:
-                coll, did = w["delete"].split("/documents/")[1].rsplit("/", 1)
+                dn = w["delete"]
+                if dn.startswith("http") or not dn.startswith("projects/"):
+                    return 400, {"error": {"code": 400,
+                                           "message": 'Document name "%s" is not valid' % dn}}
+                coll, did = dn.split("/documents/")[1].rsplit("/", 1)
                 DOCS.get(coll, {}).pop(did, None)
         return 200, {"writeResults": [{} for _ in writes]}
     raise AssertionError("unexpected request %s %s" % (method, url))
@@ -162,5 +173,5 @@ if FAIL:
     print("FAILED (%d): %s" % (len(FAIL), "; ".join(FAIL)))
     sys.exit(1)
 print("ALL CHECKS PASSED")
-print("NB this is the protocol layer only — a live round-trip against a real project "
-      "still needs firebase_project_id + a service-account key entered in Settings.")
+print("NB protocol layer only. For a real round-trip: run a Firestore emulator and use "
+      "test_dbsync_live.py firebase with FIRESTORE_EMULATOR_HOST set.")
