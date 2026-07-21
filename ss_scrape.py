@@ -111,11 +111,23 @@ def main(argv):
               file=sys.stderr)
         return
 
+    # The quota probe (ssuserInfos) needs a ScreenScraper USER account. The embedded dev
+    # credentials alone are enough to SCRAPE (jeuInfos works fine), so a failure here must
+    # not abort: without this, an install with no user account scraped nothing at all while
+    # the API was perfectly reachable — which is why ScreenScraper never produced anything.
+    # Unknown quota is already safe downstream: the daily-cap check is guarded on a
+    # positive cap, and every jeuInfos response carries the live quota back, so the real
+    # limits self-populate after the first request.
     try:
         q = show_status(creds)
     except ss.SSError as e:
-        print("ss_scrape: cannot reach ScreenScraper (%s)" % e, file=sys.stderr)
-        return
+        if "--status" in argv:
+            print("ss_scrape: cannot read your quota (%s)" % e, file=sys.stderr)
+            return
+        print("ss_scrape: no user account for the quota check (%s) — continuing with the "
+              "dev credentials; limits will be read from the first response." % e.kind,
+              file=sys.stderr)
+        q = {"requeststoday": 0, "maxrequestsperday": 0, "maxrequestspermin": 0}
     if "--status" in argv:
         return
 

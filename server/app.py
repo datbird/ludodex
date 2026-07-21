@@ -7866,6 +7866,8 @@ def _sync_worker(job, services, media_ids=(), full=False):
     phases = [
         {"id": "tags", "label": "Steam tags", "state": "pending", "detail": ""},
         {"id": "catalog", "label": "Catalog rebuilt", "state": "pending", "detail": ""},
+        {"id": "screenscraper", "label": "ScreenScraper (emulation)", "state": "pending",
+         "detail": ""},
         {"id": "meta", "label": "Descriptions & attributes", "state": "pending", "detail": ""},
         {"id": "scores", "label": "Scores & ratings", "state": "pending", "detail": ""},
         {"id": "os", "label": "OS / platform support", "state": "pending", "detail": ""},
@@ -8000,6 +8002,31 @@ def _sync_worker(job, services, media_ids=(), full=False):
             # synced (via --source) so a Steam full refresh re-checks ~Steam games,
             # not the whole ROM-dominated catalog. New-games stays whole-catalog
             # (cheap — only unresolved games hit the network).
+            # ScreenScraper BEFORE the catalog merge, so its matches land in the SAME
+            # rebuild that links IGDB. SS is quota-limited and resumable, so each sync
+            # spends a bounded number of requests on emulation games not yet scraped and
+            # picks up where it left off next time — "always attempting", within the tier.
+            if config.metadata_enabled("screenscraper"):
+                try:
+                    ss_limit = int(config.get("screenscraper_sync_limit") or 200)
+                except (TypeError, ValueError):
+                    ss_limit = 200
+                if ss_limit > 0:
+                    job["step"] = "Scraping ScreenScraper…"
+                    _phase("screenscraper", "running")
+                    ok_ss, err_ss = _run_script(
+                        "ss_scrape.py", args=["--limit", str(ss_limit)],
+                        timeout=3600, job=job)
+                    if ok_ss:
+                        # index the newly cached SS media (local cache read, no API calls)
+                        _run_script("media_fetch.py", args=["--ss-index"],
+                                    timeout=900, job=job)
+                    _phase("screenscraper", "ok" if ok_ss else "failed",
+                           None if ok_ss else err_ss)
+                else:
+                    _phase("screenscraper", "skipped")
+            else:
+                _phase("screenscraper", "skipped")
             enrich_args = []
             if full:
                 for sid in services:

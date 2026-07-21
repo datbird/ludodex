@@ -589,6 +589,12 @@ def main(argv):
         prune_dead(con)
         con.close()
         return
+    if "--ss-index" in argv:                      # incremental: index the SS cache without
+        if config.get_bool("screenscraper_media", True):   # dropping what's already indexed
+            fetch_screenscraper(con, now)        # (rows upsert by ref; sha1 preserved)
+            con.commit()
+        con.close()
+        return
     if "--backfill-art" in argv:                  # name-based art gap-fill
         n = fetch_missing_art(con, now, limit)
         prune_dead(con)
