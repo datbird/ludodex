@@ -97,6 +97,24 @@ check("backups.sqlite" in s, "archives list survives, so it stays recoverable")
 check(not any(os.path.isdir(os.path.join(scratch, d)) for d in reset.TOKEN_DIRS),
       "store token dirs gone")
 
+print("coverage — every database the app can create belongs to SOME scope")
+import glob as _glob                                       # noqa: E402
+import re as _re                                           # noqa: E402
+ROOT = os.path.dirname(os.path.abspath(__file__))
+declared = set()
+for src in _glob.glob(os.path.join(ROOT, "*.py")) + _glob.glob(os.path.join(ROOT, "server", "*.py")):
+    if os.path.basename(src).startswith(("verify_", "test_")):
+        continue
+    for m in _re.finditer(r'["\']([a-z0-9_.-]+\.sqlite)["\']', open(src).read()):
+        declared.add(m.group(1))
+known = (set(reset.IMPORT_DBS) | set(reset.CURATION_DBS)
+         | set(reset.CONFIG_DBS) | reset.KEEP_ALWAYS)
+# roms-index* are handled by glob, not by name; metadata-cache is listed already.
+missing = sorted(d for d in declared
+                 if d not in known and not d.startswith("roms-index"))
+check(not missing,
+      "no database escapes every reset scope (uncovered: %s)" % (missing or "none"))
+
 print("guards")
 try:
     reset.plan("everything")

@@ -46,12 +46,17 @@ IMPORT_DBS = [
     "os.sqlite",                # fetched per-appid OS support
     "ra.sqlite",                # RetroAchievements cache
     "scores.sqlite",            # fetched ratings, not user-entered
+    "steam-tags.sqlite",        # SteamSpy community tags — a 30-day-TTL fetch cache,
+                                # so leaving it behind makes a "reset" quietly partial:
+                                # the next sync skips every game still inside the TTL
+    "crawl-index.sqlite",       # file crawl inventory + extracted facts (re-crawlable)
 ]
 # What the user personally decided about their games.
 CURATION_DBS = [
     "tags.sqlite", "pins.sqlite", "user-media.sqlite", "manual-games.sqlite",
     "collections.sqlite", "attr-overrides.sqlite", "merges.sqlite",
     "splits.sqlite", "framing.sqlite", "ownership.sqlite",
+    "media-flags.sqlite",       # assets you banned / marked non-redistributable
 ]
 # How to reach the outside world.
 CONFIG_DBS = ["config.sqlite", "connections.sqlite", "file-profiles.sqlite"]
