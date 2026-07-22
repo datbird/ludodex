@@ -51,6 +51,7 @@ source.
 | **IGDB** | metadata | Twitch app Client ID+Secret | dev.twitch.tv/console/apps | `igdb_client_id/secret` | token auto-mints |
 | **ScreenScraper** | metadata + media | software `devid`/`devpassword` + account `ssid`/`sspassword` | forum (devid) + screenscraper.fr (account) | `screenscraper_devid/devpassword/ssid/sspassword` | no (devid is approval-gated) |
 | **SteamGridDB** | media | API key | steamgriddb.com/profile/preferences/api | `steamgriddb_api_key` | no |
+| **Google image search** | media (last resort) | API key + Search engine ID | console.cloud.google.com + programmablesearchengine.google.com | `google_cse_key`, `google_cse_cx` | no (100 queries/day) |
 | **ES-DE / Steam-grid / Steam CDN / IGDB images** | media | none / reuses IGDB | — | media mounts | — |
 | **PocketBase** | sync | superuser email+password | your PocketBase admin | `pocketbase_admin_email/password`, `pocketbase_url` | no |
 | **Firebase** | sync | service-account JSON | Firebase console | `firebase_project_id`, `firebase_sa_json` | no |
@@ -292,6 +293,113 @@ lists registered local paths.
    python3 config.py enable steamgriddb
    ```
    (Env override: `STEAMGRIDDB_API_KEY`.)
+
+### Google image search (optional, last resort)
+
+The wand's "search the web" toggle uses this **only** for games that IGDB, ScreenScraper
+and SteamGridDB all failed to supply art for. It needs two values from two different Google
+consoles. Neither works without the other.
+
+> **Read this first.** Google **deprecated "Search the entire web"** for Programmable Search
+> Engines — the toggle exists but can no longer be enabled on a new engine. Your engine can
+> therefore only search sites you explicitly list, which makes the site list (step 8) the
+> difference between this feature working and returning nothing at all.
+
+**Part A — the Search engine ID (`cx`)**
+
+1. Go to **https://programmablesearchengine.google.com/controlpanel/all** and click **Add**.
+2. Name it anything (`ludodex image search`).
+3. **Sites to search** cannot be left empty — the **Create** button stays disabled. Add one
+   throwaway entry (`en.wikipedia.org`) to get past the form; you replace it in step 8.
+4. Turn **Image search** **On**. This is the one that matters.
+5. Leave **SafeSearch** off — box art occasionally trips it.
+6. Tick the reCAPTCHA and click **Create**.
+7. Open the engine → **Customise** / **Overview → Basic** and copy the **Search engine ID**.
+   That is your `cx` — a bare alphanumeric string (older accounts show `0123456789:abcdefghij`).
+
+**Part B — the sites to search (this is the important step)**
+
+8. In **Sites to search**, click **Add**, and paste the list below (one per line), then delete
+   the `en.wikipedia.org` placeholder from step 3.
+
+   Every domain here was live-probed and confirmed to return **raw image bytes** to a
+   non-browser client — no Cloudflare challenge, no JS rendering, no referer check:
+
+   ```
+   *.archive.org
+   art.gametdb.com
+   segaretro.org
+   retrocdn.net
+   thumbnails.libretro.com
+   coverproject.sfo2.cdn.digitaloceanspaces.com
+   adb.arcadeitalia.net
+   upload.wikimedia.org
+   cdn.thegamesdb.net
+   cdn.cloudflare.steamstatic.com
+   ```
+
+   - `*.archive.org` — the strongest single entry: multi-megabyte originals, referer-
+     independent, CORS-open. Note it redirects across hosts; ludodex follows that.
+   - `art.gametdb.com` — Nintendo only (Wii/GameCube/Wii U/3DS/Switch) but high-res with real
+     JA/EN/DE regional variants. It is `art.`, not `www.`
+   - `segaretro.org` / `retrocdn.net` — full-size scans up to ~1.2 MB. Their HTML pages sit
+     behind a proof-of-work gate; the image paths do not.
+   - `thumbnails.libretro.com` — the broadest platform coverage of the set, but hard-capped
+     at **512 px wide**. Good as a fallback, never as a hero image.
+   - `coverproject.sfo2.cdn.digitaloceanspaces.com` — the CDN behind The Cover Project. Use
+     this, not `thecoverproject.net`, which is challenge-walled.
+
+   **The more the merrier — with a caveat.** A wider list genuinely finds more art, and you
+   have up to **50 domains**. But every extra domain is more index for Google to search and
+   more candidate URLs for ludodex to fetch and validate, so each one costs time on every
+   lookup. A domain that never returns a usable result is pure overhead — it slows every
+   search and buys nothing. Add sites you have reason to believe hold art for the platforms
+   *you* actually own, and prune anything that never produces a hit.
+
+   **Do not add these** — each was tested and fails, so it would waste a slot and slow every
+   query for nothing:
+
+   | Domain | Why not |
+   |---|---|
+   | `gamefaqs.gamespot.com` | Cloudflare-challenged on **every** path incl. images. 100% failure; cannot be worked around with a UA or referer. |
+   | `www.mobygames.com` | Returned the identical Cloudflare 403 signature. |
+   | `amiga.abime.net` | Worst case: returns **HTTP 200 with an HTML challenge body**. Only a content-type check catches it. |
+   | `progettosnaps.net` | Bulk zip/7z archives only — no per-game image URLs. Use `adb.arcadeitalia.net`, which republishes the same media per game. |
+   | `thecoverproject.net` | Challenge-walled, and its assets are 300-DPI print wraps (front+spine+back, often rotated), not usable as covers. |
+
+**Part C — the API key**
+
+9. Enable the API: **https://console.cloud.google.com/apis/library/customsearch.googleapis.com**
+   → check the project selector at the top → **Enable**. (If it already reads *Manage*, it is
+   enabled.)
+10. **https://console.cloud.google.com/apis/credentials** → **+ CREATE CREDENTIALS** →
+    **API key**. Copy the `AIza…` string.
+11. Recommended: **Edit API key** → *API restrictions* → **Restrict key** → tick **Custom
+    Search API**, so the key cannot be used for anything else.
+
+**Part D — verify before entering it**
+
+12. Paste this in a browser, substituting both values:
+
+    ```
+    https://www.googleapis.com/customsearch/v1?key=YOUR_KEY&cx=YOUR_CX&q=chrono+trigger+box+art&searchType=image&num=1
+    ```
+
+    - JSON with an `items` array → working.
+    - `API key not valid` → wrong key, or step 9 was skipped.
+    - `Invalid Value` on cx → wrong ID, or Image search was never switched on.
+    - `accessNotConfigured` → the API is enabled on a *different* project than the key.
+
+13. Store it:
+    ```
+    python3 config.py set google_cse_key <key>
+    python3 config.py set google_cse_cx  <search-engine-id>
+    ```
+    or paste both into **Settings → Connections → Stores & providers → Google image search**.
+
+**Quota:** the free tier is **100 queries/day**, after which it errors rather than billing.
+ludodex only reaches this provider for games still art-less after every other provider, and
+only when the wand's web-search toggle is on.
 
 ---
 

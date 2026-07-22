@@ -7211,11 +7211,17 @@ SERVICES = [
      "creds": [{"key": "steamgriddb_api_key", "label": "API key", "secret": True}],
      "limits": _limits("steamgriddb", cooldown="200")},
     {"id": "google_images", "name": "Google image search", "role": "provider",
-     "hint": "Optional last-resort cover finder for the wand's 'Find media + search web'. "
-             "Create a Google API key (console.cloud.google.com — enable the Custom Search "
-             "API) and a Programmable Search Engine that searches the whole web "
-             "(programmablesearchengine.google.com) — paste its key + Search engine ID. "
-             "Results are AI-picked and validated; art is for your own private catalog.",
+     "hint": "Optional last-resort cover finder for the wand's 'Find media + search web' — "
+             "used only for games IGDB, ScreenScraper and SteamGridDB all failed to supply. "
+             "Two values, two consoles: an API key (console.cloud.google.com, enable the "
+             "Custom Search API) and a Programmable Search Engine's Search engine ID "
+             "(programmablesearchengine.google.com). NB Google DEPRECATED 'search the entire "
+             "web', so your engine only searches sites you list — the site list decides "
+             "whether this works at all. AUTH.md has a verified list of art sites that "
+             "return real image bytes, plus the ones to avoid. More sites find more art but "
+             "make every lookup slower, and a site that never hits is pure overhead. "
+             "Free tier is 100 queries/day. Results are AI-picked and validated; art is for "
+             "your own private catalog.",
      "creds": [{"key": "google_cse_key", "label": "API key", "secret": True},
                {"key": "google_cse_cx", "label": "Search engine ID (cx)", "secret": False}],
      "limits": _limits("google_images", cooldown="500")},
