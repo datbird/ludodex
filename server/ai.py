@@ -1299,6 +1299,40 @@ def _resolve(provider, model=None):
     return provider, key, (model or model_for(provider))
 
 
+def find_media_pages(title, systems=None, year=None, provider=None, model=None):
+    """Grounded web search for the PAGES a game's art lives on. Returns [{title,url}].
+
+    This exists because the provider's search tool already hands back its real search
+    results — `_web_gemini`/`_web_anthropic` return them as the 4th element — and
+    find_media_urls was throwing them away, keeping only the model's prose. Asking a model
+    to RECITE direct image-file URLs from memory is unreliable (it invents and misremembers
+    them); asking a search tool which PAGES are about a game is exactly what search is good
+    at. The caller then extracts the image from each page and validates it.
+
+    Returns [] when the provider has no web search."""
+    provider = provider or provider_for_area("metadata")
+    if not supports_web(provider):
+        return []
+    try:
+        provider, key, model = _resolve(provider, model or model_for_area("metadata"))
+    except RuntimeError:
+        return []
+    sysline = (" for the %s" % systems[0]) if systems else ""
+    yline = (" (%s)" % year) if year else ""
+    system = ("You find web pages showing a video game's BOX ART / COVER. Search, then name "
+              "the pages you found. Prefer database and wiki pages dedicated to that exact "
+              "game — MobyGames, TheGamesDB, Wikipedia, archive.org, platform fan wikis. "
+              "Answer in one short sentence; the sources matter, not the prose.")
+    user = 'Where can I see the cover art for the video game "%s"%s%s?' % (title, yline, sysline)
+    fn = _web_gemini if provider == "gemini" else _web_anthropic
+    try:
+        res = _retry(lambda: fn(key, model, system, user))
+    except Exception:
+        return []
+    srcs = res[3] if len(res) > 3 else []
+    return [s for s in (srcs or []) if (s or {}).get("url")]
+
+
 def find_media_urls(title, systems=None, year=None, provider=None, model=None):
     """Best-effort OPEN-WEB image discovery: ask the web-search model for DIRECT image-file
     URLs (cover + a few screenshots) for a game. Returns [{"kind","url"}]. The CALLER must

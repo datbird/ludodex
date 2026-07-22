@@ -4927,26 +4927,37 @@ def _fetch_media_web(con, nk, title, now):
         img = _fetch_img(c["url"])
         if img:
             _add(c["url"], "cover", img[0]); seen.add(c["url"]); added += 1
-    # 2) Google image search + AI vision pick (needs a configured key + cx)
-    gcse_key, cx = config.get("google_cse_key"), config.get("google_cse_cx")
-    if gcse_key and cx:
-        sys0 = (systems or [""])[0] if systems else ""
-        query = " ".join(x for x in (title, sys0, "cover art") if x)
-        imgs, urls = [], []
-        for c in media_web.google_images(query, gcse_key, cx, n=6):
-            if c["url"] in seen:
+    # 2) Grounded web search -> the PAGES the art lives on -> the image on each page.
+    #    The provider's search tool already returns its real search results; we extract each
+    #    page's declared image (og:image, then a real <img>), validate it, and let the vision
+    #    model pick among what actually fetched. This replaced the Custom Search JSON API,
+    #    which Google closed to new customers (see AUTH.md) — and it needs no extra key
+    #    beyond the AI provider already configured.
+    pages = []
+    try:
+        pages = ai.find_media_pages(title, systems=systems, year=year)
+    except Exception as e:
+        print("web media: grounded search %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+    imgs, urls = [], []
+    for pg in pages[:6]:
+        if len(imgs) >= 6:
+            break
+        for cand in media_web.page_images(pg["url"], limit=2):
+            if cand in seen or len(imgs) >= 6:
                 continue
-            img = _fetch_img(c["url"])
+            seen.add(cand)
+            img = _fetch_img(cand)
             if img:
-                imgs.append(img); urls.append(c["url"])
-        if imgs:
-            pick = 0
-            if len(imgs) > 1:
-                try:
-                    pick = int(ai.pick_art(title, "cover", imgs).get("index", 0))
-                except Exception:
-                    pick = 0
-            _add(urls[pick], "cover", imgs[pick][0]); seen.add(urls[pick]); added += 1
+                imgs.append(img); urls.append(cand)
+    if imgs:
+        pick = 0
+        if len(imgs) > 1:
+            try:
+                pick = int(ai.pick_art(title, "cover", imgs).get("index", 0))
+            except Exception:
+                pick = 0
+        pick = max(0, min(pick, len(imgs) - 1))
+        _add(urls[pick], "cover", imgs[pick][0]); added += 1
     # 3) LLM-proposed direct urls (low-yield last resort)
     for c in ai.find_media_urls(title, systems=systems, year=year):
         u = (c.get("url") or "").strip()
@@ -7213,17 +7224,6 @@ SERVICES = [
      "hint": "steamgriddb.com/profile/preferences/api",
      "creds": [{"key": "steamgriddb_api_key", "label": "API key", "secret": True}],
      "limits": _limits("steamgriddb", cooldown="200")},
-    {"id": "google_images", "name": "Google image search", "role": "provider",
-     "hint": "CLOSED BY GOOGLE — do not attempt setup. Google closed the Custom Search "
-             "JSON API to new customers, and shuts it down entirely on 2027-01-01. A new "
-             "project returns 403 'This project does not have the access to Custom Search "
-             "JSON API' on every request no matter how correctly it is configured (verified "
-             "2026-07-22). These fields remain only for installs that still hold legacy "
-             "access. The wand's web search already uses Wikimedia, which is keyless and "
-             "unaffected. See AUTH.md.",
-     "creds": [{"key": "google_cse_key", "label": "API key", "secret": True},
-               {"key": "google_cse_cx", "label": "Search engine ID (cx)", "secret": False}],
-     "limits": _limits("google_images", cooldown="500")},
     {"id": "steamspy", "name": "SteamSpy", "role": "provider",
      "hint": "steamspy.com — Steam community tags for your owned Steam games. "
              "No account or API key needed (SteamSpy's API is public). Rate-limited "
@@ -9026,105 +9026,6 @@ def backup_import(body: dict = Body(...)):
         raise HTTPException(400, "could not read the zip: %s" % str(e)[:150])
     n = len([f for f in os.listdir(dest) if f.endswith(".sqlite")])
     return {"ok": True, "id": bid, "databases": n}
-
-
-def _probe_image(url, timeout=12):
-    """Fetch a candidate image URL exactly as the wand does and report WHY it passed or
-    failed. Redirects are followed and the FINAL Content-Type decides — the bot-protection
-    systems in the wild fail differently: Cloudflare answers 403, Anubis answers 200 with an
-    HTML challenge body, and hotlink guards 302 you to a homepage. Only content-type catches
-    all three."""
-    out = {"url": url, "ok": False, "status": None, "ctype": "", "bytes": 0, "why": ""}
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "Mozilla/5.0 (ludodex media finder)"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            out["status"] = resp.status
-            out["final_url"] = resp.geturl()
-            out["ctype"] = (resp.headers.get("Content-Type") or "").lower()
-            blob = resp.read(6_000_000)
-        out["bytes"] = len(blob)
-        if "image" not in out["ctype"]:
-            out["why"] = ("served %s, not an image — a bot challenge or an error page"
-                          % (out["ctype"].split(";")[0] or "no content-type"))
-        elif len(blob) < 2000:
-            out["why"] = "image but only %d bytes — probably a placeholder or spacer" % len(blob)
-        else:
-            out["ok"] = True
-            out["why"] = "real image"
-    except urllib.error.HTTPError as e:
-        out["status"] = e.code
-        out["ctype"] = (e.headers.get("Content-Type") or "").lower() if e.headers else ""
-        out["why"] = "HTTP %s — blocked or missing" % e.code
-    except Exception as e:
-        out["why"] = "unreachable: %s" % str(e)[:80]
-    return out
-
-
-@app.post("/api/google-images/probe")
-def google_images_probe(body: dict = Body(...)):
-    """Is this site worth a slot in the Programmable Search Engine allowlist?
-
-    Two independent legs, because a site fails in two very different ways:
-      1. SEARCH  — ask the engine for `title` restricted to `site`. Zero results means
-         either the site isn't in your engine's list, or Google has no image index for it.
-      2. FETCH   — pull every returned URL and validate it, the same way the wand will.
-         A site can be perfectly indexed and still useless if its images won't fetch.
-    When search returns nothing we additionally probe the site root, which distinguishes
-    "not in your list" from "this host blocks non-browser clients outright"."""
-    body = body or {}
-    site = re.sub(r"^https?://", "", (body.get("site") or "").strip()).strip("/*. ")
-    title = (body.get("title") or "").strip()
-    if not site or not title:
-        raise HTTPException(400, "need both a site and a game title")
-    key, cx = config.get("google_cse_key"), config.get("google_cse_cx")
-    if not (key and cx):
-        raise HTTPException(400, "Google image search isn't configured yet — add the API "
-                                 "key and Search engine ID first")
-    params = {"key": key, "cx": cx, "searchType": "image", "safe": "off",
-              "num": "5", "q": title, "siteSearch": site, "siteSearchFilter": "i"}
-    url = "https://www.googleapis.com/customsearch/v1?" + urllib.parse.urlencode(params)
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "ludodex"})
-        with urllib.request.urlopen(req, timeout=20) as r:
-            data = json.load(r)
-    except urllib.error.HTTPError as e:
-        # Google puts the useful diagnosis in the error body — surface it verbatim rather
-        # than a bare status, since "API not enabled on this project" and "bad cx" are the
-        # two most common setup mistakes and they look identical from the outside.
-        try:
-            msg = (json.load(e).get("error") or {}).get("message") or ""
-        except Exception:
-            msg = ""
-        raise HTTPException(502, "Google returned %s%s" % (e.code, ": " + msg if msg else ""))
-    except Exception as e:
-        raise HTTPException(502, "Google search failed: %s" % str(e)[:150])
-    items = [it.get("link") for it in (data.get("items") or []) if it.get("link")]
-    probes = [_probe_image(u) for u in items[:5]]
-    good = [p for p in probes if p["ok"]]
-
-    root = None
-    if not items:
-        root = _probe_image("https://" + site + "/")
-    if good:
-        verdict, advice = "good", (
-            "Worth keeping — %d of %d results fetched as real images (largest %.0f KB)."
-            % (len(good), len(probes), max(p["bytes"] for p in good) / 1024.0))
-    elif items:
-        verdict, advice = "blocked", (
-            "Remove it. Google indexes %d image(s) here but NONE could be fetched (%s). "
-            "This site costs you time on every lookup and returns nothing usable."
-            % (len(items), probes[0]["why"] if probes else "all failed"))
-    else:
-        hint = ""
-        if root and "image" not in (root.get("ctype") or "") and root.get("status") in (403, 503):
-            hint = (" The site also refused a plain request (HTTP %s), so it blocks "
-                    "non-browser clients — it would be useless even if indexed." % root["status"])
-        verdict, advice = "empty", (
-            "No results. Either this domain isn't in your search engine's site list yet "
-            "(add it, then re-test), or Google has no image index for it.%s" % hint)
-    return {"site": site, "title": title, "verdict": verdict, "advice": advice,
-            "results": len(items), "fetched": len(good), "probes": probes, "root": root}
 
 
 @app.get("/api/backups/archives")

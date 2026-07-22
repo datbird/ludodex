@@ -51,7 +51,7 @@ source.
 | **IGDB** | metadata | Twitch app Client ID+Secret | dev.twitch.tv/console/apps | `igdb_client_id/secret` | token auto-mints |
 | **ScreenScraper** | metadata + media | software `devid`/`devpassword` + account `ssid`/`sspassword` | forum (devid) + screenscraper.fr (account) | `screenscraper_devid/devpassword/ssid/sspassword` | no (devid is approval-gated) |
 | **SteamGridDB** | media | API key | steamgriddb.com/profile/preferences/api | `steamgriddb_api_key` | no |
-| **Google image search** | media (last resort) | ~~API key + Search engine ID~~ | **CLOSED to new customers by Google; ends 2027-01-01** | `google_cse_key`, `google_cse_cx` | legacy access only |
+| **Open-web art discovery** | media (last resort) | none — uses your AI provider's grounded search | — | — | — |
 | **ES-DE / Steam-grid / Steam CDN / IGDB images** | media | none / reuses IGDB | — | media mounts | — |
 | **PocketBase** | sync | superuser email+password | your PocketBase admin | `pocketbase_admin_email/password`, `pocketbase_url` | no |
 | **Firebase** | sync | service-account JSON | Firebase console | `firebase_project_id`, `firebase_sa_json` | no |
@@ -294,42 +294,34 @@ lists registered local paths.
    ```
    (Env override: `STEAMGRIDDB_API_KEY`.)
 
-### Google image search — **CLOSED BY GOOGLE, do not attempt setup**
+### Open-web art discovery — no key of its own
 
-> **Google closed the Custom Search JSON API to new customers.** Per Google's own docs:
-> *"The Custom Search JSON API is closed to new customers"*, and *"Existing Custom Search
-> JSON API customers have until January 1, 2027 to transition to an alternative solution."*
-> — https://developers.google.com/custom-search/v1/overview
+The wand's "search the web" toggle needs **no separate credential**. It runs on the AI
+provider you already configured, in three legs:
 
-If you set this up today you will do everything correctly and still get, on every request:
+1. **Wikimedia** — keyless. The game's Wikipedia lead image, which is usually the cover.
+2. **Grounded web search** — the provider's own search tool (Gemini's `google_search`,
+   Anthropic's `web_search`) returns the *pages* a game's art lives on. ludodex fetches each
+   page, extracts its declared image (`og:image`, then a real `<img>`), validates that it is
+   a live image, and the vision model picks the best of what actually fetched.
+3. **Model-proposed direct URLs** — a low-yield last resort.
 
-```
-403 — This project does not have the access to Custom Search JSON API.
-```
+Leg 2 replaced the Google **Custom Search JSON API**, which Google
+[closed to new customers](https://developers.google.com/custom-search/v1/overview) and
+discontinues on 2027-01-01. A new project returns `403 This project does not have the access
+to Custom Search JSON API` no matter how correctly it is configured — verified 2026-07-22
+against a fully correct setup. The `google_cse_key` / `google_cse_cx` settings and their UI
+were removed; grounded search reaches the same index through a credential you already have.
 
-That error is **not** a mistake you can fix. Verified 2026-07-22 against a correct setup:
-project with **Custom Search API enabled**, an API key in that same project **restricted to
-Custom Search API**, and a valid Programmable Search Engine `cx`. Both `customsearch/v1` and
-`customsearch/v1/siterestrict` returned 403. A deliberately corrupted key returns a
-*different* error (`API key not valid`), which proves the key itself is fine — the project
-simply has no entitlement to the service.
+**Validation is content-type based, after redirects** — that is what makes leg 2 safe. The
+protections in the wild fail differently: Cloudflare answers 403, Anubis answers **HTTP 200
+with an HTML challenge body**, hotlink guards 302 to a homepage. Only checking the final
+Content-Type catches all three.
 
-Two further nails in it, so nobody re-litigates this:
-
-- Google also **deprecated "Search the entire web"** for Programmable Search Engines, so even
-  with access the engine could only search domains you list.
-- The service is **discontinued entirely on 2027-01-01**, even for existing customers.
-
-**ludodex keeps the code path** for anyone who still holds legacy access — if
-`google_cse_key` + `google_cse_cx` are set and working, the wand's web search will use them.
-It is simply no longer something a new install can enable.
-
-**What to use instead.** The wand's open-web media chain already begins with **Wikimedia**,
-which is keyless, unaffected, and supplies the Wikipedia lead image (usually the cover). For
-emulation libraries, `thumbnails.libretro.com` addresses art by *constructed URL*
-(`thumbnails/<Playlist>/<Named_Type>/<Game>.png`, No-Intro names), so it needs no search
-engine, no key and no quota at all. Google names **Vertex AI Search** as its successor, but
-it is a paid GCP product with a different API and is not wired into ludodex.
+**Junk filtering.** Some real, correctly-served images are never the game's art — bot-
+challenge mascots (Anubis serves one as its page's `og:image`), database placeholders, site
+logos, region flags and YouTube thumbnails all validate perfectly and are all wrong. They are
+rejected by URL pattern before reaching the vision picker; see `media_web._is_junk_image`.
 
 ---
 

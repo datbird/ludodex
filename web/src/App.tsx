@@ -5,7 +5,7 @@ import type {
   GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
   AiUsageModel, AiUsageDay, AiUsageSummary, AiPrice, Currency, Caps,
   DedupeSuggestion, ArtPick, Service, ServiceConnect, Achievements as AchData,
-  MediaLibrary, MediaAsset, MediaKind, BannedMedia, BackupsState, BackupJob, GoogleProbeResult,
+  MediaLibrary, MediaAsset, MediaKind, BannedMedia, BackupsState, BackupJob,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device, LibraryManager,
@@ -3842,67 +3842,6 @@ function DevicesPanel() {
   )
 }
 
-// Is a domain worth one of the 50 allowlist slots? Two legs, because a site fails in two
-// different ways: Google may not index it at all, or it may index it fine while blocking the
-// actual image fetch. Only testing both tells you which.
-function GoogleSiteTester() {
-  const [site, setSite] = useState('')
-  const [title, setTitle] = useState('Chrono Trigger')
-  const [busy, setBusy] = useState(false)
-  const [res, setRes] = useState<GoogleProbeResult | null>(null)
-  const [err, setErr] = useState('')
-
-  const run = async () => {
-    if (!site.trim() || !title.trim()) return
-    setBusy(true); setErr(''); setRes(null)
-    try { setRes(await api.probeImageSite(site.trim(), title.trim())) }
-    catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
-  }
-
-  return (
-    <div className="site-tester">
-      <div className="pref-name">Is a site worth adding?</div>
-      <span className="pref-hint">Test a domain before it takes one of your 50 slots. More
-        sites find more art, but each one is searched and fetched on every lookup — a domain
-        that never returns a usable image just makes every search slower.</span>
-      <div className="bk-row">
-        <label>Site</label>
-        <input placeholder="art.gametdb.com" value={site}
-          onChange={(e) => setSite(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') run() }} />
-        <label className="bk-sub">Game</label>
-        <input placeholder="a game you own" value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') run() }} />
-        <button className="ops-btn" disabled={busy || !site.trim()} onClick={run}>
-          {busy ? 'Testing…' : 'Test'}</button>
-      </div>
-      {err && <div className="bs-test bad">✗ {err}</div>}
-      {res && (
-        <div className={'probe-out ' + res.verdict}>
-          <div className="probe-verdict">
-            {res.verdict === 'good' ? '✓ Keep it'
-              : res.verdict === 'blocked' ? '✗ Drop it' : '— Nothing found'}
-            <span className="dim"> · {res.results} search result(s), {res.fetched} fetched as real images</span>
-          </div>
-          <div className="probe-advice">{res.advice}</div>
-          {res.probes.length > 0 && (
-            <ul className="probe-list">
-              {res.probes.map((p, i) => (
-                <li key={i} className={p.ok ? 'ok' : 'bad'}>
-                  <span className="probe-mark">{p.ok ? '✓' : '✗'}</span>
-                  <span className="probe-why">{p.why}</span>
-                  <span className="dim probe-url">{p.url.replace(/^https?:\/\//, '').slice(0, 60)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
 function Credentials() {
   const [data, setData] = useState<Service[] | null>(null)
   const [vals, setVals] = useState<Record<string, string>>({})
@@ -3992,7 +3931,6 @@ function Credentials() {
                       </div>
                     ))}
                     {s.connect && <ConnectFlow connect={s.connect} onDone={reload} />}
-                    {s.id === 'google_images' && <GoogleSiteTester />}
                   </div>
                 )}
               </div>

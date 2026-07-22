@@ -382,13 +382,6 @@ export interface BackupsState {
   devices: { id: number; name: string; transport: string }[]
 }
 
-export interface SiteProbe {
-  url: string; ok: boolean; status: number | null; ctype: string; bytes: number; why: string
-}
-export interface GoogleProbeResult {
-  site: string; title: string; verdict: 'good' | 'blocked' | 'empty'; advice: string
-  results: number; fetched: number; probes: SiteProbe[]; root: SiteProbe | null
-}
 export interface Prefs {
   hide_non_games: boolean
   spotlight_seconds: number
@@ -1067,8 +1060,6 @@ export const api = {
     postJson<{ backend: string; dry_run: boolean; restored: number
       stores: { name: string; remote: number; local_before: number; written: number }[] }>(
       '/api/backingstore/restore', { dry_run }),
-  probeImageSite: (site: string, title: string) =>
-    postJson<GoogleProbeResult>('/api/google-images/probe', { site, title }),
   backups: () => get<BackupsState>('/api/backups/jobs'),
   backupStatus: () => get<{ job: BackupRun | null; jobs: BackupJob[] }>('/api/backups/status'),
   setBackupJob: (j: Partial<BackupJob> & { passphrase?: string | null }) =>
