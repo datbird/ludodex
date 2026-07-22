@@ -4765,6 +4765,10 @@ function ResetPanel({ onClose }: { onClose: () => void }) {
           </>
         ) : <span className="dim">checking…</span>}
       </div>
+      {plan && plan.media_preserved.length > 0 && (
+        <div className="ops-reset-keeps">Preserved in the media folder:{' '}
+          {plan.media_preserved.join(', ')} — a reset never removes a backup.</div>
+      )}
       <div className="ops-reset-note">A snapshot is taken before anything is deleted, so
         this is reversible from Restore. The server restarts afterwards.</div>
       {needsTyping && (

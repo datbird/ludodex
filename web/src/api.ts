@@ -420,6 +420,7 @@ export interface ResetPlan {
   tsvs: string[]; tsv_bytes: number
   rom_indexes: string[]; rom_index_bytes: number
   media_files: number; media_bytes: number; media_repo: string
+  media_preserved: string[]
   token_dirs: string[]; kept: string[]; total_bytes: number
 }
 export interface LibraryManager {

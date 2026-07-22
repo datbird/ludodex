@@ -30,9 +30,17 @@ files = (reset.IMPORT_DBS + reset.CURATION_DBS + reset.CONFIG_DBS
 for f in files:
     open(os.path.join(scratch, f), "w").write("x" * 100)
 open(os.path.join(scratch, "game-library.sqlite-wal"), "w").write("w")
-os.makedirs(os.path.join(scratch, "media", "ab"), exist_ok=True)
-for i in range(5):
-    open(os.path.join(scratch, "media", "ab", "%d.jpg" % i), "w").write("img")
+repo = os.path.join(scratch, "media")
+os.makedirs(repo, exist_ok=True)
+for i in range(5):                              # content-addressed blobs
+    open(os.path.join(repo, "%040x.jpg" % i), "w").write("img")
+os.makedirs(os.path.join(repo, ".thumbs"), exist_ok=True)
+open(os.path.join(repo, ".thumbs", "t.jpg"), "w").write("thumb")
+# A media BACKUP living inside the repo. A real install had a 9.4 GB one of these,
+# and an earlier rmtree(repo) would have destroyed it during a "library" reset.
+os.makedirs(os.path.join(repo, ".backup-2026-07-21"), exist_ok=True)
+for i in range(3):
+    open(os.path.join(repo, ".backup-2026-07-21", "b%d.png" % i), "w").write("backup")
 for d in reset.TOKEN_DIRS:
     os.makedirs(os.path.join(scratch, d), exist_ok=True)
 
@@ -46,7 +54,9 @@ p = reset.plan("library")
 check("config.sqlite" not in p["databases"], "credentials NOT in the plan")
 check("tags.sqlite" not in p["databases"], "hand-curation NOT in the plan")
 check("game-library.sqlite" in p["databases"], "the catalog IS")
-check(p["media_files"] == 5, "media blobs counted (%d)" % p["media_files"])
+check(p["media_files"] == 6, "blobs + thumbs counted, backup NOT (%d)" % p["media_files"])
+check(p["media_preserved"] == [".backup-2026-07-21"],
+      "the in-repo media backup is reported as PRESERVED (got %s)" % p["media_preserved"])
 check(sorted(p["tsvs"]) == ["gog_games.tsv", "steam_games.tsv"], "TSVs counted")
 check(p["rom_indexes"] == ["roms-index-mgr3.sqlite"], "ROM index counted")
 check(not p["token_dirs"], "store logins untouched at this scope")
@@ -59,7 +69,11 @@ check("game-library.sqlite" not in s, "catalog gone")
 check("game-library.sqlite-wal" not in s, "its stale WAL gone too (would replay otherwise)")
 check("steam_games.tsv" not in s, "TSVs gone — the silent-repopulate trap")
 check("roms-index-mgr3.sqlite" not in s, "ROM index gone")
-check(os.listdir(os.path.join(scratch, "media")) == [], "media repo emptied but present")
+left = sorted(os.listdir(repo))
+check(left == [".backup-2026-07-21", ".thumbs"], "only the backup + empty thumbs remain (%s)" % left)
+check(not os.listdir(os.path.join(repo, ".thumbs")), "regenerable thumbs cleared")
+check(len(os.listdir(os.path.join(repo, ".backup-2026-07-21"))) == 3,
+      "THE MEDIA BACKUP IS UNTOUCHED — a library reset must never eat a backup")
 check("backups.sqlite" in s and "ai-usage.sqlite" in s, "way-back + spend history kept")
 
 print("scope=curation")

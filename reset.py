@@ -84,25 +84,56 @@ def _size(p):
 
 
 def _repo_dir():
-    """The media repo, honouring the same knob media_choose uses — it may live
-    outside DATA on bigger storage."""
-    p = (os.environ.get("LUDODEX_MEDIA", "").strip() or "").strip()
-    if not p:
-        try:
-            import config
-            p = config.get("media_repo") or ""
-        except Exception:                       # noqa: BLE001
-            p = ""
-    return p or os.path.join(DATA, "media")
+    """The media repo. Defer to media_choose so the two can never disagree about
+    where the blobs live — that resolution honours LUDODEX_MEDIA (which the server
+    sets in its entrypoint, and which is NOT visible to `docker exec`), then the
+    media_repo config key, then <DATA>/media."""
+    try:
+        import media_choose
+        return media_choose.repo_dir()
+    except Exception:                           # noqa: BLE001  (CLI without deps)
+        p = os.environ.get("LUDODEX_MEDIA", "").strip()
+        if not p:
+            try:
+                import config
+                p = config.get("media_repo") or ""
+            except Exception:                   # noqa: BLE001
+                p = ""
+        return p or os.path.join(DATA, "media")
 
 
-def _tree_stats(root):
+# Regenerable subdirectories of the repo — safe to clear, rebuilt on demand.
+REPO_CLEARABLE_DIRS = (".thumbs",)
+
+
+def _repo_stats(root):
+    """(files, bytes, preserved_dirs) for the media repo.
+
+    Counts ONLY what a reset would actually delete: the content-addressed blobs at
+    the top level plus the regenerable caches. Every OTHER directory is preserved
+    and reported — the repo is a plausible home for a media backup (a real install
+    had a 9.4 GB `.backup-<date>/` sitting in it), and a reset that removes the
+    library must never take a backup with it."""
     n = size = 0
-    for base, _dirs, files in os.walk(root):
-        for f in files:
+    preserved = []
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError:
+        return 0, 0, []
+    for name in entries:
+        p = os.path.join(root, name)
+        if os.path.isdir(p):
+            if name in REPO_CLEARABLE_DIRS:
+                for base, _d, files in os.walk(p):
+                    for f in files:
+                        n += 1
+                        size += _size(os.path.join(base, f))
+            else:
+                preserved.append(name)
+        else:
             n += 1
-            size += _size(os.path.join(base, f))
-    return n, size
+            size += _size(p)
+    return n, size, preserved
 
 
 def plan(scope="library"):
@@ -114,7 +145,8 @@ def plan(scope="library"):
     tsvs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(DATA, TSV_GLOB)))
     roms = sorted(os.path.basename(p) for p in glob.glob(os.path.join(DATA, ROM_INDEX_GLOB)))
     repo = _repo_dir()
-    media_n, media_bytes = _tree_stats(repo) if os.path.isdir(repo) else (0, 0)
+    media_n, media_bytes, media_kept = _repo_stats(repo) if os.path.isdir(repo) \
+        else (0, 0, [])
     tokens = [d for d in TOKEN_DIRS if os.path.isdir(os.path.join(DATA, d))] \
         if scope == "factory" else []
     db_bytes = sum(_size(os.path.join(DATA, f)) for f in dbs)
@@ -126,6 +158,7 @@ def plan(scope="library"):
         "tsvs": tsvs, "tsv_bytes": tsv_bytes,
         "rom_indexes": roms, "rom_index_bytes": rom_bytes,
         "media_files": media_n, "media_bytes": media_bytes, "media_repo": repo,
+        "media_preserved": media_kept,
         "token_dirs": tokens,
         "kept": sorted(KEEP_ALWAYS),
         "total_bytes": db_bytes + tsv_bytes + rom_bytes + media_bytes,
@@ -159,14 +192,29 @@ def run(scope="library"):
             _rm(os.path.join(DATA, f + side), f + side)   # file we just removed
     for f in p["tsvs"] + p["rom_indexes"]:
         _rm(os.path.join(DATA, f), f)
+    # Media: remove the content-addressed blobs and the regenerable caches ONLY.
+    # Never rmtree the repo root — anything else in there (a media backup, say) is
+    # not ours to delete and is reported as preserved instead.
     repo = p["media_repo"]
     if p["media_files"] and os.path.isdir(repo):
-        try:
-            shutil.rmtree(repo)
-            os.makedirs(repo, exist_ok=True)
-            removed.append("%d media file(s)" % p["media_files"])
-        except OSError as e:
-            failed.append("media repo: %s" % e)
+        gone = 0
+        for name in sorted(os.listdir(repo)):
+            path = os.path.join(repo, name)
+            if os.path.isdir(path):
+                if name not in REPO_CLEARABLE_DIRS:
+                    continue                    # preserved — see plan()["media_preserved"]
+                try:
+                    shutil.rmtree(path)
+                    os.makedirs(path, exist_ok=True)
+                except OSError as e:
+                    failed.append("%s: %s" % (name, e))
+                continue
+            try:
+                os.remove(path)
+                gone += 1
+            except OSError as e:
+                failed.append("%s: %s" % (name, e))
+        removed.append("%d media file(s)" % gone)
     for d in p["token_dirs"]:
         try:
             shutil.rmtree(os.path.join(DATA, d))
