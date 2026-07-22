@@ -3972,3 +3972,18 @@ span.idchip { color: color-mix(in srgb, var(--chip, var(--text)) 80%, var(--text
 .probe-list li.bad .probe-mark { color: #f87171; }
 .probe-why { min-width: 240px; }
 .probe-url { font-family: ui-monospace, Menlo, monospace; opacity: 0.6; }
+
+/* the wand's "what it does" pipeline */
+.wand-flow { list-style: none; counter-reset: wf; margin: 2px 0 14px; padding: 0;
+  display: flex; flex-direction: column; gap: 7px; }
+.wand-flow li { counter-increment: wf; position: relative; padding-left: 26px;
+  font-size: 13px; color: var(--text); line-height: 1.45; }
+.wand-flow li::before { content: counter(wf); position: absolute; left: 0; top: 1px;
+  width: 18px; height: 18px; border-radius: 50%; font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-bg); color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+.wand-flow li b { color: var(--text-h); }
+.wand-flow li.wand-flow-auto::before { content: '✦'; background: var(--accent);
+  color: #fff; border-color: var(--accent); }
+.wand-flow li.wand-flow-auto { color: var(--text-h); }

@@ -8375,12 +8375,28 @@ function MagicWandOverlay({ filterQuery, filterCount, target, onClose }: {
             </div>
 
             <div className="wand-sec">
+              <div className="wand-sec-h">What the wand does</div>
+              {/* The wand is one operation, but users could not see WHAT it does or why the
+                  web option exists — so the pipeline is stated plainly, with the automatic
+                  rescue called out as automatic. */}
+              <ol className="wand-flow">
+                <li><b>Checks the identity</b><span> — re-verifies which game this really is,
+                  even if it already looked matched</span></li>
+                <li><b>Fixes associations</b><span> — cross-platform grouping, same-title
+                  splits, and entries bound to the wrong game sharing a name</span></li>
+                <li><b>Fills the media</b><span> — every provider you have configured
+                  (IGDB, ScreenScraper, SteamGridDB, store art)</span></li>
+                <li className="wand-flow-auto"><b>Rescues anything still empty</b><span> — a
+                  game left with no cover gets an automatic open-web search. This always
+                  happens; you don’t have to ask for it.</span></li>
+              </ol>
               <div className="wand-sec-h">Options</div>
               <label className={'wand-check' + (targets && !targets.web_capable ? ' off' : '')}
-                title={targets && !targets.web_capable ? 'The metadata AI provider has no web search — pick Gemini/Anthropic/OpenAI in AI settings' : 'Slower, but verifies against live web sources'}>
+                title={targets && !targets.web_capable ? 'The metadata AI provider has no web search — pick Gemini/Anthropic/OpenAI in AI settings' : 'The wand already falls back to the open web for any game left with NO cover. Tick this to search the web for EVERY scanned game — better art and live verification, but noticeably slower.'}>
                 <input type="checkbox" checked={web} disabled={!targets?.web_capable}
                   onChange={(e) => setWeb(e.target.checked)} />
-                <span>Search the web for verification <span className="dim">(slower)</span></span>
+                <span>Be extra thorough — search the web for every game
+                  <span className="dim"> (slower; a game with no cover already gets this automatically)</span></span>
               </label>
               <label className="wand-check">
                 <input type="checkbox" checked={matchProvider} onChange={(e) => setMatchProvider(e.target.checked)} />
@@ -8477,9 +8493,9 @@ function MetadataScan() {
           <input type="number" min={1} value={limit}
             onChange={(e) => setLimit(Math.max(1, parseInt(e.target.value, 10) || 1))} />
         </label>
-        <label className="wand-check" title={targets && !targets.web_capable ? 'Provider has no web search' : 'Slower; verifies against live web sources'}>
+        <label className="wand-check" title={targets && !targets.web_capable ? 'Provider has no web search' : 'The wand already falls back to the open web for any game left with NO cover. Tick this to search the web for EVERY scanned game — better art and live verification, but noticeably slower.'}>
           <input type="checkbox" checked={web} disabled={!targets?.web_capable}
-            onChange={(e) => setWeb(e.target.checked)} /> Web search
+            onChange={(e) => setWeb(e.target.checked)} /> Extra thorough (web)
         </label>
         <label className="wand-check">
           <input type="checkbox" checked={matchProvider} onChange={(e) => setMatchProvider(e.target.checked)} /> Match provider (IGDB)

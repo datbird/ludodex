@@ -5075,11 +5075,17 @@ def _fetch_media_for(nk, want_web=False):
 
 
 def _wand_fill_media(nks, want_web, should_stop):
-    """The wand's media step: fetch + choose art for the games it scanned, from every
-    provider (+ open-web discovery when the user turned on web search). Runs for games that
-    already have a resolution (a newly-proposed match fills its art on apply instead). One
-    choose after the batch. Web discovery is capped so a huge 'scan all' doesn't do
-    thousands of slow web calls — providers still run for every game."""
+    """The wand's media step: fetch + choose art for the games it scanned.
+
+    Two tiers, so the wand is never silently worse for not having ticked a box:
+      - ALWAYS: every provider, then a bounded open-web RESCUE for any game left with no
+        cover at all. A game with nothing is the case the wand exists to fix.
+      - want_web: the open-web pass for EVERY scanned game, not just the stranded ones —
+        "be extra thorough", worth the time when you want the best art rather than just
+        art. Capped separately, because on a big scan it is thousands of slow calls.
+
+    Runs for games that already have a resolution (a newly-proposed match fills its art on
+    apply instead). One choose after each batch."""
     nks = list(nks)
     if not nks:
         return
@@ -5115,6 +5121,42 @@ def _wand_fill_media(nks, want_web, should_stop):
         _mf._backfill_game_key(con)
         media_choose.select(con)
         con.commit()
+
+        # RESCUE PASS — the wand's "just make it correct" promise, not an opt-in.
+        #
+        # A cover is the one piece of media a game cannot look right without, so if every
+        # provider has run and a game STILL has none, the wand takes the extra step by
+        # itself rather than leaving the entry blank and waiting for someone to know there
+        # was a checkbox. The web-search toggle therefore means "use the slow path for
+        # EVERY scanned game", not "be allowed to fix a game that has nothing".
+        #
+        # Bounded on purpose: this is the expensive path (a grounded search, several page
+        # fetches and a vision call per game), so it only ever runs for genuinely
+        # cover-less games and only up to RESCUE_CAP of them. Anything beyond that is a
+        # bulk backfill, which is what the toggle and Server-ops are for.
+        if not do_web and not should_stop():
+            RESCUE_CAP = 12
+            stranded = [nk for nk in need if not con.execute(
+                "SELECT 1 FROM media WHERE norm_key=? AND chosen=1 AND kind='cover' LIMIT 1",
+                (nk,)).fetchone()]
+            if stranded:
+                rescue = stranded[:RESCUE_CAP]
+                print("aimeta wand: %d game(s) still cover-less after every provider — "
+                      "trying open-web discovery for %d%s"
+                      % (len(stranded), len(rescue),
+                         " (capped)" if len(stranded) > RESCUE_CAP else ""),
+                      file=sys.stderr)
+                for nk in rescue:
+                    if should_stop():
+                        break
+                    try:
+                        _pull_media_sources(con, nk, want_web=True)
+                    except Exception as e:
+                        print("aimeta wand rescue %s: %s" % (nk, str(e)[:120]),
+                              file=sys.stderr)
+                _mf._backfill_game_key(con)
+                media_choose.select(con)
+                con.commit()
     finally:
         con.close()
 
