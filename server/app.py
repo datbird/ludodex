@@ -7214,18 +7214,13 @@ SERVICES = [
      "creds": [{"key": "steamgriddb_api_key", "label": "API key", "secret": True}],
      "limits": _limits("steamgriddb", cooldown="200")},
     {"id": "google_images", "name": "Google image search", "role": "provider",
-     "hint": "Optional last-resort cover finder for the wand's 'Find media + search web' — "
-             "used only for games IGDB, ScreenScraper and SteamGridDB all failed to supply. "
-             "THREE steps: (1) enable the Custom Search API on a Google Cloud project, "
-             "(2) create an API key in THAT SAME project and restrict it to Custom Search "
-             "API, (3) create a Programmable Search Engine and give it sites to search. "
-             "Steps 1+2 must share a project — mismatching them is the usual failure. The "
-             "search engine belongs to your Google account, not a project, so it needs no "
-             "matching. NB Google deprecated 'search the entire web', so your engine only "
-             "searches sites you list: the site list decides whether this works at all. "
-             "AUTH.md has verified sites that return real image bytes, and the ones to "
-             "avoid. More sites find more art but slow every lookup, so a site that never "
-             "hits is pure overhead — use the tester below. Free tier 100 queries/day.",
+     "hint": "CLOSED BY GOOGLE — do not attempt setup. Google closed the Custom Search "
+             "JSON API to new customers, and shuts it down entirely on 2027-01-01. A new "
+             "project returns 403 'This project does not have the access to Custom Search "
+             "JSON API' on every request no matter how correctly it is configured (verified "
+             "2026-07-22). These fields remain only for installs that still hold legacy "
+             "access. The wand's web search already uses Wikimedia, which is keyless and "
+             "unaffected. See AUTH.md.",
      "creds": [{"key": "google_cse_key", "label": "API key", "secret": True},
                {"key": "google_cse_cx", "label": "Search engine ID (cx)", "secret": False}],
      "limits": _limits("google_images", cooldown="500")},

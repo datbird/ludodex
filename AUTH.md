@@ -51,7 +51,7 @@ source.
 | **IGDB** | metadata | Twitch app Client ID+Secret | dev.twitch.tv/console/apps | `igdb_client_id/secret` | token auto-mints |
 | **ScreenScraper** | metadata + media | software `devid`/`devpassword` + account `ssid`/`sspassword` | forum (devid) + screenscraper.fr (account) | `screenscraper_devid/devpassword/ssid/sspassword` | no (devid is approval-gated) |
 | **SteamGridDB** | media | API key | steamgriddb.com/profile/preferences/api | `steamgriddb_api_key` | no |
-| **Google image search** | media (last resort) | API key + Search engine ID | console.cloud.google.com + programmablesearchengine.google.com | `google_cse_key`, `google_cse_cx` | no (100 queries/day) |
+| **Google image search** | media (last resort) | ~~API key + Search engine ID~~ | **CLOSED to new customers by Google; ends 2027-01-01** | `google_cse_key`, `google_cse_cx` | legacy access only |
 | **ES-DE / Steam-grid / Steam CDN / IGDB images** | media | none / reuses IGDB | — | media mounts | — |
 | **PocketBase** | sync | superuser email+password | your PocketBase admin | `pocketbase_admin_email/password`, `pocketbase_url` | no |
 | **Firebase** | sync | service-account JSON | Firebase console | `firebase_project_id`, `firebase_sa_json` | no |
@@ -294,147 +294,42 @@ lists registered local paths.
    ```
    (Env override: `STEAMGRIDDB_API_KEY`.)
 
-### Google image search (optional, last resort)
+### Google image search — **CLOSED BY GOOGLE, do not attempt setup**
 
-Used by the wand's "search the web" toggle **only** for games that IGDB, ScreenScraper and
-SteamGridDB all failed to supply art for.
+> **Google closed the Custom Search JSON API to new customers.** Per Google's own docs:
+> *"The Custom Search JSON API is closed to new customers"*, and *"Existing Custom Search
+> JSON API customers have until January 1, 2027 to transition to an alternative solution."*
+> — https://developers.google.com/custom-search/v1/overview
 
-> **Read first.** Google **deprecated "Search the entire web"** — the toggle exists but can no
-> longer be enabled. Your engine searches *only* the sites you list, so the site list (goal 3)
-> is what decides whether this feature works at all.
-
-#### The three goals
-
-| # | Goal | Where |
-|---|---|---|
-| 1 | **Enable the Custom Search API** on a Google Cloud project | console.cloud.google.com |
-| 2 | **Create an API key** in *that same project*, restricted to Custom Search API | console.cloud.google.com |
-| 3 | **Create a Programmable Search Engine** and give it sites to search | programmablesearchengine.google.com |
-
-Goals 1 and 2 must happen in the **same Cloud project** — that pairing is the one thing that
-actually has to line up, and getting it wrong is the most common failure.
-
-Goal 3 is **not** in a Cloud project at all. A Programmable Search Engine belongs to your
-Google *account*, so there is nothing to match between it and the key. Any key from any
-project with the API enabled works with any engine on your account.
-
-You end up with **two values**: an API key (`AIza…`) and a Search engine ID (`cx`).
-
----
-
-#### Goal 1 — enable the API
-
-Open **https://console.cloud.google.com/apis/library/customsearch.googleapis.com**
-
-Check the **project selector in the top bar** and remember which project you are in. Click
-**Enable**. If it already reads **Manage**, it is done.
-
-> If Enable bounces or does nothing, the project may need a billing account attached — some
-> Google APIs now require one even for a free tier.
-
-#### Goal 2 — create the API key
-
-Open **https://console.cloud.google.com/apis/credentials**
-
-Confirm the project selector still shows **the same project as goal 1**, then
-**+ CREATE CREDENTIALS → API key** (not OAuth client ID, not Service account). Copy the
-`AIza…` string, then **Edit API key → API restrictions → Restrict key → Custom Search API**.
-
-**If the project is wrong**, every query fails with
-`This project does not have the access to Custom Search JSON API` even though the key itself
-is valid. To find which project owns a key: open the credentials page, find the key in the
-list, and read the project in the top bar. Then force the library page onto that exact
-project with
-`https://console.cloud.google.com/apis/library/customsearch.googleapis.com?project=YOUR_PROJECT_ID`
-and confirm it reads **Manage**.
-
-#### Goal 3 — create the search engine
-
-Open **https://programmablesearchengine.google.com/controlpanel/all** → **Add**
-
-1. Name it anything (`ludodex image search`).
-2. **Sites to search cannot be empty** — Create stays disabled. Add a throwaway
-   (`en.wikipedia.org`); you replace it below.
-3. Turn **Image search** **On**. This is the setting that matters.
-4. Leave **SafeSearch** off — box art occasionally trips it.
-5. Tick the reCAPTCHA → **Create**.
-6. Open the engine → **Customise / Overview → Basic** → copy the **Search engine ID**. That
-   is your `cx`.
-7. In **Sites to search**, **Add** the list below (one per line), then delete the placeholder.
-
-#### Which sites to add
-
-Every domain here was live-probed and returns **raw image bytes** to a non-browser client —
-no challenge page, no JS rendering, no referer check:
+If you set this up today you will do everything correctly and still get, on every request:
 
 ```
-*.archive.org
-art.gametdb.com
-segaretro.org
-retrocdn.net
-thumbnails.libretro.com
-coverproject.sfo2.cdn.digitaloceanspaces.com
-adb.arcadeitalia.net
-upload.wikimedia.org
-cdn.thegamesdb.net
-cdn.cloudflare.steamstatic.com
+403 — This project does not have the access to Custom Search JSON API.
 ```
 
-- `*.archive.org` — strongest single entry; multi-MB originals, CORS-open. Redirects across
-  hosts; ludodex follows that.
-- `art.gametdb.com` — Nintendo only (Wii/GC/Wii U/3DS/Switch), high-res, real JA/EN/DE
-  variants. Note `art.`, not `www.`
-- `segaretro.org` / `retrocdn.net` — scans up to ~1.2 MB. Their HTML pages are gated; the
-  image paths are not.
-- `thumbnails.libretro.com` — broadest platform coverage here, but capped at **512 px wide**.
-- `coverproject.sfo2.cdn…` — the CDN behind The Cover Project. Use this, not
-  `thecoverproject.net`, which is challenge-walled.
+That error is **not** a mistake you can fix. Verified 2026-07-22 against a correct setup:
+project with **Custom Search API enabled**, an API key in that same project **restricted to
+Custom Search API**, and a valid Programmable Search Engine `cx`. Both `customsearch/v1` and
+`customsearch/v1/siterestrict` returned 403. A deliberately corrupted key returns a
+*different* error (`API key not valid`), which proves the key itself is fine — the project
+simply has no entitlement to the service.
 
-**The more the merrier — but not for free.** You get up to **50 domains**, and a wider list
-genuinely finds more art. Every extra domain is also more index to search and more candidates
-to fetch and validate on *every* lookup, so a domain that never returns a usable image is
-pure overhead: it slows every search and gives nothing back. Add sites likely to hold art for
-the platforms you actually own, and prune what never hits.
+Two further nails in it, so nobody re-litigates this:
 
-**Do not add these** — each was tested and fails:
+- Google also **deprecated "Search the entire web"** for Programmable Search Engines, so even
+  with access the engine could only search domains you list.
+- The service is **discontinued entirely on 2027-01-01**, even for existing customers.
 
-| Domain | Why not |
-|---|---|
-| `gamefaqs.gamespot.com` | Cloudflare-challenged on every path incl. images. 100% failure; no UA or referer defeats it. |
-| `www.mobygames.com` | Identical Cloudflare 403 signature. |
-| `amiga.abime.net` | Returns **HTTP 200 with an HTML challenge body** — only a content-type check catches it. |
-| `progettosnaps.net` | Bulk zip/7z only, no per-game image URLs. Use `adb.arcadeitalia.net`. |
-| `thecoverproject.net` | Challenge-walled, and its assets are 300-DPI print wraps, not covers. |
+**ludodex keeps the code path** for anyone who still holds legacy access — if
+`google_cse_key` + `google_cse_cx` are set and working, the wand's web search will use them.
+It is simply no longer something a new install can enable.
 
-#### Store and verify
-
-```
-python3 config.py set google_cse_key <key>
-python3 config.py set google_cse_cx  <search-engine-id>
-```
-
-or paste both into **Settings → Connections → Stores & providers → Google image search**.
-
-Check it end-to-end in a browser:
-
-```
-https://www.googleapis.com/customsearch/v1?key=YOUR_KEY&cx=YOUR_CX&q=chrono+trigger+box+art&searchType=image&num=1
-```
-
-| Response | Meaning |
-|---|---|
-| JSON with an `items` array | working |
-| `This project does not have the access to Custom Search JSON API` | goal 1 and goal 2 are on different projects |
-| `API key not valid` | wrong key |
-| `Invalid Value` (on cx) | wrong Search engine ID, or Image search was never turned on |
-
-**Built-in tester.** Once saved, the Google image search card gains *"Is a site worth
-adding?"* — enter a domain and a game you own. It asks your engine for that site, then
-fetches every result and validates it the way the wand will. **Keep it** = results fetched as
-real images. **Drop it** = indexed but nothing fetches. **Nothing found** = not in your site
-list yet, or no index. Re-test occasionally: sites add bot protection over time.
-
-**Quota:** free tier is **100 queries/day**; it errors rather than billing.
+**What to use instead.** The wand's open-web media chain already begins with **Wikimedia**,
+which is keyless, unaffected, and supplies the Wikipedia lead image (usually the cover). For
+emulation libraries, `thumbnails.libretro.com` addresses art by *constructed URL*
+(`thumbnails/<Playlist>/<Named_Type>/<Game>.png`, No-Intro names), so it needs no search
+engine, no key and no quota at all. Google names **Vertex AI Search** as its successor, but
+it is a paid GCP product with a different API and is not wired into ludodex.
 
 ---
 
