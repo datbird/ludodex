@@ -699,13 +699,15 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       <header>
         <div className="brand">
           <img className="logo-mark" src="/logo-mark.png" alt="" />
-          <h1>ludo<span>dex</span></h1>
-          {stats && (
-            <div className="stats">
-              {(stats.identified ?? stats.games).toLocaleString()} identified games · {stats.media.games_with_art.toLocaleString()} with art ·{' '}
-              {stats.cross_source} cross-source
-            </div>
-          )}
+          <div className="brand-text">
+            <h1>ludo<span>dex</span></h1>
+            {stats && (
+              <div className="stats">
+                {(stats.identified ?? stats.games).toLocaleString()} identified games · {stats.media.games_with_art.toLocaleString()} with art ·{' '}
+                {stats.cross_source} cross-source
+              </div>
+            )}
+          </div>
         </div>
         <div className="jm-slot">
           <JobMonitor onOpen={setSelected} pendingApply={stats?.pending_meta ?? 0}

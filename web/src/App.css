@@ -12,10 +12,19 @@ header {
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
 }
-/* jobmon sits between the brand and the action buttons; margin-left:auto pushes it (and
-   the buttons after it) to the right, so desktop keeps brand-left / jobmon+buttons-right */
-.jm-slot { display: flex; align-items: center; margin-left: auto; min-width: 0; }
-.brand { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* jobmon sits between the brand and the action buttons. It takes ALL the leftover
+   width and centres its content, so the gap to the brand and the gap to the buttons
+   are equal by construction — no magic margin to re-tune when the brand or the
+   button row changes width. min-width:0 keeps a long job label from pushing the
+   buttons off; the monitor truncates instead. */
+.jm-slot {
+  display: flex; align-items: center; justify-content: center;
+  flex: 1 1 0; min-width: 0;
+}
+.brand { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: none; }
+/* wordmark stacked over the counts, so the stats read as a caption to the logo
+   rather than a third item competing for the header's horizontal space */
+.brand-text { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
 .logo-mark {
   height: 46px;
   width: auto;
