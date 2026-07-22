@@ -2049,6 +2049,11 @@ def _call_openai(key, model, system, user, base_url=None):
             getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0)
 
 
+# Models observed to reject thinking_budget=0 — populated at run time by the first
+# rejection, so a new model family self-heals without a code change.
+_NO_THINKING = set()
+
+
 def _call_gemini(key, model, system, user):
     from google import genai
     from google.genai import types
@@ -2064,15 +2069,34 @@ def _call_gemini(key, model, system, user):
         max_output_tokens=2048,
     )
     # Disable "thinking" — 2.5-flash spends output tokens on thinking and can
-    # truncate the JSON to just "{". Not all models accept it, so degrade safely.
+    # truncate the JSON to just "{".
+    #
+    # Newer models (gemini-flash-latest and the 3.x line) REJECT thinking_budget=0
+    # outright with a bare 400 INVALID_ARGUMENT. Constructing the object still
+    # succeeds, so a try/except around the constructor alone never fires — the
+    # failure only surfaces at call time, which silently broke every AI area for
+    # anyone on such a model. Try it, and on rejection drop it and retry once,
+    # remembering the model so the wasted round-trip happens at most once per
+    # process.
+    want_thinking = model not in _NO_THINKING
+    if want_thinking:
+        try:
+            cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        except Exception:
+            want_thinking = False
+
+    def _go(c):
+        return client.models.generate_content(
+            model=model, contents=user, config=types.GenerateContentConfig(**c))
+
     try:
-        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-    except Exception:
-        pass
-    resp = client.models.generate_content(
-        model=model, contents=user,
-        config=types.GenerateContentConfig(**cfg),
-    )
+        resp = _go(cfg)
+    except Exception as e:                  # noqa: BLE001
+        if not want_thinking or "INVALID_ARGUMENT" not in str(e):
+            raise
+        _NO_THINKING.add(model)
+        cfg.pop("thinking_config", None)
+        resp = _go(cfg)
     u = getattr(resp, "usage_metadata", None)
     return (resp.text, getattr(u, "prompt_token_count", 0) or 0,
             getattr(u, "candidates_token_count", 0) or 0)
