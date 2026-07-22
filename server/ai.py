@@ -648,6 +648,10 @@ AREAS = [
      "description": "Describes the CURRENT on-disk layout (system/group folders, "
                     "and whether media is intermixed) so the Before panel understands "
                     "what it's reading."},
+    {"id": "ingest", "name": "Ingest filename identification", "status": "live",
+     "description": "Reads ROM file paths during an import and works out the real game "
+                    "title, system and release year when the filename rules can't "
+                    "(cryptic 8.3 names, abbreviations, romanisations, wrong folders)."},
     {"id": "metadata", "name": "Metadata search & supplement", "status": "live",
      "description": "Audits provider matches (catches wrong ones like a remake "
                     "matched to the original), identifies games no provider matched, "
@@ -713,6 +717,26 @@ DEFAULT_PROMPTS = {
         "\"games\": [{\"title\": \"<name with (year)>\", \"year\": <int|null>, "
         "\"rows\": [<row numbers>]}]}. Put the MOST-canonical/original game first. "
         "Every row number must appear in exactly one game."
+    ),
+    "ingest": (
+        "You identify video games from ROM/disc file paths taken from a personal "
+        "emulation library. For each numbered path decide the REAL game.\n"
+        "The folder a file sits in is a HINT, not proof — collections misfile ROMs "
+        "often. If the filename carries a hardware tag that contradicts the folder "
+        "(\"Doom 32X\" under sega genesis), the FILENAME wins.\n"
+        "Expand abbreviations (FF7 -> Final Fantasy VII), de-abbreviate 8.3 names, and "
+        "give the widely-known official English title where one exists (keep the "
+        "original for Japan-only releases).\n"
+        "Ignore region/version/dump markers — (U), (E), [!], v1.1, Rev A — they are not "
+        "part of the title.\n\n"
+        "Respond ONLY with a JSON array, one item per numbered path; each item:\n"
+        '  {"n": <number>, "title": "<official title, or empty string if the '
+        'parsed-title is already right>", "platform": "<system, or empty string to '
+        'keep the folder value>", "year": <release year int or null>, '
+        '"confidence": <0..1>}\n'
+        "Set confidence honestly: 1.0 only when you are certain of the game. Use a LOW "
+        "confidence (below 0.5) rather than guessing at a title you do not recognise — "
+        "a wrong title is worse than no answer, because the algorithmic one is kept."
     ),
     "fileprofile": (
         "You design a file-organization profile for a ROM/game library. You are given "
@@ -1678,6 +1702,55 @@ def dedupe_pairs(pairs, provider=None, model=None):
     text = _complete_text(provider, key, model, system, "Pairs:\n" + listing)
     obj = _json(text)
     return obj if isinstance(obj, list) else obj.get("results", [])
+
+
+def identify_roms(items, provider=None, model=None):
+    """Identify games from ROM paths. `items` = [{system, game, path}] — the folder's
+    system label, the algorithmic title, and one real relative path.
+
+    Returns [{n, title, platform, year, confidence}] with n 1-based into `items`.
+    An empty title/platform means "the algorithmic value was already right", which is
+    the common case and keeps the response cheap. Raises on error.
+
+    Batching is the caller's job (see ingest_ai.py) — this sends exactly what it is
+    given, so the caller controls token spend per call.
+    """
+    provider, key, model = _resolve(provider, model)
+    listing = "\n".join(
+        '%d. folder="%s"  parsed-title="%s"  path="%s"'
+        % (i + 1, it.get("system", ""), it.get("game", ""), it.get("path", ""))
+        for i, it in enumerate(items))
+    system = area_prompt("ingest")
+    text = _complete_text(provider, key, model, system, "Paths:\n" + listing)
+    obj = _json(text)
+    rows = obj if isinstance(obj, list) else (obj.get("results") or obj.get("games") or [])
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        try:
+            n = int(r.get("n"))
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= n <= len(items):        # a hallucinated index would corrupt a title
+            continue
+        yr = r.get("year")
+        try:
+            yr = int(yr) if yr not in (None, "", "null") else None
+        except (TypeError, ValueError):
+            yr = None
+        if yr is not None and not 1950 <= yr <= 2100:
+            yr = None
+        try:
+            conf = float(r.get("confidence") or 0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        out.append({"n": n,
+                    "title": (r.get("title") or "").strip(),
+                    "platform": (r.get("platform") or "").strip(),
+                    "year": yr,
+                    "confidence": max(0.0, min(1.0, conf))})
+    return out
 
 
 def split_adjudicate(title, rows, provider=None, model=None):

@@ -26,8 +26,14 @@ import console_eras             # hardware timelines — catch era-impossible me
 import homebrew                 # ROM release-type classifier (homebrew/hack/proto/…)
 import overrides                # durable per-attribute user corrections
 import platmap                  # platform ontology + filename-carried hardware tags
+import ingesthints              # AI ingest hints (lite/heavy import) — advisory
 _MERGE_ALIAS = merges.alias_map()
 _PEEL = splits.overrides()      # {(source, source_id): (to_key, to_title)}
+# {(system, game): (title, platform, year)} — what an AI ingest pass read off the
+# file paths. Applied to folder-based ROMs only, and only where the algorithmic
+# parse produced the (system, game) it was recorded against, so a re-scan that
+# changes the parse quietly drops the stale hint instead of misapplying it.
+_INGEST_HINT = ingesthints.overrides()
 
 
 def _mkey(title, platform=None):
@@ -275,7 +281,17 @@ if config.source_enabled("emulation"):
         try:
             for system, game, regions in rc.execute(q, list(ROM_EXTS)
                                                      + list(MEDIA_GAMES)):
-                add(game, "emulation", system, system, (regions or ""))
+                # An AI ingest hint rewrites the title and/or the platform this ROM
+                # is attributed to. The source id stays the folder's system so the
+                # source row still points at where the file actually lives — only
+                # the identity axes move. (The hint's year is left for the metadata
+                # pass to use as a disambiguator; it must not enter the norm_key.)
+                hint = _INGEST_HINT.get((system, game))
+                title, plat = game, system
+                if hint:
+                    title = hint[0] or game
+                    plat = hint[1] or system
+                add(title, "emulation", plat, system, (regions or ""))
         except sqlite3.OperationalError:
             pass
         rc.close()

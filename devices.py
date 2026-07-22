@@ -62,9 +62,18 @@ def _con():
         id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER, norm_key TEXT,
         added REAL, UNIQUE(device_id, norm_key))""")
     # which media kinds a "media" folder should ingest (comma-joined; '' = all)
-    if "media_kinds" not in {r[1] for r in
-                             con.execute("PRAGMA table_info(library_managers)")}:
+    _lm_cols = {r[1] for r in con.execute("PRAGMA table_info(library_managers)")}
+    if "media_kinds" not in _lm_cols:
         con.execute("ALTER TABLE library_managers ADD COLUMN media_kinds TEXT DEFAULT ''")
+    # How much work an import of this ROM source should do:
+    #   algo  — filename rules only, zero AI (the historical behaviour, still default)
+    #   lite  — algo, then an AI pass over paths whose parsed title looks mangled
+    #   heavy — lite, then the full metadata/art supplement over the imported games
+    # Existing rows default to 'algo', so adding this column changes nothing for a
+    # source that already exists.
+    if "import_mode" not in _lm_cols:
+        con.execute("ALTER TABLE library_managers ADD COLUMN import_mode TEXT "
+                    "DEFAULT 'algo'")
     # the former "storage archive" kind was folded into "ROM folder" — migrate any
     # existing rows so they sync via the normal ROM path
     con.execute("UPDATE library_managers SET kind='roms' WHERE kind='archive'")
@@ -472,17 +481,23 @@ def wants_for_key(norm_key):
     return ids
 
 
+IMPORT_MODES = ("algo", "lite", "heavy")
+
+
 def manager_set(m):
     con = _con()
     # media_kinds may arrive as a list (from the UI picker) or a string
     mk = m.get("media_kinds")
     mk_str = ",".join(mk) if isinstance(mk, (list, tuple)) else (mk or "")
+    mode = (m.get("import_mode") or "algo").strip().lower()
+    if mode not in IMPORT_MODES:
+        mode = "algo"
     fields = ("device_id", "kind", "name", "rom_path", "media_path",
-              "media_kinds", "enabled")
+              "media_kinds", "enabled", "import_mode")
     vals = {"device_id": m.get("device_id"), "kind": m.get("kind"),
             "name": m.get("name"), "rom_path": m.get("rom_path"),
             "media_path": m.get("media_path"), "media_kinds": mk_str,
-            "enabled": 1 if m.get("enabled", True) else 0}
+            "enabled": 1 if m.get("enabled", True) else 0, "import_mode": mode}
     if m.get("id"):
         con.execute("UPDATE library_managers SET %s WHERE id=?"
                     % ",".join("%s=?" % f for f in fields),
@@ -861,8 +876,33 @@ def sync_device(dev_id):
             except (subprocess.TimeoutExpired, OSError) as e:
                 out["materialized"] = False
                 out["materialize_error"] = str(e)[:200]
-    if rebuild:      # rebuild the catalog so pulled ROM titles appear (build_library
-        try:         # runs the consumer carry-over pass internally — the blessed rebuild path)
+    if rebuild:
+        # The import tier decides how much work happens between "files are indexed"
+        # and "the catalog is enriched". Every tier below is additive.
+        modes = {lm["id"]: (lm.get("import_mode") or "algo") for lm in lms
+                 if lm.get("rom_path")}
+        out["import_modes"] = modes
+        # --- lite/heavy: read the paths with a model BEFORE the rebuild, so the
+        # hints are in place when build_library derives identities from them.
+        ai_mgrs = [mid for mid, m in modes.items() if m in ("lite", "heavy")]
+        if ai_mgrs:
+            out["ingest_ai"] = {}
+            for mid in ai_mgrs:
+                argv = [sys.executable, os.path.join(DIR, "ingest_ai.py"),
+                        "--mgr", str(mid)]
+                if modes[mid] == "heavy":
+                    argv.append("--all")     # heavy re-reads every title, not just
+                try:                         # the ones that look mangled
+                    r = _run(argv, timeout=5400)
+                    out["ingest_ai"][mid] = ((r.stdout or "").strip().splitlines() or
+                                             [""])[-1][:200] if r.returncode == 0 \
+                        else "failed: " + (r.stderr or "")[:160]
+                except (subprocess.TimeoutExpired, OSError) as e:
+                    out["ingest_ai"][mid] = "failed: " + str(e)[:160]
+        # rebuild the catalog so pulled ROM titles (and any hints) appear —
+        # build_library runs the consumer carry-over pass internally, so this is the
+        # blessed rebuild path
+        try:
             r = _run([sys.executable, os.path.join(DIR, "build_library.py")], timeout=900)
             out["rebuilt"] = (r.returncode == 0)
             if r.returncode != 0:
@@ -870,7 +910,51 @@ def sync_device(dev_id):
         except (subprocess.TimeoutExpired, OSError) as e:
             out["rebuilt"] = False
             out["rebuild_error"] = str(e)[:200]
+        # --- every tier, including algo: identify and enrich against the PROVIDERS.
+        # None of this is AI — it is ScreenScraper/IGDB/SteamGridDB lookups, the same
+        # chain a store sync runs. A ROM sync skipped it entirely before, which left
+        # emulation games unmatched and art-less no matter which tier you picked.
+        if out.get("rebuilt"):
+            out["enriched"] = _enrich_roms()
     return out
+
+
+def _enrich_roms():
+    """Provider identification + art for freshly-imported ROMs. Zero AI: this is the
+    'algorithmic' half of every import tier. Each step is best-effort — one provider
+    being down must not cost you the rest of the import."""
+    steps, done = [], {}
+
+    def _step(label, script, args, timeout):
+        try:
+            r = _run([sys.executable, os.path.join(DIR, script)] + args, timeout=timeout)
+            done[label] = (r.returncode == 0)
+            if r.returncode != 0:
+                done[label + "_error"] = (r.stderr or "")[:160]
+        except (subprocess.TimeoutExpired, OSError) as e:
+            done[label] = False
+            done[label + "_error"] = str(e)[:160]
+        steps.append(label)
+
+    if config.metadata_enabled("screenscraper"):
+        try:
+            lim = int(config.get("screenscraper_sync_limit") or 200)
+        except (TypeError, ValueError):
+            lim = 200
+        if lim > 0:
+            _step("screenscraper", "ss_scrape.py", ["--limit", str(lim)], 3600)
+            if done.get("screenscraper"):    # index what it cached (local read, no API)
+                _step("ss_index", "media_fetch.py", ["--ss-index"], 900)
+    if config.metadata_enabled("igdb"):
+        _step("igdb", "igdb_enrich.py", [], 3600)
+        if done.get("igdb"):                 # merge the cache into game_attributes
+            _step("merge", "build_library.py", [], 900)
+    _step("art", "media_fetch.py", ["--backfill-art"], 3600)
+    mode = config.get("media_mode") or "chosen"
+    _step("media", "media_choose.py",
+          ["--materialize"] + (["--all"] if mode == "all" else [])
+          if mode != "ondemand" else [], 3600)
+    return done
 
 
 if __name__ == "__main__":               # tiny CLI for testing

@@ -8,7 +8,7 @@ import type {
   MediaLibrary, MediaAsset, MediaKind, BannedMedia, BackupsState, BackupJob,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
-  Device, LibraryManager,
+  Device, LibraryManager, ImportMode, ImportEstimate,
   FileVariable, FileProfile, FilePlan, FileDetect, SourceModel,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
@@ -3547,6 +3547,21 @@ function PathInput({ deviceId, value, onChange, placeholder }: {
   )
 }
 
+// The three import tiers, in ascending cost. Copy is deliberately concrete about
+// what each one SPENDS — the difference between them is money, not just quality.
+const IMPORT_TIERS: { id: ImportMode; name: string; cost: string; desc: string }[] = [
+  { id: 'algo', name: 'Algorithmic', cost: 'free',
+    desc: 'Filename and folder rules only — zero AI. Titles are still matched against '
+        + 'IGDB and ScreenScraper for art and metadata, because those are lookups, not a model.' },
+  { id: 'lite', name: 'Lite AI', cost: 'cents',
+    desc: 'Everything above, plus a model reads the file paths that look mangled '
+        + '(SMW_U, FF7, cryptic 8.3 names) and works out the real title, system and year.' },
+  { id: 'heavy', name: 'Heavy AI', cost: 'depends on library size',
+    desc: 'Everything above, but every title is re-read, and any game the providers '
+        + 'could not identify goes through the full metadata and art pipeline — the same '
+        + 'work the magic wand does, run automatically at import.' },
+]
+
 // Add OR edit a library manager (a rom/media folder on a device). `existing`
 // prefills the form and switches it to update-in-place (backend UPDATEs by id).
 function ManagerModal({ deviceId, deviceName, kinds, existing, onClose, onSaved }: {
@@ -3560,8 +3575,20 @@ function ManagerModal({ deviceId, deviceName, kinds, existing, onClose, onSaved 
   const [media, setMedia] = useState(existing?.media_path || '')
   const [mkinds, setMkinds] = useState<MediaKind[]>([])
   const [pick, setPick] = useState<Set<string>>(new Set(existing?.media_kinds || []))   // empty = all types
+  const [mode, setMode] = useState<ImportMode>(existing?.import_mode || 'algo')
+  const [est, setEst] = useState<ImportEstimate | null>(null)
   const [busy, setBusy] = useState(false)
   useEffect(() => { api.mediaKinds().then((d) => setMkinds(d.kinds)).catch(() => {}) }, [])
+  // Cost/cap preview for the selected tier. Only the AI tiers have anything to
+  // report, and only an existing source has an index to count against.
+  useEffect(() => {
+    if (mode === 'algo') { setEst(null); return }
+    let live = true
+    api.importEstimate(mode, existing?.id)
+      .then((d) => { if (live) setEst(d) })
+      .catch(() => { if (live) setEst(null) })
+    return () => { live = false }
+  }, [mode, existing?.id])
   const caps = kinds.find(([k]) => k === kind)?.[1]
   const doesRoms = caps ? caps[1] : true
   const doesMedia = caps ? caps[2] : false
@@ -3576,6 +3603,7 @@ function ManagerModal({ deviceId, deviceName, kinds, existing, onClose, onSaved 
         device_id: deviceId, kind, name,
         rom_path: doesRoms ? rom : '', media_path: doesMedia ? media : '',
         media_kinds: doesMedia ? Array.from(pick) : [],
+        import_mode: doesRoms ? mode : 'algo',
       }))
       onClose()
     } finally { setBusy(false) }
@@ -3611,6 +3639,46 @@ function ManagerModal({ deviceId, deviceName, kinds, existing, onClose, onSaved 
             </label>
           )}
         </div>
+        {doesRoms && (
+          <div className="imode">
+            <div className="imode-head">
+              How should games be imported?
+              <span className="imode-note">applies every time this source syncs</span>
+            </div>
+            {IMPORT_TIERS.map((t) => (
+              <label key={t.id} className={'imode-opt' + (mode === t.id ? ' on' : '')}>
+                <input type="radio" name="import-mode" checked={mode === t.id}
+                  onChange={() => setMode(t.id)} />
+                <div className="imode-body">
+                  <div className="imode-title">{t.name} <em>{t.cost}</em></div>
+                  <div className="imode-desc">{t.desc}</div>
+                </div>
+              </label>
+            ))}
+            {mode !== 'algo' && (
+              <div className="imode-est">
+                {est?.error ? <span className="warn">{est.error}</span> : est ? (
+                  <>
+                    {typeof est.targets === 'number' && (
+                      <span>{est.targets.toLocaleString()} path{est.targets === 1 ? '' : 's'} would go to {est.model || 'the model'}
+                        {typeof est.cost_usd === 'number' && <> · ~${est.cost_usd.toFixed(2)}</>}
+                        {est.cost_usd === null && <> · cost unknown (model not priced)</>}
+                      </span>
+                    )}
+                    {mode === 'heavy' && !est.has_cap && (
+                      <div className="imode-warn">
+                        <b>No AI budget cap is set.</b> Heavy runs the full pipeline over
+                        every game it imports, so nothing but your provider billing will
+                        stop it. Set one in AI settings → Budgets &amp; limits if you want
+                        a ceiling — otherwise this proceeds unlimited.
+                      </div>
+                    )}
+                  </>
+                ) : <span className="dim">estimating…</span>}
+              </div>
+            )}
+          </div>
+        )}
         {kind === 'media' && (
           <div className="emu-kinds">
             <div className="emu-kinds-head">

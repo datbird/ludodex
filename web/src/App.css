@@ -2358,6 +2358,34 @@ span.idchip { color: color-mix(in srgb, var(--chip, var(--text)) 80%, var(--text
 .emu-kind.role-media { background: rgba(192,132,252,0.16); color: #c084fc; }
 .emu-media-count { font-size: 11px; color: var(--text); opacity: 0.65; }
 
+/* import-tier picker (ROM sources) */
+.imode { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.imode-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-weight: 700; color: var(--text-h); font-size: 13px; margin-bottom: 8px;
+}
+.imode-note { font-size: 11px; font-weight: 500; color: var(--text); opacity: 0.7; }
+.imode-opt {
+  display: flex; gap: 9px; align-items: flex-start; cursor: pointer;
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px;
+  margin-bottom: 6px; background: var(--bg);
+}
+.imode-opt:hover { border-color: var(--accent); }
+.imode-opt.on { border-color: var(--accent); background: var(--accent-bg); }
+.imode-opt input { margin-top: 3px; flex: none; }
+.imode-body { min-width: 0; }
+.imode-title { font-size: 13px; font-weight: 700; color: var(--text-h); }
+.imode-title em {
+  font-style: normal; font-weight: 500; font-size: 11px; margin-left: 6px;
+  padding: 1px 7px; border-radius: 999px; background: var(--accent-bg); color: var(--accent);
+}
+.imode-desc { font-size: 11.5px; line-height: 1.45; color: var(--text); opacity: 0.8; margin-top: 3px; }
+.imode-est { font-size: 11.5px; color: var(--text); opacity: 0.85; margin-top: 8px; }
+.imode-warn {
+  margin-top: 7px; padding: 8px 10px; border-radius: 8px; line-height: 1.5;
+  border: 1px solid rgba(251,191,36,0.4); background: rgba(251,191,36,0.1); color: #fbbf24;
+}
+
 /* media-type picker */
 .emu-kinds { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
 .emu-kinds-head {

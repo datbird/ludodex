@@ -55,6 +55,7 @@ import framing         # noqa: E402  per-game/per-kind image framing (position +
 import mediaflags      # noqa: E402  durable per-asset ban / not-redistributable flags
 import merges          # noqa: E402  durable game merges (fold duplicate entries)
 import splits          # noqa: E402  durable "peel apart" (split a merged entry out)
+import ingesthints     # noqa: E402  AI ingest hints (lite/heavy import path rewrites)
 import devicesync      # noqa: E402  outbound push (ROM+media+gamelist) to RetroDECK/ES-DE
 import auth            # noqa: E402  local username/password accounts + sessions
 import cf_access       # noqa: E402  Cloudflare Access SSO (verify the Access JWT)
@@ -2113,9 +2114,68 @@ def sync_device_ep(dev_id: int):
     if not devices._device(dev_id):
         raise HTTPException(404, "no such device")
     try:
-        return devices.sync_device(dev_id)
+        out = devices.sync_device(dev_id)
     except Exception as e:
         raise HTTPException(502, "device sync failed: %s" % e)
+    # 'heavy' finishes with the same AI supplement the magic wand runs — but only
+    # over what the providers could NOT resolve, so the model is spent on the games
+    # that actually need it rather than re-describing ones IGDB already answered.
+    if "heavy" in set((out.get("import_modes") or {}).values()):
+        try:
+            keys = aimeta.targets("unmatched", 2000)
+            if keys:
+                provider = ai.provider_for_area("metadata")
+                ai._resolve(provider, ai.model_for_area("metadata"))
+                run_id = aimeta.scan_new("heavy import", keys, False, True, None)
+                _start_aimeta_job(run_id, keys,
+                                  {"web": False, "match_provider": True,
+                                   "metadata_kinds": None, "want_media": True,
+                                   "label": "heavy import"})
+                out["heavy_scan"] = {"run_id": run_id, "count": len(keys)}
+        except Exception as e:              # noqa: BLE001
+            # No AI key, a tripped budget cap, or nothing left unmatched. The import
+            # itself already succeeded — say so, don't fail it.
+            out["heavy_scan"] = {"skipped": str(e)[:160]}
+    return out
+
+
+@app.get("/api/devices/import-estimate")
+def import_estimate(mgr: int = None, mode: str = "lite"):
+    """What an import tier would cost on this ROM source, before you commit to it.
+
+    Reports the target count and a projected token/dollar range for `lite`, plus
+    whether a budget cap is currently in force — the UI warns on `heavy` when the
+    answer is 'no cap', because then nothing but your provider billing stops it."""
+    if mode not in devices.IMPORT_MODES:
+        raise HTTPException(400, "bad mode")
+    caps = ai.limits_list()
+    out = {"mode": mode, "has_cap": bool(caps), "caps": caps}
+    if mode == "algo":
+        return dict(out, targets=0, cost_usd=0)
+    try:
+        sys.path.insert(0, DIR)
+        import ingest_ai
+        n = len(ingest_ai.targets(mgr, take_all=(mode == "heavy")))
+        out.update(ingest_ai._estimate(n))
+    except Exception as e:                  # noqa: BLE001
+        out["error"] = str(e)[:200]
+    return out
+
+
+@app.get("/api/ingest-hints")
+def ingest_hints_list(limit: int = 200):
+    """What the AI ingest pass concluded — so a hint that renamed a game is auditable
+    and reversible, not an invisible rewrite."""
+    return {"count": ingesthints.count(), "hints": ingesthints.listing(limit)}
+
+
+@app.delete("/api/ingest-hints")
+def ingest_hints_clear(system: str = None):
+    """Drop hints and rebuild — the undo for an AI ingest pass."""
+    n = ingesthints.clear(system)
+    subprocess.run([sys.executable, os.path.join(DIR, "build_library.py")],
+                   timeout=900, cwd=DIR)
+    return {"ok": True, "cleared": n}
 
 
 @app.post("/api/devices/managers")

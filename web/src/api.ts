@@ -413,10 +413,17 @@ export interface RecognizedGame {
   source: string
   confidence: number
 }
+export type ImportMode = 'algo' | 'lite' | 'heavy'
 export interface LibraryManager {
   id: number; device_id: number; kind: string; kind_label: string
   name: string; rom_path: string; media_path: string; enabled: number
   media_kinds?: string[]
+  import_mode?: ImportMode
+}
+export interface ImportEstimate {
+  mode: ImportMode; has_cap: boolean; targets?: number; calls?: number
+  in_tokens?: number; out_tokens?: number; cost_usd?: number | null
+  provider?: string; model?: string; error?: string
 }
 export interface Device {
   id: number; name: string; transport: string; host: string; port: number
@@ -1073,6 +1080,17 @@ export const api = {
     const r = await fetch('/api/devices/managers', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(m) })
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
     return r.json() as Promise<{ devices: Device[] }>
+  },
+  // What an import tier would cost on this source, and whether a budget cap is set
+  importEstimate: (mode: ImportMode, mgr?: number) =>
+    get<ImportEstimate>(`/api/devices/import-estimate?mode=${mode}` +
+      (mgr ? `&mgr=${mgr}` : '')),
+  ingestHints: (limit = 200) =>
+    get<{ count: number; hints: Record<string, unknown>[] }>(`/api/ingest-hints?limit=${limit}`),
+  clearIngestHints: async (system?: string) => {
+    const r = await fetch('/api/ingest-hints' + (system ? `?system=${encodeURIComponent(system)}` : ''),
+      { method: 'DELETE' })
+    if (!r.ok) throw new Error(`${r.status} hints`); return r.json() as Promise<{ cleared: number }>
   },
   removeManager: async (id: number) => {
     const r = await fetch('/api/devices/managers/' + id, { method: 'DELETE' })
