@@ -160,6 +160,29 @@ check("build_library.py" in asrc[asrc.index("def ingest_hints_clear("):
                                  asrc.index("def ingest_hints_clear(") + 700],
       "clearing rebuilds, so the undo is immediate")
 
+print("13. store syncs get the tier too (stores give title+ownership and little else)")
+check("def import_mode_for(" in asrc, "per-store tier, read from config")
+imf = asrc[asrc.index("def import_mode_for("):asrc.index("def _lib_keys(")]
+check('or "algo"' in imf, "defaults to algo — enabling the feature spends nothing")
+check("if m in IMPORT_MODES else \"algo\"" in imf, "an unknown value can't leak through")
+w = asrc[asrc.index("tiers = {sid: import_mode_for(sid)"):]
+w = w[:w.index("job[\"prog\"][\"done\"] = job[\"prog\"][\"total\"]")]
+check('"missing" if worst == "heavy" else "unmatched"' in w,
+      "lite = games with NO match; heavy = every game with attribute holes")
+check("sources=ai_srcs" in w, "and the scan is SCOPED to the stores just synced")
+check('_phase("supplement", "skipped", str(e)[:120])' in w,
+      "a missing key / spent cap degrades to a note, never fails the sync")
+check('{"id": "supplement"' in asrc.replace("'", '"'),
+      "the sync panel shows it as its own phase")
+
+print("14. aimeta.targets can be restricted to a source set")
+msrc = open(os.path.join(ROOT, "aimeta.py")).read()
+tg_fn = msrc[msrc.index("def targets("):msrc.index("def target_count(")]
+check("sources=None" in tg_fn, "targets() takes a source filter")
+check("s.game_id=g.id" in tg_fn and "s.source IN" in tg_fn, "joined via the sources table")
+check('" AND " if " WHERE " in q else " WHERE "' in tg_fn,
+      "the clause is appended correctly whether or not the base query already filters")
+
 print()
 if FAIL:
     print("FAILED (%d): %s" % (len(FAIL), "; ".join(FAIL)))

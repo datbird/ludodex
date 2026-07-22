@@ -470,6 +470,7 @@ export interface SyncService {
   connect: ServiceConnect | null
   count: number | null
   can_media: boolean
+  import_mode?: ImportMode
 }
 export interface SyncJobService {
   state: 'pending' | 'running' | 'ok' | 'failed' | 'skipped'
@@ -1242,7 +1243,9 @@ export const api = {
     return r.json() as Promise<{ id: string; enabled: boolean }>
   },
   // Ownership sync (pull owned games per store, then rebuild the catalog)
-  syncStatus: () => get<{ services: SyncService[]; job: SyncJob | null }>('/api/sync/status'),
+  syncStatus: () => get<{ services: SyncService[]; job: SyncJob | null; has_cap?: boolean }>('/api/sync/status'),
+  setImportMode: (id: string, mode: ImportMode) =>
+    postJson<{ ok: boolean }>('/api/sync/import-mode', { id, mode }),
   syncRun: async (services: string[], media: string[] = [], full = false) => {
     const r = await fetch('/api/sync/run', {
       method: 'POST', headers: { 'content-type': 'application/json' },

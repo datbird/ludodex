@@ -3547,6 +3547,16 @@ function PathInput({ deviceId, value, onChange, placeholder }: {
   )
 }
 
+// Store-sync tiers. Stores give a title and ownership and (outside Steam) little
+// else, so the tier decides how much of the gap a model is asked to close.
+const STORE_TIERS: { id: ImportMode; name: string; desc: string }[] = [
+  { id: 'algo', name: 'Titles only', desc: 'no AI — whatever IGDB and the store provide' },
+  { id: 'lite', name: 'Fill the blanks',
+    desc: 'ask AI only about games no provider could match at all' },
+  { id: 'heavy', name: 'Fill everything',
+    desc: 'ask AI about every game still missing descriptions, genres or art' },
+]
+
 // The three import tiers, in ascending cost. Copy is deliberately concrete about
 // what each one SPENDS — the difference between them is money, not just quality.
 const IMPORT_TIERS: { id: ImportMode; name: string; cost: string; desc: string }[] = [
@@ -4354,9 +4364,14 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
   const [romJob, setRomJob] = useState<RomJob | null>(null)
   const [romListOpen, setRomListOpen] = useState(false)             // ROM repos — collapsed by default
   const [romExpanded, setRomExpanded] = useState<Set<number>>(new Set())
+  const [hasCap, setHasCap] = useState<boolean | null>(null)        // any AI budget cap?
+  const [tiers, setTiers] = useState<Record<string, ImportMode>>({})  // local echo
 
   const load = useCallback(async () => {
-    try { const s = await api.syncStatus(); setSvcs(s.services); setJob(s.job) }
+    try {
+      const s = await api.syncStatus(); setSvcs(s.services); setJob(s.job)
+      if (typeof s.has_cap === 'boolean') setHasCap(s.has_cap)
+    }
     catch { /* offline */ }
     try { const r = await api.romsStatus(); setRomLocs(r.locations); setRomJob(r.job) }
     catch { /* offline */ }
@@ -4407,6 +4422,15 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
   }
 
   const rowState = (id: string) => job?.services?.[id]?.state
+  // The local echo wins so the radio responds immediately; the server value is the
+  // truth on the next poll.
+  const tierOf = (s: SyncService): ImportMode => tiers[s.id] || s.import_mode || 'algo'
+  const setTier = (id: string, mode: ImportMode) => {
+    setTiers((t) => ({ ...t, [id]: mode }))
+    api.setImportMode(id, mode).catch(() => setTiers((t) => {
+      const n = { ...t }; delete n[id]; return n           // failed → fall back to server
+    }))
+  }
 
   const romEnabled = romLocs.filter((l) => l.enabled)
   const toggleRomExpand = (id: number) =>
@@ -4544,6 +4568,28 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
                         )}
                         {s.ready && !s.needs_auth && !s.can_media && (
                           <div className="sync-note dim">Syncs which games you own on {s.name}.</div>
+                        )}
+                        {s.ready && (
+                          <div className="sync-tier">
+                            <div className="sync-tier-head">How much should this import fill in?</div>
+                            {STORE_TIERS.map((t) => (
+                              <label key={t.id}
+                                className={'sync-tier-opt' + (tierOf(s) === t.id ? ' on' : '')}>
+                                <input type="radio" name={'tier-' + s.id}
+                                  checked={tierOf(s) === t.id}
+                                  onChange={() => setTier(s.id, t.id)} />
+                                <span><b>{t.name}</b> — {t.desc}</span>
+                              </label>
+                            ))}
+                            {tierOf(s) === 'heavy' && hasCap === false && (
+                              <div className="sync-tier-warn">
+                                <b>No AI budget cap is set.</b> Heavy will keep going until
+                                every gap is filled — nothing but your provider billing
+                                stops it. Set a ceiling in AI settings → Budgets &amp; limits
+                                if you want one.
+                              </div>
+                            )}
+                          </div>
                         )}
                       </div>
                     )}

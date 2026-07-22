@@ -7726,6 +7726,7 @@ def _sync_services():
             "connect": dict(conn, connected=ready) if conn else None,
             "count": _tsv_count(tsv),
             "can_media": sid in MEDIA_SYNC_PROVIDER,
+            "import_mode": import_mode_for(sid),
         })
     return out
 
@@ -7816,6 +7817,17 @@ def _sync_stop():
     if p and p.poll() is None:
         _kill_proc(p, True)
     return True
+
+
+IMPORT_MODES = ("algo", "lite", "heavy")
+
+
+def import_mode_for(sid):
+    """This store's import tier. Per-source and persistent, so a scheduled sync
+    honours the same choice as a manual one. Defaults to 'algo' — adding this
+    feature must not start spending money on an install that never opted in."""
+    m = (config.get("import_mode_%s" % sid) or "algo").strip().lower()
+    return m if m in IMPORT_MODES else "algo"
 
 
 def _lib_keys():
@@ -7982,6 +7994,7 @@ def _sync_worker(job, services, media_ids=(), full=False):
         {"id": "language", "label": "Language filter", "state": "pending", "detail": ""},
         {"id": "media", "label": "Media downloaded" if mode != "ondemand" else "Media chosen",
          "state": "pending", "detail": ""},
+        {"id": "supplement", "label": "AI supplement", "state": "pending", "detail": ""},
     ]
     job["phases"] = phases
 
@@ -8279,6 +8292,41 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 _phase("art", "ok", "+%d filled" % max(cover_after - cover_before, 0))
         else:
             _phase("media", "ok")
+        # --- import tier: the AI supplement, scoped to what this sync brought in.
+        # Stores hand over a title and ownership and little else (GOG/Epic/EA/PSN/
+        # Xbox/itch give literally nothing more), so the games the providers could
+        # not fill in stay bare unless something asks a model about them.
+        #   algo  nothing
+        #   lite  games with NO provider match at all — the bare tail
+        #   heavy every game still missing supplement attributes
+        tiers = {sid: import_mode_for(sid) for sid in services
+                 if job["services"].get(sid, {}).get("state") == "ok"}
+        ai_srcs = [sid for sid, m in tiers.items() if m in ("lite", "heavy")]
+        if ai_srcs and not job.get("cancel"):
+            _phase("supplement", "running")
+            job["step"] = "AI supplement…"
+            try:
+                worst = "heavy" if "heavy" in tiers.values() else "lite"
+                keys = aimeta.targets("missing" if worst == "heavy" else "unmatched",
+                                      2000, sources=ai_srcs)
+                if not keys:
+                    _phase("supplement", "ok", "nothing left to fill")
+                else:
+                    ai._resolve(ai.provider_for_area("metadata"),
+                                ai.model_for_area("metadata"))
+                    run_id = aimeta.scan_new("%s import" % worst, keys, False, True, None)
+                    _start_aimeta_job(run_id, keys,
+                                      {"web": False, "match_provider": True,
+                                       "metadata_kinds": None, "want_media": True,
+                                       "label": "%s import" % worst})
+                    job["supplement"] = {"run_id": run_id, "count": len(keys)}
+                    _phase("supplement", "ok", "%d game(s) queued" % len(keys))
+            except Exception as e:              # noqa: BLE001
+                # No AI key, or a budget cap already spent. The import itself
+                # succeeded — report it and move on rather than failing the sync.
+                _phase("supplement", "skipped", str(e)[:120])
+        else:
+            _phase("supplement", "skipped")
     job["prog"]["done"] = job["prog"]["total"]   # snap to complete
     job["step"] = "Done"
     job["running"] = False
@@ -8288,7 +8336,21 @@ def _sync_worker(job, services, media_ids=(), full=False):
 @app.get("/api/sync/status")
 def sync_status():
     """Syncable sources (enabled/ready/needs-auth) + current-or-last job progress."""
-    return {"services": _sync_services(), "job": _SYNC["job"]}
+    return {"services": _sync_services(), "job": _SYNC["job"],
+            "has_cap": bool(ai.limits_list())}
+
+
+@app.post("/api/sync/import-mode")
+def sync_import_mode(body: dict = Body(...)):
+    """Set one store's import tier. Persistent, so scheduled syncs match."""
+    sid = ((body or {}).get("id") or "").strip()
+    mode = ((body or {}).get("mode") or "").strip().lower()
+    if sid not in SYNC_SPECS:
+        raise HTTPException(400, "unknown source")
+    if mode not in IMPORT_MODES:
+        raise HTTPException(400, "bad mode")
+    config.set_("import_mode_%s" % sid, mode)
+    return {"ok": True, "id": sid, "mode": mode}
 
 
 @app.post("/api/sync/run")

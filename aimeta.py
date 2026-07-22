@@ -277,10 +277,14 @@ def game_context(norm_key, lib=None):
             own.close()
 
 
-def targets(target="unmatched", limit=200):
+def targets(target="unmatched", limit=200, sources=None):
     """norm_keys to scan for a target set: 'unmatched' (no provider link),
     'matched' (verify existing matches), 'missing' (holes in SUPPLEMENT_KINDS),
-    or 'all'."""
+    or 'all'.
+
+    `sources` (e.g. ['steam','gog']) restricts the result to games owned via those
+    sources — so an import-driven scan spends the model on the games that import
+    actually brought in, not the whole catalog."""
     lib = _lib()
     try:
         if target == "unmatched":
@@ -299,6 +303,12 @@ def targets(target="unmatched", limit=200):
             args = SUPPLEMENT_KINDS + [len(SUPPLEMENT_KINDS)]
         else:                                   # all
             q, args = "SELECT g.norm_key FROM games g", []
+        if sources:
+            sp = ",".join("?" * len(sources))
+            q += (" AND " if " WHERE " in q else " WHERE ") + (
+                "EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
+                "AND s.source IN (%s))" % sp)
+            args = list(args) + list(sources)
         rows = lib.execute(q + " ORDER BY g.norm_key LIMIT ?", args + [limit]).fetchall()
         return [r[0] for r in rows]
     finally:
