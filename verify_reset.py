@@ -107,8 +107,11 @@ asrc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "server", "app.py")).read()
 ep = asrc[asrc.index("def ops_reset("):asrc.index("@app.get(\"/api/ops/backups\")")]
 check("safety = ops_backup()" in ep, "a safety snapshot is taken BEFORE any deletion")
-check('!= scope' in ep and "type %r to confirm" in ep,
-      "curation/factory need the scope typed; library stays one click")
+check('!= "DELETE"' in ep, "EVERY scope requires the DELETE token")
+check('.strip()' not in ep.split('confirm')[1].split('\n')[0],
+      "the token is compared untrimmed — reflex Enter cannot satisfy it")
+check('"library"' not in ep.split("confirm")[0].split("if (body.get")[-1],
+      "no scope is exempt from the gate")
 check("ops_restart()" in ep, "re-execs so deleted DBs are reopened/recreated")
 
 print()

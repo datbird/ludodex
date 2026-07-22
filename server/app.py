@@ -6729,9 +6729,11 @@ def ops_reset(body: dict = Body(default={})):
     scope = (body.get("scope") or "library").strip()
     if scope not in reset.SCOPES:
         raise HTTPException(400, "unknown scope")
-    # Wiping credentials or hand-curation is not a one-click action.
-    if scope != "library" and (body.get("confirm") or "").strip().lower() != scope:
-        raise HTTPException(400, "type %r to confirm this scope" % scope)
+    # Deleting is never a one-click action, at ANY scope. The token is deliberately
+    # the same word every time and case-SENSITIVE: a muscle-memory Enter cannot
+    # satisfy it, and the client cannot "helpfully" normalise its way past it.
+    if (body.get("confirm") or "") != "DELETE":
+        raise HTTPException(400, 'type DELETE (all caps) to confirm')
     safety = ops_backup()["id"]
     try:
         out = reset.run(scope)
