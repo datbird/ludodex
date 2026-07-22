@@ -397,6 +397,21 @@ consoles. Neither works without the other.
     ```
     or paste both into **Settings → Connections → Stores & providers → Google image search**.
 
+**Built-in tester.** Once the key and `cx` are saved, the Google image search card gains
+*"Is a site worth adding?"* — enter a domain and a game you own and it runs both checks that
+matter: it asks your engine for that site, then fetches every result and validates it the way
+the wand will. Three verdicts:
+
+- **Keep it** — results came back AND fetched as real images.
+- **Drop it** — Google indexes the site but nothing fetched (challenge, hotlink guard, or a
+  login wall). Costs you time on every lookup and returns nothing.
+- **Nothing found** — either the domain isn't in your engine's site list yet (add it, then
+  re-test), or Google has no image index for it. If the site also refuses a plain request,
+  the tester says so, which tells you adding it would be pointless.
+
+Use it before spending a slot, and re-test occasionally: sites put up bot protection over
+time, and a domain that worked last year can silently become dead weight.
+
 **Quota:** the free tier is **100 queries/day**, after which it errors rather than billing.
 ludodex only reaches this provider for games still art-less after every other provider, and
 only when the wand's web-search toggle is on.
