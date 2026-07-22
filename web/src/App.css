@@ -4064,3 +4064,8 @@ span.idchip { color: color-mix(in srgb, var(--chip, var(--text)) 80%, var(--text
   border: 1px solid var(--border); background: var(--bg); color: var(--text-h);
 }
 .ops-reset-msg { font-size: 11.5px; margin-top: 8px; color: var(--text-h); }
+/* the panel-level tier picker sits with the New/Full buttons, where the decision
+   actually gets made — the per-source copy is an override, not the primary path */
+.sync-tier-all { margin: 10px 0 4px; border-top: none; border-bottom: 1px solid var(--border);
+  padding-top: 0; padding-bottom: 10px; }
+.sync-tier-mixed { margin-left: 8px; font-weight: 500; font-size: 11px; color: #fbbf24; }

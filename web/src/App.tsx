@@ -4433,6 +4433,14 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
       const n = { ...t }; delete n[id]; return n           // failed → fall back to server
     }))
   }
+  // The tier that matters at the top of the panel is whatever the ready sources
+  // agree on; if they disagree we say so rather than silently showing one of them.
+  const readySvcs = svcs.filter((s) => s.ready)
+  const readyTiers = new Set(readySvcs.map((s) => tierOf(s)))
+  const mixedTier = readyTiers.size > 1
+  const allTier: ImportMode = readyTiers.size === 1
+    ? [...readyTiers][0] : 'algo'
+  const setTierAll = (mode: ImportMode) => readySvcs.forEach((s) => setTier(s.id, mode))
 
   const romEnabled = romLocs.filter((l) => l.enabled)
   const toggleRomExpand = (id: number) =>
@@ -4492,6 +4500,29 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
               <span className="sync-choice-sub">slower · re-checks all</span>
             </button>
           </div>
+          {anyReady && (
+            <div className="sync-tier sync-tier-all">
+              <div className="sync-tier-head">How much should an import fill in?
+                {mixedTier && <span className="sync-tier-mixed">mixed — set per source below</span>}
+              </div>
+              {STORE_TIERS.map((t) => (
+                <label key={t.id}
+                  className={'sync-tier-opt' + (!mixedTier && allTier === t.id ? ' on' : '')}>
+                  <input type="radio" name="tier-all" disabled={anyRunning}
+                    checked={!mixedTier && allTier === t.id}
+                    onChange={() => setTierAll(t.id)} />
+                  <span><b>{t.name}</b> — {t.desc}</span>
+                </label>
+              ))}
+              {allTier === 'heavy' && !mixedTier && hasCap === false && (
+                <div className="sync-tier-warn">
+                  <b>No AI budget cap is set.</b> Heavy keeps going until every gap is
+                  filled — nothing but your provider billing stops it. Set a ceiling in
+                  AI settings → Budgets &amp; limits if you want one.
+                </div>
+              )}
+            </div>
+          )}
           {!anyReady && !running && (
             <div className="sync-note dim">Nothing ready yet — connect a store below.</div>
           )}
