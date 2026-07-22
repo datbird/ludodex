@@ -8,7 +8,7 @@ import type {
   MediaLibrary, MediaAsset, MediaKind, BannedMedia, BackupsState, BackupJob,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
-  Device, LibraryManager, ImportMode, ImportEstimate,
+  Device, LibraryManager, ImportMode, ImportEstimate, ResetScope, ResetPlan,
   FileVariable, FileProfile, FilePlan, FileDetect, SourceModel,
   Runbook, RunHistoryRow, Troubleshoot, Job, AiCap,
   AiFinding, AiFindingCounts, AiScanTargets, AiScanRun, AiApplySelection,
@@ -4694,6 +4694,91 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
   )
 }
 
+const RESET_SCOPES: { id: ResetScope; name: string; blurb: string; keeps: string }[] = [
+  { id: 'library', name: 'Reset the library',
+    blurb: 'Everything an import produced — the catalog, media, caches, ROM indexes '
+         + 'and the store ownership dumps a rebuild would otherwise read back in.',
+    keeps: 'Keeps your credentials, account, devices and hand-curation.' },
+  { id: 'curation', name: 'Reset the library and my curation',
+    blurb: 'The above, plus what you decided about games: tags, art pins, merges, '
+         + 'peels, attribute overrides, framing, ownership and manual entries.',
+    keeps: 'Keeps your credentials, account and devices.' },
+  { id: 'factory', name: 'Reset everything',
+    blurb: 'The above, plus credentials, device connections and cached store logins.',
+    keeps: 'Keeps your login and your backup archives — this cannot lock you out.' },
+]
+
+// Scoped reset. Fetches the PLAN first so the button can state exactly what it is
+// about to destroy; anything beyond 'library' also needs its scope typed out.
+function ResetPanel({ onClose }: { onClose: () => void }) {
+  const [scope, setScope] = useState<ResetScope>('library')
+  const [plan, setPlan] = useState<ResetPlan | null>(null)
+  const [confirm, setConfirm] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  useEffect(() => {
+    setPlan(null); setConfirm('')
+    let live = true
+    api.resetPlan(scope).then((p) => { if (live) setPlan(p) }).catch(() => {})
+    return () => { live = false }
+  }, [scope])
+  const needsTyping = scope !== 'library'
+  const ready = !!plan && (!needsTyping || confirm.trim().toLowerCase() === scope)
+  const go = async () => {
+    setBusy(true); setMsg('')
+    try {
+      const r = await api.resetRun(scope, needsTyping ? confirm.trim() : undefined)
+      setMsg(`Reset — ${r.removed.length} item(s) removed, snapshot ${r.safety_backup} taken first. Restarting…`)
+      setTimeout(() => window.location.reload(), 4000)
+    } catch (e) {
+      setMsg(String(e)); setBusy(false)
+    }
+  }
+  const cur = RESET_SCOPES.find((s) => s.id === scope)!
+  return (
+    <div className="ops-reset">
+      <div className="ops-reset-head">Reset
+        <button className="ops-link" onClick={onClose} disabled={busy}>cancel</button></div>
+      {RESET_SCOPES.map((s) => (
+        <label key={s.id} className={'ops-reset-opt' + (scope === s.id ? ' on' : '')}>
+          <input type="radio" name="reset-scope" checked={scope === s.id}
+            disabled={busy} onChange={() => setScope(s.id)} />
+          <div>
+            <div className="ops-reset-name">{s.name}</div>
+            <div className="ops-reset-blurb">{s.blurb}</div>
+            <div className="ops-reset-keeps">{s.keeps}</div>
+          </div>
+        </label>
+      ))}
+      <div className="ops-reset-plan">
+        {plan ? (
+          <>
+            <b>Will remove:</b>{' '}
+            {plan.databases.length} database{plan.databases.length === 1 ? '' : 's'}
+            {plan.tsvs.length > 0 && <> · {plan.tsvs.length} store dump{plan.tsvs.length === 1 ? '' : 's'}</>}
+            {plan.rom_indexes.length > 0 && <> · {plan.rom_indexes.length} ROM index{plan.rom_indexes.length === 1 ? '' : 'es'}</>}
+            {plan.media_files > 0 && <> · {plan.media_files.toLocaleString()} media file{plan.media_files === 1 ? '' : 's'}</>}
+            {plan.token_dirs.length > 0 && <> · {plan.token_dirs.length} store login{plan.token_dirs.length === 1 ? '' : 's'}</>}
+            {' '}({fmtBytes(plan.total_bytes)})
+            {plan.databases.length + plan.tsvs.length + plan.media_files === 0 &&
+              <> — nothing to remove; already clean.</>}
+          </>
+        ) : <span className="dim">checking…</span>}
+      </div>
+      <div className="ops-reset-note">A snapshot is taken before anything is deleted, so
+        this is reversible from Restore. The server restarts afterwards.</div>
+      {needsTyping && (
+        <input className="ops-reset-confirm" value={confirm} disabled={busy}
+          onChange={(e) => setConfirm(e.target.value)}
+          placeholder={`type "${scope}" to confirm`} />
+      )}
+      <button className="ops-btn danger" disabled={!ready || busy} onClick={go}>
+        {busy ? 'Resetting…' : `⟲ ${cur.name}`}</button>
+      {msg && <div className="ops-reset-msg">{msg}</div>}
+    </div>
+  )
+}
+
 function ServerOps() {
   const [open, setOpen] = useState(false)
   const [status, setStatus] = useState<OpsStatus | null>(null)
@@ -4704,6 +4789,7 @@ function ServerOps() {
   const [dbOpen, setDbOpen] = useState(false)   // Databases details — collapsed by default
   const [backups, setBackups] = useState<{ id: string; count: number; size: number }[]>([])
   const [restoreOpen, setRestoreOpen] = useState(false)
+  const [resetOpen, setResetOpen] = useState(false)
   const [backingCfg, setBackingCfg] = useState(false)   // is a backing store configured?
   // Stay open until an outside click; don't close mid-operation.
   const wrapRef = useClickOutside<HTMLDivElement>(open, () => { if (!busy) setOpen(false) })
@@ -4894,6 +4980,10 @@ function ServerOps() {
                       title="Two-way sync your durable data (tags, ownership, art pins, overrides, framing, manual games) with your backup database. SQLite stays your fast local copy.">
                       {busy === 'backing' ? 'Backing up…' : '☁ Back up now'}</button>
                   )}
+                  <button className="ops-btn danger" disabled={!!busy}
+                    onClick={() => setResetOpen(true)}
+                    title="Empty the library and start over. Credentials and your account are kept; a snapshot is taken first.">
+                    ⟲ Reset…</button>
                   {broken.length > 0 && (
                     <button className="ops-btn danger" disabled={!!busy}
                       onClick={() => fix(broken[0].id, 'recover')}
@@ -4901,6 +4991,8 @@ function ServerOps() {
                       {busy === broken[0].id ? '…' : `🛠 Repair ${broken[0].name}`}</button>
                   )}
                 </div>
+
+                {resetOpen && <ResetPanel onClose={() => setResetOpen(false)} />}
 
                 {restoreOpen && (
                   <div className="ops-restore">

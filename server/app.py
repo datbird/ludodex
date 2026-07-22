@@ -56,6 +56,7 @@ import mediaflags      # noqa: E402  durable per-asset ban / not-redistributable
 import merges          # noqa: E402  durable game merges (fold duplicate entries)
 import splits          # noqa: E402  durable "peel apart" (split a merged entry out)
 import ingesthints     # noqa: E402  AI ingest hints (lite/heavy import path rewrites)
+import reset           # noqa: E402  scoped reset (library / curation / factory)
 import devicesync      # noqa: E402  outbound push (ROM+media+gamelist) to RetroDECK/ES-DE
 import auth            # noqa: E402  local username/password accounts + sessions
 import cf_access       # noqa: E402  Cloudflare Access SSO (verify the Access JWT)
@@ -6706,6 +6707,42 @@ def ops_backup():
         n += 1
         size += os.path.getsize(dst)
     return {"ok": True, "id": bid, "count": n, "size": size}
+
+
+@app.get("/api/ops/reset/plan")
+def ops_reset_plan(scope: str = "library"):
+    """Exactly what a reset would delete, before you press it."""
+    try:
+        return reset.plan(scope)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/ops/reset")
+def ops_reset(body: dict = Body(default={})):
+    """Put the install back to a known state. Always takes a safety snapshot first,
+    so even this is reversible — restore it from Server operations if the reset was
+    not what you meant.
+
+    A restart follows, because deleted databases are still open in this process."""
+    body = body or {}
+    scope = (body.get("scope") or "library").strip()
+    if scope not in reset.SCOPES:
+        raise HTTPException(400, "unknown scope")
+    # Wiping credentials or hand-curation is not a one-click action.
+    if scope != "library" and (body.get("confirm") or "").strip().lower() != scope:
+        raise HTTPException(400, "type %r to confirm this scope" % scope)
+    safety = ops_backup()["id"]
+    try:
+        out = reset.run(scope)
+    except Exception as e:                      # noqa: BLE001
+        raise HTTPException(500, "reset failed: %s" % e)
+    out["safety_backup"] = safety
+    # The deleted databases are still open in this process; re-exec so every module
+    # reopens and recreates its schema from scratch. Same mechanism as /api/ops/restart.
+    ops_restart()
+    out["restarting"] = True
+    return out
 
 
 @app.get("/api/ops/backups")

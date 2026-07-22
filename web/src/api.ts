@@ -414,6 +414,14 @@ export interface RecognizedGame {
   confidence: number
 }
 export type ImportMode = 'algo' | 'lite' | 'heavy'
+export type ResetScope = 'library' | 'curation' | 'factory'
+export interface ResetPlan {
+  scope: ResetScope; databases: string[]; database_bytes: number
+  tsvs: string[]; tsv_bytes: number
+  rom_indexes: string[]; rom_index_bytes: number
+  media_files: number; media_bytes: number; media_repo: string
+  token_dirs: string[]; kept: string[]; total_bytes: number
+}
 export interface LibraryManager {
   id: number; device_id: number; kind: string; kind_label: string
   name: string; rom_path: string; media_path: string; enabled: number
@@ -1244,6 +1252,10 @@ export const api = {
   },
   // Ownership sync (pull owned games per store, then rebuild the catalog)
   syncStatus: () => get<{ services: SyncService[]; job: SyncJob | null; has_cap?: boolean }>('/api/sync/status'),
+  resetPlan: (scope: ResetScope) => get<ResetPlan>(`/api/ops/reset/plan?scope=${scope}`),
+  resetRun: (scope: ResetScope, confirm?: string) =>
+    postJson<{ ok: boolean; removed: string[]; failed: string[]; safety_backup: string }>(
+      '/api/ops/reset', { scope, ...(confirm ? { confirm } : {}) }),
   setImportMode: (id: string, mode: ImportMode) =>
     postJson<{ ok: boolean }>('/api/sync/import-mode', { id, mode }),
   syncRun: async (services: string[], media: string[] = [], full = false) => {
