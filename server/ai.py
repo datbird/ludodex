@@ -634,6 +634,17 @@ AREAS = [
                     "Add-game flow. Needs a vision-capable model."},
     {"id": "dedupe", "name": "Dedupe assist", "status": "live",
      "description": "Flags likely same-game duplicates that title-matching missed."},
+    {"id": "dedupe_media", "name": "Media de-dup (Heavy)", "status": "live", "vision": True,
+     "data": True,
+     "description": "Drops near-duplicate images across providers during a Heavy import "
+                    "(perceptual hash first; AI only adjudicates the gray pairs)."},
+    {"id": "categorize", "name": "Media category placement (Heavy)", "status": "live",
+     "vision": True, "data": True,
+     "description": "Classifies an ambiguous image into the right kind (cover/hero/logo/"
+                    "screenshot) when the source didn't say."},
+    {"id": "consensus", "name": "Attribute consensus (Heavy)", "status": "live",
+     "description": "Adjudicates the best value per attribute across all providers during "
+                    "a Heavy import."},
     {"id": "split", "name": "Split assist (peel apart)", "status": "live",
      "description": "Looks at one catalog entry that merged two same-named but DIFFERENT "
                     "games (a remake / re-release — Uno 2006 vs 2016) and works out which "
@@ -684,10 +695,39 @@ DEFAULT_PROMPTS = {
     ),
     "art": (
         "You help pick the best <<kind>> image for the video game '<<title>>'. You "
-        "will see <<count>> candidate images labeled 'Image N'. Choose the single "
-        "best: correct game, highest quality, well-cropped, not a "
-        "placeholder/blank/wrong-region. Respond ONLY with JSON: "
+        "will see <<count>> candidate images labeled 'Image N'. Judge on, in order:\n"
+        "1. CORRECT game (right title/region, not a placeholder/blank/wrong game).\n"
+        "2. RIGHT SHAPE for a '<<kind>>': a cover/box is UPRIGHT (portrait ~3:4); a "
+        "hero/background is WIDE (landscape ~16:9); a logo is a transparent wordmark; "
+        "a screenshot is in-game. Reject an image whose orientation is wrong for the "
+        "kind.\n"
+        "3. HIGHEST resolution / sharpness, well-cropped, uncluttered.\n"
+        "4. OFFICIAL first: prefer official store / publisher key art; only choose "
+        "fan-made or 'cool' custom art when nothing official is decent.\n"
+        "Respond ONLY with JSON: "
         '{"index": <1-based number>, "reason": "<short>"}.'
+    ),
+    "dedupe_media": (
+        "You are shown pairs of candidate images for one video game. For each numbered "
+        "pair decide if they are the SAME image (near-duplicates: same artwork differing "
+        "only by resolution, crop, compression, or a small watermark) or DIFFERENT "
+        "images. Respond ONLY with a JSON array: "
+        '[{"n": <num>, "same": true|false, "confidence": <0-1>}].'
+    ),
+    "categorize": (
+        "You classify a single video-game image into exactly one asset KIND. Allowed "
+        "kinds: <<kinds>>. A cover/box is upright portrait art; a hero/background is a "
+        "wide landscape scene; a logo is a transparent wordmark; a screenshot is "
+        "in-game; a title_screen is the game's title card. Respond ONLY with JSON: "
+        '{"kind": "<one of the allowed kinds>", "confidence": <0-1>}.'
+    ),
+    "consensus": (
+        "Multiple metadata providers describe the video game '<<title>>'. For each "
+        "attribute below you are given each provider's value(s). Choose the single most "
+        "accurate, canonical value (or, for list attributes, the best union) using your "
+        "knowledge of the game — favor official/authoritative data, correct obvious "
+        "errors, and drop values that belong to a different game. Respond ONLY with a "
+        'JSON object: {"<attribute>": {"value": <string or array>, "reason": "<short>"}}.'
     ),
     "identify": (
         "You identify video games shown in images — box art, cartridges/discs, "
@@ -1702,6 +1742,109 @@ def dedupe_pairs(pairs, provider=None, model=None):
     text = _complete_text(provider, key, model, system, "Pairs:\n" + listing)
     obj = _json(text)
     return obj if isinstance(obj, list) else obj.get("results", [])
+
+
+# ------------------------------------------------------- Heavy-tier media adjudicators
+def same_image(a, b, provider=None, model=None):
+    """Vision adjudication of ONE gray-zone near-duplicate pair (Heavy media de-dup).
+    `a`,`b` = (mime, bytes). Returns {"same": bool, "confidence": float}. The caller does
+    the cheap perceptual/sha pre-filter and only sends AI the genuinely ambiguous pairs."""
+    provider, key, model = _resolve(provider or provider_for_area("dedupe_media"),
+                                    model or model_for_area("dedupe_media"))
+    system = area_prompt("dedupe_media")
+    text = _complete_vision(provider, key, model, system,
+                            "Pair 1 — Image 1 is A, Image 2 is B. Same image?", [a, b])
+    obj = _json(text)
+    if isinstance(obj, list):
+        obj = obj[0] if obj else {}
+    obj = obj if isinstance(obj, dict) else {}
+    try:
+        conf = float(obj.get("confidence") or 0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    return {"same": bool(obj.get("same")), "confidence": conf}
+
+
+def categorize_media(image, kinds, provider=None, model=None):
+    """Classify one ambiguous image into the right asset kind (Heavy). `image`=(mime,bytes),
+    `kinds`=allowed kind names. Returns {"kind": str|None, "confidence": float}."""
+    provider, key, model = _resolve(provider or provider_for_area("categorize"),
+                                    model or model_for_area("categorize"))
+    system = area_prompt("categorize", kinds=", ".join(kinds))
+    text = _complete_vision(provider, key, model, system, "Classify this image.", [image])
+    obj = _json(text) or {}
+    obj = obj if isinstance(obj, dict) else {}
+    kind = obj.get("kind")
+    if kind not in kinds:
+        kind = None
+    try:
+        conf = float(obj.get("confidence") or 0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    return {"kind": kind, "confidence": conf}
+
+
+def consensus_attributes(title, per_attr, provider=None, model=None):
+    """Adjudicate the best value per attribute across providers (Heavy). `per_attr` =
+    {kind: {provider: value_or_list}}. Returns {kind: {"value": str|list, "reason": str}}
+    for the kinds the model chose to adjudicate (it may omit ones it can't improve)."""
+    if not per_attr:
+        return {}
+    provider, key, model = _resolve(provider or provider_for_area("consensus"),
+                                    model or model_for_area("consensus"))
+    system = area_prompt("consensus", title=title)
+    lines = []
+    for kind, pv in per_attr.items():
+        parts = "; ".join("%s=%s" % (p, json.dumps(v)) for p, v in pv.items())
+        lines.append("%s -> %s" % (kind, parts))
+    text = _complete_text(provider, key, model, system, "\n".join(lines))
+    obj = _json(text)
+    return obj if isinstance(obj, dict) else {}
+
+
+def web_scores(title, systems=None, year=None, provider=None, model=None):
+    """Web-grounded critic/user score lookup for a game the normal score sources missed
+    (Heavy fallback). Returns {"critic": int|None, "user": int|None, "sources": [url]}.
+    {} when the provider has no web search. Scores are 0-100."""
+    provider = provider or provider_for_area("metadata")
+    if not supports_web(provider):
+        return {}
+    try:
+        provider, key, model = _resolve(
+            provider, model or escalation_model_for_area("metadata") or model_for_area("metadata"))
+    except RuntimeError:
+        return {}
+    sysline = (" (the %s version)" % systems[0]) if systems else ""
+    yline = (" released %s" % year) if year else ""
+    system = ("You look up a video game's review scores from the open web (Metacritic, "
+              "OpenCritic, MobyGames, Steam, IGDB, Wikipedia). Normalize every score to a "
+              "0-100 integer. Only report a number you actually found — never invent one.")
+    user = ('What are the critic and user/player review scores for the video game "%s"%s%s?\n'
+            'Respond as STRICT JSON only: {"critic": <0-100 or null>, '
+            '"user": <0-100 or null>}.' % (title, yline, sysline))
+    fn = _web_gemini if provider == "gemini" else _web_anthropic
+    try:
+        res = _retry(lambda: fn(key, model, system, user))
+    except Exception:
+        return {}
+    txt = res[0] if res else ""
+    srcs = [s.get("url") for s in (res[3] if len(res) > 3 else []) or [] if (s or {}).get("url")]
+    import re as _re
+    m = _re.search(r"\{.*\}", txt or "", _re.S)
+    if not m:
+        return {}
+    try:
+        data = json.loads(m.group(0))
+    except ValueError:
+        return {}
+
+    def _si(v):
+        try:
+            n = int(float(v))
+        except (TypeError, ValueError):
+            return None
+        return max(0, min(100, n))
+    return {"critic": _si(data.get("critic")), "user": _si(data.get("user")), "sources": srcs}
 
 
 def identify_roms(items, provider=None, model=None):

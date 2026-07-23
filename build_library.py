@@ -839,6 +839,12 @@ CREATE TABLE source_attrs (game_id INTEGER, source TEXT, source_id TEXT,
   attrs_json TEXT);                       -- lossless per-provider record (export)
 CREATE TABLE game_attributes (game_id INTEGER, kind TEXT, value TEXT,
   origin TEXT DEFAULT '');  -- origin = comma-joined source(s): steam/igdb/ai/…
+-- Lossless per-metadata-provider attribute retention (tiered ingest): EVERY value
+-- each provider (igdb/screenscraper/…) contributed per kind, incl. scalar "losers"
+-- the game_attributes merge dropped. Powers per-provider provenance + the
+-- disable/re-point identity-badge cascade (chosen value recomputed excluding a
+-- disabled provider). game_attributes stays the merged/winning view.
+CREATE TABLE provider_attrs (game_id INTEGER, provider TEXT, kind TEXT, value TEXT);
 CREATE TABLE metadata_links (game_id INTEGER, provider TEXT, provider_id TEXT,
   slug TEXT, url TEXT);                    -- canonical ids from metadata providers
 CREATE TABLE game_tags (game_id INTEGER, tag TEXT, origin TEXT);  -- origin: playnite/ludodex/…
@@ -1035,6 +1041,9 @@ for gid, kind in cur.execute("SELECT game_id, kind FROM game_attributes"):
 
 p_multi = {}    # gid -> kind -> {value: set(origins)}   list-valued (unioned)
 p_scalar = {}   # gid -> kind -> [value, set(origins)]   single-valued (first wins)
+# Lossless retention: EVERY (gid, provider, kind, value) any provider fed, incl.
+# scalar values that lose the first-wins merge above. Deduped on insert.
+_prov_all = set()   # {(gid, provider, kind, value)}
 
 
 def _accum(gid, kind, val, origin):
@@ -1043,13 +1052,41 @@ def _accum(gid, kind, val, origin):
         for v in val:
             if v not in (None, ""):
                 d.setdefault(str(v), set()).add(origin)
+                _prov_all.add((gid, origin, kind, str(v)))
     elif val not in (None, ""):
+        _prov_all.add((gid, origin, kind, str(val)))
         cur_s = p_scalar.setdefault(gid, {}).get(kind)
         if cur_s is None:
             p_scalar[gid][kind] = [str(val), {origin}]
         elif cur_s[0] == str(val):           # same value from another provider
             cur_s[1].add(origin)
 
+
+# Steam appdetails attributes (tiered ingest, Algo tier) — Steam's OWN data, fed
+# FIRST so it wins scalar disagreements for Steam-owned games (Steam is authoritative
+# for its titles per the precedence rule); IGDB/ScreenScraper then fill the rest.
+# Cached by media_fetch's Steam-media pass; absent until the first such pass.
+STEAM_META_DB = os.path.join(DATA, "steam-meta.sqlite")
+if os.path.exists(STEAM_META_DB):
+    sm = sqlite3.connect(STEAM_META_DB)
+    try:
+        srows = sm.execute("SELECT norm_key, payload_json FROM steam_meta").fetchall()
+    except sqlite3.OperationalError:
+        srows = []
+    sm.close()
+    for nk, payload in srows:
+        gids = base_to_gids.get(nk)
+        if not gids:
+            continue
+        try:
+            sattrs = json.loads(payload)
+        except ValueError:
+            continue
+        for gid in gids:
+            if gid in blocked_gids:
+                continue
+            for kind, val in sattrs.items():
+                _accum(gid, kind, val, "steam")
 
 CACHE_DB = os.path.join(DATA, "metadata-cache.sqlite")
 n_link = n_attr = 0
@@ -1169,7 +1206,12 @@ if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
     except sqlite3.OperationalError:
         ss_rows = []
     sc.close()
+    import matchconf as _mc
+    # entry platform per gid (IGDB block defines its own copy; recompute here so SS
+    # confidence works even when IGDB enrichment is disabled/absent).
+    ss_gid_platform = {gid: plat for (nk, plat), gid in key_to_gid.items()}
     linked = set()
+    _ss_conf = {}                            # gid -> (score, reason)
     for nk, ss_id, payload in ss_rows:
         gids = base_to_gids.get(nk)          # metadata is title-level → every platform entry
         if not gids or not payload:
@@ -1179,6 +1221,12 @@ if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
         except ValueError:
             continue
         mapped = ss_map(jeu)
+        # SS candidate names + platforms for the confidence scorer (per-provider, task #3)
+        _nm = mapped.get("name")
+        ss_names = ([_nm] if isinstance(_nm, str) else list(_nm or []))
+        ss_plats = mapped.get("platforms")
+        ss_plat_canons = {platmap.canon(p) for p in (ss_plats or [])} if isinstance(ss_plats, list) else set()
+        _mb = "ss_id" if ss_id else "ss_name"
         for gid in gids:
             if gid in blocked_gids:          # homebrew/hack/unlicensed: NOT this game
                 continue
@@ -1190,9 +1238,18 @@ if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
                              % ss_id))
                 linked.add((gid, ss_id))
                 ss_link += 1
+            _ss_conf[gid] = _mc.ss_match_confidence(
+                _mb, nk, ss_names, ss_plat_canons, ss_gid_platform.get(gid))
             for kind, val in mapped.items():
                 if kind != "name":                  # 'name' isn't an attribute
                     _accum(gid, kind, val, "screenscraper")
+    if _ss_conf:
+        _sscrows = []
+        for _gid, (_sc, _rs) in _ss_conf.items():
+            _sscrows.append((_gid, "match_confidence_ss", str(_sc), "derived"))
+            _sscrows.append((_gid, "match_reason_ss", _rs, "derived"))
+        cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
+                        "VALUES(?,?,?,?)", _sscrows)
 
 # insert unioned provider attributes — skip any kind an owned source already filled
 _prov_rows = []
@@ -1213,6 +1270,10 @@ if _prov_rows:
     cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "
                     "VALUES(?,?,?,?)", _prov_rows)
 n_attr = len(_prov_rows)
+# Retain every provider's raw contribution (incl. merge losers) losslessly.
+if _prov_all:
+    cur.executemany("INSERT INTO provider_attrs(game_id,provider,kind,value) "
+                    "VALUES(?,?,?,?)", sorted(_prov_all))
 
 # ---- AI metadata supplement (accepted findings, fill-gaps, LOWEST precedence) ----
 # Only attributes the user accepted in the metadata review, and only for kinds no
@@ -1296,6 +1357,7 @@ CREATE INDEX IF NOT EXISTS ix_src_plat ON sources(platform);
 CREATE INDEX IF NOT EXISTS ix_sattr_game ON source_attrs(game_id);
 CREATE INDEX IF NOT EXISTS ix_gattr_game ON game_attributes(game_id);
 CREATE INDEX IF NOT EXISTS ix_gattr_kv ON game_attributes(kind, value);
+CREATE INDEX IF NOT EXISTS ix_pattr_game ON provider_attrs(game_id);
 CREATE INDEX IF NOT EXISTS ix_mlink_game ON metadata_links(game_id);
 CREATE INDEX IF NOT EXISTS ix_gtag_game ON game_tags(game_id);
 """)

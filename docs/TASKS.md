@@ -4,24 +4,25 @@ The working backlog. Numbers are stable task IDs referenced in commit messages
 (`feat(match-confidence): … (#13)`). Per-task design docs live in
 `docs/superpowers/specs/`; execution plans in `docs/superpowers/plans/`.
 
-Last reviewed: 2026-07-21.
+Last reviewed: 2026-07-23.
 
 ---
 
 ## Big build — next major feature
 
-- **Tiered store ingest (Algo / Light AI / Heavy AI)** — full behaviour behind the per-source
-  sync tiers, Steam as the reference impl, template for all stores. Complete design in
-  `docs/superpowers/specs/2026-07-23-tiered-store-ingest-design.md`. Build from that spec.
-  Governed by the AI-spend guardrail (no runaway, no new confirmations, scope to the run).
+- **Tiered store ingest (Algo / Light AI / Heavy AI)** — **IMPLEMENTED 2026-07-23** (uncommitted
+  at time of writing → see the commit that lands this). Design:
+  `docs/superpowers/specs/2026-07-23-tiered-store-ingest-design.md`. All 11 net-new items built,
+  compile-clean, deterministic units verified. Details in **Tiered ingest — shipped** below.
+  Two vision passes (media de-dup, category placement) are built as callable AI capabilities but
+  **deliberately not auto-fired over whole imports** (guardrail: vision-over-all-media is a large
+  automatic spend). Rebuild-dependent — the new data model + attribute feeds populate on the next
+  `build_library`.
 
 ## Top of queue
 
-- **Cover / hero loading spinner** (do first). While a cover or hero image is loading —
-  especially when there's a fetch delay — show a small spinning loading indicator instead of
-  a blank/black area, so it reads as "still loading" rather than "loaded empty". Applies to
-  the library grid covers, the detail hero, and anywhere an image is fetched on demand.
-  (Raised 2026-07-23.)
+- ~~**Cover / hero loading spinner**~~ **DONE 2026-07-23.** `SpinImg` component (cache-race guarded,
+  src-keyed) wired into the library grid covers and the detail hero. `.img-spin` reuses `sync-spin`.
 
 ## Open
 
@@ -108,37 +109,53 @@ the first sync + build:
 - **Magic-animations research** — evaluate a reference site's scroll animations for possible UI
   use. Discussion first, nothing started.
 
-## UI tweaks
+## UI tweaks — all DONE 2026-07-23
 
-- **Match-confidence pill placement** — the `◎ NN% match` pill currently renders in the
-  detail **About** header (`web/src/App.tsx` ~5405, `AboutSection`). Remove it from there;
-  keep the confidence indicator **only** in the "View / edit all attributes" section. (Raised
-  during wand testing 2026-07-23.)
+- ~~**Match-confidence pill placement**~~ **DONE.** Removed the `◎ NN% match` pill from the
+  detail **About** header; confidence still surfaces in "View / edit all attributes" (as the
+  `match confidence` row) and now on the interactive metadata-provider badges (tiered ingest).
 
-- **Header stats line miscalculates** (bug) — the dashboard/library header reads
-  "`N identified games · M with art · X cross-source`" and the numbers are wrong: observed
-  **2,067 with art vs 1,506 identified** (with-art can't exceed identified) and
-  **0 cross-source** (should be >0 for games owned on >1 source). Audit the stats query —
-  "with art" is likely counting media-index norm_keys (incl. wanted/unidentified, or
-  per-entry rows) rather than identified games with a chosen cover; cross-source count looks
-  broken. (Raised 2026-07-23.)
+- ~~**Header stats line miscalculates**~~ **DONE.** `/api/stats`: `cross_source` was `n_kinds>1`
+  (media-kind count, 0 library-wide) → now `n_sources>1` + wanted filter (**0 → 22**);
+  `games_with_art` was `COUNT(DISTINCT norm_key) chosen=1` (swept in unidentified/wanted/non-cover)
+  → now identified, non-wanted games with a chosen cover (**2067 → 1492**, a real subset).
+  Reproduced + verified against the live DB.
 
-- **Library toolbar → single line** (redesign). Today it's two rows (top: Basic/AI/Query,
-  Owned/Wanted/All, Filters, Sort; bottom: results count + Per-page, Posters/Table, Columns,
-  Select, Tools, Add game). Collapse to one line:
-  1. **Basic/AI/Query = an expandable half-pill on the RIGHT edge of the search field.**
-     Collapsed it shows only the current mode. Tap → it smoothly expands leftward *within the
-     search field's own horizontal footprint* to reveal the three options; pick one → it
-     collapses back to just the chosen label, sized to that text. (Search-mode selector,
-     currently the left segmented control.)
-  2. **Owned / Wanted / All → move into the Filters popover**, keeping its current segmented
-     form, placed at the TOP of the filter panel — above the "Search attributes" field and
-     the include/exclude attribute list.
-  3. **New "View" button after Filters** that contains: Posters/Table toggle, Sort, Columns,
-     and the Per-page selector (all four currently loose on the toolbar).
-  4. **Left-justified:** Filters, View. **Right-justified:** Select, Tools, Add game. Those
-     three are the only other top-level buttons.
-  (Raised 2026-07-23. `web/src/App.tsx` library toolbar ~line 1000+.)
+- ~~**Library toolbar → single line**~~ **DONE.** Mode half-pill on the search field's right edge;
+  Owned/Wanted/All moved into the Filters popover top; new **View** popover (Layout/Sort/Columns/
+  Per-page); Filters+View left-justified, Select/Tools/Add game right (`.controls-right`).
+
+## Tiered ingest — shipped (2026-07-23)
+
+The 11 net-new items from the design spec, all compile-clean:
+
+1. **Steam art fold** — `_put_steam_art`; `fetch_steam_media(art=True)` pulls art+screenshots+
+   trailers in one pass (idempotent via ON CONFLICT).
+2. **Store attrs at Algo** — `_extract_steam_attrs` caches Steam appdetails attrs to
+   `steam-meta.sqlite`; `build_library` feeds them **Steam-first** (authoritative for Steam games).
+3. **Per-provider confidence** — `matchconf.ss_match_confidence` → `match_confidence_ss`; exposed
+   as `identity_confidence`. SGDB stays art-only (spec's open decision — it has no identity).
+4. **Per-provider attribute retention** — new `provider_attrs` table retains every provider's
+   value incl. merge losers; `attribute_alternates` in the game-detail response.
+5. **Best-asset picker** — `art` AI prompt now scores ratio/orientation/resolution/
+   official-first-else-coolest across all kinds (`pick_art` is already per-kind).
+6-7. **Media de-dup / category placement** — `ai.same_image`, `ai.categorize_media` + AI areas
+   `dedupe_media`/`categorize`. Callable capabilities; NOT auto-fired over whole imports (guardrail).
+8-9. **Consensus / web scores** — `ai.consensus_attributes`, `ai.web_scores`; wired into a
+   **Heavy-only, keys-scoped** post-scan job (`_heavy_ai_consensus`) writing `ai-consensus`
+   overrides + web `ratings`, then a scoped `scores_fetch recompute`.
+10. **Editable identity badges** — `identity-disable.sqlite` + `identity_disable.py` +
+    `POST /api/games/{nk}/identity/{provider}` + read-time cascade in `game_detail` (drops a
+    disabled provider's links/confidence/attrs, falls back to a retained alternate). Frontend:
+    interactive metadata badges (confidence pill, disable ⊘, re-point ✎) split from the immutable
+    store-ownership badges.
+11. **Tier wiring** — store Heavy now enables open-web + score refresh + AI consensus, **scoped to
+    the import's games** and gated by the existing `ai.check_limit` caps. Algo/Lite unchanged
+    (Algo = deterministic only; Lite = provider-only, no paid consensus).
+
+**Rebuild-dependent** (populate on the next `build_library`): `provider_attrs`, `match_confidence_ss`,
+the Steam-attr feed. The Steam-attr cache fills on the next Steam-media pass. New sidecar DB
+`identity-disable.sqlite` auto-creates.
 
 ## Open design decision
 

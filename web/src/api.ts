@@ -83,6 +83,9 @@ export interface GameDetail {
   media_kinds: string[]
   ai_meta?: AiFinding | null
   attribute_provenance?: Record<string, { value: string; origins: string[]; ai: boolean }[]>
+  attribute_alternates?: Record<string, { provider: string; value: string }[]>  // per-provider retained values
+  identity_confidence?: Record<string, { score: number; reason: string }>  // per-provider match certainty
+  disabled_identity?: string[]   // metadata providers the user turned off for this game
   attribute_overrides?: Record<string, { value: string; origin: string }>
   editable_kinds?: string[]
   ownership?: OwnershipFact[]
@@ -1640,5 +1643,13 @@ export const api = {
     const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/attribute/' + encodeURIComponent(kind), { method: 'DELETE' })
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ cleared: boolean }>
+  },
+  setIdentityDisabled: async (nk: string, provider: string, disabled: boolean) => {
+    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/identity/' + encodeURIComponent(provider), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ disabled }),
+    })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
+    return r.json() as Promise<{ disabled_identity: string[] }>
   },
 }

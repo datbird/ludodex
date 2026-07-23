@@ -295,6 +295,31 @@ function NoArt({ title, compact, unmatched }: {
   )
 }
 
+// An <img> that shows a small spinner over its container while the pixels are
+// still fetching, so an in-flight image reads as "still loading" rather than a
+// blank/black box. The parent must be positioned (relative/absolute) for the
+// spinner to centre over it — pass spin={false} where it isn't. Load state is
+// keyed to `src` so a src swap re-shows the spinner; the ref-check catches an
+// already-cached image (whose onLoad can fire before React attaches the
+// handler, which would otherwise strand the spinner spinning forever).
+function SpinImg({ src, className, alt = '', lazy, spin = true, onError }: {
+  src: string; className?: string; alt?: string; lazy?: boolean; spin?: boolean
+  onError?: () => void
+}) {
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null)
+  const done = loadedSrc === src
+  return (
+    <>
+      <img key={src} src={src} className={className} alt={alt}
+        loading={lazy ? 'lazy' : undefined}
+        ref={(el) => { if (el && el.complete && el.naturalWidth > 0) setLoadedSrc(src) }}
+        onLoad={() => setLoadedSrc(src)}
+        onError={() => { setLoadedSrc(src); onError?.() }} />
+      {spin && !done && <span className="img-spin" aria-hidden="true" />}
+    </>
+  )
+}
+
 // Cover image with graceful fallback: if the game has no cover, OR the cover
 // fails to load (e.g. a Deck-local file that 404s on this host), render the
 // generated name-placeholder instead.
@@ -310,9 +335,11 @@ function Cover({ g, compact }: {
   // .frame-box would escape to the viewport — and framing a ~40px thumb is
   // pointless anyway — so only apply framing in the full (non-compact) cover.
   const fs = compact ? undefined : frameStyle(g.framing_cover)
-  // key/src carry cover_v so a re-pinned cover swaps in without a hard refresh.
-  const img = <img key={g.cover_v || 'c'} loading="lazy"
-    src={api.mediaUrl(g.entry_key ?? g.norm_key, 'cover', true, g.cover_v)} alt=""
+  // src carries cover_v so a re-pinned cover swaps in without a hard refresh.
+  // Compact thumbnails (table cell, spotlight) aren't in a positioned box, so
+  // the overlay spinner would escape — skip it there, as with framing.
+  const img = <SpinImg lazy spin={!compact}
+    src={api.mediaUrl(g.entry_key ?? g.norm_key, 'cover', true, g.cover_v)}
     onError={() => setFailed(true)} />
   return fs ? <div className="frame-box" style={fs}>{img}</div> : img
 }
@@ -320,6 +347,10 @@ function Cover({ g, compact }: {
 // Sources that don't identify a game to an external catalogue — a loose ROM or a manual
 // entry has nothing to link out to.
 const NON_ID_SOURCES = new Set(['emulation', 'archive', 'physical', 'rom', 'digital', 'manual'])
+
+// Metadata-PROVIDER identities (editable/disable-able badges), as opposed to
+// store-ownership badges which are immutable facts.
+const META_PROVIDERS = new Set(['igdb', 'screenscraper', 'steamgriddb'])
 
 // Deep link to a store's page for this game, where the id maps to a stable public URL.
 // Stores whose ids don't (GOG product ids, Epic/Xbox/PSN catalogue ids) still get a chip —
@@ -460,8 +491,11 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [status, setStatus] = useState<'owned' | 'wanted' | 'all'>('owned')
   // Bare unidentified ROMs (just a filename, no match) are hidden by default.
   const [showUnidentified, setShowUnidentified] = useState(false)
-  // Mobile: collapse everything past the search into one "Options" disclosure.
-  const [optsOpen, setOptsOpen] = useState(false)
+  // Search-mode selector: an expandable half-pill on the right edge of the
+  // search field (collapsed shows the current mode; open reveals all three).
+  const [modeOpen, setModeOpen] = useState(false)
+  // The "View" popover groups layout / sort / columns / per-page.
+  const [viewOpen, setViewOpen] = useState(false)
   const [filters, setFilters] = useState<FilterState>({})
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [filterQ, setFilterQ] = useState('')
@@ -469,7 +503,6 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const toggleSec = (t: string) =>
     setOpenSecs((s) => { const n = new Set(s); n.has(t) ? n.delete(t) : n.add(t); return n })
   const [sort, setSort] = useState<SortState>({})
-  const [sortOpen, setSortOpen] = useState(false)
   const [searchMode, setSearchMode] = useState<'basic' | 'ai' | 'query'>('basic')
   const aiMode = searchMode === 'ai'
   const [aiNote, setAiNote] = useState('')
@@ -513,7 +546,6 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
     try { raw = localStorage.getItem(prefKey('table-cols')) } catch { /* disabled */ }
     return raw === null ? TABLE_COL_IDS : raw.split(',').filter((c) => TABLE_COL_IDS.includes(c))
   })
-  const [colsOpen, setColsOpen] = useState(false)
 
   useEffect(() => { writePref('view', view) }, [view])
   useEffect(() => { writePref('perpage', String(perPage)) }, [perPage])
@@ -642,8 +674,8 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   }))
   // Dropdowns stay open until an outside click or a re-click of their toggle.
   const filtersRef = useClickOutside<HTMLDivElement>(filtersOpen && !aiMode, () => setFiltersOpen(false))
-  const sortRef = useClickOutside<HTMLDivElement>(sortOpen && !aiMode, () => setSortOpen(false))
-  const colsRef = useClickOutside<HTMLDivElement>(colsOpen, () => setColsOpen(false))
+  const modeRef = useClickOutside<HTMLDivElement>(modeOpen, () => setModeOpen(false))
+  const viewRef = useClickOutside<HTMLDivElement>(viewOpen, () => setViewOpen(false))
   const profileRef = useClickOutside<HTMLDivElement>(showProfile, () => setShowProfile(false))
 
   // Assign a sort key to a priority slot (1/2/3). Each slot holds one key and
@@ -764,51 +796,42 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
         <PendingApplyBar count={stats.pending_meta}
           onApplied={() => { refreshStats(); load(true) }} />
       )}
-      <div className={'controls' + (optsOpen ? ' opts-open' : '')}>
+      <div className="controls">
         <div className="controls-search">
-          <input
-            className="search"
-            placeholder={aiMode ? 'Ask: "co-op platformers I own"…'
-              : searchMode === 'query' ? 'mario platform:snes genre:racing year:>1990 -tag:multiplayer'
-              : 'Search titles…'}
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => { if (aiMode && e.key === 'Enter') runAi() }}
-          />
+          <div className="search-field">
+            <input
+              className="search"
+              placeholder={aiMode ? 'Ask: "co-op platformers I own"…'
+                : searchMode === 'query' ? 'mario platform:snes genre:racing year:>1990 -tag:multiplayer'
+                : 'Search titles…'}
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => { if (aiMode && e.key === 'Enter') runAi() }}
+            />
+            {/* Search-mode selector: half-pill anchored to the field's right edge.
+                Collapsed → just the current mode; click expands it leftward within
+                the field to reveal all three; picking one collapses it back. */}
+            <div className={'mode-pill' + (modeOpen ? ' open' : '')} ref={modeRef}
+              title="Basic = title contains · ✨ AI = natural-language · ⌘ Query = field:value search">
+              {(['basic', 'ai', 'query'] as const).map((m) => (
+                <button key={m} type="button"
+                  className={'mp-seg' + (searchMode === m ? ' cur' : '')
+                    + (modeOpen || searchMode === m ? ' show' : '')}
+                  onClick={() => {
+                    if (!modeOpen) { setModeOpen(true) }
+                    else { setSearchMode(m); setModeOpen(false); setAiNote('') }
+                  }}>
+                  {m === 'basic' ? 'Basic' : m === 'ai' ? '✨ AI' : '⌘ Query'}
+                </button>
+              ))}
+            </div>
+          </div>
           {aiMode && <button className="go" onClick={runAi}>Ask</button>}
           {searchMode === 'query' && (
             <span className="query-hint has-tip" data-tip="platform: system: source: genre: theme: dev: publisher: series: tag: os: device: · year:>1990 · score:>=75 · prefix - to exclude · quote &quot;multi word&quot;">?</span>
           )}
         </div>
-        <div className="search-mode has-tip"
-          data-tip="Basic = title contains, across your whole library. ✨ AI = natural-language (“co-op platformers I own”). ⌘ Query = advanced field:value search.">
-          {(['basic', 'ai', 'query'] as const).map((m) => (
-            <button key={m} type="button" className={'sm-seg' + (searchMode === m ? ' on' : '')}
-              onClick={() => { setSearchMode(m); setAiNote('') }}>
-              {m === 'basic' ? 'Basic' : m === 'ai' ? '✨ AI' : '⌘ Query'}
-            </button>
-          ))}
-        </div>
-        <button type="button" className={'opts-toggle' + (optsOpen ? ' on' : '')}
-          aria-expanded={optsOpen} onClick={() => setOptsOpen((v) => !v)}>
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <line x1="4" y1="6" x2="20" y2="6" /><line x1="4" y1="12" x2="20" y2="12" />
-            <line x1="4" y1="18" x2="20" y2="18" />
-          </svg>
-          Options
-        </button>
-        <div className="own-seg has-tip lib-collapse" role="group" aria-label="Ownership"
-          data-tip="Owned = games you have. Wanted = your imported store wishlists (Steam/GOG) for titles you don't own yet. All = both.">
-          {(['owned', 'wanted', 'all'] as const).map((s) => (
-            <button key={s} type="button" className={'own-seg-btn' + (status === s ? ' on' : '')}
-              disabled={aiMode} onClick={() => setStatus(s)}>
-              {s === 'owned' ? 'Owned' : s === 'wanted' ? 'Wanted' : 'All'}
-              {s === 'wanted' && !!stats?.wanted && <span className="own-seg-n">{stats.wanted}</span>}
-            </button>
-          ))}
-        </div>
-        <div className={'filter-wrap lib-collapse' + (filtersOpen ? '' : ' has-tip')} ref={filtersRef}
+        <div className={'filter-wrap' + (filtersOpen ? '' : ' has-tip')} ref={filtersRef}
           data-tip="Narrow the library. Each row has two boxes: check Include to keep only games that match, or Exclude to hide games that match — one box per row. Rules combine (e.g. Steam + Matched, but not Emulation). Type in the search box to find a row.">
           <button className={'filter-btn' + (activeFilters ? ' on' : '')}
             disabled={aiMode} onClick={() => setFiltersOpen((v) => !v)}>
@@ -825,6 +848,19 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
                 {activeFilters > 0 &&
                   <button className="filter-clear" onClick={() => setFilters({})}>
                     Clear ({activeFilters})</button>}
+              </div>
+              {/* Ownership scope moved here from the toolbar, at the top of the panel. */}
+              <div className="filter-own" role="group" aria-label="Ownership">
+                <span className="filter-own-label">Show</span>
+                <div className="own-seg">
+                  {(['owned', 'wanted', 'all'] as const).map((s) => (
+                    <button key={s} type="button" className={'own-seg-btn' + (status === s ? ' on' : '')}
+                      onClick={() => setStatus(s)}>
+                      {s === 'owned' ? 'Owned' : s === 'wanted' ? 'Wanted' : 'All'}
+                      {s === 'wanted' && !!stats?.wanted && <span className="own-seg-n">{stats.wanted}</span>}
+                    </button>
+                  ))}
+                </div>
               </div>
               <input className="filter-search" placeholder="Search attributes…"
                 value={filterQ} onChange={(e) => setFilterQ(e.target.value)} autoFocus />
@@ -874,119 +910,95 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             </div>
           )}
         </div>
-        <div className={'filter-wrap lib-collapse' + (sortOpen ? '' : ' has-tip')} ref={sortRef}
-          data-tip="Sort by up to three things at once. Put a 1 next to your main sort, a 2 for the tiebreaker, and a 3 for the next — so “1st: System, 2nd: Matched” groups by system, then matched first within each. One pick per column; click a pick again to clear it.">
+        <div className="filter-wrap" ref={viewRef}>
           <button className={'filter-btn' + (activeSort ? ' on' : '')}
-            disabled={aiMode} onClick={() => setSortOpen((v) => !v)}>
+            title="Layout, sort, columns & page size" onClick={() => setViewOpen((v) => !v)}>
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M3 6h12M3 12h9M3 18h6M17 8l3-3 3 3M20 5v14" />
+              <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
+              <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
             </svg>
-            Sort{activeSort ? ` (${activeSort})` : ''}
+            View{activeSort ? ` · sort ${activeSort}` : ''}
           </button>
-          {sortOpen && !aiMode && (
-            <div className="filter-menu">
-              <div className="filter-head">
-                <span>Sort by</span>
-                {activeSort > 0 &&
-                  <button className="filter-clear" onClick={() => setSort({})}>Clear</button>}
+          {viewOpen && (
+            <div className="filter-menu view-menu">
+              <div className="filter-head"><span>View</span></div>
+              <div className="vm-row">
+                <span className="vm-label">Layout</span>
+                <div className="view-toggle">
+                  <button className={view === 'poster' ? 'active' : ''} title="Poster view"
+                    onClick={() => setView('poster')}>
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
+                      <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+                    </svg> Posters
+                  </button>
+                  <button className={view === 'table' ? 'active' : ''} title="Table view"
+                    onClick={() => setView('table')}>
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+                    </svg> Table
+                  </button>
+                </div>
+              </div>
+              <div className="vm-row">
+                <span className="vm-label">Per page</span>
+                <select className="vm-perpage" value={perPage} onChange={(e) => setPerPage(Number(e.target.value))}>
+                  {PAGE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
               </div>
               <div className="filter-scroll">
-                <div className="filter-grid sort-grid">
-                  <div className="fg-h">Name</div>
-                  <div className="fg-h fg-c">1st</div>
-                  <div className="fg-h fg-c">2nd</div>
-                  <div className="fg-h fg-c">3rd</div>
-                  {SORT_SECTIONS.map((sec) => (
-                    <Fragment key={sec.title}>
-                      <div className="fg-section">{sec.title}</div>
-                      {sec.rows.map((r) => (
-                        <SortRow key={r.id} name={r.name} rank={sort[r.id]}
-                          onSet={(rk) => setSortRank(r.id, rk)} />
+                {view === 'table' && (
+                  <div className="vm-sec">
+                    <div className="vm-sec-h">Columns</div>
+                    <div className="vm-cols">
+                      {TABLE_COLS.map((c) => (
+                        <label key={c.id} className="col-item">
+                          <input type="checkbox" checked={cols.includes(c.id)}
+                            onChange={() => toggleCol(c.id)} />
+                          {c.label}
+                        </label>
                       ))}
-                    </Fragment>
-                  ))}
+                      {attrCols.length > 0 && <div className="col-note col-sec">Attributes</div>}
+                      {attrCols.map((c) => (
+                        <label key={c.id} className="col-item">
+                          <input type="checkbox" checked={cols.includes(c.id)}
+                            onChange={() => toggleCol(c.id)} />
+                          {c.label}
+                        </label>
+                      ))}
+                      <div className="col-note">Title always shown.</div>
+                    </div>
+                  </div>
+                )}
+                <div className="vm-sec">
+                  <div className="vm-sec-h">Sort
+                    {activeSort > 0 &&
+                      <button className="filter-clear" onClick={() => setSort({})}>Clear</button>}
+                  </div>
+                  <div className="filter-grid sort-grid">
+                    <div className="fg-h">Name</div>
+                    <div className="fg-h fg-c">1st</div>
+                    <div className="fg-h fg-c">2nd</div>
+                    <div className="fg-h fg-c">3rd</div>
+                    {SORT_SECTIONS.map((sec) => (
+                      <Fragment key={sec.title}>
+                        <div className="fg-section">{sec.title}</div>
+                        {sec.rows.map((r) => (
+                          <SortRow key={r.id} name={r.name} rank={sort[r.id]}
+                            onSet={(rk) => setSortRank(r.id, rk)} />
+                        ))}
+                      </Fragment>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
           )}
         </div>
-      </div>
-
-      {aiNote && <div className="ai-note">{aiNote}</div>}
-      <div className={'results-bar' + (optsOpen ? ' opts-open' : '')}>
-        <div className="count">{total.toLocaleString()} results
-          {!showUnidentified && hidden > 0 && (
-            <button className="hidden-hint" onClick={() => setShowUnidentified(true)}
-              title="Show the unidentified ROMs that also match your search">
-              · 👁 {hidden.toLocaleString()} unidentified match{hidden === 1 ? '' : 'es'} hidden — show
-            </button>
-          )}</div>
-        <div className="results-tools lib-collapse">
-          {!!stats?.unidentified && (
-            <button className={'filter-btn' + (showUnidentified ? ' active' : '')}
-              title="Bare ROMs with no provider match yet — hidden until identified (manually or by the Magic wand)"
-              onClick={() => setShowUnidentified((v) => !v)}>
-              {showUnidentified ? '🙈 Hide' : '👁'} {stats.unidentified.toLocaleString()} unidentified
-            </button>
-          )}
-          <label className="per-page">
-            Per page
-            <select value={perPage} onChange={(e) => setPerPage(Number(e.target.value))}>
-              {PAGE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </label>
-          <div className="view-toggle">
-          <button className={view === 'poster' ? 'active' : ''} title="Poster view"
-            onClick={() => setView('poster')}>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-              strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
-              <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
-            </svg> Posters
-          </button>
-          <button className={view === 'table' ? 'active' : ''} title="Table view"
-            onClick={() => setView('table')}>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-              strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-            </svg> Table
-          </button>
-          </div>
-          {view === 'table' && (
-            <div className="filter-wrap" ref={colsRef}>
-              <button className="filter-btn" onClick={() => setColsOpen((v) => !v)}
-                title="Choose which columns to show">
-                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-                  strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <rect x="3" y="3" width="18" height="18" rx="1" />
-                  <line x1="9" y1="3" x2="9" y2="21" /><line x1="15" y1="3" x2="15" y2="21" />
-                </svg>
-                Columns
-              </button>
-              {colsOpen && (
-                <div className="filter-menu cols-menu">
-                  <div className="filter-head"><span>Table columns</span></div>
-                  {TABLE_COLS.map((c) => (
-                    <label key={c.id} className="col-item">
-                      <input type="checkbox" checked={cols.includes(c.id)}
-                        onChange={() => toggleCol(c.id)} />
-                      {c.label}
-                    </label>
-                  ))}
-                  {attrCols.length > 0 && <div className="col-note col-sec">Attributes</div>}
-                  {attrCols.map((c) => (
-                    <label key={c.id} className="col-item">
-                      <input type="checkbox" checked={cols.includes(c.id)}
-                        onChange={() => toggleCol(c.id)} />
-                      {c.label}
-                    </label>
-                  ))}
-                  <div className="col-note">Title always shown.</div>
-                </div>
-              )}
-            </div>
-          )}
+        <div className="controls-right">
           <button className={'filter-btn' + (selectMode ? ' active' : '')}
             title="Select multiple games — AI-enrich them with the Magic wand, or add ROMs to a device's wishlist"
             onClick={() => { setSelectMode((v) => !v); setPicked(new Map()); setAddMenuOpen(false) }}>
@@ -1010,6 +1022,24 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             Add game
           </button>
         </div>
+      </div>
+
+      {aiNote && <div className="ai-note">{aiNote}</div>}
+      <div className="results-bar">
+        <div className="count">{total.toLocaleString()} results
+          {!showUnidentified && hidden > 0 && (
+            <button className="hidden-hint" onClick={() => setShowUnidentified(true)}
+              title="Show the unidentified ROMs that also match your search">
+              · 👁 {hidden.toLocaleString()} unidentified match{hidden === 1 ? '' : 'es'} hidden — show
+            </button>
+          )}</div>
+        {!!stats?.unidentified && (
+          <button className={'filter-btn' + (showUnidentified ? ' active' : '')}
+            title="Bare ROMs with no provider match yet — hidden until identified (manually or by the Magic wand)"
+            onClick={() => setShowUnidentified((v) => !v)}>
+            {showUnidentified ? '🙈 Hide' : '👁'} {stats.unidentified.toLocaleString()} unidentified
+          </button>
+        )}
       </div>
 
       {view === 'poster' ? (
@@ -5385,9 +5415,6 @@ function About({ attrs, scores, prov }: {
   const released = first('release_date') || first('release_year')
   const dev = attrs['developers']?.join(', ')
   const pub = attrs['publishers']?.join(', ')
-  const confRaw = first('match_confidence')
-  const confN = confRaw != null && confRaw !== '' ? Number(confRaw) : null
-  const confReason = first('match_reason')
   const ludodex = scores?.ludodex ?? null
   const critic = scores?.critic ?? null
   const players = scores?.players ?? null
@@ -5398,15 +5425,13 @@ function About({ attrs, scores, prov }: {
   if (pub) facts.push(['Publisher', pub])
 
   const hasTags = TAG_GROUPS.some(([k]) => attrs[k]?.length)
-  if (!desc && !facts.length && ludodex == null && !hasTags && confN == null) return null
+  if (!desc && !facts.length && ludodex == null && !hasTags) return null
 
   return (
     <section className="about">
-      <h3>About{confN != null && (
-        <span className={'conf-pill ' + (confN < 40 ? 'conf-low' : confN < 70 ? 'conf-mid' : 'conf-high')}
-          title={'Match confidence — how sure we are this is the right game'
-            + (confReason ? ' · ' + confReason : '')}>◎ {confN}% match</span>
-      )}</h3>
+      {/* Match-confidence indicator lives only in "View / edit all attributes"
+          now — it was too prominent here in the About header. */}
+      <h3>About</h3>
       {desc && <p className="about-desc">{desc}</p>}
       {ludodex != null && (
         <div className="score-row">
@@ -6188,6 +6213,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   const [heroPref, setHeroPref] = useState<string | null>(null)
   const [frames, setFrames] = useState<Record<string, Frame>>({})
   const [resolve, setResolve] = useState(false)
+  const [idBusy, setIdBusy] = useState('')   // provider whose disable toggle is in-flight
   const [toolsOpen, setToolsOpen] = useState(false)
   const toolsRef = useClickOutside<HTMLDivElement>(toolsOpen, () => setToolsOpen(false))
   useEffect(() => { setToolsOpen(false) }, [nk])
@@ -6271,7 +6297,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                  style={(bg || marquee.length) ? undefined : { ['--h' as string]: hueOf(d.title) } as CSSProperties}>
               {bg && (
                 <div className="hero-bg-frame" style={frameStyle(bgKind ? frames[bgKind] : undefined)}>
-                  <img className="hero-bg" src={bg.url} alt="" />
+                  <SpinImg className="hero-bg" src={bg.url} />
                 </div>
               )}
               {!bg && marquee.length > 0 && (
@@ -6399,39 +6425,75 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                 )}
 
                 {(() => {
-                  // EVERY provider that identifies this game, metadata and store alike —
-                  // IGDB, ScreenScraper and the stores it's owned on can all be true at
-                  // once, and each is a different claim worth seeing. Previously only
-                  // metadata_links rendered, so a Steam-owned game showed no Steam chip.
-                  const chips = [
-                    ...d.metadata_links.map((l) => ({
-                      provider: l.provider, id: l.provider_id, url: l.url })),
-                    ...Array.from(new Map(
-                      d.sources
-                        .filter((sc) => !NON_ID_SOURCES.has(sc.source) && sc.source_id)
-                        .map((sc) => [sc.source, {
-                          provider: sc.source, id: sc.source_id,
-                          url: storeUrl(sc.source, sc.source_id) }])).values()),
-                  ]
-                  if (!chips.length) return null
+                  // Two DIFFERENT claims, now shown apart: metadata-PROVIDER identities
+                  // (IGDB / ScreenScraper / SteamGridDB) are editable — each carries a
+                  // match confidence and can be re-pointed or disabled, cascading to the
+                  // attributes/media it feeds. Store-OWNERSHIP badges are facts (you own
+                  // it there) and are never editable.
+                  const disabled = new Set(d.disabled_identity ?? [])
+                  const conf = d.identity_confidence ?? {}
+                  const metaChips = d.metadata_links.filter((l) => META_PROVIDERS.has(l.provider))
+                  const storeChips = Array.from(new Map(
+                    d.sources
+                      .filter((sc) => !NON_ID_SOURCES.has(sc.source) && sc.source_id)
+                      .map((sc) => [sc.source, {
+                        provider: sc.source, id: sc.source_id,
+                        url: storeUrl(sc.source, sc.source_id) }])).values())
+                  if (!metaChips.length && !storeChips.length) return null
+                  const toggle = async (provider: string, off: boolean) => {
+                    setIdBusy(provider)
+                    try { await api.setIdentityDisabled(d.norm_key, provider, off); reloadDetail() }
+                    catch { /* ignore */ } finally { setIdBusy('') }
+                  }
                   return (
                     <section className="idvia">
                       <h3>Identified via
-                        <span className="sec-help">every provider and store that identifies this game</span>
+                        <span className="sec-help">metadata providers (editable) and the stores you own it on</span>
                       </h3>
-                      <div className="idvia-chips">
-                        {chips.map((c, i) => {
-                          const style = { '--chip': providerColor(c.provider) } as CSSProperties
-                          const body = <>{providerLabel(c.provider)}
-                            {c.id ? <span className="idchip-id">#{c.id}</span> : null}</>
-                          return c.url
-                            ? <a key={i} className="idchip" style={style} href={c.url}
-                                 target="_blank" rel="noreferrer"
-                                 title={`Open on ${providerLabel(c.provider)}`}>{body}</a>
-                            : <span key={i} className="idchip" style={style}
-                                    title={`Identified on ${providerLabel(c.provider)}`}>{body}</span>
-                        })}
-                      </div>
+                      {metaChips.length > 0 && (
+                        <div className="idvia-chips">
+                          {metaChips.map((l) => {
+                            const off = disabled.has(l.provider)
+                            const c = conf[l.provider]
+                            const style = { '--chip': providerColor(l.provider) } as CSSProperties
+                            return (
+                              <span key={l.provider} className={'idchip idchip-meta' + (off ? ' idchip-off' : '')} style={style}>
+                                {l.url
+                                  ? <a className="idchip-lnk" href={l.url} target="_blank" rel="noreferrer"
+                                       title={`Open on ${providerLabel(l.provider)}`}>{providerLabel(l.provider)}
+                                       {l.provider_id ? <span className="idchip-id">#{l.provider_id}</span> : null}</a>
+                                  : <span className="idchip-lnk">{providerLabel(l.provider)}</span>}
+                                {c && !off && (
+                                  <span className={'idchip-conf ' + (c.score < 40 ? 'conf-low' : c.score < 70 ? 'conf-mid' : 'conf-high')}
+                                    title={'Match confidence' + (c.reason ? ' · ' + c.reason : '')}>◎ {c.score}%</span>
+                                )}
+                                {l.provider === 'igdb' && !off && (
+                                  <button className="idchip-act" title="Re-point this match"
+                                    onClick={() => setResolve(true)}>✎</button>
+                                )}
+                                <button className="idchip-act" disabled={idBusy === l.provider}
+                                  title={off ? 'Re-enable this provider' : 'Disable — drop its attributes & media, fall back to the next provider'}
+                                  onClick={() => toggle(l.provider, !off)}>{off ? 'off ↺' : '⊘'}</button>
+                              </span>
+                            )
+                          })}
+                        </div>
+                      )}
+                      {storeChips.length > 0 && (
+                        <div className="idvia-chips idvia-stores">
+                          {storeChips.map((c, i) => {
+                            const style = { '--chip': providerColor(c.provider) } as CSSProperties
+                            const body = <>{providerLabel(c.provider)}
+                              {c.id ? <span className="idchip-id">#{c.id}</span> : null}</>
+                            return c.url
+                              ? <a key={i} className="idchip" style={style} href={c.url}
+                                   target="_blank" rel="noreferrer"
+                                   title={`Open on ${providerLabel(c.provider)}`}>{body}</a>
+                              : <span key={i} className="idchip" style={style}
+                                      title={`Owned on ${providerLabel(c.provider)}`}>{body}</span>
+                          })}
+                        </div>
+                      )}
                     </section>
                   )
                 })()}

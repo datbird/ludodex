@@ -20,6 +20,7 @@ Providers (in increasing cost; later ones gap-fill what earlier ones lack):
 """
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -33,6 +34,11 @@ import config
 
 INDEX = os.path.join(DATA, "media-index.sqlite")
 META_CACHE = os.path.join(DATA, "metadata-cache.sqlite")
+# Steam appdetails ATTRIBUTES cache (tiered ingest, Algo tier): genres/devs/pubs/
+# release/description/type extracted from the same appdetails call the media pass
+# already makes, so build_library can feed Steam's own data as a metadata provider
+# (authoritative for Steam-owned games) — no extra network round-trip.
+STEAM_META = os.path.join(DATA, "steam-meta.sqlite")
 
 # Steam store CDN. library_600x900 (portrait cover), library_hero (wide hero),
 # header.jpg (capsule/header banner), logo. Not every appid has every asset —
@@ -252,15 +258,65 @@ def put(con, nk, kind, provider, url, now, ext="jpg", system=None, meta=None,
 
 
 # --------------------------------------------------------------------------- #
-def fetch_steam(con, now):
-    games = steam_games()
+def _steam_meta_con():
+    c = sqlite3.connect(STEAM_META)
+    c.execute("CREATE TABLE IF NOT EXISTS steam_meta("
+              "appid TEXT PRIMARY KEY, norm_key TEXT, payload_json TEXT, fetched REAL)")
+    return c
+
+
+def _extract_steam_attrs(data):
+    """Deterministically map a Steam appdetails `data` block to ludodex attribute
+    kinds (Algo tier — no AI). Genres/categories are lists; devs/pubs lists; a scalar
+    release_year/release_date/description/content_type. Empty/missing → omitted."""
+    out = {}
+    genres = [g.get("description") for g in (data.get("genres") or []) if g.get("description")]
+    if genres:
+        out["genres"] = genres
+    cats = [c.get("description") for c in (data.get("categories") or []) if c.get("description")]
+    if cats:
+        out["categories"] = cats
+    if data.get("developers"):
+        out["developers"] = list(data["developers"])
+    if data.get("publishers"):
+        out["publishers"] = list(data["publishers"])
+    date = ((data.get("release_date") or {}).get("date") or "").strip()
+    if date:
+        out["release_date"] = date
+        m = re.search(r"(19|20)\d{2}", date)
+        if m:
+            out["release_year"] = m.group(0)
+    desc = (data.get("short_description") or "").strip()
+    if desc:
+        out["description"] = desc
+    # Steam's own game/dlc/tool/… classification — feeds game-vs-utility (content_type).
+    typ = (data.get("type") or "").strip()
+    if typ:
+        out["content_type"] = "Game" if typ == "game" else typ.capitalize()
+    return out
+
+
+def _put_steam_art(con, nk, appid, now):
+    """Emit the constructed-CDN art candidates (cover/hero/background/header/logo)
+    for one Steam appid. Idempotent via put()'s ON CONFLICT; prune_dead drops any
+    leaf that 404s. Shared by fetch_steam (catalog-wide) and fetch_steam_media
+    (per-game fold), so a Steam-media pass yields the COMPLETE set in one go."""
     n = 0
+    for kind, leaves in STEAM_ART.items():
+        for leaf in leaves:
+            put(con, nk, kind, "steam", STEAM_CDN % (appid, leaf), now,
+                ext=leaf.rsplit(".", 1)[-1], meta=appid)
+            n += 1
+    return n
+
+
+def fetch_steam(con, now, only=None):
+    games = steam_games()
+    if only is not None:
+        want = set(only)
+        games = {a: nk for a, nk in games.items() if nk in want}
     for appid, nk in games.items():
-        for kind, leaves in STEAM_ART.items():
-            for leaf in leaves:
-                put(con, nk, kind, "steam", STEAM_CDN % (appid, leaf), now,
-                    ext=leaf.rsplit(".", 1)[-1], meta=appid)
-                n += 1
+        _put_steam_art(con, nk, appid, now)
     con.commit()
     print("media_fetch: steam — %d candidate URLs for %d games"
           % (n, len(games)), file=sys.stderr)
@@ -293,7 +349,7 @@ def _screenshot_limit():
         return 0
 
 
-def fetch_steam_media(con, now, only=None, refresh=False, limit=None):
+def fetch_steam_media(con, now, only=None, refresh=False, limit=None, art=True):
     """Steam `appdetails`: the FULL screenshot set + movie trailers (playable .mp4/.webm)
     for each owned/wanted Steam appid — the media the constructed-URL `fetch_steam` can't
     reach because those have unpredictable ids. Per-appid, rate-limited and incremental
@@ -304,11 +360,21 @@ def fetch_steam_media(con, now, only=None, refresh=False, limit=None):
     if only is not None:
         want = set(only)
         games = {a: nk for a, nk in games.items() if nk in want}
+    # Fold the constructed-CDN art (cover/hero/background/header/logo) into this
+    # same pass so "Steam media" is the COMPLETE set in one go — no separate
+    # "Also sync media" toggle (design: Algo runs both). Art is cheap + idempotent
+    # (ON CONFLICT), and runs for EVERY scoped game regardless of the appdetails
+    # incremental gate below, which only throttles the rate-limited store API.
+    if art:
+        for appid, nk in games.items():
+            _put_steam_art(con, nk, appid, now)
+        con.commit()
     seen = _steam_media_seen(con)
     todo = [(a, nk) for a, nk in games.items() if refresh or a not in seen]
     if limit:
         todo = todo[:limit]
     cap = _screenshot_limit()
+    smeta = _steam_meta_con()       # cache appdetails attributes alongside the media
     last = 0.0
     n = 0
     for i, (appid, nk) in enumerate(todo, 1):
@@ -325,6 +391,11 @@ def fetch_steam_media(con, now, only=None, refresh=False, limit=None):
             entry = d.get(str(appid)) or {}
             if entry.get("success"):
                 data = entry.get("data") or {}
+                # cache Steam's own attributes (Algo tier feeds build_library)
+                _attrs = _extract_steam_attrs(data)
+                if _attrs:
+                    smeta.execute("INSERT OR REPLACE INTO steam_meta VALUES(?,?,?,?)",
+                                  (appid, nk, json.dumps(_attrs), now))
                 shots = data.get("screenshots") or []
                 if cap > 0:
                     shots = shots[:cap]
@@ -351,7 +422,10 @@ def fetch_steam_media(con, now, only=None, refresh=False, limit=None):
             print("  steam-media %s: %s" % (appid, str(e)[:120]), file=sys.stderr)
         if i % 25 == 0:
             con.commit()
+            smeta.commit()
     con.commit()
+    smeta.commit()
+    smeta.close()
     print("media_fetch: steam appdetails — %d screenshot/video URLs for %d game(s)"
           % (n, len(todo)), file=sys.stderr)
 

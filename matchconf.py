@@ -17,6 +17,38 @@ _TITLE_BASED = {"name", "ai_name", "ai_entry", "era_reheal"}
 _ANCHOR_PENALTY = {"exact": 0, "anchored": -12, "interior": -50, "norun": -45}
 
 
+# ScreenScraper identity bases. SS is a retro/console DB that barely covers PC, so a
+# Steam→SS miss is legitimate, not low confidence — we only score entries SS actually
+# matched. (SteamGridDB is art-only — it has no identity to score, so no sgdb variant.)
+_SS_SOURCE_BASE = {"manual": 100, "ss_id": 90, "ss_name": 80}
+
+
+def ss_match_confidence(matched_by, nk, ss_names, ss_plat_canons, entry_platform):
+    """(score:int 0-100, reason:str) for a ScreenScraper identity — the SS counterpart of
+    match_confidence. `ss_names` = [primary title + region alternates]; `ss_plat_canons` =
+    set of canon platform names SS lists for the game. Same title-anchor + platform-fit
+    rules, SS-shaped inputs (the caller extracts them since SS's record differs from IGDB's)."""
+    mb = matched_by or "ss_name"
+    if mb == "manual":
+        return 100, "pinned by hand"
+    base = _SS_SOURCE_BASE.get(mb, 70)
+    factors = []
+    names = [n for n in (ss_names or []) if n]
+    if names:
+        anchor = _name_anchor_class(nk, names)
+        base += _ANCHOR_PENALTY.get(anchor, 0)
+        if anchor in ("interior", "norun"):
+            factors.append("%s title match" % anchor)
+    if entry_platform and ss_plat_canons \
+            and platmap.canon(entry_platform) not in ss_plat_canons:
+        base -= 22
+        factors.append("platform not listed by ScreenScraper")
+    score = max(0, min(100, base))
+    if not factors:
+        factors.append("matched by ScreenScraper")
+    return score, "; ".join(factors)
+
+
 def _impossible(entry_platform, cand):
     """True when the entry's hardware generation is strictly BELOW the game's earliest
     platform generation (a game can't ship on hardware older than its debut) — the strong

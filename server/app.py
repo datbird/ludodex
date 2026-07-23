@@ -43,6 +43,7 @@ import devices         # noqa: E402  device connections + library-manager pull
 import fileops         # noqa: E402  file-operations engine (profiles + runbooks)
 import aimeta          # noqa: E402  AI metadata audit/supplement store + context
 import overrides       # noqa: E402  per-attribute provenance overrides (re-pointing)
+import identity_disable  # noqa: E402  disabled metadata-provider identities (badge cascade)
 import ownership       # noqa: E402  durable per-format ownership (physical + per-platform wants)
 import backups         # noqa: E402  scheduled snapshot backups (zip + push)
 import matchconf       # noqa: E402  identity-certainty scorer (pure, import-safe)
@@ -495,7 +496,9 @@ def stats():
         ident = con.execute("SELECT COUNT(*) FROM games g" +
                             (gw + " AND " if gw else " WHERE ") + IDENTIFIED_SQL).fetchone()[0]
         wanted_ct = con.execute("SELECT COUNT(*) FROM games WHERE wanted=1").fetchone()[0] if wcol else 0
-        cross = con.execute("SELECT COUNT(*) FROM games WHERE n_kinds>1").fetchone()[0]
+        # cross-source = owned on >1 source (n_sources), matching the facet/sort
+        # definitions. NOT n_kinds (media-kind count) — that reads 0 library-wide.
+        cross = con.execute("SELECT COUNT(*) FROM games g WHERE g.n_sources>1" + and_w).fetchone()[0]
         unmatched = con.execute(
             "SELECT COUNT(*) FROM games g WHERE NOT EXISTS("
             "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)" + and_w).fetchone()[0]
@@ -517,8 +520,15 @@ def stats():
                                "FROM sources GROUP BY source"):
             by_source.setdefault(row["source"], row["c"])
         coverage = {}
+        # "with art" = identified, non-wanted games that have a chosen COVER — a
+        # subset of `identified` (same definition as the sync helper). The old
+        # count (distinct chosen norm_key, any kind) also swept in unidentified
+        # ROMs, wishlist-wanted titles and non-cover assets, so it could exceed
+        # `identified`.
         total_with = con.execute(
-            "SELECT COUNT(DISTINCT norm_key) FROM m.media WHERE chosen=1").fetchone()[0]
+            "SELECT COUNT(*) FROM games g WHERE " + IDENTIFIED_SQL + and_w +
+            " AND EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
+            "AND md.chosen=1 AND md.kind='cover')").fetchone()[0]
         for row in con.execute("SELECT kind, COUNT(DISTINCT norm_key) c "
                                "FROM m.media WHERE chosen=1 GROUP BY kind"):
             coverage[row["kind"]] = row["c"]
@@ -557,7 +567,8 @@ def facets():
         attributes = {}
         kinds = [r["kind"] for r in con.execute(
             "SELECT DISTINCT kind FROM game_attributes "
-            "WHERE kind NOT IN ('description','match_confidence','match_reason') "
+            "WHERE kind NOT IN ('description','match_confidence','match_reason',"
+            "'match_confidence_ss','match_reason_ss') "
             "ORDER BY kind")]
         for k in kinds:
             vals = [r["value"] for r in con.execute(
@@ -3787,6 +3798,107 @@ def _start_aimeta_job(run_id, keys, opts):
                run_id=run_id, cancelable=True)
 
 
+# Scalar attribute kinds where a single AI-adjudicated winner is meaningful (list
+# kinds like genres are unioned, not adjudicated, so they're excluded here).
+_CONSENSUS_KINDS = ("release_year", "release_date", "description", "developers", "publishers")
+
+
+def _heavy_ai_consensus(keys, stop):
+    """Heavy tier: for each scanned game, adjudicate scalar attribute DISAGREEMENTS
+    between providers (from provider_attrs) with ai.consensus_attributes, writing the
+    winner as an 'ai-consensus' override; and fill review scores for games that have
+    NONE via ai.web_scores. Strictly scoped to `keys` and gated by the AI spend caps —
+    a Heavy import spends the model only on the games it brought in. Fully guarded so a
+    provider/credit error degrades to a no-op rather than breaking the run."""
+    try:
+        con = sqlite3.connect(LIBRARY_DB)
+        con.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return
+    sco = None
+    try:
+        sco = sqlite3.connect(SCORES_DB)
+    except sqlite3.Error:
+        sco = None
+    web_keys, n_over, capped = [], 0, 0
+    CAP = 800                                    # soft ceiling; log if the run exceeds it
+    try:
+        for i, nk in enumerate(keys):
+            if stop and stop():
+                break
+            if i >= CAP:
+                capped = len(keys) - CAP
+                break
+            row = con.execute("SELECT id, canonical_title FROM games WHERE norm_key=?",
+                              (nk,)).fetchone()
+            if not row:
+                continue
+            gid, title = row["id"], row["canonical_title"]
+            # collect each provider's value(s) per scalar kind
+            per = {}
+            try:
+                for r in con.execute("SELECT kind, provider, value FROM provider_attrs "
+                                     "WHERE game_id=? AND kind IN (%s)"
+                                     % ",".join("?" * len(_CONSENSUS_KINDS)),
+                                     (gid, *_CONSENSUS_KINDS)):
+                    per.setdefault(r["kind"], {}).setdefault(r["provider"], []).append(r["value"])
+            except sqlite3.OperationalError:
+                per = {}                         # provider_attrs absent → nothing to adjudicate
+            # only send kinds where providers actually DISAGREE (>1 distinct value)
+            disputed = {k: {p: (v if len(v) > 1 else v[0]) for p, v in pv.items()}
+                        for k, pv in per.items()
+                        if len({tuple(sorted(v)) for v in pv.values()}) > 1}
+            if disputed:
+                try:
+                    choices = ai.consensus_attributes(title, disputed)
+                    for kind, choice in (choices or {}).items():
+                        if kind not in _CONSENSUS_KINDS or not isinstance(choice, dict):
+                            continue
+                        val = choice.get("value")
+                        if isinstance(val, list):
+                            val = ", ".join(str(x) for x in val)
+                        if val not in (None, ""):
+                            overrides.set_override(nk, kind, str(val), "ai-consensus")
+                            n_over += 1
+                except Exception:                # noqa: BLE001 — spend cap or provider error
+                    pass
+            # web-score fallback: only for games with NO computed score at all
+            if sco is not None:
+                try:
+                    has = sco.execute("SELECT 1 FROM game_scores WHERE norm_key=?",
+                                      (nk,)).fetchone()
+                except sqlite3.OperationalError:
+                    has = None
+                if not has:
+                    try:
+                        ws = ai.web_scores(title)
+                    except Exception:            # noqa: BLE001
+                        ws = {}
+                    now = time.time()
+                    for kind in ("critic", "user"):
+                        if ws.get(kind) is not None:
+                            sco.execute(
+                                "INSERT OR REPLACE INTO ratings(norm_key,source,kind,score,"
+                                "votes,raw,updated) VALUES(?,?,?,?,?,?,?)",
+                                (nk, "web", kind, float(ws[kind]), None, "ai/web", now))
+                            web_keys.append(nk)
+        if sco is not None:
+            sco.commit()
+    finally:
+        con.close()
+        if sco is not None:
+            sco.close()
+    if web_keys:
+        # recompute the Ludodex roll-up for just the games that gained a web score
+        _run_script("scores_fetch.py",
+                    args=["recompute", "--keys", "\x1f".join(sorted(set(web_keys)))],
+                    timeout=1200)
+    msg = "heavy consensus: %d override(s), %d web-score game(s)" % (n_over, len(set(web_keys)))
+    if capped:
+        msg += " — NOTE %d game(s) beyond the %d cap were skipped" % (capped, CAP)
+    print(msg, file=sys.stderr)
+
+
 def _post_scan_media_scores(keys, opts):
     """After a wand scan: pull Steam's full media for the scanned Steam games (every
     tier; --steam-media filters to Steam appids and is incremental), and — for a Heavy
@@ -3803,6 +3915,13 @@ def _post_scan_media_scores(keys, opts):
             # game's scores, never the whole library
             _run_script("scores_fetch.py", args=["all", "--keys", tk], timeout=3600)
         _start_job("scores:wand", "scores", "Refreshing scores (heavy wand)", _sc)
+        # Heavy-only AI adjudication, strictly scoped to the scanned keys (the tier
+        # choice + scan click are the consent — no new confirmation, no runaway; the
+        # ai.check_limit caps still gate every call). Consensus resolves scalar
+        # attribute disagreements between providers; web_scores fills score-less games.
+        def _cons(_stop):
+            _heavy_ai_consensus(keys, _stop)
+        _start_job("consensus:wand", "supplement", "AI consensus (heavy)", _cons)
 
 
 @app.post("/api/aimeta/scan")
@@ -5775,6 +5894,33 @@ def game_detail(norm_key: str):
         # detail view. The provenance block below still lists every source value.
         for _k, _o in ov.items():
             attrs[_k] = [_o["value"]]
+        # Per-provider attribute alternates (tiered ingest): every value each
+        # metadata provider contributed per kind, incl. ones the merge dropped —
+        # so the UI can show "igdb says X, screenscraper says Y" and the identity
+        # badges can re-point/disable a provider. Guarded: an un-rebuilt catalog
+        # (or a narrow backing-store pull) may lack the table — never 500 detail.
+        alternates = {}          # kind -> [{provider, value}]
+        try:
+            for r in con.execute("SELECT provider, kind, value FROM provider_attrs "
+                                 "WHERE game_id=? ORDER BY kind, provider", (gid,)):
+                alternates.setdefault(r["kind"], []).append(
+                    {"provider": r["provider"], "value": r["value"]})
+        except sqlite3.OperationalError:
+            pass                 # provider_attrs absent until the next full rebuild
+        # Per-provider identity confidence for the metadata-provider badges (tiered
+        # ingest): igdb from match_confidence, screenscraper from match_confidence_ss.
+        identity_confidence = {}
+        def _idc(provider, ckind, rkind):
+            _v = attrs.get(ckind)
+            if _v and _v[0] not in (None, ""):
+                try:
+                    _sc = int(float(_v[0]))
+                except (ValueError, TypeError):
+                    return
+                identity_confidence[provider] = {
+                    "score": _sc, "reason": (attrs.get(rkind) or [""])[0]}
+        _idc("igdb", "match_confidence", "match_reason")
+        _idc("screenscraper", "match_confidence_ss", "match_reason_ss")
         links = [dict(r) for r in con.execute(
             "SELECT provider, provider_id, slug, url FROM metadata_links "
             "WHERE game_id=?", (gid,))]
@@ -5797,6 +5943,43 @@ def game_detail(norm_key: str):
             if url:
                 provider_links.append({"provider": src, "url": url})
                 _pl_seen.add(src)
+        # Disabled-provider cascade (tiered ingest, identity badges): when the user
+        # turns a metadata provider off for this game, drop its links/confidence AND
+        # its attribute contributions, falling back to the next provider's RETAINED
+        # value (from the alternates surface built above). Store-ownership facts are
+        # never disable-able, so this only ever affects metadata providers.
+        disabled = identity_disable.disabled_for(base)
+        if disabled:
+            links = [l for l in links if l["provider"] not in disabled]
+            provider_links = [l for l in provider_links if l["provider"] not in disabled]
+            for _p in list(identity_confidence):
+                if _p in disabled:
+                    identity_confidence.pop(_p)
+            # prune provenance values contributed ONLY by disabled providers
+            for _k in list(prov):
+                kept = [e for e in prov[_k]
+                        if not e["origins"] or any(o not in disabled for o in e["origins"])]
+                if kept:
+                    prov[_k] = kept
+                else:
+                    prov.pop(_k)
+            # recompute the displayed value per kind: surviving provenance, else a
+            # retained alternate from a still-enabled provider (a manual override wins)
+            for _k in list(attrs):
+                if _k in ov:
+                    continue
+                surviving = [e["value"] for e in prov.get(_k, [])]
+                if surviving:
+                    attrs[_k] = surviving
+                else:
+                    _alt = next((a["value"] for a in alternates.get(_k, [])
+                                 if a["provider"] not in disabled), None)
+                    if _alt is not None:
+                        attrs[_k] = [_alt]
+                    else:
+                        attrs.pop(_k, None)
+            for _k in list(alternates):
+                alternates[_k] = [a for a in alternates[_k] if a["provider"] not in disabled]
         # media kinds available to THIS entry: its own console's chosen art, plus
         # platform-neutral store/IGDB art whose identity matches this entry
         # (media.game_key = the entry's game_key, DESIGN §11.9). An era-collision entry
@@ -5825,6 +6008,9 @@ def game_detail(norm_key: str):
             "rom_files": _entry_rom_paths(sources),   # on-disk ROM path(s) for this entry
             "attributes": attrs,
             "attribute_provenance": prov,     # per-value origins (+ ai flag → ✨)
+            "attribute_alternates": alternates,  # per-provider retained values per kind
+            "identity_confidence": identity_confidence,  # per-provider match certainty
+            "disabled_identity": sorted(disabled),  # metadata providers turned off here
             "attribute_overrides": ov,        # user re-pointed canonical values
             "editable_kinds": _EDITABLE_ATTR_KINDS,   # full vocab for the "all attributes" editor
             "tags": _game_tags(con, gid, base),
@@ -5952,6 +6138,18 @@ def clear_ownership(norm_key: str, form: str, platform: str = "", state: str = "
     ownership.clear_fact(DATA, norm_key, form, platform, state)
     _apply_ownership_live(norm_key, _game_title(norm_key))
     return {"ownership": ownership.list_for(DATA, norm_key)}
+
+
+@app.post("/api/games/{norm_key}/identity/{provider}")
+def set_identity_disabled(norm_key: str, provider: str, body: dict = Body(...)):
+    """Turn a metadata provider (igdb/screenscraper/…) off or on for this game. When
+    off, its attributes + media drop out of use and the game falls back to the next
+    provider's retained value (the read-time cascade in game_detail). Store-ownership
+    providers aren't disable-able — only metadata identities."""
+    if provider not in ("igdb", "screenscraper", "steamgriddb"):
+        raise HTTPException(400, "not a disable-able metadata provider")
+    identity_disable.set_disabled(norm_key, provider, bool(body.get("disabled", True)))
+    return {"disabled_identity": sorted(identity_disable.disabled_for(norm_key))}
 
 
 @app.get("/api/games/{norm_key}/releases")
@@ -8456,17 +8654,24 @@ def _sync_worker(job, services, media_ids=(), full=False):
             job["step"] = "AI supplement…"
             try:
                 worst = "heavy" if "heavy" in tiers.values() else "lite"
-                keys = aimeta.targets("missing" if worst == "heavy" else "unmatched",
+                heavy = worst == "heavy"
+                keys = aimeta.targets("missing" if heavy else "unmatched",
                                       2000, sources=ai_srcs)
                 if not keys:
                     _phase("supplement", "ok", "nothing left to fill")
                 else:
                     ai._resolve(ai.provider_for_area("metadata"),
                                 ai.model_for_area("metadata"))
-                    run_id = aimeta.scan_new("%s import" % worst, keys, False, True, None)
+                    # Heavy: open-web gap-fill + score refresh + AI consensus, all
+                    # scoped to `keys` (the games this import brought in). Lite stays
+                    # provider-only (no web, no paid consensus).
+                    web = heavy and ai.supports_web(ai.provider_for_area("metadata"))
+                    run_id = aimeta.scan_new("%s import" % worst, keys, 1 if web else 0,
+                                             True, None, 1 if heavy else 0)
                     _start_aimeta_job(run_id, keys,
-                                      {"web": False, "match_provider": True,
+                                      {"web": web, "match_provider": True,
                                        "metadata_kinds": None, "want_media": True,
+                                       "pull_scores": heavy,
                                        "label": "%s import" % worst})
                     job["supplement"] = {"run_id": run_id, "count": len(keys)}
                     _phase("supplement", "ok", "%d game(s) queued" % len(keys))
