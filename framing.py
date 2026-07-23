@@ -22,6 +22,18 @@ def _db(data_dir):
         m_bottom REAL DEFAULT 0, m_left REAL DEFAULT 0,
         zoom REAL DEFAULT 1,
         PRIMARY KEY(norm_key, kind))""")
+    # Heal a legacy / externally-created table that is missing the geometry columns.
+    # The backing-store sync (dbsync._local_apply) recreates a table from ONLY the
+    # columns present in the remote data, so if framing was pulled before any frame
+    # was set it lands as just (norm_key, kind) — and CREATE TABLE IF NOT EXISTS
+    # above can't add columns to a table that already exists. This module owns the
+    # framing schema, so it is the right place to reconcile it. Idempotent.
+    have = {r[1] for r in con.execute("PRAGMA table_info(framing)")}
+    for col, default in (("m_top", 0), ("m_right", 0), ("m_bottom", 0),
+                         ("m_left", 0), ("zoom", 1)):
+        if col not in have:
+            con.execute("ALTER TABLE framing ADD COLUMN %s REAL DEFAULT %s"
+                        % (col, default))
     # per-game hero override — which media drives the detail hero (same "durable
     # render overlay" idea as framing, so it lives in the same store). Value is
     # 'marquee' (force the scrolling dance) or a media kind to force as the static

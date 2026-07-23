@@ -9619,8 +9619,6 @@ function AiReviewModal({ runId, title, onClose }: { runId: number; title: string
       <div className="panel review-panel" onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={onClose}>×</button>
         <h2>✨ Review changes{title ? <> — <span className="rv-title">{title}</span></> : null}</h2>
-        <p className="dim">Exactly what the AI wants to change for this game. Tick what to keep,
-          then Accept &amp; apply — it goes straight into your catalog.</p>
         <MetadataChangeset runId={runId} onApplied={onClose} />
       </div>
     </div>
