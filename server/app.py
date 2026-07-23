@@ -6165,6 +6165,9 @@ def _pins():
     con.execute("""CREATE TABLE IF NOT EXISTS pins(
         norm_key TEXT, kind TEXT, provider TEXT, ref TEXT, rank INTEGER,
         PRIMARY KEY(norm_key, kind, provider, ref))""")
+    if "rank" not in {r[1] for r in con.execute("PRAGMA table_info(pins)")}:
+        con.execute("ALTER TABLE pins ADD COLUMN rank INTEGER")   # backing-store heal
+        con.commit()
     con.row_factory = sqlite3.Row
     return con
 
