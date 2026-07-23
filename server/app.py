@@ -102,12 +102,14 @@ DATABASES = [
     ("aimeta", "AI metadata", "ai-metadata.sqlite", "durable"),
     ("collections", "Collections", "collections.sqlite", "durable"),
     ("overrides", "Attribute overrides", "attr-overrides.sqlite", "durable"),
+    ("identity_disable", "Disabled identities", "identity-disable.sqlite", "durable"),
     ("merges", "Duplicate merges", "merges.sqlite", "durable"),
     ("splits", "Peeled-apart games", "splits.sqlite", "durable"),
     ("ra", "RetroAchievements", "ra.sqlite", "durable"),
     ("library", "Game library", "game-library.sqlite", "output"),
     ("media", "Media index", "media-index.sqlite", "output"),
     ("metadata", "Metadata cache", "metadata-cache.sqlite", "cache"),
+    ("steam_meta", "Steam attributes cache", "steam-meta.sqlite", "cache"),
     # NB: roms-index.sqlite is a Deck-side *input* (config roms_index_db →
     # /home/deck/...), not a DB this server owns, so it's intentionally not listed.
 ]

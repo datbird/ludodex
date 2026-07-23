@@ -50,6 +50,8 @@ IMPORT_DBS = [
                                 # so leaving it behind makes a "reset" quietly partial:
                                 # the next sync skips every game still inside the TTL
     "crawl-index.sqlite",       # file crawl inventory + extracted facts (re-crawlable)
+    "steam-meta.sqlite",        # Steam appdetails attribute cache (tiered ingest) —
+                                # regenerable from the next Steam-media pass
 ]
 # What the user personally decided about their games.
 CURATION_DBS = [
@@ -57,6 +59,7 @@ CURATION_DBS = [
     "collections.sqlite", "attr-overrides.sqlite", "merges.sqlite",
     "splits.sqlite", "framing.sqlite", "ownership.sqlite",
     "media-flags.sqlite",       # assets you banned / marked non-redistributable
+    "identity-disable.sqlite",  # providers you turned off per game (tiered ingest)
 ]
 # How to reach the outside world.
 CONFIG_DBS = ["config.sqlite", "connections.sqlite", "file-profiles.sqlite"]
