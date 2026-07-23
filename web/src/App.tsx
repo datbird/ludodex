@@ -496,6 +496,12 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [modeOpen, setModeOpen] = useState(false)
   // The "View" popover groups layout / sort / columns / per-page.
   const [viewOpen, setViewOpen] = useState(false)
+  // View popover: each section (layout/perpage/columns/sort) is a disclosure,
+  // collapsed by default so the popover stays compact.
+  const [openViewSecs, setOpenViewSecs] = useState<Set<string>>(new Set())
+  const toggleViewSec = (id: string) => setOpenViewSecs((s) => {
+    const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n
+  })
   const [filters, setFilters] = useState<FilterState>({})
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [filterQ, setFilterQ] = useState('')
@@ -923,76 +929,116 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           {viewOpen && (
             <div className="filter-menu view-menu">
               <div className="filter-head"><span>View</span></div>
-              <div className="vm-row">
-                <span className="vm-label">Layout</span>
-                <div className="view-toggle">
-                  <button className={view === 'poster' ? 'active' : ''} title="Poster view"
-                    onClick={() => setView('poster')}>
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
-                      <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
-                    </svg> Posters
-                  </button>
-                  <button className={view === 'table' ? 'active' : ''} title="Table view"
-                    onClick={() => setView('table')}>
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-                    </svg> Table
-                  </button>
-                </div>
-              </div>
-              <div className="vm-row">
-                <span className="vm-label">Per page</span>
-                <select className="vm-perpage" value={perPage} onChange={(e) => setPerPage(Number(e.target.value))}>
-                  {PAGE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
-                </select>
-              </div>
               <div className="filter-scroll">
+                {/* Layout */}
+                <div className="vm-sec">
+                  <button type="button" className="vm-sec-toggle"
+                    onClick={() => toggleViewSec('layout')} aria-expanded={openViewSecs.has('layout')}>
+                    <span className={'vm-chev' + (openViewSecs.has('layout') ? ' open' : '')}>▸</span>
+                    <span className="vm-sec-label">Layout</span>
+                    <span className="vm-sec-hint">{view === 'poster' ? 'Posters' : 'Table'}</span>
+                  </button>
+                  {openViewSecs.has('layout') && (
+                    <div className="vm-sec-body">
+                      <div className="view-toggle">
+                        <button className={view === 'poster' ? 'active' : ''} title="Poster view"
+                          onClick={() => setView('poster')}>
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
+                            <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+                          </svg> Posters
+                        </button>
+                        <button className={view === 'table' ? 'active' : ''} title="Table view"
+                          onClick={() => setView('table')}>
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+                          </svg> Table
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {/* Per page */}
+                <div className="vm-sec">
+                  <button type="button" className="vm-sec-toggle"
+                    onClick={() => toggleViewSec('perpage')} aria-expanded={openViewSecs.has('perpage')}>
+                    <span className={'vm-chev' + (openViewSecs.has('perpage') ? ' open' : '')}>▸</span>
+                    <span className="vm-sec-label">Per page</span>
+                    <span className="vm-sec-hint">{perPage}</span>
+                  </button>
+                  {openViewSecs.has('perpage') && (
+                    <div className="vm-sec-body">
+                      <select className="vm-perpage" value={perPage} onChange={(e) => setPerPage(Number(e.target.value))}>
+                        {PAGE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                    </div>
+                  )}
+                </div>
+                {/* Columns (table view only) */}
                 {view === 'table' && (
                   <div className="vm-sec">
-                    <div className="vm-sec-h">Columns</div>
-                    <div className="vm-cols">
-                      {TABLE_COLS.map((c) => (
-                        <label key={c.id} className="col-item">
-                          <input type="checkbox" checked={cols.includes(c.id)}
-                            onChange={() => toggleCol(c.id)} />
-                          {c.label}
-                        </label>
-                      ))}
-                      {attrCols.length > 0 && <div className="col-note col-sec">Attributes</div>}
-                      {attrCols.map((c) => (
-                        <label key={c.id} className="col-item">
-                          <input type="checkbox" checked={cols.includes(c.id)}
-                            onChange={() => toggleCol(c.id)} />
-                          {c.label}
-                        </label>
-                      ))}
-                      <div className="col-note">Title always shown.</div>
-                    </div>
+                    <button type="button" className="vm-sec-toggle"
+                      onClick={() => toggleViewSec('columns')} aria-expanded={openViewSecs.has('columns')}>
+                      <span className={'vm-chev' + (openViewSecs.has('columns') ? ' open' : '')}>▸</span>
+                      <span className="vm-sec-label">Columns</span>
+                      <span className="vm-sec-hint">{cols.length} shown</span>
+                    </button>
+                    {openViewSecs.has('columns') && (
+                      <div className="vm-sec-body">
+                        <div className="vm-cols">
+                          {TABLE_COLS.map((c) => (
+                            <label key={c.id} className="col-item">
+                              <input type="checkbox" checked={cols.includes(c.id)}
+                                onChange={() => toggleCol(c.id)} />
+                              {c.label}
+                            </label>
+                          ))}
+                          {attrCols.length > 0 && <div className="col-note col-sec">Attributes</div>}
+                          {attrCols.map((c) => (
+                            <label key={c.id} className="col-item">
+                              <input type="checkbox" checked={cols.includes(c.id)}
+                                onChange={() => toggleCol(c.id)} />
+                              {c.label}
+                            </label>
+                          ))}
+                          <div className="col-note">Title always shown.</div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
+                {/* Sort */}
                 <div className="vm-sec">
-                  <div className="vm-sec-h">Sort
-                    {activeSort > 0 &&
-                      <button className="filter-clear" onClick={() => setSort({})}>Clear</button>}
-                  </div>
-                  <div className="filter-grid sort-grid">
-                    <div className="fg-h">Name</div>
-                    <div className="fg-h fg-c">1st</div>
-                    <div className="fg-h fg-c">2nd</div>
-                    <div className="fg-h fg-c">3rd</div>
-                    {SORT_SECTIONS.map((sec) => (
-                      <Fragment key={sec.title}>
-                        <div className="fg-section">{sec.title}</div>
-                        {sec.rows.map((r) => (
-                          <SortRow key={r.id} name={r.name} rank={sort[r.id]}
-                            onSet={(rk) => setSortRank(r.id, rk)} />
+                  <button type="button" className="vm-sec-toggle"
+                    onClick={() => toggleViewSec('sort')} aria-expanded={openViewSecs.has('sort')}>
+                    <span className={'vm-chev' + (openViewSecs.has('sort') ? ' open' : '')}>▸</span>
+                    <span className="vm-sec-label">Sort</span>
+                    <span className="vm-sec-hint">{activeSort > 0 ? activeSort + ' active' : 'none'}</span>
+                  </button>
+                  {openViewSecs.has('sort') && (
+                    <div className="vm-sec-body">
+                      {activeSort > 0 && (
+                        <button className="filter-clear vm-sort-clear" onClick={() => setSort({})}>Clear sort</button>
+                      )}
+                      <div className="filter-grid sort-grid">
+                        <div className="fg-h">Name</div>
+                        <div className="fg-h fg-c">1st</div>
+                        <div className="fg-h fg-c">2nd</div>
+                        <div className="fg-h fg-c">3rd</div>
+                        {SORT_SECTIONS.map((sec) => (
+                          <Fragment key={sec.title}>
+                            <div className="fg-section">{sec.title}</div>
+                            {sec.rows.map((r) => (
+                              <SortRow key={r.id} name={r.name} rank={sort[r.id]}
+                                onSet={(rk) => setSortRank(r.id, rk)} />
+                            ))}
+                          </Fragment>
                         ))}
-                      </Fragment>
-                    ))}
-                  </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
