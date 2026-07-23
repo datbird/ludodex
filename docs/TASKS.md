@@ -93,6 +93,13 @@ the first sync + build:
 - **Magic-animations research** — evaluate a reference site's scroll animations for possible UI
   use. Discussion first, nothing started.
 
+## UI tweaks
+
+- **Match-confidence pill placement** — the `◎ NN% match` pill currently renders in the
+  detail **About** header (`web/src/App.tsx` ~5405, `AboutSection`). Remove it from there;
+  keep the confidence indicator **only** in the "View / edit all attributes" section. (Raised
+  during wand testing 2026-07-23.)
+
 ## Open design decision
 
 - **Selection policy** (`DESIGN.md` §9) — which games push to a device: allowlist / tag /
