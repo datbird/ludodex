@@ -100,6 +100,31 @@ the first sync + build:
   keep the confidence indicator **only** in the "View / edit all attributes" section. (Raised
   during wand testing 2026-07-23.)
 
+- **Header stats line miscalculates** (bug) — the dashboard/library header reads
+  "`N identified games · M with art · X cross-source`" and the numbers are wrong: observed
+  **2,067 with art vs 1,506 identified** (with-art can't exceed identified) and
+  **0 cross-source** (should be >0 for games owned on >1 source). Audit the stats query —
+  "with art" is likely counting media-index norm_keys (incl. wanted/unidentified, or
+  per-entry rows) rather than identified games with a chosen cover; cross-source count looks
+  broken. (Raised 2026-07-23.)
+
+- **Library toolbar → single line** (redesign). Today it's two rows (top: Basic/AI/Query,
+  Owned/Wanted/All, Filters, Sort; bottom: results count + Per-page, Posters/Table, Columns,
+  Select, Tools, Add game). Collapse to one line:
+  1. **Basic/AI/Query = an expandable half-pill on the RIGHT edge of the search field.**
+     Collapsed it shows only the current mode. Tap → it smoothly expands leftward *within the
+     search field's own horizontal footprint* to reveal the three options; pick one → it
+     collapses back to just the chosen label, sized to that text. (Search-mode selector,
+     currently the left segmented control.)
+  2. **Owned / Wanted / All → move into the Filters popover**, keeping its current segmented
+     form, placed at the TOP of the filter panel — above the "Search attributes" field and
+     the include/exclude attribute list.
+  3. **New "View" button after Filters** that contains: Posters/Table toggle, Sort, Columns,
+     and the Per-page selector (all four currently loose on the toolbar).
+  4. **Left-justified:** Filters, View. **Right-justified:** Select, Tools, Add game. Those
+     three are the only other top-level buttons.
+  (Raised 2026-07-23. `web/src/App.tsx` library toolbar ~line 1000+.)
+
 ## Open design decision
 
 - **Selection policy** (`DESIGN.md` §9) — which games push to a device: allowlist / tag /
