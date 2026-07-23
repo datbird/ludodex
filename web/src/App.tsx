@@ -3610,19 +3610,52 @@ function TierRow({ name, desc, info }: { name: string; desc: string; info: strin
   )
 }
 
+// Stacked variant of the same ⓘ affordance for the wand + device-import pickers
+// (name on its own line, desc below), so the disclosure looks and behaves identically
+// everywhere while each screen keeps its own layout classes. `extra` is the trailing
+// bit on the head line (the wand's web-capability note, the device's cost tag).
+function TierPick({ headClass, descClass, name, desc, info, extra }: {
+  headClass: string; descClass: string; name: string; desc: string; info: string; extra?: ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <div className={headClass}>{name}{extra}
+        <button type="button" className={'tier-info' + (open ? ' on' : '')}
+          aria-label="what this tier does" aria-expanded={open}
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen((o) => !o) }}>ⓘ</button>
+      </div>
+      <div className={descClass}>{desc}</div>
+      {open && <div className="tier-info-detail">{info}</div>}
+    </>
+  )
+}
+
 // The three import tiers, in ascending cost. Copy is deliberately concrete about
 // what each one SPENDS — the difference between them is money, not just quality.
-const IMPORT_TIERS: { id: ImportMode; name: string; cost: string; desc: string }[] = [
+const IMPORT_TIERS: { id: ImportMode; name: string; cost: string; desc: string; info: string }[] = [
   { id: 'algo', name: 'Algorithmic', cost: 'free',
     desc: 'Filename and folder rules only — zero AI. Titles are still matched against '
-        + 'IGDB and ScreenScraper for art and metadata, because those are lookups, not a model.' },
+        + 'IGDB and ScreenScraper for art and metadata, because those are lookups, not a model.',
+    info: 'DOES: identify ROMs by filename and folder rules only — zero AI — then match those '
+        + 'titles against IGDB & ScreenScraper for art and metadata (lookups, not a model). '
+        + 'DOESN’T: send anything to a model (it’s free), so genuinely cryptic filenames stay '
+        + 'unresolved.' },
   { id: 'lite', name: 'Light', cost: 'cents',
     desc: 'Everything above, plus a model reads the file paths that look mangled '
-        + '(SMW_U, FF7, cryptic 8.3 names) and works out the real title, system and year.' },
+        + '(SMW_U, FF7, cryptic 8.3 names) and works out the real title, system and year.',
+    info: 'DOES: everything Algorithmic, plus a model reads only the file paths that look '
+        + 'mangled (SMW_U, FF7, cryptic 8.3 names) and works out the real title, system and '
+        + 'year. DOESN’T: re-read names the rules already got right — it spends only on the '
+        + 'suspicious ones.' },
   { id: 'heavy', name: 'Heavy', cost: 'depends on library size',
     desc: 'Everything above, but every title is re-read, and any game the providers '
         + 'could not identify goes through the full metadata and art pipeline — the same '
-        + 'work the magic wand does, run automatically at import.' },
+        + 'work the magic wand does, run automatically at import.',
+    info: 'DOES: everything Light, but re-reads EVERY title, and any game the providers '
+        + 'couldn’t identify goes through the full metadata + art pipeline — the same work the '
+        + 'magic wand does, run automatically. DOESN’T: cap its own spend — cost scales with '
+        + 'library size (set an AI budget cap).' },
 ]
 
 // Add OR edit a library manager (a rom/media folder on a device). `existing`
@@ -3713,8 +3746,9 @@ function ManagerModal({ deviceId, deviceName, kinds, existing, onClose, onSaved 
                 <input type="radio" name="import-mode" checked={mode === t.id}
                   onChange={() => setMode(t.id)} />
                 <div className="imode-body">
-                  <div className="imode-title">{t.name} <em>{t.cost}</em></div>
-                  <div className="imode-desc">{t.desc}</div>
+                  <TierPick headClass="imode-title" descClass="imode-desc"
+                    name={t.name} desc={t.desc} info={t.info}
+                    extra={<> <em>{t.cost}</em></>} />
                 </div>
               </label>
             ))}
@@ -8647,14 +8681,20 @@ function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
   )
 }
 
-const WAND_TIERS: { id: 'light' | 'heavy'; name: string; desc: string }[] = [
+const WAND_TIERS: { id: 'light' | 'heavy'; name: string; desc: string; info: string }[] = [
   { id: 'light', name: 'Light',
     desc: 'Identify, match to a provider, and fill only the base attributes and art '
-        + 'that are missing. No per-game web search, no score refresh — fast.' },
+        + 'that are missing. No per-game web search, no score refresh — fast.',
+    info: 'DOES: identify the games in scope, match each to a provider, and fill only the '
+        + 'base attributes and art still missing. DOESN’T: search the open web, refresh '
+        + 'review scores, or re-do games that are already complete — the fast, cheap pass.' },
   { id: 'heavy', name: 'Heavy',
     desc: 'Re-check every game in scope, search the open web on each for the best art '
         + 'and verification, fill everything, and refresh scores. Thorough — slower, '
-        + 'more AI.' },
+        + 'more AI.',
+    info: 'DOES: re-check EVERY game in scope, search the open web on each for the best art '
+        + 'and to verify identity, fill everything, and refresh scores. DOESN’T: cap its own '
+        + 'spend — the thorough, higher-cost pass (set an AI budget cap for a ceiling).' },
 ]
 
 // The Magic wand. Scope is IMPLIED by where it was opened (this game, the current
@@ -8729,11 +8769,11 @@ function MagicWandOverlay({ filterQuery, filterCount, target, onClose }: {
                   <input type="radio" name="wand-tier" checked={tier === t.id}
                     onChange={() => setTier(t.id)} />
                   <div>
-                    <div className="wand-tier-name">{t.name}
-                      {t.id === 'heavy' && targets && !targets.web_capable &&
-                        <span className="wand-tier-note"> (web search needs a Gemini/Anthropic/OpenAI provider)</span>}
-                    </div>
-                    <div className="wand-tier-desc">{t.desc}</div>
+                    <TierPick headClass="wand-tier-name" descClass="wand-tier-desc"
+                      name={t.name} desc={t.desc} info={t.info}
+                      extra={t.id === 'heavy' && targets && !targets.web_capable
+                        ? <span className="wand-tier-note"> (web search needs a Gemini/Anthropic/OpenAI provider)</span>
+                        : null} />
                   </div>
                 </label>
               ))}
