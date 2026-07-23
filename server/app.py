@@ -3771,9 +3771,33 @@ def _start_aimeta_job(run_id, keys, opts):
     label = "Metadata scan (%s%s%s)" % (opts.get("label", "scan"),
                                         ", web" if web else "",
                                         ", match" if mp else "")
-    _start_job("aimeta:%d" % run_id, "aimeta", label,
-               lambda stop: _aimeta_scan(run_id, keys, opts, stop),
+    def _run(stop):
+        _aimeta_scan(run_id, keys, opts, stop)
+        if stop and stop():
+            return
+        # Provider media/scores for the SCANNED games — independent of whether the AI
+        # found anything to change. This is why the wand pulls Steam's full media (all
+        # tiers) and refreshes scores (heavy) even for an already-matched, complete game:
+        # gating these on applied findings meant a "nothing to change" scan did neither.
+        _post_scan_media_scores(keys, opts)
+    _start_job("aimeta:%d" % run_id, "aimeta", label, _run,
                run_id=run_id, cancelable=True)
+
+
+def _post_scan_media_scores(keys, opts):
+    """After a wand scan: pull Steam's full media for the scanned Steam games (every
+    tier; --steam-media filters to Steam appids and is incremental), and — for a Heavy
+    run — refresh the network score sources. Fired as their own background jobs so the
+    scan itself completes and its findings are reviewable immediately."""
+    tk = "\x1f".join(keys)
+
+    def _sm(_stop):
+        _run_script("media_fetch.py", args=["--steam-media", "--keys", tk], timeout=7200)
+    _start_job("steammedia:wand", "steammedia", "Steam screenshots & trailers", _sm)
+    if opts.get("pull_scores"):
+        def _sc(_stop):
+            _run_script("scores_fetch.py", args=["all"], timeout=3600)
+        _start_job("scores:wand", "scores", "Refreshing scores (heavy wand)", _sc)
 
 
 @app.post("/api/aimeta/scan")
@@ -3819,7 +3843,7 @@ def aimeta_scan(body: dict = Body(default={})):
                              pull_scores=pull_scores)
     _start_aimeta_job(run_id, keys, {"web": web, "match_provider": match_provider,
                                      "metadata_kinds": md_kinds, "want_media": want_media,
-                                     "label": label})
+                                     "label": label, "pull_scores": pull_scores})
     return {"run_id": run_id, "target": label, "count": len(keys), "web": web,
             "match_provider": match_provider}
 
@@ -4660,34 +4684,16 @@ def _aimeta_apply(should_stop, only_ids=None):
     except Exception as e:
         print("aimeta apply: instant media failed (reconcile will apply): %s"
               % str(e)[:200], file=sys.stderr)
-    # Was any of what we're applying from a Heavy wand run? Check BEFORE mark_applied
-    # flips the status the query keys on.
-    want_scores = aimeta.runs_want_scores(only_ids)
     aimeta.mark_applied(only_ids)  # accepted -> applied (only this pass's findings)
     # recompute the combined Ludodex score from the IGDB ratings the wand just
     # cached (reads the cache, no network), so a newly-matched game's score lands
     # in the library immediately instead of waiting on a manual scores_fetch run.
+    # (The Steam full-media pull and Heavy network-score refresh now run at SCAN time,
+    # scoped to the scanned games, so they happen even when a scan finds nothing to
+    # apply — see _post_scan_media_scores.)
     ok_s, err_s = _run_script("scores_fetch.py", args=["igdb"], timeout=180)
     if not ok_s:
         print("apply scores: %s" % (err_s or "")[:150], file=sys.stderr)
-    # Heavy wand: also refresh the NETWORK score sources (Steam/GOG/ScreenScraper),
-    # which the IGDB cache recompute above doesn't cover. Backgrounded and non-fatal —
-    # the apply is already done; scores trickle in. Self-limiting via scores_fetch's
-    # 7-day per-source freshness skip, same as the store-sync scores phase.
-    if want_scores:
-        def _scores(_stop):
-            _run_script("scores_fetch.py", args=["all"], timeout=3600)
-        _start_job("scores:heavy", "scores", "Refreshing scores (heavy wand)", _scores)
-    # Any wand run (light or heavy) tops up Steam's full media for the games it touched.
-    # Incremental (skips appids already pulled), so this is near-free for games ingested
-    # before — the user's "wand does the same, cheap after initial" ask. Backgrounded.
-    if touched:
-        _tk = "\x1f".join(touched)
-
-        def _smedia(_stop):
-            _run_script("media_fetch.py", args=["--steam-media", "--keys", _tk],
-                        timeout=3600)
-        _start_job("steammedia:wand", "steammedia", "Steam screenshots & trailers", _smedia)
     return touched
 
 
