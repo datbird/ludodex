@@ -8,6 +8,14 @@ Last reviewed: 2026-07-21.
 
 ---
 
+## Top of queue
+
+- **Cover / hero loading spinner** (do first). While a cover or hero image is loading —
+  especially when there's a fetch delay — show a small spinning loading indicator instead of
+  a blank/black area, so it reads as "still loading" rather than "loaded empty". Applies to
+  the library grid covers, the detail hero, and anywhere an image is fetched on demand.
+  (Raised 2026-07-23.)
+
 ## Open
 
 Nothing is open pending code. One item is **data-gated**:
