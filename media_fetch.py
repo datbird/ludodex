@@ -159,6 +159,9 @@ def _backfill_game_key(con):
 def con_index():
     con = sqlite3.connect(INDEX)
     con.execute("PRAGMA busy_timeout=30000")   # wait out the live server's locks
+    con.execute("PRAGMA journal_mode=WAL")     # readers never block the writer — avoids the
+                                               # reader/writer deadlock two concurrent media
+                                               # jobs hit in rollback mode ("database is locked")
     con.execute("""CREATE TABLE IF NOT EXISTS media(
       id INTEGER PRIMARY KEY, norm_key TEXT NOT NULL, system TEXT,
       kind TEXT NOT NULL, provider TEXT NOT NULL, mount TEXT,

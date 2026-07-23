@@ -47,6 +47,7 @@ def con_index():
     # server reads/writes the same index — without a busy timeout a momentary lock
     # aborts the whole pass at commit time. Wait for the lock instead of failing.
     con.execute("PRAGMA busy_timeout=30000")
+    con.execute("PRAGMA journal_mode=WAL")   # concurrent-safe with background media jobs
     if "hidden" not in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
         con.execute("ALTER TABLE media ADD COLUMN hidden INTEGER DEFAULT 0")
         con.commit()

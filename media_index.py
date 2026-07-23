@@ -53,6 +53,8 @@ DOC_EXTS = (".pdf",)
 
 def index_con():
     con = sqlite3.connect(INDEX)
+    con.execute("PRAGMA busy_timeout=30000")   # wait out concurrent media jobs' locks
+    con.execute("PRAGMA journal_mode=WAL")     # readers never block the writer
     con.executescript("""
     CREATE TABLE IF NOT EXISTS media(
       id INTEGER PRIMARY KEY,
