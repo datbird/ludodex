@@ -3914,7 +3914,14 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
    containing block for position:fixed descendants, which would re-anchor the
    FrameEditor popover (fixed so it can escape the panel's overflow:hidden) to the
    panel instead of the viewport. The animation is 300ms and cheap without it. */
-.overlay > *:not(.game-panel) { animation: overlay-pop 300ms var(--ease-reveal) both; }
+/* fill-mode `backwards`, NOT `both`: `both` keeps the final keyframe applied after the
+   animation ends, and because that keyframe carries a `transform`, the panel's computed
+   transform lingers as matrix(1,0,0,1,0,0) — an identity transform, but its mere presence
+   makes the panel the containing block for position:fixed descendants, trapping any
+   full-screen child overlay (the review's image lightbox) inside the panel's box instead
+   of the viewport. The resting frame (`transform:none; opacity:1`) equals the panel's
+   natural style, so `backwards` looks identical and leaves no lingering transform. */
+.overlay > *:not(.game-panel) { animation: overlay-pop 300ms var(--ease-reveal) backwards; }
 /* The detail overlay animates itself; don't double up on the backdrop either. */
 .overlay:has(> .game-panel) { animation: none; }
 
