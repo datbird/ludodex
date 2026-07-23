@@ -4098,3 +4098,19 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .ops-reset-type { display: block; font-size: 12px; font-weight: 700; color: var(--text-h); margin-top: 10px; }
 .ops-reset-type .ops-reset-confirm { margin-top: 5px; letter-spacing: 2px; font-weight: 700; }
 .ops-reset-actions { display: flex; gap: 8px; margin-top: 4px; }
+
+/* wand tiers + scope + the reusable bulk toolbox */
+.wand-scope { font-size: 12.5px; color: var(--text); margin: 2px 0 12px; }
+.wand-scope b { color: var(--text-h); }
+.wand-tier { display: flex; gap: 9px; align-items: flex-start; cursor: pointer;
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px; background: var(--bg); }
+.wand-tier:hover { border-color: var(--accent); }
+.wand-tier.on { border-color: var(--accent); background: var(--accent-bg); }
+.wand-tier input { margin-top: 3px; flex: none; }
+.wand-tier-name { font-size: 13px; font-weight: 700; color: var(--text-h); }
+.wand-tier-note { font-weight: 400; font-size: 11px; color: var(--text); opacity: 0.7; }
+.wand-tier-desc { font-size: 11.5px; line-height: 1.45; color: var(--text); opacity: 0.82; margin-top: 3px; }
+.wand-tier-warn { margin-top: 7px; padding: 8px 10px; border-radius: 8px; line-height: 1.5; font-size: 11.5px;
+  border: 1px solid rgba(251,191,36,0.4); background: rgba(251,191,36,0.1); color: #fbbf24; }
+.tb-wrap { position: relative; display: inline-block; }
+.tb-menu { top: calc(100% + 4px); }

@@ -3801,7 +3801,10 @@ def aimeta_scan(body: dict = Body(default={})):
         label = target
     if not keys:
         raise HTTPException(400, "no games to scan")
-    run_id = aimeta.scan_new(label, keys, web, match_provider, md_kinds)
+    # Heavy wand: refresh multi-source scores when this run's findings are applied.
+    pull_scores = bool(body.get("scores"))
+    run_id = aimeta.scan_new(label, keys, web, match_provider, md_kinds,
+                             pull_scores=pull_scores)
     _start_aimeta_job(run_id, keys, {"web": web, "match_provider": match_provider,
                                      "metadata_kinds": md_kinds, "want_media": want_media,
                                      "label": label})
@@ -4645,6 +4648,9 @@ def _aimeta_apply(should_stop, only_ids=None):
     except Exception as e:
         print("aimeta apply: instant media failed (reconcile will apply): %s"
               % str(e)[:200], file=sys.stderr)
+    # Was any of what we're applying from a Heavy wand run? Check BEFORE mark_applied
+    # flips the status the query keys on.
+    want_scores = aimeta.runs_want_scores(only_ids)
     aimeta.mark_applied(only_ids)  # accepted -> applied (only this pass's findings)
     # recompute the combined Ludodex score from the IGDB ratings the wand just
     # cached (reads the cache, no network), so a newly-matched game's score lands
@@ -4652,6 +4658,14 @@ def _aimeta_apply(should_stop, only_ids=None):
     ok_s, err_s = _run_script("scores_fetch.py", args=["igdb"], timeout=180)
     if not ok_s:
         print("apply scores: %s" % (err_s or "")[:150], file=sys.stderr)
+    # Heavy wand: also refresh the NETWORK score sources (Steam/GOG/ScreenScraper),
+    # which the IGDB cache recompute above doesn't cover. Backgrounded and non-fatal —
+    # the apply is already done; scores trickle in. Self-limiting via scores_fetch's
+    # 7-day per-source freshness skip, same as the store-sync scores phase.
+    if want_scores:
+        def _scores(_stop):
+            _run_script("scores_fetch.py", args=["all"], timeout=3600)
+        _start_job("scores:heavy", "scores", "Refreshing scores (heavy wand)", _scores)
     return touched
 
 
@@ -5948,6 +5962,52 @@ def clear_attribute_override(norm_key: str, kind: str):
     """Remove an override — the attribute reverts to its provider-derived value(s)."""
     overrides.clear_override(norm_key, kind)
     return {"cleared": True}
+
+
+# attributes the bulk editor may set — every categorical/text attribute EXCEPT the
+# title (identity is changed by matching/resolve, never a blanket overwrite).
+BULK_ATTR_KINDS = list(aimeta.SUPPLEMENT_KINDS)
+
+
+@app.get("/api/attributes/bulk")
+def bulk_attr_kinds():
+    """The attribute kinds the bulk editor can set (title is intentionally excluded)."""
+    return {"kinds": BULK_ATTR_KINDS}
+
+
+@app.post("/api/attributes/bulk")
+def bulk_set_attribute(body: dict = Body(...)):
+    """Set (or clear) one attribute across many games at once — the library/selection
+    'Attribute editor' tool. Scope is EITHER an explicit norm_keys list (a selection)
+    OR a filter query (the current library view); the value is written as a manual
+    override per game, exactly like the single-game editor, so it survives rebuilds
+    and is individually reversible. No title — identity isn't a bulk overwrite."""
+    body = body or {}
+    kind = (body.get("kind") or "").strip()
+    if kind not in BULK_ATTR_KINDS:
+        raise HTTPException(400, "attribute %r cannot be bulk-set" % kind)
+    clear = bool(body.get("clear"))
+    value = body.get("value")
+    if not clear and value in (None, ""):
+        raise HTTPException(400, "value is required (or set clear:true)")
+    # Scope is an explicit norm_keys set. The caller (library-wide or selection) resolves
+    # its filter to keys first — same pattern the wand uses — so this endpoint stays a
+    # simple, auditable "apply to exactly these games".
+    keys = [k for k in (body.get("norm_keys") or []) if isinstance(k, str)][:20000]
+    keys = list(dict.fromkeys(keys))          # de-dupe, keep order
+    if not keys:
+        raise HTTPException(400, "no games in scope")
+    n = 0
+    for nk in keys:
+        try:
+            if clear:
+                overrides.clear_override(nk, kind)
+            else:
+                overrides.set_override(nk, kind, value, origin="manual")
+            n += 1
+        except ValueError:
+            pass
+    return {"ok": True, "kind": kind, "count": n, "cleared": clear}
 
 
 # Friendly names + type for each rating source (drives the per-source display).

@@ -497,10 +497,6 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   }, [])
   const [showProfile, setShowProfile] = useState(false)
   const [showAddGame, setShowAddGame] = useState(false)
-  const [showWand, setShowWand] = useState(false)
-  // when the wand is opened on a specific set (bulk selection), it carries that here;
-  // null = the plain filter/all-scoped wand from the toolbar button.
-  const [wandTarget, setWandTarget] = useState<{ norm_keys: string[]; label: string } | null>(null)
   const [prefsTick, setPrefsTick] = useState(0)   // bump to push prefs changes live
   const [mediaTick, setMediaTick] = useState(0)   // bump to refresh spotlight covers live
   // Dashboard is always the landing page (not persisted), per product decision.
@@ -623,15 +619,6 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       setPicked(new Map())
     } catch (e) { setWantMsg((e as Error).message) }
     setTimeout(() => setWantMsg(''), 4500)
-  }
-  // Bulk Magic wand: open the ONE wand pre-scoped to the selected games, so a bulk run
-  // has the same scope/options/fill choices (and review flow) as any other wand run.
-  const wandPicked = () => {
-    const nks = [...new Set([...picked.values()].map((r) => r.norm_key))]
-    if (!nks.length) return
-    setWandTarget({ norm_keys: nks, label: `${nks.length} selected` })
-    setShowWand(true)
-    setSelectMode(false); setAddMenuOpen(false)
   }
 
   // selection split for the device wishlist: ROMs are eligible, marketplace games aren't
@@ -1005,11 +992,15 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             onClick={() => { setSelectMode((v) => !v); setPicked(new Map()); setAddMenuOpen(false) }}>
             {selectMode ? '✕ Cancel select' : '☑ Select'}
           </button>
-          <button className="filter-btn wand-btn"
-            title="Let AI enrich and supplement metadata and media for your library"
-            onClick={(e) => { sparkleFrom(e.currentTarget); setWandTarget(null); setShowWand(true) }}>
-            <span className="wand-spark">✨</span> Magic wand
-          </button>
+          <BulkToolbox
+            filterQuery={{
+              q: q || undefined,
+              include: Object.keys(filters).filter((k) => filters[k] === 'include'),
+              exclude: Object.keys(filters).filter((k) => filters[k] === 'exclude'),
+            }}
+            filterCount={total}
+            onApplied={() => load(true)}
+            label="Tools" btnClass="filter-btn wand-btn" />
           <button className="filter-btn add-game" title="Add a game"
             onClick={() => setShowAddGame(true)}>
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
@@ -1107,11 +1098,16 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       {selectMode && (
         <div className="select-bar">
           <span className="sel-count">{picked.size} selected</span>
-          <span className="sel-hint dim">✨ Magic wand: any game · Add to device: ROM-only wishlist (no transfer)</span>
-          <button className="go" disabled={!picked.size}
-            onClick={(e) => { sparkleFrom(e.currentTarget); wandPicked() }}
-            title="AI-enrich every selected game — findings land in the Jobs monitor to review & accept">
-            ✨ Magic wand</button>
+          <span className="sel-hint dim">Tools: wand or attribute editor on any game · Add to device: ROM-only wishlist (no transfer)</span>
+          {picked.size > 0 && (
+            <BulkToolbox
+              target={{
+                norm_keys: [...new Set([...picked.values()].map((r) => r.norm_key))],
+                label: `${picked.size} selected`,
+              }}
+              onApplied={() => { load(true); setPicked(new Map()); setSelectMode(false) }}
+              label="Tools" btnClass="go" />
+          )}
           <div className="sel-add">
             <button className="go" disabled={!pickedRoms.length}
               title={!picked.size ? 'Select some games first'
@@ -1171,15 +1167,6 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
         initialSection={settingsTarget} />}
       {showAddGame && <AddGame facets={facets} onClose={() => setShowAddGame(false)}
         onAdded={() => load(true)} />}
-      {showWand && <MagicWandOverlay
-        filterQuery={wandTarget ? undefined : {
-          q: q || undefined,
-          include: Object.keys(filters).filter((k) => filters[k] === 'include'),
-          exclude: Object.keys(filters).filter((k) => filters[k] === 'exclude'),
-        }}
-        filterCount={total}
-        target={wandTarget ?? undefined}
-        onClose={() => { setShowWand(false); setWandTarget(null) }} />}
     </div>
   )
 }
@@ -8395,11 +8382,6 @@ function AimActions({ f, onAct }: { f: AiFinding; onAct: (a: 'accept' | 'reject'
 }
 
 // true = all, false = none, [kinds] = a chosen subset
-function scopeValue(master: boolean, picked: Set<string>): ScopeValue {
-  if (master) return true
-  return picked.size ? Array.from(picked) : false
-}
-
 // the wand's media scope is remembered so Apply pulls the same kinds it scanned for
 const WAND_MEDIA_KEY = 'ludodex_wand_media'
 function wandMedia(): ScopeValue {
@@ -8546,91 +8528,61 @@ function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
   )
 }
 
-function ScopeCategory({ name, unit, items, master, setMaster, picked, setPicked }: {
-  name: string; unit: string; items: string[]
-  master: boolean; setMaster: (b: boolean) => void
-  picked: Set<string>; setPicked: (s: Set<string>) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const n = master ? items.length : picked.size
-  const label = master ? `all ${items.length} ${unit}` : n === 0 ? `no ${unit}` : `${n} of ${items.length} ${unit}`
-  const toggle = (k: string) => {
-    const s = new Set(picked); s.has(k) ? s.delete(k) : s.add(k); setPicked(s)
-  }
-  return (
-    <div className={'wand-scope' + (!master && picked.size === 0 ? ' off' : '')}>
-      <div className="wand-scope-h">
-        <label className="wand-check wand-scope-master">
-          <input type="checkbox" checked={master} onChange={(e) => setMaster(e.target.checked)} />
-          <span>{name} <span className="dim">— {label}</span></span>
-        </label>
-        <button type="button" className="wand-scope-exp" title={open ? 'Collapse' : 'Expand'}
-          onClick={() => setOpen((v) => !v)}>{open ? '▾' : '▸'}</button>
-      </div>
-      {open && (
-        <div className="wand-scope-kinds">
-          {items.map((k) => (
-            <label key={k} className={'wand-kchip' + ((master || picked.has(k)) ? ' on' : '') + (master ? ' locked' : '')}
-              title={master ? 'All selected — uncheck the master to pick individually' : ''}>
-              <input type="checkbox" checked={master || picked.has(k)} disabled={master} onChange={() => toggle(k)} />
-              {k.replace(/_/g, ' ')}
-            </label>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
+const WAND_TIERS: { id: 'light' | 'heavy'; name: string; desc: string }[] = [
+  { id: 'light', name: 'Light',
+    desc: 'Identify, match to a provider, and fill only the base attributes and art '
+        + 'that are missing. No per-game web search, no score refresh — fast.' },
+  { id: 'heavy', name: 'Heavy',
+    desc: 'Re-check every game in scope, search the open web on each for the best art '
+        + 'and verification, fill everything, and refresh scores. Thorough — slower, '
+        + 'more AI.' },
+]
 
+// The Magic wand. Scope is IMPLIED by where it was opened (this game, the current
+// filtered view, or a selection) and shown as a summary — never chosen here. The one
+// choice is the tier, matching the sync button: Light or Heavy (Heavy pulls scores).
 function MagicWandOverlay({ filterQuery, filterCount, target, onClose }: {
   filterQuery?: GamesQuery; filterCount?: number
-  // explicit game set (one game from its detail, or a bulk selection) — the SAME wand,
-  // just pre-scoped. When present, the default scope is this set instead of the filter.
   target?: { norm_keys: string[]; label: string }
   onClose: () => void
 }) {
   useScrollLock()
   const [targets, setTargets] = useState<AiScanTargets | null>(null)
-  const [scope, setScope] = useState<'all' | 'filtered' | 'explicit'>(target ? 'explicit' : 'filtered')
-  const [web, setWeb] = useState(false)
-  const [matchProvider, setMatchProvider] = useState(true)
-  const [limit, setLimit] = useState(100)
+  const [tier, setTier] = useState<'light' | 'heavy'>('light')
+  const [hasCap, setHasCap] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
-  // metadata + media scope: master "all" flag + a picked subset when master is off
-  const [mdMaster, setMdMaster] = useState(true)
-  const [mdPicked, setMdPicked] = useState<Set<string>>(new Set())
-  const [mediaMaster, setMediaMaster] = useState(true)
-  const [mediaPicked, setMediaPicked] = useState<Set<string>>(new Set())
   useEffect(() => { api.aimetaTargets().then(setTargets).catch(() => {}) }, [])
-  const hasFilter = !!(filterQuery && (filterQuery.q || (filterQuery.include || []).length || (filterQuery.exclude || []).length))
+  useEffect(() => {
+    api.syncStatus().then((d) => { if (typeof d.has_cap === 'boolean') setHasCap(d.has_cap) })
+      .catch(() => {})
+  }, [])
 
-  const metadataVal = scopeValue(mdMaster, mdPicked)
-  const mediaVal = scopeValue(mediaMaster, mediaPicked)
-  const nothingToDo = metadataVal === false && mediaVal === false
+  const oneGame = !!target && target.norm_keys.length === 1
+  const scopeLabel = target
+    ? (oneGame ? target.label : `${target.norm_keys.length.toLocaleString()} selected games`)
+    : `${(filterCount ?? 0).toLocaleString()} games in the current view`
 
   const wave = async () => {
     setBusy(true); setErr(''); setMsg('')
+    const heavy = tier === 'heavy'
+    const opts = {
+      web: heavy && !!targets?.web_capable,
+      match_provider: true, metadata: true, media: true, scores: heavy,
+    }
     try {
-      const opts = {
-        web: web && !!targets?.web_capable, match_provider: matchProvider,
-        metadata: metadataVal, media: mediaVal,
-      }
-      try { localStorage.setItem(WAND_MEDIA_KEY, JSON.stringify(mediaVal)) } catch { /* */ }
       let r
-      if (scope === 'explicit' && target) {
+      if (target) {
         r = await api.aimetaScan({ norm_keys: target.norm_keys, label: target.label, ...opts })
-      } else if (scope === 'all') {
-        r = await api.aimetaScan({ target: 'all', limit, ...opts })
       } else {
-        // resolve the current filter to an explicit set of norm_keys
         const page = await api.games({ ...(filterQuery || {}), limit: 2000, offset: 0 })
         const keys = page.items.map((g) => g.norm_key)
-        if (!keys.length) { setErr('No games in the current filter.'); setBusy(false); return }
+        if (!keys.length) { setErr('No games in the current view.'); setBusy(false); return }
         r = await api.aimetaScan({ norm_keys: keys, label: 'filtered', ...opts })
       }
-      setMsg(`✨ Scan started on ${r.count.toLocaleString()} game(s)${r.web ? ' (web search on)' : ''} — watch the job monitor by the sync button, then review in Settings → AI Metadata → Review.`)
+      setMsg(`✨ ${heavy ? 'Heavy' : 'Light'} scan started on ${r.count.toLocaleString()} game(s)`
+        + ` — watch the job monitor by the sync button, then review & accept.`)
     } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
 
@@ -8639,8 +8591,9 @@ function MagicWandOverlay({ filterQuery, filterCount, target, onClose }: {
       <div className="panel wand-panel" onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={onClose}>×</button>
         <h2 className="wand-title"><span className="wand-spark">✨</span> Magic wand</h2>
-        <p className="dim">Let AI make your library as complete as possible — identify unmatched
-          games, match them to a real provider, and fill in the gaps.</p>
+        <p className="dim">Let AI make your library more complete — identify games, match
+          them to a real provider, and fill the gaps.</p>
+        <div className="wand-scope">Applies to <b>{scopeLabel}</b></div>
 
         {msg ? (
           <>
@@ -8651,83 +8604,162 @@ function MagicWandOverlay({ filterQuery, filterCount, target, onClose }: {
         ) : (
           <>
             <div className="wand-sec">
-              <div className="wand-sec-h">Scope</div>
-              {target ? (
-                <label className="wand-radio">
-                  <input type="radio" checked={scope === 'explicit'} onChange={() => setScope('explicit')} />
-                  <span>{target.norm_keys.length === 1 ? 'This game' : 'These selected games'}
-                    <span className="wand-n">{target.norm_keys.length === 1
-                      ? target.label : `${target.norm_keys.length.toLocaleString()} games`}</span></span>
+              <div className="wand-sec-h">How thorough?</div>
+              {WAND_TIERS.map((t) => (
+                <label key={t.id} className={'wand-tier' + (tier === t.id ? ' on' : '')}>
+                  <input type="radio" name="wand-tier" checked={tier === t.id}
+                    onChange={() => setTier(t.id)} />
+                  <div>
+                    <div className="wand-tier-name">{t.name}
+                      {t.id === 'heavy' && targets && !targets.web_capable &&
+                        <span className="wand-tier-note"> (web search needs a Gemini/Anthropic/OpenAI provider)</span>}
+                    </div>
+                    <div className="wand-tier-desc">{t.desc}</div>
+                  </div>
                 </label>
-              ) : (
-                <label className="wand-radio">
-                  <input type="radio" checked={scope === 'filtered'} onChange={() => setScope('filtered')} />
-                  <span>{hasFilter ? 'Only what’s currently filtered' : 'Current view'}
-                    <span className="wand-n">{(filterCount ?? 0).toLocaleString()} games</span></span>
-                </label>
-              )}
-              <label className="wand-radio">
-                <input type="radio" checked={scope === 'all'} onChange={() => setScope('all')} />
-                <span>All games<span className="wand-n">{targets ? targets.all.toLocaleString() : '…'}</span></span>
-              </label>
-              {scope === 'all' && (
-                <label className="wand-limit">Max games this run
-                  <input type="number" min={1} value={limit}
-                    onChange={(e) => setLimit(Math.max(1, parseInt(e.target.value, 10) || 1))} />
-                </label>
+              ))}
+              {tier === 'heavy' && hasCap === false && (
+                <div className="wand-tier-warn">
+                  <b>No AI budget cap is set.</b> Heavy searches the web for every game in
+                  scope — nothing but your provider billing limits it. Set a cap in AI
+                  settings → Budgets &amp; limits if you want a ceiling.
+                </div>
               )}
             </div>
-
-            <div className="wand-sec">
-              <div className="wand-sec-h">What the wand does</div>
-              {/* The wand is one operation, but users could not see WHAT it does or why the
-                  web option exists — so the pipeline is stated plainly, with the automatic
-                  rescue called out as automatic. */}
-              <ol className="wand-flow">
-                <li><b>Checks the identity</b><span> — re-verifies which game this really is,
-                  even if it already looked matched</span></li>
-                <li><b>Fixes associations</b><span> — cross-platform grouping, same-title
-                  splits, and entries bound to the wrong game sharing a name</span></li>
-                <li><b>Fills the media</b><span> — every provider you have configured
-                  (IGDB, ScreenScraper, SteamGridDB, store art)</span></li>
-                <li className="wand-flow-auto"><b>Rescues anything still empty</b><span> — a
-                  game left with no cover gets an automatic open-web search. This always
-                  happens; you don’t have to ask for it.</span></li>
-              </ol>
-              <div className="wand-sec-h">Options</div>
-              <label className={'wand-check' + (targets && !targets.web_capable ? ' off' : '')}
-                title={targets && !targets.web_capable ? 'The metadata AI provider has no web search — pick Gemini/Anthropic/OpenAI in AI settings' : 'The wand already falls back to the open web for any game left with NO cover. Tick this to search the web for EVERY scanned game — better art and live verification, but noticeably slower.'}>
-                <input type="checkbox" checked={web} disabled={!targets?.web_capable}
-                  onChange={(e) => setWeb(e.target.checked)} />
-                <span>Be extra thorough — search the web for every game
-                  <span className="dim"> (slower; a game with no cover already gets this automatically)</span></span>
-              </label>
-              <label className="wand-check">
-                <input type="checkbox" checked={matchProvider} onChange={(e) => setMatchProvider(e.target.checked)} />
-                <span>Match to a provider (IGDB) <span className="dim">— turn AI identities into real links</span></span>
-              </label>
-              <div className="wand-info">Matching a provider also pulls that provider’s trusted
-                attributes and media when you Apply the results.</div>
-            </div>
-
-            <div className="wand-sec">
-              <div className="wand-sec-h">Fill</div>
-              <ScopeCategory name="Metadata" unit="attributes" items={targets?.attributes || []}
-                master={mdMaster} setMaster={setMdMaster} picked={mdPicked} setPicked={setMdPicked} />
-              <ScopeCategory name="Media" unit="types" items={targets?.media_kinds || []}
-                master={mediaMaster} setMaster={setMediaMaster} picked={mediaPicked} setPicked={setMediaPicked} />
-              {nothingToDo && <div className="wand-info dim">Turn on Metadata or Media — nothing is selected to fill.</div>}
-            </div>
-
             {err && <div className="fo-warn">⚠ {err}</div>}
             <div className="settings-actions wand-actions">
-              <button className="go wand-go" disabled={busy || nothingToDo}
+              <button className="go wand-go" disabled={busy}
                 onClick={(e) => { sparkleFrom(e.currentTarget, 56, true); wave() }}>
-                {busy ? 'Starting…' : '✨ Wave the wand'}</button>
+                {busy ? 'Starting…' : `✨ Wave the wand (${tier})`}</button>
             </div>
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+// Bulk attribute editor — set any attribute (except the title) across the scoped set.
+// Scope is implied like the wand; writes a manual override per game (reversible,
+// survives rebuilds), applied at serve time so no rebuild is needed.
+function AttributeEditorModal({ filterQuery, filterCount, target, onApplied, onClose }: {
+  filterQuery?: GamesQuery; filterCount?: number
+  target?: { norm_keys: string[]; label: string }
+  onApplied?: () => void; onClose: () => void
+}) {
+  useScrollLock()
+  const [kinds, setKinds] = useState<string[]>([])
+  const [kind, setKind] = useState('')
+  const [value, setValue] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    api.bulkAttrKinds().then((d) => { setKinds(d.kinds); setKind(d.kinds[0] || '') }).catch(() => {})
+  }, [])
+  const oneGame = !!target && target.norm_keys.length === 1
+  const count = target ? target.norm_keys.length : (filterCount ?? 0)
+  const scopeLabel = target
+    ? (oneGame ? target.label : `${target.norm_keys.length.toLocaleString()} selected games`)
+    : `${(filterCount ?? 0).toLocaleString()} games in the current view`
+  const LIST_KINDS = new Set(['genres', 'themes', 'game_modes', 'player_perspectives'])
+  const kindLabel = (k: string) => k.replace(/_/g, ' ')
+
+  const apply = async (clear: boolean) => {
+    setBusy(true); setErr(''); setMsg('')
+    try {
+      let keys = target?.norm_keys
+      if (!keys) {
+        const page = await api.games({ ...(filterQuery || {}), limit: 2000, offset: 0 })
+        keys = page.items.map((g) => g.norm_key)
+      }
+      if (!keys.length) { setErr('No games in scope.'); setBusy(false); return }
+      const r = await api.bulkSetAttribute({ norm_keys: keys, kind, value: clear ? undefined : value, clear })
+      setMsg(`${clear ? 'Cleared' : 'Set'} ${kindLabel(kind)} on ${r.count.toLocaleString()} game(s).`)
+      onApplied?.()
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="panel wand-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose}>×</button>
+        <h2 className="wand-title"><span className="wand-spark">✎</span> Attribute editor</h2>
+        <p className="dim">Set one attribute across many games at once. The title can’t be
+          bulk-edited — identity is changed by matching, not a blanket overwrite.</p>
+        <div className="wand-scope">Applies to <b>{scopeLabel}</b></div>
+        {msg ? (
+          <>
+            <div className="sync-note wand-ok">{msg}</div>
+            <div className="settings-actions"><button className="go" onClick={onClose}>Done</button></div>
+          </>
+        ) : (
+          <>
+            <div className="wand-sec">
+              <label className="dm-field">
+                <span>Attribute</span>
+                <select value={kind} onChange={(e) => setKind(e.target.value)}>
+                  {kinds.map((k) => <option key={k} value={k}>{kindLabel(k)}</option>)}
+                </select>
+              </label>
+              <label className="dm-field">
+                <span>Value{LIST_KINDS.has(kind) && <em> (comma-separated)</em>}</span>
+                {kind === 'description'
+                  ? <textarea rows={4} value={value} onChange={(e) => setValue(e.target.value)}
+                      placeholder="New description for every game in scope" />
+                  : <input value={value} onChange={(e) => setValue(e.target.value)}
+                      placeholder={LIST_KINDS.has(kind) ? 'e.g. Action, Adventure' : `New ${kindLabel(kind)}`} />}
+              </label>
+              <div className="wand-info">Writes a manual override on each game — reversible
+                per-game, and it won’t be undone by a rebuild. Clearing reverts to the
+                provider value.</div>
+            </div>
+            {err && <div className="fo-warn">⚠ {err}</div>}
+            <div className="settings-actions wand-actions">
+              <button className="ops-btn" disabled={busy} onClick={() => apply(true)}
+                title={`Clear the ${kindLabel(kind)} override on all ${count.toLocaleString()} games`}>
+                {busy ? '…' : 'Clear override'}</button>
+              <button className="go" disabled={busy || !value.trim()} onClick={() => apply(false)}>
+                {busy ? 'Applying…' : `Set ${kindLabel(kind)} on ${count.toLocaleString()}`}</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// The bulk toolbox — the wand + attribute editor, scoped to the current filtered
+// view or a selection. (The per-game detail keeps its own wand + Resolve menu.)
+function BulkToolbox({ target, filterQuery, filterCount, onApplied, label = 'Tools', btnClass = 'filter-btn' }: {
+  target?: { norm_keys: string[]; label: string }
+  filterQuery?: GamesQuery; filterCount?: number
+  onApplied?: () => void; label?: string; btnClass?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [tool, setTool] = useState<null | 'wand' | 'attr'>(null)
+  const ref = useClickOutside<HTMLDivElement>(open, () => setOpen(false))
+  const count = target ? target.norm_keys.length : (filterCount ?? 0)
+  const noun = target && target.norm_keys.length === 1 ? 'game' : 'games'
+  return (
+    <div className="tb-wrap" ref={ref}>
+      <button className={btnClass} title="Library tools" onClick={() => setOpen((o) => !o)}>
+        <span className="wand-spark">✨</span> {label}
+      </button>
+      {open && (
+        <div className="hero-tools-menu tb-menu">
+          <button onClick={(e) => { sparkleFrom(e.currentTarget); setOpen(false); setTool('wand') }}>
+            <span className="htm-ic">✨</span> Magic wand
+            <span className="htm-sub">Light or Heavy · {count.toLocaleString()} {noun}</span></button>
+          <button onClick={() => { setOpen(false); setTool('attr') }}>
+            <span className="htm-ic">✎</span> Attribute editor
+            <span className="htm-sub">Set an attribute on {count.toLocaleString()} {noun}</span></button>
+        </div>
+      )}
+      {tool === 'wand' && <MagicWandOverlay target={target} filterQuery={filterQuery}
+        filterCount={filterCount} onClose={() => setTool(null)} />}
+      {tool === 'attr' && <AttributeEditorModal target={target} filterQuery={filterQuery}
+        filterCount={filterCount} onApplied={onApplied} onClose={() => setTool(null)} />}
     </div>
   )
 }

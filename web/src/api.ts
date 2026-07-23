@@ -201,7 +201,7 @@ export interface MediaDiff {
 }
 export interface AiScanTargets { unmatched: number; matched: number; missing: number; all: number; web_capable: boolean; provider?: string; model?: string; escalation_model?: string | null; attributes: string[]; media_kinds: string[] }
 export type ScopeValue = boolean | string[]   // true=all, false=none, [kinds]=subset
-export interface ScanOpts { web?: boolean; match_provider?: boolean; metadata?: ScopeValue; media?: ScopeValue }
+export interface ScanOpts { web?: boolean; match_provider?: boolean; metadata?: ScopeValue; media?: ScopeValue; scores?: boolean }
 export interface AiScanRun {
   id: number
   target: string
@@ -1253,6 +1253,9 @@ export const api = {
   },
   // Ownership sync (pull owned games per store, then rebuild the catalog)
   syncStatus: () => get<{ services: SyncService[]; job: SyncJob | null; has_cap?: boolean }>('/api/sync/status'),
+  bulkAttrKinds: () => get<{ kinds: string[] }>('/api/attributes/bulk'),
+  bulkSetAttribute: (body: { norm_keys: string[]; kind: string; value?: string; clear?: boolean }) =>
+    postJson<{ ok: boolean; kind: string; count: number; cleared: boolean }>('/api/attributes/bulk', body),
   resetPlan: (scope: ResetScope) => get<ResetPlan>(`/api/ops/reset/plan?scope=${scope}`),
   resetRun: (scope: ResetScope, confirm?: string) =>
     postJson<{ ok: boolean; removed: string[]; failed: string[]; safety_backup: string }>(

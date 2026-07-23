@@ -169,7 +169,10 @@ def _con():
                       # complete = already matched + nothing to add; unmatched = no match and
                       # the AI couldn't identify it — the two very different "0 found" reasons.
                       ("skipped", "INTEGER DEFAULT 0"), ("errored", "INTEGER DEFAULT 0"),
-                      ("complete", "INTEGER DEFAULT 0"), ("unmatched", "INTEGER DEFAULT 0")):
+                      ("complete", "INTEGER DEFAULT 0"), ("unmatched", "INTEGER DEFAULT 0"),
+                      # heavy wand: refresh multi-source scores when this run's findings
+                      # are applied (a light run leaves scores to the sync's scores phase)
+                      ("pull_scores", "INTEGER DEFAULT 0")):
         if col not in cols:
             con.execute("ALTER TABLE scan_runs ADD COLUMN %s %s" % (col, decl))
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_nk ON findings(norm_key)")
@@ -487,6 +490,28 @@ def accepted_ids():
     return ids
 
 
+def runs_want_scores(ids=None):
+    """True if any of these findings (all pending 'accepted' if ids is None) belong to
+    a scan run flagged pull_scores — i.e. a Heavy wand run whose apply should refresh
+    the multi-source scores, not just the IGDB cache recompute every apply does."""
+    con = _con()
+    try:
+        if ids:
+            ph = ",".join("?" * len(ids))
+            q = ("SELECT 1 FROM findings f JOIN scan_runs r ON r.id=f.run_id "
+                 "WHERE r.pull_scores=1 AND f.id IN (%s) LIMIT 1" % ph)
+            row = con.execute(q, [int(i) for i in ids]).fetchone()
+        else:
+            row = con.execute(
+                "SELECT 1 FROM findings f JOIN scan_runs r ON r.id=f.run_id "
+                "WHERE r.pull_scores=1 AND f.status='accepted' LIMIT 1").fetchone()
+        return bool(row)
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        con.close()
+
+
 def mark_applied(ids=None):
     """After a successful apply, move 'accepted' -> 'applied' so they stop showing
     as pending. The readers below still include 'applied' so a later plain rebuild
@@ -590,14 +615,15 @@ def accepted_ss_matches():
 
 
 # --------------------------------------------------------------------- scan runs
-def scan_new(target, keys, web=0, match_provider=0, md_kinds=None):
+def scan_new(target, keys, web=0, match_provider=0, md_kinds=None, pull_scores=0):
     con = _con()
     cur = con.execute("INSERT INTO scan_runs(target,total,web,match_provider,"
-                      "keys_json,md_json,status,created) "
-                      "VALUES(?,?,?,?,?,?, 'running', ?)",
+                      "keys_json,md_json,pull_scores,status,created) "
+                      "VALUES(?,?,?,?,?,?,?, 'running', ?)",
                       (target, len(keys), 1 if web else 0, 1 if match_provider else 0,
                        json.dumps(keys),
                        json.dumps(md_kinds) if md_kinds is not None else None,
+                       1 if pull_scores else 0,
                        time.time()))
     rid = cur.lastrowid
     con.commit()
