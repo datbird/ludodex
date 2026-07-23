@@ -2135,7 +2135,10 @@ def sync_device_ep(dev_id: int):
     # that actually need it rather than re-describing ones IGDB already answered.
     if "heavy" in set((out.get("import_modes") or {}).values()):
         try:
-            keys = aimeta.targets("unmatched", 2000)
+            # SCOPE to emulation games only — a Heavy ROM-device import must not AI-scan
+            # unmatched STORE games (or any non-ROM source) that this import never touched.
+            # (Guardrail: an AI run covers only what the user's action targeted.)
+            keys = aimeta.targets("unmatched", 2000, sources=["emulation"])
             if keys:
                 provider = ai.provider_for_area("metadata")
                 ai._resolve(provider, ai.model_for_area("metadata"))
