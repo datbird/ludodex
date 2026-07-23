@@ -4100,6 +4100,9 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .sync-tier-opt:hover { background: var(--accent-bg); }
 .sync-tier-opt.on { background: var(--accent-bg); color: var(--text-h); }
 .sync-tier-opt input { margin-top: 2px; flex: none; }
+.tier-info { margin-left: 5px; font-size: 11px; color: var(--accent); cursor: help;
+  opacity: 0.85; vertical-align: baseline; }
+.tier-info:hover { opacity: 1; }
 .sync-tier-warn {
   margin-top: 7px; padding: 7px 9px; border-radius: 7px; font-size: 11.5px; line-height: 1.5;
   border: 1px solid rgba(251,191,36,0.4); background: rgba(251,191,36,0.1); color: #fbbf24;

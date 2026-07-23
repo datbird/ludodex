@@ -3570,12 +3570,26 @@ function PathInput({ deviceId, value, onChange, placeholder }: {
 // else, so the tier decides how much of the gap a model is asked to close.
 // Tier names match the magic wand's (Light / Heavy) so the same word means the same
 // depth of AI work everywhere — the sync dropdown, the device modal, and the wand.
-const STORE_TIERS: { id: ImportMode; name: string; desc: string }[] = [
-  { id: 'algo', name: 'Algorithmic', desc: 'no AI — whatever IGDB and the store provide' },
+// `info` is the ⓘ tooltip: concise does / doesn't, accurate to the wired pipeline.
+const STORE_TIERS: { id: ImportMode; name: string; desc: string; info: string }[] = [
+  { id: 'algo', name: 'Algorithmic', desc: 'no AI — whatever IGDB and the store provide',
+    info: 'DOES: pull ownership, then fill from lookups only — Steam’s own art, '
+        + 'screenshots, trailers and attributes; IGDB & ScreenScraper matched by store ID '
+        + 'or exact name; review scores; a rule-based match confidence per provider. '
+        + 'DOESN’T: call any model (it’s free), or identify a game no provider matched.' },
   { id: 'lite', name: 'Light',
-    desc: 'ask AI only about games no provider could match at all' },
+    desc: 'ask AI only about games no provider could match at all',
+    info: 'DOES: everything Algorithmic, plus a model identifies only the games no provider '
+        + 'could match on its own (the unmatched tail) and fills their base attributes. '
+        + 'DOESN’T: search the open web, refresh scores, or reconcile provider '
+        + 'disagreements — the cheapest AI tier.' },
   { id: 'heavy', name: 'Heavy',
-    desc: 'ask AI about every game still missing descriptions, genres or art' },
+    desc: 'ask AI about every game still missing descriptions, genres or art',
+    info: 'DOES: everything Light, but for EVERY game still missing core attributes — plus '
+        + 'open-web search for the best art and to verify identity, a score refresh, an AI '
+        + 'consensus pass that picks the winner when providers disagree, and web-searched '
+        + 'scores for games that have none. DOESN’T: touch games outside this import, '
+        + 'or exceed your AI budget caps.' },
 ]
 
 // The three import tiers, in ascending cost. Copy is deliberately concrete about
@@ -4553,7 +4567,9 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
                   <input type="radio" name="tier-all" disabled={anyRunning}
                     checked={!mixedTier && allTier === t.id}
                     onChange={() => setTierAll(t.id)} />
-                  <span><b>{t.name}</b> — {t.desc}</span>
+                  <span><b>{t.name}</b> — {t.desc}
+                    <span className="tier-info has-tip" data-tip={t.info}
+                      role="img" aria-label="details">ⓘ</span></span>
                 </label>
               ))}
               {allTier === 'heavy' && !mixedTier && hasCap === false && (
@@ -4653,7 +4669,9 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
                                 <input type="radio" name={'tier-' + s.id}
                                   checked={tierOf(s) === t.id}
                                   onChange={() => setTier(s.id, t.id)} />
-                                <span><b>{t.name}</b> — {t.desc}</span>
+                                <span><b>{t.name}</b> — {t.desc}
+                                  <span className="tier-info has-tip" data-tip={t.info}
+                                    role="img" aria-label="details">ⓘ</span></span>
                               </label>
                             ))}
                             {tierOf(s) === 'heavy' && hasCap === false && (
