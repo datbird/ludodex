@@ -263,6 +263,96 @@ def fetch_steam(con, now):
           % (n, len(games)), file=sys.stderr)
 
 
+UA = "ludodex/1.0 (+https://github.com/datbird/ludodex)"
+STEAM_APPDETAILS = "https://store.steampowered.com/api/appdetails?appids=%s"
+# Highest-quality trailer file, constructed from the movie id (appdetails stopped
+# listing direct files, but this path still serves a real playable .webm).
+STEAM_MOVIE = "https://cdn.akamai.steamstatic.com/steam/apps/%s/movie_max.webm"
+# Steam's store API is unauthenticated but rate-limited (~200 req / 5 min / IP), so
+# space the per-appid calls out — same cooldown os_fetch uses.
+STEAM_STORE_COOLDOWN = float(os.environ.get("STEAM_STORE_COOLDOWN_MS", "1500")) / 1000.0
+
+
+def _steam_media_seen(con):
+    """appids whose appdetails media we've already pulled — the incremental gate, so a
+    resync doesn't re-hit the (slow, rate-limited) store API for games already done."""
+    con.execute("CREATE TABLE IF NOT EXISTS steam_media_seen("
+                "appid TEXT PRIMARY KEY, fetched REAL)")
+    return {r[0] for r in con.execute("SELECT appid FROM steam_media_seen")}
+
+
+def _screenshot_limit():
+    """Max screenshots to keep per game (config; 0 = no limit). Applies to every
+    screenshot provider so a game's set is consistent regardless of source."""
+    try:
+        return max(0, int(config.get("screenshot_limit") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def fetch_steam_media(con, now, only=None, refresh=False, limit=None):
+    """Steam `appdetails`: the FULL screenshot set + movie trailers (playable .mp4/.webm)
+    for each owned/wanted Steam appid — the media the constructed-URL `fetch_steam` can't
+    reach because those have unpredictable ids. Per-appid, rate-limited and incremental
+    (skips appids already pulled unless `refresh`), mirroring os_fetch. `only` scopes to a
+    set of norm_keys (the wand's per-game path). Kept under provider 'steam' so it shares
+    the Steam badge; fetch_steam's refresh is kind-scoped so it never wipes these."""
+    games = steam_games()                       # {appid -> nk}
+    if only is not None:
+        want = set(only)
+        games = {a: nk for a, nk in games.items() if nk in want}
+    seen = _steam_media_seen(con)
+    todo = [(a, nk) for a, nk in games.items() if refresh or a not in seen]
+    if limit:
+        todo = todo[:limit]
+    cap = _screenshot_limit()
+    last = 0.0
+    n = 0
+    for i, (appid, nk) in enumerate(todo, 1):
+        print("PROG\t%d\t%d\t%s\tsteam-media" % (i, len(todo), appid), flush=True)
+        wait = last + STEAM_STORE_COOLDOWN - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        last = time.monotonic()
+        try:
+            req = urllib.request.Request(STEAM_APPDETAILS % appid,
+                                         headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                d = json.load(r)
+            entry = d.get(str(appid)) or {}
+            if entry.get("success"):
+                data = entry.get("data") or {}
+                shots = data.get("screenshots") or []
+                if cap > 0:
+                    shots = shots[:cap]
+                for sh in shots:
+                    url = sh.get("path_full") or sh.get("path_thumbnail")
+                    if url:
+                        put(con, nk, "screenshot", "steam", url, now,
+                            ext="jpg", meta=appid)
+                        n += 1
+                # Steam's appdetails now lists only DASH/HLS manifests (dash_h264,
+                # hls_h264) — not playable in a plain <video>. But the classic
+                # constructed direct file, keyed by the movie id, still resolves to a
+                # real .webm (verified), so build that; prune_dead drops any that 404.
+                for mv in (data.get("movies") or []):
+                    mid = mv.get("id")
+                    if not mid:
+                        continue
+                    put(con, nk, "video", "steam",
+                        STEAM_MOVIE % mid, now, ext="webm", meta=appid)
+                    n += 1
+            con.execute("INSERT OR REPLACE INTO steam_media_seen VALUES(?,?)",
+                        (appid, now))
+        except Exception as e:                  # noqa: BLE001 — one bad appid never aborts
+            print("  steam-media %s: %s" % (appid, str(e)[:120]), file=sys.stderr)
+        if i % 25 == 0:
+            con.commit()
+    con.commit()
+    print("media_fetch: steam appdetails — %d screenshot/video URLs for %d game(s)"
+          % (n, len(todo)), file=sys.stderr)
+
+
 def fetch_igdb(con, now, only=None):
     """Fetch IGDB cover/artwork/screenshot URLs for resolved games. `only` (a set of
     norm_keys) scopes the fetch to specific games — the surgical per-game wand path;
@@ -316,7 +406,9 @@ def fetch_igdb(con, now, only=None):
                     IGDB_IMG % (IGDB_SIZE["background"], art["image_id"]),
                     now, meta=str(g["id"]), gkey=gkey)
                 c += 1
-        for sh in (g.get("screenshots") or [])[:3]:
+        _cap = _screenshot_limit()
+        _shots = g.get("screenshots") or []
+        for sh in (_shots[:_cap] if _cap > 0 else _shots):
             if sh.get("image_id"):
                 put(con, nk, "screenshot", "igdb",
                     IGDB_IMG % (IGDB_SIZE["screenshot"], sh["image_id"]),
@@ -602,8 +694,19 @@ def main(argv):
         con.close()
         print("media_fetch: backfill-art — added %d art URLs" % n, file=sys.stderr)
         return
+    if "--steam-media" in argv:                   # per-appid appdetails: full shots + movies
+        keys = None
+        if "--keys" in argv:
+            keys = [k for k in argv[argv.index("--keys") + 1].split("\x1f") if k]
+        fetch_steam_media(con, now, only=keys, refresh=("--refresh" in argv), limit=limit)
+        con.commit()
+        con.close()
+        return
     if only in (None, "steam") and config.media_enabled("steam"):
-        con.execute("DELETE FROM media WHERE provider='steam'")
+        # kind-scoped delete: refresh only the constructed-URL art this pass owns, so the
+        # incremental appdetails screenshots/movies (same provider) are NOT wiped.
+        con.execute("DELETE FROM media WHERE provider='steam' AND kind IN "
+                    "('cover','hero','background','header','logo')")
         fetch_steam(con, now)
     if only in (None, "igdb") and config.media_enabled("igdb"):
         con.execute("DELETE FROM media WHERE provider='igdb'")

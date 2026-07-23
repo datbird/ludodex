@@ -242,6 +242,9 @@ SCHEMA = [
      "How much media to download into the local repo: 'ondemand' (keep refs, "
      "fetch-on-serve), 'chosen' (download the shown asset per game/kind on sync), "
      "or 'all' (every candidate — a full archive)."),
+    ("screenshot_limit", "0",
+     "Max screenshots to keep per game (0 = no limit). Applies to every screenshot "
+     "provider so a game's set is consistent regardless of source."),
 ]
 DEFAULTS = {k: d for k, d, _ in SCHEMA}
 DESCS = {k: c for k, _, c in SCHEMA}

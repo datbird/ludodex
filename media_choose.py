@@ -170,7 +170,9 @@ def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
     caller can show what's being pulled live."""
     repo = repo_dir()
     base = "(sha1 IS NULL OR sha1='')" if all_refs else "chosen=1 AND (sha1 IS NULL OR sha1='')"
-    q = "SELECT * FROM media WHERE " + base
+    # Never download videos into the repo — trailers are tens of MB each and play fine
+    # streamed live through the media-asset proxy. Keep them as references always.
+    q = "SELECT * FROM media WHERE kind!='video' AND " + base
     if kind:
         q += " AND kind='%s'" % kind
     q += " ORDER BY ref_type"        # local files first (cheap), then URLs

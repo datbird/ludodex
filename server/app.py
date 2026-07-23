@@ -1345,6 +1345,7 @@ def get_prefs():
         "spotlight_seconds": _spotlight_seconds(),
         "spotlight_disabled": sorted(_spotlight_disabled()),
         "media_mode": config.get("media_mode") or "chosen",
+        "screenshot_limit": int(config.get("screenshot_limit") or 0),
         "media_language": config.get("media_language") or "",
         "media_languages": medialang.preferred(),
         "media_lang_mode": medialang.mode(),
@@ -1364,6 +1365,11 @@ def set_prefs(body: dict = Body(...)):
     body = body or {}
     if body.get("media_mode") in ("ondemand", "chosen", "all"):
         config.set_("media_mode", body["media_mode"])
+    if "screenshot_limit" in body:                    # 0 = no limit
+        try:
+            config.set_("screenshot_limit", str(max(0, int(body["screenshot_limit"]))))
+        except (TypeError, ValueError):
+            pass
     if body.get("xbox_platform") in ("xbox", "pc"):   # bucket for inbound Xbox games
         config.set_("xbox_platform", body["xbox_platform"])
     def _clamp_int(v, lo=0, hi=100):
@@ -4672,6 +4678,16 @@ def _aimeta_apply(should_stop, only_ids=None):
         def _scores(_stop):
             _run_script("scores_fetch.py", args=["all"], timeout=3600)
         _start_job("scores:heavy", "scores", "Refreshing scores (heavy wand)", _scores)
+    # Any wand run (light or heavy) tops up Steam's full media for the games it touched.
+    # Incremental (skips appids already pulled), so this is near-free for games ingested
+    # before — the user's "wand does the same, cheap after initial" ask. Backgrounded.
+    if touched:
+        _tk = "\x1f".join(touched)
+
+        def _smedia(_stop):
+            _run_script("media_fetch.py", args=["--steam-media", "--keys", _tk],
+                        timeout=3600)
+        _start_job("steammedia:wand", "steammedia", "Steam screenshots & trailers", _smedia)
     return touched
 
 
@@ -8100,6 +8116,8 @@ def _sync_worker(job, services, media_ids=(), full=False):
         {"id": "os", "label": "OS / platform support", "state": "pending", "detail": ""},
         {"id": "art", "label": "Missing art", "state": "pending", "detail": ""},
         {"id": "language", "label": "Language filter", "state": "pending", "detail": ""},
+        {"id": "steammedia", "label": "Steam screenshots & trailers", "state": "pending",
+         "detail": ""},
         {"id": "media", "label": "Media downloaded" if mode != "ondemand" else "Media chosen",
          "state": "pending", "detail": ""},
         {"id": "supplement", "label": "AI supplement", "state": "pending", "detail": ""},
@@ -8341,6 +8359,18 @@ def _sync_worker(job, services, media_ids=(), full=False):
             job["step"] = "Fetching %s media…" % _SVC_NAME.get(sid, sid)
             _run_script("media_fetch.py",
                         args=["--provider", MEDIA_SYNC_PROVIDER[sid]], timeout=1800, job=job)
+            # Steam's full media (all screenshots + trailers) comes from a per-appid
+            # appdetails pass — provider work, not AI, so it runs at EVERY import tier.
+            # Rate-limited + incremental (skips appids already pulled), so the first
+            # import is slow but resyncs are cheap. Streamed for live progress.
+            if sid == "steam":
+                _phase("steammedia", "running")
+                ok_sm, _ = _run_streaming(
+                    "media_fetch.py", ["--steam-media"],
+                    _mk_prog("Fetching Steam screenshots & trailers…", "steammedia",
+                             job["prog"]["done"]),
+                    timeout=7200, job=job)
+                _phase("steammedia", "ok" if ok_sm else "failed")
             step()
             if _stopped():
                 return

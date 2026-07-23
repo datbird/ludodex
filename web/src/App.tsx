@@ -3909,6 +3909,28 @@ function DevicesPanel() {
   )
 }
 
+// Steam-specific media setting (lives in the Steam card, but persists as a global
+// pref). 0 = no limit — pull every screenshot Steam offers.
+function SteamMediaPref() {
+  const [n, setN] = useState<number | null>(null)
+  const [saved, setSaved] = useState(false)
+  useEffect(() => { api.prefs().then((p) => setN(p.screenshot_limit ?? 0)).catch(() => {}) }, [])
+  if (n === null) return null
+  const save = async (v: number) => {
+    setN(v); setSaved(false)
+    try { await api.setPrefs({ screenshot_limit: v }); setSaved(true) } catch { /* */ }
+  }
+  return (
+    <div className="svc-field steam-shots">
+      <span className="svc-label">Max screenshots per game</span>
+      <input type="number" min={0} value={n}
+        onChange={(e) => save(Math.max(0, parseInt(e.target.value, 10) || 0))} />
+      <span className="dim">0 = no limit — pull every screenshot &amp; trailer Steam offers.
+        {saved && <span className="saved"> ✓</span>}</span>
+    </div>
+  )
+}
+
 function Credentials() {
   const [data, setData] = useState<Service[] | null>(null)
   const [vals, setVals] = useState<Record<string, string>>({})
@@ -3998,6 +4020,7 @@ function Credentials() {
                       </div>
                     ))}
                     {s.connect && <ConnectFlow connect={s.connect} onDone={reload} />}
+                    {s.id === 'steam' && <SteamMediaPref />}
                   </div>
                 )}
               </div>

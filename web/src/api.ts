@@ -388,6 +388,7 @@ export interface Prefs {
   spotlight_disabled?: string[]
   spotlight_include_collections?: boolean
   media_mode: MediaMode
+  screenshot_limit?: number    // max screenshots kept per game (0 = no limit)
   media_language: string       // '' = any; else the preferred media language (legacy single)
   media_languages: string[]    // ordered 1st,2nd,3rd preferred media languages
   media_lang_mode: MediaLangMode
