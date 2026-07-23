@@ -3796,7 +3796,9 @@ def _post_scan_media_scores(keys, opts):
     _start_job("steammedia:wand", "steammedia", "Steam screenshots & trailers", _sm)
     if opts.get("pull_scores"):
         def _sc(_stop):
-            _run_script("scores_fetch.py", args=["all"], timeout=3600)
+            # scoped to the scanned games — a Heavy wand on one game refreshes ONE
+            # game's scores, never the whole library
+            _run_script("scores_fetch.py", args=["all", "--keys", tk], timeout=3600)
         _start_job("scores:wand", "scores", "Refreshing scores (heavy wand)", _sc)
 
 

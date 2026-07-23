@@ -81,6 +81,11 @@ def _http_json(url, timeout=25):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+# When set (via --keys), every fetcher restricts to these norm_keys — so a scoped
+# wand refresh scores ONLY its scanned games, never the whole library.
+KEYS = None
+
+
 def _library_ids(source):
     """[(norm_key, source_id)] for a store source, from the game library."""
     db = config.get("library_db")
@@ -91,6 +96,8 @@ def _library_ids(source):
         "SELECT g.norm_key, s.source_id FROM sources s JOIN games g ON g.id=s.game_id "
         "WHERE s.source=? AND s.source_id!=''", (source,)).fetchall()
     c.close()
+    if KEYS is not None:
+        rows = [(nk, sid) for nk, sid in rows if nk in KEYS]
     # de-dup norm_key -> first id
     seen, out = set(), []
     for nk, sid in rows:
@@ -118,6 +125,8 @@ def fetch_igdb(con, refresh=False, limit=None):
     for nk, payload in rows:
         if limit and n >= limit:
             break
+        if KEYS is not None and nk not in KEYS:
+            continue
         try:
             g = json.loads(payload)
         except ValueError:
@@ -159,6 +168,8 @@ def fetch_ss(con, refresh=False, limit=None):
     for nk, payload in rows:
         if limit and n >= limit:
             break
+        if KEYS is not None and nk not in KEYS:
+            continue
         try:
             note = json.loads(payload).get("note")
         except ValueError:
@@ -330,13 +341,18 @@ FETCHERS = {"igdb": fetch_igdb, "ss": fetch_ss, "steam": fetch_steam,
 
 
 def main(argv):
+    global KEYS
     refresh = "--refresh" in argv
     metacritic = "--metacritic" in argv
     limit = None
+    skip = set()                                    # indices consumed as flag VALUES
     for i, a in enumerate(argv):
         if a == "--limit" and i + 1 < len(argv):
-            limit = int(argv[i + 1])
-    cmds = [a for a in argv if not a.startswith("--") and not a.isdigit()]
+            limit = int(argv[i + 1]); skip.add(i + 1)
+        if a == "--keys" and i + 1 < len(argv):     # scope to these norm_keys (\x1f-joined)
+            KEYS = {k for k in argv[i + 1].split("\x1f") if k}; skip.add(i + 1)
+    cmds = [a for i, a in enumerate(argv)
+            if i not in skip and not a.startswith("--") and not a.isdigit()]
     cmd = cmds[0] if cmds else "all"
     con = _con()
     try:
