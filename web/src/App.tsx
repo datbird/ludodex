@@ -3592,6 +3592,24 @@ const STORE_TIERS: { id: ImportMode; name: string; desc: string; info: string }[
         + 'or exceed your AI budget caps.' },
 ]
 
+// One tier row: name — desc, with a ⓘ that toggles the full does/doesn't detail
+// INLINE (in normal flow, below the line). The sync panel scrolls, so a floating
+// tooltip clips against its narrow edges no matter which way it opens; an inline
+// disclosure wraps to the panel width and scrolls with it, so it never clips.
+function TierRow({ name, desc, info }: { name: string; desc: string; info: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <span className="sync-tier-body">
+      <span><b>{name}</b> — {desc}{' '}
+        <button type="button" className={'tier-info' + (open ? ' on' : '')}
+          aria-label="what this tier does" aria-expanded={open}
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen((o) => !o) }}>ⓘ</button>
+      </span>
+      {open && <span className="tier-info-detail">{info}</span>}
+    </span>
+  )
+}
+
 // The three import tiers, in ascending cost. Copy is deliberately concrete about
 // what each one SPENDS — the difference between them is money, not just quality.
 const IMPORT_TIERS: { id: ImportMode; name: string; cost: string; desc: string }[] = [
@@ -4567,9 +4585,7 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
                   <input type="radio" name="tier-all" disabled={anyRunning}
                     checked={!mixedTier && allTier === t.id}
                     onChange={() => setTierAll(t.id)} />
-                  <span><b>{t.name}</b> — {t.desc}
-                    <span className="tier-info has-tip" data-tip={t.info}
-                      role="img" aria-label="details">ⓘ</span></span>
+                  <TierRow name={t.name} desc={t.desc} info={t.info} />
                 </label>
               ))}
               {allTier === 'heavy' && !mixedTier && hasCap === false && (
@@ -4669,9 +4685,7 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
                                 <input type="radio" name={'tier-' + s.id}
                                   checked={tierOf(s) === t.id}
                                   onChange={() => setTier(s.id, t.id)} />
-                                <span><b>{t.name}</b> — {t.desc}
-                                  <span className="tier-info has-tip" data-tip={t.info}
-                                    role="img" aria-label="details">ⓘ</span></span>
+                                <TierRow name={t.name} desc={t.desc} info={t.info} />
                               </label>
                             ))}
                             {tierOf(s) === 'heavy' && hasCap === false && (
