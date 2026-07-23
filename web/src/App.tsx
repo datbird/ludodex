@@ -3568,11 +3568,13 @@ function PathInput({ deviceId, value, onChange, placeholder }: {
 
 // Store-sync tiers. Stores give a title and ownership and (outside Steam) little
 // else, so the tier decides how much of the gap a model is asked to close.
+// Tier names match the magic wand's (Light / Heavy) so the same word means the same
+// depth of AI work everywhere — the sync dropdown, the device modal, and the wand.
 const STORE_TIERS: { id: ImportMode; name: string; desc: string }[] = [
-  { id: 'algo', name: 'Titles only', desc: 'no AI — whatever IGDB and the store provide' },
-  { id: 'lite', name: 'Fill the blanks',
+  { id: 'algo', name: 'Algorithmic', desc: 'no AI — whatever IGDB and the store provide' },
+  { id: 'lite', name: 'Light',
     desc: 'ask AI only about games no provider could match at all' },
-  { id: 'heavy', name: 'Fill everything',
+  { id: 'heavy', name: 'Heavy',
     desc: 'ask AI about every game still missing descriptions, genres or art' },
 ]
 
@@ -3582,10 +3584,10 @@ const IMPORT_TIERS: { id: ImportMode; name: string; cost: string; desc: string }
   { id: 'algo', name: 'Algorithmic', cost: 'free',
     desc: 'Filename and folder rules only — zero AI. Titles are still matched against '
         + 'IGDB and ScreenScraper for art and metadata, because those are lookups, not a model.' },
-  { id: 'lite', name: 'Lite AI', cost: 'cents',
+  { id: 'lite', name: 'Light', cost: 'cents',
     desc: 'Everything above, plus a model reads the file paths that look mangled '
         + '(SMW_U, FF7, cryptic 8.3 names) and works out the real title, system and year.' },
-  { id: 'heavy', name: 'Heavy AI', cost: 'depends on library size',
+  { id: 'heavy', name: 'Heavy', cost: 'depends on library size',
     desc: 'Everything above, but every title is re-read, and any game the providers '
         + 'could not identify goes through the full metadata and art pipeline — the same '
         + 'work the magic wand does, run automatically at import.' },
