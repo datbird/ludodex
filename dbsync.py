@@ -40,7 +40,9 @@ STORES = [
     {"name": "manual_games", "db": "manual-games.sqlite",   "table": "manual_games",
      "key": ["norm_key", "source", "platform"]},
     {"name": "ownership",    "db": "ownership.sqlite",      "table": "ownership",
-     "key": ["norm_key", "form"]},
+     # the FULL natural PK — a reduced key made a pull recreate the table with the
+     # wrong PRIMARY KEY (and collapse distinct per-platform/state rows)
+     "key": ["norm_key", "form", "platform", "state"]},
 ]
 _TS_COLS = ("updated", "updated_at", "modified", "mtime", "created", "added", "ts")
 SEP = "\x1f"                            # composite-key join (never appears in values)

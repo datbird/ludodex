@@ -23,17 +23,38 @@ STATES = {"have", "want"}
 FORM_TO_SOURCE = {"physical": "physical", "rom": "emulation", "digital": "digital"}
 
 
-def _db(data_dir):
-    p = os.path.join(data_dir, "ownership.sqlite")
-    con = sqlite3.connect(p)
-    con.execute("""CREATE TABLE IF NOT EXISTS ownership(
+_OWNERSHIP_DDL = """CREATE TABLE IF NOT EXISTS ownership(
         norm_key TEXT NOT NULL,
         title    TEXT NOT NULL,       -- seeds a game row if the title is new
         form     TEXT NOT NULL,       -- physical | rom | digital
         platform TEXT NOT NULL,       -- gamecube, switch, … ('' = unspecified)
         state    TEXT NOT NULL,       -- have | want
         note     TEXT NOT NULL DEFAULT '',
-        PRIMARY KEY (norm_key, form, platform, state))""")
+        PRIMARY KEY (norm_key, form, platform, state))"""
+_OWNERSHIP_COLS = {"norm_key", "title", "form", "platform", "state", "note"}
+
+
+def _db(data_dir):
+    p = os.path.join(data_dir, "ownership.sqlite")
+    con = sqlite3.connect(p)
+    con.execute(_OWNERSHIP_DDL)
+    # Heal a table the backing-store sync recreated with only its key columns: the
+    # dbsync pull builds a table from the columns present in remote data and a reduced
+    # key, so a never-populated ownership store lands as (norm_key, form) — missing
+    # platform/state/title/note AND with the wrong PRIMARY KEY. CREATE IF NOT EXISTS
+    # above then no-ops, and every ownership query dies on "no such column: platform".
+    # This module owns the schema, so reconcile here. Empty (the real case) → rebuild
+    # clean so the PK is correct too; non-empty → add the missing columns best-effort.
+    have = {r[1] for r in con.execute("PRAGMA table_info(ownership)")}
+    if not _OWNERSHIP_COLS.issubset(have):
+        if con.execute("SELECT COUNT(*) FROM ownership").fetchone()[0] == 0:
+            con.execute("DROP TABLE ownership")
+            con.execute(_OWNERSHIP_DDL)
+        else:
+            for col in ("title", "platform", "state", "note"):
+                if col not in have:
+                    con.execute("ALTER TABLE ownership ADD COLUMN %s TEXT NOT NULL "
+                                "DEFAULT ''" % col)
     con.commit()
     return con
 

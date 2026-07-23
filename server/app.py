@@ -343,6 +343,8 @@ def _tags_con():
     con = sqlite3.connect(TAGS_DB)
     con.execute("""CREATE TABLE IF NOT EXISTS user_tags(
         norm_key TEXT, tag TEXT, created REAL, PRIMARY KEY(norm_key, tag))""")
+    if "created" not in {r[1] for r in con.execute("PRAGMA table_info(user_tags)")}:
+        con.execute("ALTER TABLE user_tags ADD COLUMN created REAL")   # backing-store heal
     con.row_factory = sqlite3.Row
     return con
 
@@ -408,6 +410,10 @@ def _manual_con():
     con.execute("""CREATE TABLE IF NOT EXISTS manual_games(
         norm_key TEXT, title TEXT, source TEXT, platform TEXT,
         detail TEXT, added REAL, PRIMARY KEY(norm_key, source, platform))""")
+    have = {r[1] for r in con.execute("PRAGMA table_info(manual_games)")}  # backing-store heal
+    for col, decl in (("title", "TEXT"), ("detail", "TEXT"), ("added", "REAL")):
+        if col not in have:
+            con.execute("ALTER TABLE manual_games ADD COLUMN %s %s" % (col, decl))
     con.row_factory = sqlite3.Row
     return con
 

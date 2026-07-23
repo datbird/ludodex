@@ -40,6 +40,16 @@ def _db(data_dir):
     # background; absent = 'auto' (the default hero/background/header → marquee logic).
     con.execute("""CREATE TABLE IF NOT EXISTS hero_pref(
         norm_key TEXT PRIMARY KEY, source TEXT NOT NULL)""")
+    # Same backing-store-strip heal as `framing` above: a narrow pull can recreate
+    # hero_pref as just (norm_key), dropping `source`. Empty → rebuild; else add it.
+    hp = {r[1] for r in con.execute("PRAGMA table_info(hero_pref)")}
+    if "source" not in hp:
+        if con.execute("SELECT COUNT(*) FROM hero_pref").fetchone()[0] == 0:
+            con.execute("DROP TABLE hero_pref")
+            con.execute("CREATE TABLE hero_pref(norm_key TEXT PRIMARY KEY, "
+                        "source TEXT NOT NULL)")
+        else:
+            con.execute("ALTER TABLE hero_pref ADD COLUMN source TEXT NOT NULL DEFAULT ''")
     con.commit()
     return con
 

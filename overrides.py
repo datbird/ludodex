@@ -22,6 +22,14 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS overrides(
         norm_key TEXT, kind TEXT, value TEXT, origin TEXT, created REAL,
         PRIMARY KEY(norm_key, kind))""")
+    # Heal a backing-store-stripped table (a narrow pull can drop the non-key
+    # columns — here value/origin/created — which would break every attribute read
+    # and the bulk attribute editor). PK matches the sync key, so ALTER-add suffices.
+    have = {r[1] for r in con.execute("PRAGMA table_info(overrides)")}
+    for col, decl in (("value", "TEXT"), ("origin", "TEXT"), ("created", "REAL")):
+        if col not in have:
+            con.execute("ALTER TABLE overrides ADD COLUMN %s %s" % (col, decl))
+    con.commit()
     return con
 
 
