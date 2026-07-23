@@ -8,6 +8,13 @@ Last reviewed: 2026-07-21.
 
 ---
 
+## Big build — next major feature
+
+- **Tiered store ingest (Algo / Light AI / Heavy AI)** — full behaviour behind the per-source
+  sync tiers, Steam as the reference impl, template for all stores. Complete design in
+  `docs/superpowers/specs/2026-07-23-tiered-store-ingest-design.md`. Build from that spec.
+  Governed by the AI-spend guardrail (no runaway, no new confirmations, scope to the run).
+
 ## Top of queue
 
 - **Cover / hero loading spinner** (do first). While a cover or hero image is loading —
