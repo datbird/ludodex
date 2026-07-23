@@ -3739,6 +3739,15 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
   .files-body { max-width: 100%; }
 }
 
+/* ---- Tablet & narrower: library toolbar becomes two rows ----
+   Search takes its own full-width row; Filters / View / Select / Tools / Add game
+   wrap to a centered second row. */
+@media (max-width: 900px) {
+  .controls-search { flex: 1 1 100%; }
+  .controls { justify-content: center; }
+  .controls-right { margin-left: 0; }
+}
+
 /* ---- Phone: full mobile treatment ---- */
 @media (max-width: 600px) {
   .app { padding: 12px 12px 32px; }
@@ -3765,21 +3774,10 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
   /* main tabs stay full-width (ParticleTabs fill) */
   .pt-nav.main-tabs { margin: 12px 0 14px; }
 
-  /* controls: search on its own full row, everything else wraps below */
+  /* controls: search on its own full row, buttons centered below (the two-row
+     treatment itself is the ≤900px rule above; this just tightens spacing). */
   .controls { gap: 8px; margin: 12px 0 6px; }
-  /* Keep search + Options together on the top row (search shrinks, not wraps). */
-  .search { flex: 1 1 120px; min-width: 0; }
-
-  /* "Options" disclosure: show the toggle; collapse the rest until it's open. */
-  .opts-toggle { display: inline-flex; flex: 0 0 auto; }
-  .controls .lib-collapse, .results-bar .lib-collapse { display: none; }
-  .controls.opts-open .lib-collapse { display: flex; flex: 1 1 100%; }
-  .results-bar.opts-open .lib-collapse { display: flex; }
-  /* when open, the tools become a tidy wrapping tray under the count */
-  .results-bar.opts-open { flex-wrap: wrap; }
-  .results-bar.opts-open .results-tools { width: 100%; margin-top: 8px; }
-  .controls .go, .controls select, .filter-btn, .own-seg-btn { padding: 9px 12px; }
-  .ai-switch { order: -1; }
+  .controls .go, .controls select, .filter-btn { padding: 9px 12px; }
 
   /* poster grid: clean 2-across */
   .grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
