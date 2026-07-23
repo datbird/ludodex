@@ -3149,6 +3149,9 @@ span.idchip { color: color-mix(in srgb, var(--chip, var(--text)) 80%, var(--text
 .chg-media-h2 { margin-top: 10px; }
 .chg-art-gallery { display: flex; flex-wrap: wrap; gap: 8px; }
 .chg-art { display: flex; flex-direction: column; align-items: center; gap: 3px; max-width: 96px; }
+/* when the whole card is the enlarge button, keep it looking like the card, not a button */
+button.chg-art { padding: 0; border: none; background: none; cursor: zoom-in; }
+button.chg-art .chg-art-kind { cursor: zoom-in; }
 .chg-art.have { opacity: 0.5; }
 .chg-art-thumb { max-width: 90px; max-height: 68px; object-fit: cover; border-radius: 4px; border: 1px solid var(--border); background: var(--panel); }
 .chg-art.have .chg-art-thumb { border-style: dashed; }

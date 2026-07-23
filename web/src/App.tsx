@@ -8494,13 +8494,15 @@ function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
             <span className="dim"> — {newCount} new{art.length > newCount ? `, ${art.length - newCount} already have` : ''}</span></div>
           <div className="chg-art-gallery">
             {art.map((a, i) => (
-              <div key={i} className={'chg-art' + (a.new ? '' : ' have')}
-                title={(a.new ? `New ${a.kind}` : `Already have ${a.kind}`) + ' — click to enlarge'}>
-                <button type="button" className="chg-zoom" onClick={() => setZoom(shotAt(a.url))}>
-                  <img className="chg-art-thumb" src={a.url} alt="" loading="lazy" />
-                </button>
+              // the whole card is the click target (image AND kind label) so the
+              // caption below the thumbnail isn't a dead zone — the enlarge tooltip
+              // promises the whole card is clickable.
+              <button type="button" key={i} className={'chg-art chg-zoom' + (a.new ? '' : ' have')}
+                title={(a.new ? `New ${a.kind}` : `Already have ${a.kind}`) + ' — click to enlarge'}
+                onClick={() => setZoom(shotAt(a.url))}>
+                <img className="chg-art-thumb" src={a.url} alt="" loading="lazy" />
                 <span className="chg-art-kind">{a.kind.replace(/_/g, ' ')}{a.new ? '' : ' ✓'}</span>
-              </div>
+              </button>
             ))}
           </div>
         </>
