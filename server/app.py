@@ -8308,7 +8308,13 @@ def _sync_worker(job, services, media_ids=(), full=False):
     any_ok = False
     # progress across ALL phases, not just the ownership pulls: each source, the
     # catalog rebuild, each media fetch, and the one materialize pass.
-    planned_media = [sid for sid in media_ids if sid in MEDIA_SYNC_PROVIDER]
+    # A store's own media (Steam art + screenshots + trailers) is part of ingest at
+    # EVERY tier — deterministic provider work, not AI, not an opt-in. So run it for
+    # every media-capable source in this sync, not just ones the (legacy) "also sync
+    # media" toggle named. Without this, a game that matched IGDB cleanly never got
+    # its Steam hero/cover/trailers — the whole matched library came out IGDB-only.
+    planned_media = [sid for sid in services if sid in MEDIA_SYNC_PROVIDER]
+    _ = media_ids  # retained for API compatibility; media now always runs for Steam
     mode = config.get("media_mode") or "chosen"
     # + 4 fixed pipeline steps: Steam tags, catalog rebuild, IGDB enrich (with
     # its merge rebuild), and the multi-source scores pass.

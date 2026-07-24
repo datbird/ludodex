@@ -369,6 +369,12 @@ def fetch_steam_media(con, now, only=None, refresh=False, limit=None, art=True):
         for appid, nk in games.items():
             _put_steam_art(con, nk, appid, now)
         con.commit()
+        # These are SPECULATIVE urls — not every appid has every library asset (older
+        # titles have no library_hero/library_600x900 at all). Re-probe just what we
+        # re-emitted, for just these games, so a dead hero can't be chosen and render
+        # as a blank card. Without this the caller's earlier global prune is undone.
+        prune_dead(con, only_nks=list(games.values()), providers=("steam",),
+                   kinds=tuple(STEAM_ART))
     seen = _steam_media_seen(con)
     todo = [(a, nk) for a, nk in games.items() if refresh or a not in seen]
     if limit:
@@ -713,17 +719,37 @@ def fetch_screenscraper(con, now, only=None):
           % (n, len(rows)), file=sys.stderr)
 
 
-def prune_dead(con, workers=16):
+def prune_dead(con, workers=16, only_nks=None, providers=("steam", "igdb", "steamgriddb"),
+               kinds=None):
     """HEAD-check un-materialized public URL refs and drop the definitively-dead
     ones (404/410). Candidate refs are recorded speculatively (esp. Steam CDN,
     which has no per-asset manifest — not every appid has every art type), so
     without this they'd render as blank cards. Cached (sha1) refs are already
-    proven; screenscraper is skipped (its URLs need auth, so a bare HEAD lies)."""
+    proven; screenscraper is skipped (its URLs need auth, so a bare HEAD lies).
+
+    `only_nks` / `providers` / `kinds` scope the probe — used by the Steam-media
+    pass to re-check just the constructed art it re-emitted for the games in that
+    run, instead of re-probing the whole index."""
     import urllib.error
     from concurrent.futures import ThreadPoolExecutor
-    rows = con.execute(
-        "SELECT id, ref FROM media WHERE ref_type='url' AND (sha1 IS NULL OR sha1='')"
-        " AND provider IN ('steam','igdb','steamgriddb')").fetchall()
+    base = ("SELECT id, ref FROM media WHERE ref_type='url' AND (sha1 IS NULL OR sha1='')"
+            " AND provider IN (%s)" % ",".join("?" * len(providers)))
+    base_params = list(providers)
+    if kinds:
+        base += " AND kind IN (%s)" % ",".join("?" * len(kinds))
+        base_params += list(kinds)
+    if only_nks is None:
+        rows = con.execute(base, base_params).fetchall()
+    else:
+        nks = list(only_nks)
+        rows = []
+        for i in range(0, len(nks), 400):        # chunk: stay under SQLite's var limit
+            chunk = nks[i:i + 400]
+            rows += con.execute(
+                base + " AND norm_key IN (%s)" % ",".join("?" * len(chunk)),
+                base_params + chunk).fetchall()
+        if not rows:
+            return 0
 
     def check(row):
         rid, url = row
