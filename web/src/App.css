@@ -1945,6 +1945,11 @@ span.idchip { color: color-mix(in srgb, var(--chip, var(--text)) 80%, var(--text
 .score-badge.hi  { background: #16a34a; }
 .score-badge.mid { background: #d97706; }
 .score-badge.lo  { background: #dc2626; }
+/* The generic ".score span" rule (muted color, 11px, margin-top) also matches the
+   badge span and outranks ".score-badge", tinting the number muddy gray and nudging
+   it off-centre. Re-assert the badge's own look with higher specificity — white on
+   the coloured fill reads cleanly in both light and dark mode. */
+.score .score-badge { color: #fff; font-size: 15px; margin-top: 0; }
 .gt-score { text-align: center; }
 .score-main { display: flex; align-items: center; gap: 8px; }
 .score-main .score-badge { font-size: 15px; min-width: 34px; padding: 3px 8px; }
