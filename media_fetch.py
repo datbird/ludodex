@@ -315,8 +315,9 @@ def fetch_steam(con, now, only=None):
     if only is not None:
         want = set(only)
         games = {a: nk for a, nk in games.items() if nk in want}
+    n = 0
     for appid, nk in games.items():
-        _put_steam_art(con, nk, appid, now)
+        n += _put_steam_art(con, nk, appid, now)
     con.commit()
     print("media_fetch: steam — %d candidate URLs for %d games"
           % (n, len(games)), file=sys.stderr)

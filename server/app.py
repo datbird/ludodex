@@ -8303,6 +8303,23 @@ def _fmt_eta(sec):
     return " · ~%dh%02dm left" % (sec // 3600, (sec % 3600) // 60)
 
 
+def _steam_meta_count():
+    """Rows in the Steam appdetails-attr cache (steam-meta.sqlite). Lets the worker
+    tell whether the media pass added new Steam attributes worth a second catalog
+    build — the first build runs before this cache exists, so without a follow-up
+    a fresh import is one build behind on Steam-sourced attributes."""
+    p = os.path.join(DATA, "steam-meta.sqlite")
+    if not os.path.exists(p):
+        return 0
+    try:
+        con = sqlite3.connect(p)
+        n = con.execute("SELECT COUNT(*) FROM steam_meta").fetchone()[0]
+        con.close()
+        return n
+    except sqlite3.Error:
+        return 0
+
+
 def _sync_worker(job, services, media_ids=(), full=False):
     prev = _lib_keys()
     any_ok = False
@@ -8572,6 +8589,7 @@ def _sync_worker(job, services, media_ids=(), full=False):
                      if job["services"].get(sid, {}).get("state") == "ok"]
     if any_ok and not job.get("error"):
         cover_before = _n_identified_with_cover()
+        steam_meta_before = _steam_meta_count()   # Steam attr cache size pre-media
         for sid in media_targets:
             job["step"] = "Fetching %s media…" % _SVC_NAME.get(sid, sid)
             _run_script("media_fetch.py",
@@ -8647,6 +8665,16 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 _phase("art", "ok", "+%d filled" % max(cover_after - cover_before, 0))
         else:
             _phase("media", "ok")
+        # Fold in Steam's own appdetails attributes (genres/dev/pub/release/desc/type)
+        # that the media pass just cached. The first catalog build ran BEFORE this
+        # cache existed, so without this a fresh import is one build behind — Steam
+        # never becomes authoritative for its own games' attributes. Rebuild once more,
+        # but ONLY when the cache actually grew, so a no-op resync doesn't double-build.
+        if _stopped():        # proper cancel checkpoint after the media/download phase
+            return            # (else a late cancel falls through and mislabels as "Done")
+        if _steam_meta_count() > steam_meta_before:
+            job["step"] = "Folding in Steam attributes…"
+            _run_script("build_library.py", timeout=900, job=job)
         # --- import tier: the AI supplement, scoped to what this sync brought in.
         # Stores hand over a title and ownership and little else (GOG/Epic/EA/PSN/
         # Xbox/itch give literally nothing more), so the games the providers could
