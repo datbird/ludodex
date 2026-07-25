@@ -2192,9 +2192,24 @@ def _call_openai(key, model, system, user, base_url=None):
             getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0)
 
 
-# Models observed to reject thinking_budget=0 — populated at run time by the first
-# rejection, so a new model family self-heals without a code change.
+# thinking_budget=0 is a workaround for ONE model family: the gemini-2.5 line spends
+# output tokens on "thinking" and truncates the JSON to a bare "{". Newer models
+# (gemini-flash-latest, the 3.x line) REJECT the parameter outright with a 400
+# INVALID_ARGUMENT raised at CALL time — constructing the object succeeds, so a
+# try/except around the constructor never fires.
+#
+# Target it NARROWLY rather than sending it everywhere and learning from failures: the
+# default model is a current one, and it should never pay a wasted round-trip for a
+# workaround aimed at an older model. _NO_THINKING remains only as a safety net, for a
+# model that matches the prefix yet still refuses.
+_THINKING_OFF_PREFIXES = ("gemini-2.5",)
 _NO_THINKING = set()
+
+
+def _wants_thinking_off(model):
+    """True only for models that NEED thinking disabled and accept the parameter."""
+    m = model or ""
+    return m.startswith(_THINKING_OFF_PREFIXES) and m not in _NO_THINKING
 
 
 def _call_gemini(key, model, system, user):
@@ -2211,17 +2226,9 @@ def _call_gemini(key, model, system, user):
         response_mime_type="application/json",
         max_output_tokens=2048,
     )
-    # Disable "thinking" — 2.5-flash spends output tokens on thinking and can
-    # truncate the JSON to just "{".
-    #
-    # Newer models (gemini-flash-latest and the 3.x line) REJECT thinking_budget=0
-    # outright with a bare 400 INVALID_ARGUMENT. Constructing the object still
-    # succeeds, so a try/except around the constructor alone never fires — the
-    # failure only surfaces at call time, which silently broke every AI area for
-    # anyone on such a model. Try it, and on rejection drop it and retry once,
-    # remembering the model so the wasted round-trip happens at most once per
-    # process.
-    want_thinking = model not in _NO_THINKING
+    # Disable "thinking" only where it's both needed and accepted (see
+    # _wants_thinking_off). Current models neither need it nor tolerate it.
+    want_thinking = _wants_thinking_off(model)
     if want_thinking:
         try:
             cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
@@ -2297,13 +2304,29 @@ def _vision_gemini(key, model, system, user, images):
     parts.append(types.Part.from_text(text=user))
     cfg = dict(system_instruction=system,
                response_mime_type="application/json", max_output_tokens=512)
+    # The vision path had been left behind when the text path was fixed: it sent
+    # thinking_budget=0 unconditionally, so on the default model EVERY vision call
+    # (smart art pick, add-by-image, media de-dup, category placement) died with a
+    # 400 raised at call time. Same narrow rule as the text path now.
+    want_thinking = _wants_thinking_off(model)
+    if want_thinking:
+        try:
+            cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        except Exception:
+            want_thinking = False
+
+    def _go(c):
+        return client.models.generate_content(
+            model=model, contents=parts, config=types.GenerateContentConfig(**c))
+
     try:
-        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-    except Exception:
-        pass
-    resp = client.models.generate_content(
-        model=model, contents=parts,
-        config=types.GenerateContentConfig(**cfg))
+        resp = _go(cfg)
+    except Exception as e:                  # noqa: BLE001
+        if not want_thinking or "INVALID_ARGUMENT" not in str(e):
+            raise
+        _NO_THINKING.add(model)
+        cfg.pop("thinking_config", None)
+        resp = _go(cfg)
     u = getattr(resp, "usage_metadata", None)
     return (resp.text, getattr(u, "prompt_token_count", 0) or 0,
             getattr(u, "candidates_token_count", 0) or 0)
