@@ -262,6 +262,16 @@ def _steam_meta_con():
     c = sqlite3.connect(STEAM_META)
     c.execute("CREATE TABLE IF NOT EXISTS steam_meta("
               "appid TEXT PRIMARY KEY, norm_key TEXT, payload_json TEXT, fetched REAL)")
+    # Identity facts live in COLUMNS, never in payload_json: build_library turns every
+    # payload key into a game attribute, so a name/appid in there would become junk
+    # metadata. store_name is Steam's own product title (the ownership API reports a
+    # per-app label instead — "Ys I" for Ys I & II Chronicles+); canonical_appid is
+    # appdetails' `steam_appid`, which resolves a sub-app to its parent product and is
+    # how a store-granted bundle is recognised deterministically.
+    have = {r[1] for r in c.execute("PRAGMA table_info(steam_meta)")}
+    for col in ("store_name", "canonical_appid"):
+        if col not in have:
+            c.execute("ALTER TABLE steam_meta ADD COLUMN %s TEXT" % col)
     return c
 
 
@@ -398,11 +408,20 @@ def fetch_steam_media(con, now, only=None, refresh=False, limit=None, art=True):
             entry = d.get(str(appid)) or {}
             if entry.get("success"):
                 data = entry.get("data") or {}
-                # cache Steam's own attributes (Algo tier feeds build_library)
+                # cache Steam's own attributes (Algo tier feeds build_library) plus the
+                # identity facts. Written even when _attrs is empty: a sub-app with no
+                # attributes of its own still needs its canonical_appid recorded, or the
+                # bundle relationship is lost.
                 _attrs = _extract_steam_attrs(data)
-                if _attrs:
-                    smeta.execute("INSERT OR REPLACE INTO steam_meta VALUES(?,?,?,?)",
-                                  (appid, nk, json.dumps(_attrs), now))
+                _store_name = (data.get("name") or "").strip() or None
+                _canon = data.get("steam_appid")
+                _canon = str(_canon) if _canon else None
+                if _attrs or _store_name or _canon:
+                    smeta.execute(
+                        "INSERT OR REPLACE INTO steam_meta"
+                        "(appid,norm_key,payload_json,fetched,store_name,canonical_appid)"
+                        " VALUES(?,?,?,?,?,?)",
+                        (appid, nk, json.dumps(_attrs), now, _store_name, _canon))
                 shots = data.get("screenshots") or []
                 if cap > 0:
                     shots = shots[:cap]

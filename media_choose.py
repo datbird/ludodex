@@ -100,7 +100,8 @@ def select(con, kinds=None):
     # choice on every re-select. Keyed by (norm_key, kind, provider, ref) -> pin rank.
     pin_rank = _load_pins()
     rows = con.execute(
-        "SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key "
+        "SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key, "
+        "width, height "
         "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
         % ",".join("'%s'" % k for k in scalar)
     ).fetchall()
@@ -115,10 +116,24 @@ def select(con, kinds=None):
     for r in rows:
         pr = rank[r["kind"]].get(r["provider"], 99)
         pin = pin_rank.get((r["norm_key"], r["kind"], r["provider"], r["ref"]), 1 << 30)
-        # pin rank first (a pinned asset beats any unpinned), THEN provider priority,
-        # then tie-breakers: catalog-matched, local file over URL, lowest id (stable).
-        sk = (pin, pr, 0 if r["matched"] else 1, 0 if r["ref_type"] == "file" else 1,
-              r["id"])
+        # SHAPE comes before provider priority: an asset whose orientation contradicts
+        # its kind is disqualified no matter who supplied it (a landscape header can
+        # never be a cover). Nothing examined the image before this — selection ranked
+        # on provider order then row id, so a correct pick was luck, not judgment.
+        #
+        # Orientation may come from the URL (free, works on the first pass); RESOLUTION
+        # may not — Steam's `library_600x900.jpg` is served at 300x450 for older titles,
+        # so the name is reliable about shape and unreliable about size. Hence measured
+        # dimensions only for the resolution term, leaving it neutral until an index or
+        # materialize pass has actually measured the file.
+        mw, mh = r["width"], r["height"]
+        sw, sh = (mw, mh) if (mw and mh) else media.derived_dims(r["ref"])
+        bad_shape = 0 if media.shape_ok(r["kind"], sw, sh) else 1
+        px = -(mw * mh) if (mw and mh) else 0        # bigger wins; unknown stays neutral
+        # pin first (user authority), then shape, then provider priority, then measured
+        # resolution, then the original tie-breakers: matched, local file, lowest id.
+        sk = (pin, bad_shape, pr, px, 0 if r["matched"] else 1,
+              0 if r["ref_type"] == "file" else 1, r["id"])
         _sys = r["system"] or ""
         _gk = (r["game_key"] or "") if not _sys else ""
         key = (r["norm_key"], _sys, _gk, r["kind"])
@@ -163,6 +178,18 @@ def _materialize_row(repo, r):
         return None
 
 
+def _measure(path):
+    """(w, h) of a materialized file, or (None, None). Pillow reads only the header
+    for size, so this costs no real decode. Never fatal: an unmeasurable asset just
+    stays unmeasured, and shape_ok() treats unknown as acceptable."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return im.size
+    except Exception:                       # noqa: BLE001  not an image / no Pillow
+        return (None, None)
+
+
 def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
     """Download/copy assets lacking sha1 into the repo; demote dead refs and
     re-pick. Default = only the chosen asset per (game, kind); all_refs=True
@@ -185,7 +212,14 @@ def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
     for i, r in enumerate(rows, 1):
         sha = _materialize_row(repo, r)
         if sha:
-            con.execute("UPDATE media SET sha1=? WHERE id=?", (sha, r["id"]))
+            # Record the REAL dimensions while the bytes are in hand — the only
+            # authoritative source (provider filenames lie: Steam serves
+            # `library_600x900.jpg` at 300x450 for older titles). Feeds the shape test
+            # and the resolution tie-break on the next select pass.
+            _w, _h = _measure(os.path.join(
+                repo, "%s.%s" % (sha, (r["ext"] or "jpg").split("?")[0])))
+            con.execute("UPDATE media SET sha1=?, width=COALESCE(?,width), "
+                        "height=COALESCE(?,height) WHERE id=?", (sha, _w, _h, r["id"]))
             ok += 1
         else:
             # dead reference: drop it from contention and promote the next best
@@ -207,15 +241,26 @@ def _repick(con, norm_key, kind, system=None):
     """After a dead asset is removed, choose the next-best for this game+kind within
     the SAME system bucket (per-platform siloing, DESIGN §11.4)."""
     rank = {p: i for i, p in enumerate(media.priority(kind))}
-    cands = con.execute("SELECT id, provider, matched, ref_type FROM media "
+    cands = con.execute("SELECT id, provider, matched, ref_type, ref, width, height "
+                        "FROM media "
                         "WHERE norm_key=? AND kind=? AND COALESCE(system,'')=? "
                         "AND COALESCE(hidden,0)=0",
                         (norm_key, kind, system or "")).fetchall()
     if not cands:
         return
-    best = min(cands, key=lambda r: (rank.get(r["provider"], 99),
-                                     0 if r["matched"] else 1,
-                                     0 if r["ref_type"] == "file" else 1, r["id"]))
+
+    def _rk(r):
+        # Same ordering as select(): a promotion after a dead asset must not install
+        # a wrong-shaped replacement the main pass would have rejected.
+        mw, mh = r["width"], r["height"]
+        sw, sh = (mw, mh) if (mw and mh) else media.derived_dims(r["ref"])
+        return (0 if media.shape_ok(kind, sw, sh) else 1,
+                rank.get(r["provider"], 99),
+                -(mw * mh) if (mw and mh) else 0,
+                0 if r["matched"] else 1,
+                0 if r["ref_type"] == "file" else 1, r["id"])
+
+    best = min(cands, key=_rk)
     con.execute("UPDATE media SET chosen=1 WHERE id=?", (best["id"],))
 
 

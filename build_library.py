@@ -528,8 +528,60 @@ def _igdb_years():
     return ry
 
 
+def _igdb_bundle_ids():
+    """IGDB ids whose record is a COMPILATION, not a game (`game_type` 3=bundle,
+    13=pack).
+
+    A bundle's identity must never define an individually-owned app. `_id_groups`
+    collapses every entry sharing an `igdb:` game_key — correct for regional variants
+    of one game (Mario & Luigi RPG 3), catastrophic for a bundle, whose id is shared by
+    the DIFFERENT games inside it: owning "Ys I & II Chronicles+" resolved both Steam
+    appids to igdb 21032 and merged Ys I and Ys II into a single entry, deleting one of
+    them. DESIGN §13 says a compilation CREDITS its members; it must never consume them.
+
+    Deterministic (Algo tier): IGDB states this outright and it costs one extra field on
+    a query we already make. Ids absent from the cache (fetched before `game_type` was
+    requested) are simply not flagged — forward-only, per the design decision."""
+    out = set()
+    _cache = os.path.join(DATA, "metadata-cache.sqlite")
+    if not os.path.exists(_cache):
+        return out
+    _c = sqlite3.connect(_cache)
+    try:
+        for _iid, _payload in _c.execute("SELECT igdb_id, payload_json FROM igdb_meta"):
+            try:
+                if (json.loads(_payload) or {}).get("game_type") in (3, 13):
+                    out.add(_iid)
+            except Exception:       # noqa: BLE001  malformed cache row
+                continue
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        _c.close()
+    return out
+
+
 _years = _igdb_years()
 _ids = _igdb_ids()               # norm_key -> igdb_id (DESIGN §11.9 game_key)
+# Refuse a compilation's identity BEFORE it can group anything. Dropping the id here
+# sends the entry to `title:<norm_key>` in _game_key(), so each owned app keeps its own
+# identity and _id_groups has nothing to collapse. Two plain entries + a warning, per
+# the design's "Algo never guesses" rule.
+_bundle_ids = _igdb_bundle_ids()
+_identity_refused = []           # [(norm_key, reason, detail)] -> identity_review table
+if _bundle_ids:
+    _refused = sorted(nk for nk, iid in _ids.items() if iid in _bundle_ids)
+    for _nk in _refused:
+        _identity_refused.append(
+            (_nk, "compilation_identity",
+             "igdb:%s is a bundle/pack (game_type); refused as a single game's identity"
+             % _ids[_nk]))
+        del _ids[_nk]
+    if _refused:
+        print("build_library: refused %d compilation identity/ies (igdb game_type "
+              "bundle/pack) — entries keep their own identity: %s"
+              % (len(_refused), ", ".join(_refused[:12])
+                 + (" …" if len(_refused) > 12 else "")), file=sys.stderr)
 
 
 def _entry_igdb_ids():
@@ -848,7 +900,17 @@ CREATE TABLE provider_attrs (game_id INTEGER, provider TEXT, kind TEXT, value TE
 CREATE TABLE metadata_links (game_id INTEGER, provider TEXT, provider_id TEXT,
   slug TEXT, url TEXT);                    -- canonical ids from metadata providers
 CREATE TABLE game_tags (game_id INTEGER, tag TEXT, origin TEXT);  -- origin: playnite/ludodex/…
+-- Identities the ALGO tier refused, for a later tier to adjudicate. Algo never guesses:
+-- when it can prove a match is unsafe (an IGDB bundle/pack id standing in for a single
+-- owned app) it declines the identity, keeps the entries separate, and records WHY here.
+-- Light/Heavy read this to scope AI match-verification at the games that actually need
+-- it, instead of sweeping the catalog. Rebuilt with the catalog like everything else.
+CREATE TABLE identity_review (norm_key TEXT, reason TEXT, detail TEXT);
 """)
+
+if _identity_refused:
+    cur.executemany("INSERT INTO identity_review(norm_key,reason,detail) VALUES(?,?,?)",
+                    _identity_refused)
 
 key_to_gid = {}                 # (base_key, platform) -> gid   (per-entry attrs)
 base_to_gids = {}               # base_key -> [gid,...]         (title-level metadata fan-out)

@@ -17,6 +17,7 @@ EmuDeck (native install, ES-DE its default frontend). Same structure, different
 root — so one path-configurable provider covers both; register each root as a
 media mount (config.py media-mount add <path> esde).
 """
+import re
 
 # --------------------------------------------------------------------------- #
 #  canonical media kinds — the vocabulary every provider maps into
@@ -59,6 +60,76 @@ SCALAR_KINDS = ("cover", "box_back", "box_3d", "box_spine",
                 "background", "hero", "header", "logo", "icon",
                 "marquee", "bezel", "arcade_cabinet", "arcade_controls", "pcb",
                 "title_screen", "mix")
+
+# --------------------------------------------------------------------------- #
+#  Shape verification (Algo tier — measurement, not judgment)
+#
+#  Selection used to rank on provider priority then row id, so nothing ever examined
+#  the image: a landscape header could win a `cover` slot purely by being indexed
+#  first. These let the deterministic picker REJECT an asset whose orientation
+#  contradicts its kind, before any provider precedence applies.
+#
+#  Only kinds with a genuinely fixed orientation are listed. `logo`, `icon`, `mix`,
+#  `physical_media` and friends are deliberately absent — they vary legitimately, and
+#  guessing would be worse than not checking.
+# --------------------------------------------------------------------------- #
+KIND_ORIENT = {
+    "cover": "portrait", "box_back": "portrait", "box_spine": "portrait",
+    "background": "landscape", "hero": "landscape", "header": "landscape",
+    "marquee": "landscape", "bezel": "landscape", "arcade_controls": "landscape",
+    "title_screen": "landscape", "screenshot": "landscape",
+}
+
+# Fixed provider sizes we can know WITHOUT fetching. Deriving beats measuring: it costs
+# no network, so shape is testable on the first pass rather than the pass after.
+# Steam's `library_600x900` carries its size in the name (handled by the regex below);
+# these are the documented constants for the rest.
+_DERIVED_DIMS = {
+    "header.jpg": (460, 215),                 # Steam store header — long-stable
+    "library_hero.jpg": (1920, 620),          # Steam library hero
+    "t_cover_big": (264, 352),                # IGDB documented sizes
+    "t_720p": (1280, 720), "t_1080p": (1920, 1080),
+    "t_screenshot_huge": (1280, 720), "t_thumb": (90, 128),
+}
+_DIM_RE = re.compile(r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)")
+
+
+def orient_of(w, h):
+    """'portrait' | 'landscape' | 'square', or None when unmeasured."""
+    if not w or not h:
+        return None
+    if h > w:
+        return "portrait"
+    return "landscape" if w > h else "square"
+
+
+def derived_dims(ref):
+    """(w, h) inferable from a provider URL/filename alone, else (None, None)."""
+    if not ref:
+        return (None, None)
+    m = _DIM_RE.search(ref)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    for token, wh in _DERIVED_DIMS.items():
+        if token in ref:
+            return wh
+    return (None, None)
+
+
+def shape_ok(kind, w, h):
+    """False ONLY when the orientation is known AND contradicts the kind.
+
+    Unknown dimensions are never penalised — an unmeasured asset must not lose to a
+    measured one on that basis alone, or selection would silently prefer whichever
+    provider happened to be measurable. Square is tolerated everywhere (icons, logos
+    and some box art are legitimately square)."""
+    want = KIND_ORIENT.get(kind)
+    if not want:
+        return True
+    got = orient_of(w, h)
+    if got is None or got == "square":
+        return True
+    return got == want
 
 # --------------------------------------------------------------------------- #
 #  ES-DE (EmulationStation Desktop Edition) — used by RetroDECK *and* EmuDeck

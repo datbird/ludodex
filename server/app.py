@@ -8693,6 +8693,16 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 heavy = worst == "heavy"
                 keys = aimeta.targets("missing" if heavy else "unmatched",
                                       2000, sources=ai_srcs)
+                # MATCH VERIFICATION, present at every tier that has a model.
+                # Both targets above select for a GAP, so a confidently-wrong match is
+                # invisible to them: it has a provider link and a full attribute set,
+                # inherited from the wrong record. Algo proves those cases
+                # deterministically (an IGDB bundle id standing in for one owned app)
+                # and parks them in identity_review; this is where they get adjudicated.
+                # Small, precise and already scoped to the import's sources.
+                _seen = set(keys)
+                keys += [k for k in aimeta.review_targets(2000, sources=ai_srcs)
+                         if k not in _seen]
                 if not keys:
                     _phase("supplement", "ok", "nothing left to fill")
                 else:

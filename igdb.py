@@ -34,7 +34,10 @@ STEAM_SOURCE = 1
 # platforms the game released on and per-platform release dates, so ludodex can
 # offer "this game also came out on …" in the ownership overlay.
 GAME_FIELDS = (
-    "id,name,slug,summary,first_release_date,alternative_names.name,"
+    # game_type distinguishes a BUNDLE/pack from a game (3 = bundle). Authoritative,
+    # free, and the deterministic half of match verification: a bundle's identity may
+    # never define an individually-owned app (see the match-verification design).
+    "id,name,slug,summary,first_release_date,alternative_names.name,game_type,"
     "genres.name,themes.name,game_modes.name,player_perspectives.name,"
     "franchises.name,involved_companies.developer,"
     "involved_companies.publisher,involved_companies.company.name,"

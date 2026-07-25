@@ -318,6 +318,31 @@ def targets(target="unmatched", limit=200, sources=None):
         lib.close()
 
 
+def review_targets(limit=2000, sources=None):
+    """norm_keys the ALGO tier refused an identity for (`identity_review`).
+
+    These are the games ingest could never see before: a match that is confidently
+    WRONG has no gap, so it satisfies neither 'unmatched' (it has a provider link) nor
+    'missing' (its attributes are full — inherited from the wrong record). Algo proves
+    the problem deterministically and parks it here; Light/Heavy adjudicate it. Scoped
+    like targets(), so an import-driven scan still only spends on its own games."""
+    lib = _lib()
+    try:
+        q = ("SELECT DISTINCT r.norm_key FROM identity_review r "
+             "JOIN games g ON g.norm_key=r.norm_key")
+        args = []
+        if sources:
+            sp = ",".join("?" * len(sources))
+            q += (" WHERE EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
+                  "AND s.source IN (%s))" % sp)
+            args = list(sources)
+        return [r[0] for r in lib.execute(q + " LIMIT ?", args + [limit])]
+    except sqlite3.OperationalError:
+        return []                           # catalog predates identity_review
+    finally:
+        lib.close()
+
+
 def target_count(target="unmatched"):
     lib = _lib()
     try:
