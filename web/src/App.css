@@ -3245,13 +3245,33 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .chg-link .chg-value { color: var(--accent); }
 /* match row: title-rename headline + a subordinate provider-link line */
 .chg-match-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-.chg-rename { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.chg-rename .chg-label { color: var(--text-dim, #9aa); text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; }
+/* A change block is a small three-part statement, so it's set as one: the KIND of change
+   is an eyebrow heading, then the outgoing value, then the incoming one. It used to be an
+   inline flex row where a 10px dim label sat beside a bold accent value — the eye landed
+   on the new title with no idea what was being changed, and long titles wrapped so the
+   arrow stranded at the end of a line. Vertical stacking fixes both. */
+.chg-rename { display: grid; gap: 3px; min-width: 0; }
+.chg-rename .chg-label {
+  color: var(--text-h); text-transform: uppercase; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.09em; display: flex; align-items: center; gap: 7px; }
+/* The accent rule is what draws the eye to the block — position and a structural mark
+   rather than type size, so a four-word label never outshouts the titles it describes. */
+.chg-rename .chg-label::before {
+  content: ''; flex: none; width: 3px; height: 12px; border-radius: 2px;
+  background: var(--accent); }
+/* Never clip an identity: the reviewer is judging exactly these strings. */
+.chg-rename .chg-from { max-width: none; white-space: normal; overflow: visible;
+  font-size: 12px; }
+.chg-becomes { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.chg-becomes .chg-arrow { flex: none; opacity: 0.55; }
 .chg-from { color: var(--text-h); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--text-h) 45%, transparent); font-weight: 500; }
 .chg-to { color: var(--accent); font-weight: 700; }
-/* Attribute rows now state BOTH sides. The outgoing value is monospaced to line up with
-   the incoming one, and clipped so a long description can't push the arrow off-screen. */
-.chg-row .chg-from { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+/* Attribute rows state BOTH sides. The outgoing value is monospaced to line up with the
+   incoming one, and clipped so a long description can't push the arrow off-screen.
+   DIRECT CHILD ONLY: the match row's .chg-from is nested inside .chg-rename, and this
+   rule sits later in the file at equal specificity — unscoped, it would win and clip an
+   identity the reviewer is being asked to judge. */
+.chg-row > .chg-from { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
   max-width: 34%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* "not set" is a real left-hand side, not a value being destroyed — filling a blank and
    overwriting existing data are different decisions, so it must not read as struck-out. */

@@ -9553,21 +9553,19 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
                   <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} />
                   {c.cover && <img className="chg-cover" src={c.cover} alt="" />}
                   <div className="chg-match-body">
-                    {c.renameTo ? (
-                      <div className="chg-rename">
-                        <span className="chg-label">Title change</span>
-                        <b className="chg-from">{c.renameFrom}</b>
+                    {/* Reads top-down: what KIND of change, what it is now, what it
+                        becomes. The arrow is bound to the incoming value so it can never
+                        strand itself at the end of a wrapped line. */}
+                    <div className="chg-rename">
+                      <span className="chg-label">
+                        {c.renameTo ? 'Title change' : 'Identity change'}</span>
+                      <b className="chg-from">{c.renameTo ? c.renameFrom : c.idFrom}</b>
+                      <div className="chg-becomes">
                         <span className="chg-arrow">→</span>
-                        <b className="chg-to">{c.renameTo}</b>
+                        <b className="chg-to">
+                          {c.renameTo ? c.renameTo : (c.idTo || c.value)}</b>
                       </div>
-                    ) : (
-                      <div className="chg-rename">
-                        <span className="chg-label">Identity change</span>
-                        <b className="chg-from">{c.idFrom}</b>
-                        <span className="chg-arrow">→</span>
-                        <b className="chg-to">{c.idTo || c.value}</b>
-                      </div>
-                    )}
+                    </div>
                     <div className="chg-match-src">{c.label}{tag}</div>
                   </div>
                 </label>
