@@ -3238,8 +3238,10 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .chg-group { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; background: var(--panel); overflow: hidden;
   --chg-pad: 12px; --chg-cb: 15px; --chg-gap: 10px;
   --chg-gutter: calc(var(--chg-pad) + var(--chg-cb) + var(--chg-gap)); }
-/* Fixed so the gutter math is exact — a UA-default checkbox width would shift the column. */
-.chg-group input[type="checkbox"] { width: var(--chg-cb); height: var(--chg-cb); }
+/* Fixed so the gutter math is exact. margin:0 matters as much as the width — the UA
+   default (~4px left / 3px right) silently pushed every change row ~7px right of the
+   gutter, which is why the change block still failed to line up with the icon rows. */
+.chg-group input[type="checkbox"] { width: var(--chg-cb); height: var(--chg-cb); margin: 0; }
 .chg-group .chg-proposal,
 .chg-group .af-row,
 .chg-group .fc-strip,
@@ -3270,9 +3272,12 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
    on the new title with no idea what was being changed, and long titles wrapped so the
    arrow stranded at the end of a line. Vertical stacking fixes both. */
 .chg-rename { display: grid; gap: 3px; min-width: 0; }
+/* gap is tuned so mark + gap ≈ one emoji advance (~20px): the icon rows below lead with
+   "🖼 " / "🔁 ", so matching that lead-in puts this label's TEXT on the same column as
+   theirs, not just its marker. */
 .chg-rename .chg-label {
   color: var(--text-h); text-transform: uppercase; font-size: 11px; font-weight: 600;
-  letter-spacing: 0.09em; display: flex; align-items: center; gap: 9px; }
+  letter-spacing: 0.09em; display: flex; align-items: center; gap: 12px; }
 /* The accent mark is what draws the eye to the block — position and a structural mark
    rather than type size, so a four-word label never outshouts the titles it describes.
    Thickness carries that weight; height stays at the label's own scale so the mark reads
