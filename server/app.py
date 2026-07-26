@@ -5946,10 +5946,20 @@ def game_detail(norm_key: str):
         # for each owned collection whose member set includes this game.
         try:
             _bk_col = "g2.base_key" if "base_key" in _keys else "g2.norm_key"
+            # catalogs built before via_collection existed have no such column
+            _has_via_col = any(r[1] == "via_collection"
+                               for r in con.execute("PRAGMA table_info(sources)"))
             _seen_plat = {platform} | {a["platform"] for a in also}
+            # Members that build_library MATERIALIZED already carry a real source row
+            # stamped with via_collection, so re-emitting a synthetic credit here would
+            # show the same ownership twice.
+            _real_via = {r[0] for r in con.execute(
+                "SELECT DISTINCT s.via_collection FROM sources s JOIN games g2 "
+                "ON g2.id=s.game_id WHERE " + _bk_col + "=? AND s.via_collection IS NOT NULL",
+                (base,))} if _has_via_col else set()
             for c in compilations.credits_for(DATA, base):
-                if c["coll_key"] == base:
-                    continue                     # a collection never credits itself
+                if c["coll_key"] == base or c["coll_key"] in _real_via:
+                    continue                     # self-credit, or already a real row
                 owned = con.execute(
                     "SELECT s.source, g2.platform, g2.entry_key FROM games g2 "
                     "JOIN sources s ON s.game_id=g2.id "

@@ -21,6 +21,7 @@ sys.path.insert(0, DIR)
 import config
 from titlenorm import norm      # shared dedupe normalizer (honors config prefs)
 import merges                   # durable user merges — fold duplicates into one
+import compilations             # collections/compilations — materialize owned members (§13)
 import splits                   # durable "peel apart" — split a merged-away game out
 import console_eras             # hardware timelines — catch era-impossible merges
 import homebrew                 # ROM release-type classifier (homebrew/hack/proto/…)
@@ -882,8 +883,14 @@ CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
   has_archive INT, in_playnite INT, in_launchbox INT,
   wanted INT DEFAULT 0);  -- wanted=1: a wishlist-only entry (no owned source)
 CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
-  source_id TEXT, title_raw TEXT, detail TEXT, state TEXT DEFAULT 'have');
+  source_id TEXT, title_raw TEXT, detail TEXT, state TEXT DEFAULT 'have',
+  via_collection TEXT);
   -- state: 'have' (owned via this source) | 'want' (per-format wish)
+  -- via_collection: coll_key of the compilation this copy comes from (DESIGN §13).
+  -- state stays 'have' because it IS owned — §13 calls collection credit "a form of
+  -- ownership" — so every existing owned/count/facet query keeps working untouched.
+  -- The provenance lives here instead, which keeps it queryable without redefining
+  -- ownership across the codebase.
 -- store-wishlist provenance for wanted games (which store(s) they're wanted from)
 CREATE TABLE wanted (game_id INTEGER, store TEXT, store_id TEXT, title_raw TEXT);
 -- Playnite-parity attributes:
@@ -980,6 +987,57 @@ for key, w in wanted.items():
     _wrote += 1
     if _wrote % 200 == 0:
         print("PROG\t%d\t%d\t%s\tcatalog" % (_wrote, _wtotal, key), flush=True)
+
+# ---- collection members: materialize the games inside an OWNED compilation ----
+# DESIGN §13 originally recorded membership and credited it at READ time only, which
+# costs nothing but produces nothing when the bundle is your ONLY copy — the common
+# case. Owning "Castlevania Anniversary Collection" left its games nowhere in the
+# library. Members now become real entries, following the wishlist precedent: an entry
+# that exists without a separate purchase, distinguished by its own marker.
+#
+# state stays 'have' (it IS owned — §13 calls collection credit "a form of ownership")
+# so counts and facets keep working; `via_collection` carries the provenance.
+# A member that ALREADY has an entry is skipped — the real one wins and picks up the
+# existing read-time credit, so a game owned standalone never doubles.
+_owned_bases = {r[0] for r in cur.execute(
+    "SELECT DISTINCT g.base_key FROM games g JOIN sources s ON s.game_id=g.id "
+    "WHERE s.state='have'")}
+_coll_made = 0
+for _c in compilations.all_collections(DATA):
+    if _c["coll_key"] not in _owned_bases:
+        continue                        # only an OWNED bundle credits anything
+    _full = compilations.get_collection(DATA, _c["coll_key"]) or {}
+    # the store/platform the bundle is owned on — inherited by its members
+    _crow = cur.execute(
+        "SELECT g.platform, (SELECT s.source FROM sources s WHERE s.game_id=g.id "
+        "AND s.state='have' LIMIT 1) FROM games g WHERE g.base_key=? LIMIT 1",
+        (_c["coll_key"],)).fetchone()
+    _cplat, _csrc = (_crow[0] or "pc", _crow[1] or "") if _crow else ("pc", "")
+    for _m in _full.get("members") or []:
+        _mk = _m["member_key"]
+        if not _mk or _mk in base_to_gids:
+            continue                    # real entry exists — don't duplicate it
+        _mplat = (_m.get("member_platform") or _cplat) or "pc"
+        cur.execute(
+            "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,"
+            "game_key,n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,"
+            "has_epic,has_itch,has_archive,in_playnite,in_launchbox,wanted) "
+            "VALUES(?,?,?,?,?,?,1,0,?,0,0,0,0,0,0,0,0,0)",
+            (_m["member_title"], _mk, _mplat, "%s@%s" % (_mk, _mplat), _mk,
+             _game_key(_mk, _mplat, _mk), "via:" + _c["name"]))
+        _gid = cur.lastrowid
+        key_to_gid[(_mk, _mplat)] = _gid
+        base_to_gids.setdefault(_mk, []).append(_gid)
+        cur.execute(
+            "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,"
+            "state,via_collection) VALUES(?,?,?,?,?,?,'have',?)",
+            (_gid, _csrc, _mplat, "", _m["member_title"], _c["name"], _c["coll_key"]))
+        _coll_made += 1
+if _coll_made:
+    print("build_library: materialized %d collection member(s) from %d owned "
+          "compilation(s)" % (_coll_made, len(_owned_bases & {
+              c["coll_key"] for c in compilations.all_collections(DATA)})),
+          file=sys.stderr)
 
 # ---- release type -> editable attribute (classification computed above) ----
 # gids of blocked entries, so the enrichment below skips them (no rename / no metadata
