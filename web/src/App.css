@@ -3206,6 +3206,15 @@ span.idchip { color: color-mix(in srgb, var(--chip, var(--text)) 80%, var(--text
    real one, or the change block ends up sandwiched between two emphasis zones and the
    card reads as a stack of equal sections. A quiet footnote instead. */
 .chg-media.chg-media-none { background: transparent; color: var(--text-dim, #9aa); }
+/* Attribute changes are a RESERVED section, mirroring the cover section: present whether
+   or not the scan proposed anything, so the card always answers "what about the other
+   attributes?" rather than leaving the reviewer to infer silence from a missing row.
+   Icon-led like the cover rows, so all three sections read as siblings — and deliberately
+   quieter than the identity block, which is the card's headline statement. */
+.chg-attrs-h { border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  padding: 8px 12px; font-size: 12px; font-weight: 700; color: var(--text-h); }
+.chg-attrs-none { border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  padding: 8px 12px; font-size: 12px; color: var(--text-dim, #9aa); }
 .chg-media-h { font-size: 12px; font-weight: 700; color: var(--text-h); margin-bottom: 6px; }
 .chg-media-rows { display: flex; flex-wrap: wrap; gap: 10px; }
 .chg-media-row { display: flex; flex-direction: column; align-items: center; gap: 3px; }
@@ -3246,6 +3255,8 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .chg-group .af-row,
 .chg-group .fc-strip,
 .chg-group .chg-media,
+.chg-group .chg-attrs-h,
+.chg-group .chg-attrs-none,
 .chg-group .refine-toggle { padding-left: var(--chg-gutter); }
 .chg-ghead { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: color-mix(in srgb, var(--panel) 80%, var(--border)); border-bottom: 1px solid var(--border); }
 .chg-check { display: inline-flex; }

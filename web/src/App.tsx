@@ -9544,7 +9544,8 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
               <div className="chg-warn chg-warn-release">⚠ <b>{f.context.release_type}</b> release
                 {' '}matched to a commercial title — verify this ROM really is that game.</div>
             )}
-            {changes.map((c) => {
+            {(() => {
+              const renderRow = (c: Change) => {
               const man = changeIsManual(f, c)
               const tag = man && <span className="chg-manual-tag"
                 title="You set this by hand — accepting overwrites your manual change">✋ manual</span>
@@ -9582,7 +9583,30 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
                   <span className="chg-value">{c.value}</span>
                 </label>
               )
-            })}
+              }
+              // Identity is its own statement; everything else is an attribute fill.
+              // The attribute section is RESERVED — it renders whether or not the scan
+              // proposed anything, exactly like the cover section, so the card always
+              // answers "what about the other attributes?" instead of leaving the
+              // reviewer to infer silence from an absent row.
+              const matchRows = changes.filter((c) => c.type === 'match')
+              const attrRows = changes.filter((c) => c.type === 'attr')
+              return (
+                <>
+                  {matchRows.map(renderRow)}
+                  {attrRows.length > 0 ? (
+                    <>
+                      <div className="chg-attrs-h">🏷 Attribute changes</div>
+                      {attrRows.map(renderRow)}
+                    </>
+                  ) : (
+                    <div className="chg-attrs-none">
+                      🏷 No other proposed changes — every other attribute is already set.
+                    </div>
+                  )}
+                </>
+              )
+            })()}
             {p.web && (p.sources || []).length > 0 && (
               <details className="chg-sources">
                 <summary>🔎 {p.sources!.length} web source{p.sources!.length === 1 ? '' : 's'}</summary>
