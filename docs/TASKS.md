@@ -26,11 +26,10 @@ Last reviewed: 2026-07-23.
 
 ## Open
 
-Nothing is open pending code. One item is **data-gated**:
-
 | # | Task | What's left |
 |---|---|---|
 | 3 | Auto-fix confidence tuning | The gate is now a setting (Settings → Library → "Automatic fixes"), defaulting to 75. Choosing a *different* value needs a real library to observe false positives against — and it may well never need changing. |
+| 17 | **Agent/API auth** | The API surface is complete (192 endpoints — scan, apply, rebuild, collections are all there), but every `/api/*` route is behind the session middleware, so an agent can't drive the app it maintains without a credential. That gate is correct — the instance is internet-exposed — so the fix is a way IN, not a way around: a dedicated non-admin account, or a scoped API token honoured alongside the session cookie. Until then, agent-side verification has to go through `docker exec`, which bypasses the very surface it should be testing. NB an agent with host root can mint its own session in `auth.sqlite`; that it *shouldn't* is a matter of conduct, not enforcement, which is itself an argument for issuing a real credential. |
 
 The one-way **"Publish catalog"** mirror was **retired** 2026-07-21: nothing ever read what
 it published, and its name was persistently confused with the backing store that actually
