@@ -289,6 +289,15 @@ def main(argv):
     if "--materialize" in argv:
         ok, dead = materialize(con, kind, limit, all_refs="--all" in argv,
                                progress="--progress" in argv)
+        # RE-SELECT. width/height and the letterboxed-paste flag are populated BY
+        # materialize, so the pass above ran with none of them known — the shape test and
+        # the filler demotion could not have applied. Without this the picks stay one pass
+        # behind and an Algo import (which has no later AI step to re-choose) never
+        # demotes anything at all. Cheap: pure SQL over the index, no network.
+        if ok:
+            n2 = select(con, kinds=kinds)
+            print("media_choose: re-selected %d chosen assets with measured dimensions"
+                  % n2, file=sys.stderr)
         repo = repo_dir()
         sz = sum(os.path.getsize(os.path.join(repo, f)) for f in os.listdir(repo)
                  if not f.endswith(".tmp"))

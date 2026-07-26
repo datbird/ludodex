@@ -8707,6 +8707,21 @@ def _sync_worker(job, services, media_ids=(), full=False):
             step()
             if _stopped():
                 return
+        # IGDB art. Deterministic provider work — an id-keyed fetch, no AI — so it runs at
+        # EVERY tier, Algo included. Without it a clean import has only ONE art source:
+        # measured on the last run, 2,978 Steam covers against 18 from IGDB. That leaves
+        # nothing to promote when Steam's cover turns out to be an auto-generated
+        # placeholder (169 of 196 detected fillers were the sole cover their game had), so
+        # both the filler demotion and the vision picker have no alternative to choose.
+        # Previously this only ever ran via the AI reconcile path, which Algo never reaches.
+        if config.metadata_enabled("igdb") and not job.get("cancel"):
+            _phase("igdbart", "running")
+            job["step"] = "Fetching IGDB art…"
+            ok_ig, err_ig = _run_script("media_fetch.py", args=["--provider", "igdb"],
+                                        timeout=3600, job=job)
+            _phase("igdbart", "ok" if ok_ig else "failed", None if ok_ig else err_ig[:120])
+            if _stopped():
+                return
         # Built-in art gap-fill: any identified game whose source shipped no
         # cover/backdrop/logo (non-Steam stores, unresolved matches) gets it from
         # SteamGridDB by name/appid. Runs on EVERY successful sync — including
