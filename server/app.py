@@ -3437,14 +3437,30 @@ def _collection_candidates(nks):
         rows = lc.execute(
             "SELECT DISTINCT norm_key, canonical_title, platform FROM games "
             "WHERE norm_key IN (%s)" % ph, list(nks)).fetchall()
+        # PROVIDER-CONFIRMED compilations. IGDB states outright that these records are a
+        # bundle/pack (game_type), which build_library records in identity_review when it
+        # refuses the identity. That beats guessing from the title, and it is the ONLY way
+        # these particular entries can ever be found: once the identity is refused the
+        # entry is titled after a MEMBER ("Ys I"), so _looks_like_collection can never
+        # fire on it, and the bundle's real name isn't in the catalog at all.
+        try:
+            confirmed = {r[0] for r in lc.execute(
+                "SELECT DISTINCT norm_key FROM identity_review WHERE reason=? "
+                "AND norm_key IN (%s)" % ph,
+                ["compilation_identity"] + list(nks))}
+        except sqlite3.OperationalError:
+            confirmed = set()               # catalog predates identity_review
     finally:
         lc.close()
     seen = set()
     for nk, title, platform in rows:
-        if nk in seen or nk in known or not _looks_like_collection(title):
+        if nk in seen or nk in known:
+            continue
+        if nk not in confirmed and not _looks_like_collection(title):
             continue
         seen.add(nk)
-        out.append({"n": len(out), "norm_key": nk, "title": title, "platform": platform})
+        out.append({"n": len(out), "norm_key": nk, "title": title, "platform": platform,
+                    "provider_confirmed": nk in confirmed})
     return out
 
 
