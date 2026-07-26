@@ -9218,7 +9218,7 @@ function FindingContextStrip({ ctx }: { ctx?: FindingContext | null }) {
   )
 }
 
-// "Not right? Add context & re-run" — let the reviewer feed the model a hint and send
+// "Not right? Re-scan with AI" — let the reviewer feed the model a hint and send
 // the game back through the pipeline, optionally on a larger model.
 function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onRefined }: {
   f: AiFinding; currentModel?: string; escalationModel?: string; models: string[]; webCapable: boolean; onRefined: () => void
@@ -9244,7 +9244,7 @@ function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onR
         norm_key: f.norm_key, hint: hint.trim(), refs: refList(), model: model || undefined,
         web, run_id: f.run_id })
       if (r.used_refs?.length) setNote(`Grounded on ${r.used_refs.length} reference link${r.used_refs.length > 1 ? 's' : ''}.`)
-      if (!r.finding) setErr('Re-run found nothing to change — try a stronger model, more specific context, or pin it manually below.')
+      if (!r.finding) setErr('Re-scan found nothing to change — try a stronger model, more specific context, or pin it manually below.')
       else onRefined()
     } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
@@ -9278,7 +9278,7 @@ function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onR
     } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
   if (!open) return (
-    <button className="refine-toggle" onClick={() => setOpen(true)}>🔁 Not right? Add context, links, or pin it manually</button>
+    <button className="refine-toggle" onClick={() => setOpen(true)}>🔁 Not right? Re-scan with AI using context you add — or pin it manually</button>
   )
   const extra = [currentModel, escalationModel].filter((m): m is string => !!m && !models.includes(m))
   const opts = [...new Set([...extra, ...models])]
@@ -9299,10 +9299,10 @@ function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onR
             {opts.map((m) => <option key={m} value={m}>{m}{tagFor(m)}</option>)}
           </select>
         </label>
-        <label className="refine-web" title={webCapable ? 'Ground the re-run on a live web search' : 'This provider has no web search'}>
+        <label className="refine-web" title={webCapable ? 'Ground the re-scan on a live web search' : 'This provider has no web search'}>
           <input type="checkbox" checked={web} disabled={!webCapable} onChange={(e) => setWeb(e.target.checked)} /> Web
         </label>
-        <button className="ops-btn go" disabled={busy} onClick={run}>{busy ? 'Re-running…' : '✨ Re-run'}</button>
+        <button className="ops-btn go" disabled={busy} onClick={run}>{busy ? 'Re-scanning…' : '✨ Re-scan'}</button>
         <button className="ops-btn" disabled={busy} onClick={() => { setOpen(false); setErr(''); setNote('') }}>Cancel</button>
       </div>
       <div className="refine-pin">
