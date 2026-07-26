@@ -79,8 +79,16 @@ def index_con():
     CREATE INDEX IF NOT EXISTS ix_media_nk ON media(norm_key);
     CREATE INDEX IF NOT EXISTS ix_media_nk_kind ON media(norm_key, kind);
     """)
-    if "hidden" not in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
+    _cols = {r[1] for r in con.execute("PRAGMA table_info(media)")}
+    if "hidden" not in _cols:
         con.execute("ALTER TABLE media ADD COLUMN hidden INTEGER DEFAULT 0")
+    # filler: 1 = confirmed letterboxed paste (real content in a central band, blurred
+    # padding above/below — Steam auto-generates these for games with no library art).
+    # NULL = never measured. Set at materialize time, when the bytes are in hand; the
+    # selector demotes a confirmed filler beneath any authored cover. Deliberately
+    # tri-state: "not yet measured" must not be treated as "fine", nor as "bad".
+    if "filler" not in _cols:
+        con.execute("ALTER TABLE media ADD COLUMN filler INTEGER")
     return con
 
 

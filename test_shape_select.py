@@ -38,11 +38,11 @@ def _con():
     return con
 
 
-def _put(con, nk, kind, provider, ref, width=None, height=None, matched=1):
+def _put(con, nk, kind, provider, ref, width=None, height=None, matched=1, filler=None):
     con.execute(
         "INSERT INTO media(norm_key,system,kind,provider,ref_type,ref,ext,matched,"
-        "width,height,chosen) VALUES(?,?,?,?,'url',?,'jpg',?,?,?,0)",
-        (nk, "", kind, provider, ref, matched, width, height))
+        "width,height,filler,chosen) VALUES(?,?,?,?,'url',?,'jpg',?,?,?,?,0)",
+        (nk, "", kind, provider, ref, matched, width, height, filler))
     return con.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
@@ -112,6 +112,34 @@ _put(con, "unk", "cover", media.priority("cover")[-1], "https://x/known.jpg", 60
 media_choose.select(con)
 check(_chosen(con, "unk", "cover") == "https://x/unknown.png",
       "unknown dims stay neutral; provider priority still decides")
+
+print("\nselect(): a confirmed letterboxed paste loses to authored art")
+con = _con()
+# The filler is Steam's own (top priority) AND larger — it wins on every other term.
+_put(con, "filler", "cover", top, "https://x/portrait.png", 600, 900, filler=1)
+_put(con, "filler", "cover", media.priority("cover")[-1], "https://x/real.jpg", 264, 352)
+media_choose.select(con)
+check(_chosen(con, "filler", "cover") == "https://x/real.jpg",
+      "authored cover beats a bigger, higher-priority filler")
+
+print("\nselect(): an UNMEASURED candidate is never assumed to be filler")
+con = _con()
+_put(con, "unmeas", "cover", top, "https://x/portrait.png", 600, 900)      # filler NULL
+_put(con, "unmeas", "cover", media.priority("cover")[-1], "https://x/real.jpg", 264, 352)
+media_choose.select(con)
+check(_chosen(con, "unmeas", "cover") == "https://x/portrait.png",
+      "NULL filler stays neutral; provider priority still decides")
+
+print("\nselect(): a sole filler is still served (no blank cards)")
+con = _con()
+_put(con, "onlyfill", "cover", top, "https://x/portrait.png", 600, 900, filler=1)
+media_choose.select(con)
+check(_chosen(con, "onlyfill", "cover") == "https://x/portrait.png",
+      "demotion never starves a game of its only cover")
+
+print("\nlooks_padded(): tri-state discipline")
+check(media.looks_padded("/nonexistent/nope.png") is False,
+      "unreadable file is False, never an exception")
 
 print("\n%s" % ("ALL PASS" if not FAIL else "FAILURES: %d" % len(FAIL)))
 for f in FAIL:

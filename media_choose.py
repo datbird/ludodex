@@ -101,7 +101,7 @@ def select(con, kinds=None):
     pin_rank = _load_pins()
     rows = con.execute(
         "SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key, "
-        "width, height "
+        "width, height, filler "
         "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
         % ",".join("'%s'" % k for k in scalar)
     ).fetchall()
@@ -129,10 +129,15 @@ def select(con, kinds=None):
         mw, mh = r["width"], r["height"]
         sw, sh = (mw, mh) if (mw and mh) else media.derived_dims(r["ref"])
         bad_shape = 0 if media.shape_ok(r["kind"], sw, sh) else 1
+        # A confirmed letterboxed paste loses to ANY authored cover, whoever supplied it
+        # — this is where Steam's "authoritative for its own games" precedence has to
+        # yield, because the asset isn't Steam's art, it's Steam's placeholder. Only a
+        # CONFIRMED filler (measured) is demoted; NULL means unmeasured, never assumed.
+        filler = 1 if r["filler"] == 1 else 0
         px = -(mw * mh) if (mw and mh) else 0        # bigger wins; unknown stays neutral
-        # pin first (user authority), then shape, then provider priority, then measured
-        # resolution, then the original tie-breakers: matched, local file, lowest id.
-        sk = (pin, bad_shape, pr, px, 0 if r["matched"] else 1,
+        # pin first (user authority), then shape, then authored-vs-placeholder, then
+        # provider priority, measured resolution, and the original tie-breakers.
+        sk = (pin, bad_shape, filler, pr, px, 0 if r["matched"] else 1,
               0 if r["ref_type"] == "file" else 1, r["id"])
         _sys = r["system"] or ""
         _gk = (r["game_key"] or "") if not _sys else ""
@@ -216,10 +221,17 @@ def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
             # authoritative source (provider filenames lie: Steam serves
             # `library_600x900.jpg` at 300x450 for older titles). Feeds the shape test
             # and the resolution tie-break on the next select pass.
-            _w, _h = _measure(os.path.join(
-                repo, "%s.%s" % (sha, (r["ext"] or "jpg").split("?")[0])))
+            _path = os.path.join(
+                repo, "%s.%s" % (sha, (r["ext"] or "jpg").split("?")[0]))
+            _w, _h = _measure(_path)
+            # Confirm (or clear) the letterboxed-paste flag while the file is local.
+            # Only meaningful for kinds with an expected upright shape — a wide hero is
+            # SUPPOSED to have its content in a band.
+            _fill = (1 if media.looks_padded(_path) else 0) \
+                if media.KIND_ORIENT.get(r["kind"]) == "portrait" else None
             con.execute("UPDATE media SET sha1=?, width=COALESCE(?,width), "
-                        "height=COALESCE(?,height) WHERE id=?", (sha, _w, _h, r["id"]))
+                        "height=COALESCE(?,height), filler=COALESCE(?,filler) "
+                        "WHERE id=?", (sha, _w, _h, _fill, r["id"]))
             ok += 1
         else:
             # dead reference: drop it from contention and promote the next best
@@ -241,8 +253,8 @@ def _repick(con, norm_key, kind, system=None):
     """After a dead asset is removed, choose the next-best for this game+kind within
     the SAME system bucket (per-platform siloing, DESIGN §11.4)."""
     rank = {p: i for i, p in enumerate(media.priority(kind))}
-    cands = con.execute("SELECT id, provider, matched, ref_type, ref, width, height "
-                        "FROM media "
+    cands = con.execute("SELECT id, provider, matched, ref_type, ref, width, height, "
+                        "filler FROM media "
                         "WHERE norm_key=? AND kind=? AND COALESCE(system,'')=? "
                         "AND COALESCE(hidden,0)=0",
                         (norm_key, kind, system or "")).fetchall()
@@ -255,6 +267,7 @@ def _repick(con, norm_key, kind, system=None):
         mw, mh = r["width"], r["height"]
         sw, sh = (mw, mh) if (mw and mh) else media.derived_dims(r["ref"])
         return (0 if media.shape_ok(kind, sw, sh) else 1,
+                1 if r["filler"] == 1 else 0,
                 rank.get(r["provider"], 99),
                 -(mw * mh) if (mw and mh) else 0,
                 0 if r["matched"] else 1,

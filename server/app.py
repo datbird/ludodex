@@ -4628,21 +4628,41 @@ def _mark_art_adjudicated(nk, now):
         pass
 
 
-def _ai_adjudicate_game(nk, title):
+def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
     """With BOTH providers linked + art fetched, let AI pick the best image per kind
-    and the better provider per conflicting attribute. Best-effort; never raises."""
+    and the better provider per conflicting attribute. Best-effort; never raises.
+
+    `only_kinds` restricts the vision pass (Light spends it on `cover` alone — the one
+    asset the grid actually shows); None means every kind with a real choice to make.
+    `attrs=False` skips the attribute adjudication, for callers that only want art."""
     if ai.area_available("art"):                       # media — vision pick per kind
         try:
             rc = ro(INDEX_DB)
             try:
-                kinds = [r["kind"] for r in rc.execute(
-                    "SELECT kind FROM media WHERE norm_key=? GROUP BY kind "
-                    "HAVING COUNT(DISTINCT provider) >= 2", (nk,))]
+                q = ("SELECT kind FROM media WHERE norm_key=? "
+                     "AND COALESCE(hidden,0)=0 ")
+                args = [nk]
+                if only_kinds:
+                    q += "AND kind IN (%s) " % ",".join("?" * len(only_kinds))
+                    args += list(only_kinds)
+                q += "GROUP BY kind HAVING COUNT(DISTINCT provider) >= 2"
+                kinds = [r["kind"] for r in rc.execute(q, args)]
                 for kind in kinds:
                     cands = []
-                    for r in rc.execute("SELECT id, ref_type, ref, ext, sha1 FROM media "
-                                        "WHERE norm_key=? AND kind=? ORDER BY id",
-                                        (nk, kind)).fetchall():
+                    for r in rc.execute(
+                            "SELECT id, ref_type, ref, ext, sha1, width, height, filler "
+                            "FROM media WHERE norm_key=? AND kind=? "
+                            "AND COALESCE(hidden,0)=0 ORDER BY id",
+                            (nk, kind)).fetchall():
+                        # Don't pay a vision call to weigh candidates Algo has already
+                        # disqualified — a confirmed filler or a provably wrong shape.
+                        if r["filler"] == 1:
+                            continue
+                        _w, _h = r["width"], r["height"]
+                        if not (_w and _h):
+                            _w, _h = media.derived_dims(r["ref"])
+                        if not media.shape_ok(kind, _w, _h):
+                            continue
                         t = _thumb_bytes(r)
                         if t:
                             cands.append((r["id"], t))
@@ -4667,6 +4687,8 @@ def _ai_adjudicate_game(nk, title):
                 rc.close()
         except Exception as e:
             print("adjudicate media %s: %s" % (nk, str(e)[:160]), file=sys.stderr)
+    if not attrs:
+        return
     try:                                                # attributes — pick per conflict
         ig, sc = _igdb_attrs_for(nk), _ss_attrs_for(nk)
         conflicts = {k: {"igdb": ig[k], "screenscraper": sc[k]}
@@ -4682,6 +4704,51 @@ def _ai_adjudicate_game(nk, title):
                         overrides.set_override(nk, k, sval, origin=prov)
     except Exception as e:
         print("adjudicate attrs %s: %s" % (nk, str(e)[:160]), file=sys.stderr)
+
+
+def _ai_art_pass(keys, heavy=False, should_stop=lambda: False):
+    """Vision art pass for a store import. Returns the number of games adjudicated.
+
+    LIGHT spends vision on `cover` ONLY — the one asset the grid actually shows, and the
+    one that surfaced this whole defect (Steam serves an auto-generated blur-padded
+    portrait for games with no library art; it is geometrically perfect and visually
+    wrong, so only looking at it can tell). HEAVY covers every kind with a real choice.
+    ALGO never reaches here — it has no model by definition.
+
+    Scoped to `keys` (this import's games) and bounded by the same ai.check_limit caps as
+    every other paid loop, so it can never become an open-ended sweep. Candidates Algo
+    already disqualified are skipped inside _ai_adjudicate_game, so the model is never
+    paid to weigh an image we can prove is wrong."""
+    if not keys or not ai.area_available("art"):
+        return 0
+    kinds = None if heavy else ("cover",)
+    provider, model = ai.provider_for_area("art"), ai.model_for_area("art")
+    titles = {}
+    lc = ro(LIBRARY_DB)
+    try:
+        for k in keys:
+            r = lc.execute("SELECT canonical_title FROM games WHERE norm_key=? LIMIT 1",
+                           (k,)).fetchone()
+            titles[k] = (r["canonical_title"] if r and r["canonical_title"] else k)
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        lc.close()
+    n = 0
+    for k in keys:
+        if should_stop():
+            break
+        try:
+            ai.check_limit(provider, model)     # budget cap reached -> stop, don't raise
+        except Exception:
+            print("art pass: budget cap reached after %d game(s)" % n, file=sys.stderr)
+            break
+        try:
+            _ai_adjudicate_game(k, titles.get(k, k), only_kinds=kinds, attrs=False)
+            n += 1
+        except Exception as e:                  # noqa: BLE001  never abort the import
+            print("art pass %s: %s" % (k, str(e)[:120]), file=sys.stderr)
+    return n
 
 
 def _aimeta_apply(should_stop, only_ids=None):
@@ -8727,6 +8794,27 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 _phase("supplement", "skipped", str(e)[:120])
         else:
             _phase("supplement", "skipped")
+
+        # ---- vision art pass (Light = covers, Heavy = every kind) ----
+        # Nothing had ever LOOKED at a chosen image: selection ranked on provider
+        # priority then row id. Algo's shape + filler tests catch what is provable;
+        # this catches what needs judgment — a Steam capsule that is real but worse
+        # than IGDB's, and anything a heuristic can't prove. Self-limiting: where Algo
+        # already disqualified the alternatives only one candidate survives and
+        # _ai_adjudicate_game makes no call at all.
+        if ai_srcs and not job.get("cancel"):
+            _phase("artpick", "running")
+            job["step"] = "Choosing best art…"
+            try:
+                # derived here, not reused from the supplement block: `heavy` is bound
+                # inside that block's try and may not exist if it bailed early.
+                art_heavy = "heavy" in tiers.values()
+                art_keys = aimeta.targets("all", 5000, sources=ai_srcs)
+                done = _ai_art_pass(art_keys, heavy=art_heavy, should_stop=_stopped)
+                _phase("artpick", "ok", "%d game(s) reviewed" % done)
+            except Exception as e:              # noqa: BLE001  never fail the import
+                _phase("artpick", "skipped", str(e)[:120])
+
     job["prog"]["done"] = job["prog"]["total"]   # snap to complete
     job["step"] = "Done"
     job["running"] = False

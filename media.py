@@ -116,6 +116,60 @@ def derived_dims(ref):
     return (None, None)
 
 
+def looks_padded(path, bands=9, edge_ratio=6.0):
+    """True when an image is a LETTERBOXED PASTE — real content in a central band,
+    blurred/flat padding above and below.
+
+    Steam auto-generates a `portrait.png` for games that never got library art by
+    dropping the ~460x215 header onto a 600x900 canvas and blur-filling the rest. The
+    result passes every geometric test — it is genuinely 600x900 portrait — while being
+    visually a landscape image. Measured orientation and EFFECTIVE orientation disagree,
+    and that gap is the whole defect.
+
+    Deterministic, no model: slice into horizontal bands and compare per-band edge
+    energy. Authored cover art carries detail top to bottom; a padded paste has near-zero
+    high-frequency energy in the outer bands and all of it concentrated in the middle.
+
+    Conservative by construction — it only reports True when the contrast is stark, and
+    callers must treat it as a DEMOTION signal, never a deletion: an image that is all a
+    game has must still be servable."""
+    try:
+        from PIL import Image, ImageFilter
+    except Exception:                       # noqa: BLE001  Pillow absent
+        return False
+    try:
+        with Image.open(path) as im:
+            im = im.convert("L")
+            w, h = im.size
+            if h <= w or h < bands * 4:     # only meaningful for portrait canvases
+                return False
+            edges = im.filter(ImageFilter.FIND_EDGES)
+            step = h // bands
+            energy = []
+            for i in range(bands):
+                box = (0, i * step, w, (i + 1) * step if i < bands - 1 else h)
+                band = edges.crop(box)
+                px = list(band.getdata())
+                energy.append(sum(px) / max(1, len(px)))
+        if not energy:
+            return False
+        peak = max(energy)
+        if peak < 8.0:                      # no real content anywhere — not our case
+            return False
+        # A CONTIGUOUS RUN of dead bands is the tell, not low energy on its own.
+        # Authored art can have one quiet edge (a plain border, a dark sky); measured
+        # samples show a real cover bottoming out for at most ~3 of 9 bands, while a
+        # padded paste goes flat for 4+ consecutive bands at roughly a quarter of peak.
+        dead = max(4.0, peak * 0.25)
+        run = best = 0
+        for e in energy:
+            run = run + 1 if e < dead else 0
+            best = max(best, run)
+        return best >= (bands // 2)
+    except Exception:                       # noqa: BLE001  unreadable / not an image
+        return False
+
+
 def shape_ok(kind, w, h):
     """False ONLY when the orientation is known AND contradicts the kind.
 
