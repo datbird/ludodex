@@ -4397,7 +4397,12 @@ def _finding_context(ctx):
             "files": f.get("files") or [], "paths": f.get("paths") or [],
             "folders": f.get("folders") or [],
             "tags": f.get("tags") or [], "siblings": f.get("siblings") or [],
-            "current_match": (m.get("title") if m else None)}
+            "current_match": (m.get("title") if m else None),
+            "current_match_year": (m.get("year") if m else None),
+            # The values a proposed change would REPLACE. Without these the review page
+            # can only show what a value is becoming, never what it is now — so a
+            # reviewer is asked to approve a change they cannot actually see.
+            "current_attrs": ctx.get("have") or {}}
 
 
 def _manual_edits(nk):

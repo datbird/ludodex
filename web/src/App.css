@@ -3249,6 +3249,19 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .chg-rename .chg-label { color: var(--text-dim, #9aa); text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; }
 .chg-from { color: var(--text-h); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--text-h) 45%, transparent); font-weight: 500; }
 .chg-to { color: var(--accent); font-weight: 700; }
+/* Attribute rows now state BOTH sides. The outgoing value is monospaced to line up with
+   the incoming one, and clipped so a long description can't push the arrow off-screen. */
+.chg-row .chg-from { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  max-width: 34%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "not set" is a real left-hand side, not a value being destroyed — filling a blank and
+   overwriting existing data are different decisions, so it must not read as struck-out. */
+.chg-from.chg-unset { color: var(--text-dim, #9aa); text-decoration: none; font-style: italic;
+  font-weight: 400; opacity: 0.8; }
+/* Names the subject of the card. The header shows the PROPOSED title, so without this the
+   reviewer has no stated anchor for what is being changed. */
+.chg-proposal { font-size: 12px; color: var(--text-dim, #9aa); padding: 7px 12px 6px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.chg-proposal b { color: var(--text-h); font-weight: 600; }
 .chg-match-src { font-size: 11px; color: var(--text-dim, #9aa); }
 .chg-sources { padding: 6px 12px; font-size: 12px; }
 .chg-sources ul { margin: 4px 0 0; padding-left: 18px; }

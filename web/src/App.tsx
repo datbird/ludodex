@@ -9066,8 +9066,9 @@ function MetadataScan() {
 // One selectable change within a finding: the provider link, or one attribute fill.
 type Change =
   | { id: string; type: 'match'; label: string; value: string; cover?: string | null
-      renameFrom?: string; renameTo?: string }
-  | { id: string; type: 'attr'; attrKind: string; label: string; value: string }
+      renameFrom?: string; renameTo?: string; idFrom?: string; idTo?: string }
+  | { id: string; type: 'attr'; attrKind: string; label: string; value: string
+      from?: string }
 
 function findingChanges(f: AiFinding): Change[] {
   const out: Change[] = []
@@ -9082,18 +9083,31 @@ function findingChanges(f: AiFinding): Change[] {
     const srcs = f.context?.sources || []
     const romOnly = srcs.length > 0 && srcs.every((s) => s === 'emulation' || s === 'archive')
     const renameTo = (romOnly && igdb?.name && igdb.name !== curTitle) ? igdb.name : undefined
+    // The identity change ALWAYS gets a from → to, not just when a rename follows. A
+    // store-owned game keeps its title, but linking it to a provider is still a change
+    // to what the entry IS, and a reviewer ticking a box deserves to see both sides.
+    const idTo = pms.map((m) => `${m.name}${m.year ? ` (${m.year})` : ''}`).join(' · ')
+    const cm = f.context?.current_match
+    const idFrom = cm
+      ? cm + (f.context?.current_match_year ? ` (${f.context.current_match_year})` : '')
+      : 'not linked to any provider'
     out.push({
       id: `${f.id}:match`, type: 'match',
       label: '🔗 Link to ' + pms.map((m) => `${pmLabel(m)} #${pmId(m)}`).join(' + '),
       cover: pms.find((m) => m.cover)?.cover ?? null,
-      value: pms.map((m) => `${m.name}${m.year ? ` (${m.year})` : ''}`).join(' · '),
+      value: idTo,
       renameFrom: renameTo ? curTitle : undefined, renameTo,
+      idFrom, idTo,
     })
   }
   for (const k of Object.keys(f.payload.attributes || {})) {
+    const cur = f.context?.current_attrs?.[k]
+    const from = (cur === null || cur === undefined || (Array.isArray(cur) && !cur.length))
+      ? '' : fmtAttrVal(cur)
     out.push({
       id: `${f.id}:attr:${k}`, type: 'attr', attrKind: k,
       label: k.replace(/_/g, ' '), value: fmtAttrVal(f.payload.attributes[k]),
+      from,
     })
   }
   return out
@@ -9513,6 +9527,13 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
               <button className="chg-dismiss" title="Discard this suggestion"
                 disabled={busy} onClick={() => discardGroup(f.id)}>✕</button>
             </div>
+            {/* Say plainly WHOSE changes these are and how many. The card header shows the
+                game's PROPOSED title, so without this line a reviewer has no anchor for
+                what is actually being altered. */}
+            <div className="chg-proposal">
+              These are the changes proposed for <b>{f.title}</b>
+              {changes.length ? <> — {changes.length} change{changes.length === 1 ? '' : 's'}</> : null}
+            </div>
             <AnchorFacts f={f} />
             <FindingContextStrip ctx={f.context} />
             {p.match?.status === 'wrong' && (
@@ -9534,13 +9555,18 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
                   <div className="chg-match-body">
                     {c.renameTo ? (
                       <div className="chg-rename">
-                        <span className="chg-label">Title</span>
+                        <span className="chg-label">Title change</span>
                         <b className="chg-from">{c.renameFrom}</b>
                         <span className="chg-arrow">→</span>
                         <b className="chg-to">{c.renameTo}</b>
                       </div>
                     ) : (
-                      <div className="chg-rename"><span className="chg-value">{c.value}</span></div>
+                      <div className="chg-rename">
+                        <span className="chg-label">Identity change</span>
+                        <b className="chg-from">{c.idFrom}</b>
+                        <span className="chg-arrow">→</span>
+                        <b className="chg-to">{c.idTo || c.value}</b>
+                      </div>
                     )}
                     <div className="chg-match-src">{c.label}{tag}</div>
                   </div>
@@ -9548,7 +9574,12 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
               ) : (
                 <label key={c.id} className={'chg-row' + (man ? ' chg-manual' : '')}>
                   <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} />
-                  <span className="chg-label">{c.label}{tag}</span>
+                  <span className="chg-label">{c.label} change{tag}</span>
+                  {/* State BOTH sides. "not set" is a real, meaningful left-hand side —
+                      filling a blank and overwriting an existing value are different
+                      decisions, and the reviewer can only tell them apart if we say so. */}
+                  <span className={'chg-from' + (c.from ? '' : ' chg-unset')}>
+                    {c.from || 'not set'}</span>
                   <span className="chg-arrow">→</span>
                   <span className="chg-value">{c.value}</span>
                 </label>

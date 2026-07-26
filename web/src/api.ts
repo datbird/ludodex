@@ -156,6 +156,10 @@ export interface FindingContext {
   tags: string[]
   siblings: string[]
   current_match: string | null
+  current_match_year?: number | null
+  // The values a proposed change would REPLACE, keyed by attribute kind. Lets the review
+  // page state "release year: 2007 → 2024" instead of only naming the new value.
+  current_attrs?: Record<string, string | string[] | null>
   // how this game is currently identified (igdb_resolution.matched_by), its homebrew.py
   // release type (null = commercial), and whether that type must never be a commercial title.
   provenance?: string | null
