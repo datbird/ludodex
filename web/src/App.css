@@ -3229,7 +3229,22 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .chg-art-kind { font-size: 10px; color: var(--text-dim); text-transform: capitalize; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chg-media-note { font-size: 11px; margin-top: 7px; }
 .chg-media-none { font-size: 12px; color: var(--text-dim); }
-.chg-group { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; background: var(--panel); overflow: hidden; }
+/* ONE content column per card. The header title and the change rows both sit after a
+   checkbox, while the proposal line, anchor facts, context strip and footers started at
+   the raw padding — two competing left edges, which made the change block look like it
+   belonged to a different section. Everything now shares --chg-gutter, with the
+   checkboxes living in the space to its left. Derived from its parts rather than
+   hard-coded so the column can't drift if the checkbox or gap changes. */
+.chg-group { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; background: var(--panel); overflow: hidden;
+  --chg-pad: 12px; --chg-cb: 15px; --chg-gap: 10px;
+  --chg-gutter: calc(var(--chg-pad) + var(--chg-cb) + var(--chg-gap)); }
+/* Fixed so the gutter math is exact — a UA-default checkbox width would shift the column. */
+.chg-group input[type="checkbox"] { width: var(--chg-cb); height: var(--chg-cb); }
+.chg-group .chg-proposal,
+.chg-group .af-row,
+.chg-group .fc-strip,
+.chg-group .chg-media,
+.chg-group .refine-toggle { padding-left: var(--chg-gutter); }
 .chg-ghead { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: color-mix(in srgb, var(--panel) 80%, var(--border)); border-bottom: 1px solid var(--border); }
 .chg-check { display: inline-flex; }
 .chg-gtitle { font-weight: 700; color: var(--text-h); flex: 1; }
