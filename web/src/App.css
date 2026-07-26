@@ -3202,6 +3202,10 @@ span.idchip { color: color-mix(in srgb, var(--chip, var(--text)) 80%, var(--text
 .chg-scope-hint { font-size: 12px; color: var(--text-dim); flex: 1 1 240px; }
 /* per-finding cover before/after diff */
 .chg-media { border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); padding: 8px 12px; background: color-mix(in srgb, var(--accent) 4%, transparent); }
+/* "no cover changes" is a NULL result — it must not wear the accent band that marks a
+   real one, or the change block ends up sandwiched between two emphasis zones and the
+   card reads as a stack of equal sections. A quiet footnote instead. */
+.chg-media.chg-media-none { background: transparent; color: var(--text-dim, #9aa); }
 .chg-media-h { font-size: 12px; font-weight: 700; color: var(--text-h); margin-bottom: 6px; }
 .chg-media-rows { display: flex; flex-wrap: wrap; gap: 10px; }
 .chg-media-row { display: flex; flex-direction: column; align-items: center; gap: 3px; }
@@ -3286,8 +3290,15 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .chg-sources { padding: 6px 12px; font-size: 12px; }
 .chg-sources ul { margin: 4px 0 0; padding-left: 18px; }
 
-/* factual context strip — what we KNOW about the ROM, above the AI's proposals */
-.fc-strip { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: rgba(127,127,127,0.05); }
+/* factual context strip — what we KNOW about the ROM, above the AI's proposals.
+   No background band and only a hairline rule: this is SUPPORTING evidence, not a
+   section header. Tinted and bordered at full strength it read as a terminator closing
+   the title section, which made each change below look like its own top-level section
+   rather than content belonging to this game. Every division inside a card is now the
+   same 55% hairline, so the accent rule on the change label is what marks where the
+   proposals begin. */
+.fc-strip { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
 .fc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .fc-paths { display: flex; flex-direction: column; gap: 3px; }
 .fc-paths-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim, #9aa); }
@@ -3308,7 +3319,8 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .conf-pill.conf-low { background: color-mix(in srgb, #e5484d 18%, transparent); color: #e5484d; }
 
 /* always-on anchor facts (System / Year) with a new/known badge */
-.af-row { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.af-row { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
 .af-fact { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .af-key { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim, #9aa); white-space: nowrap; }
 .af-val { font-size: 13px; color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
