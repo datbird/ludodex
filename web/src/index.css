@@ -8,6 +8,12 @@
   --accent: #c084fc;
   --accent-bg: rgba(192, 132, 252, 0.15);
   --art-bg: #0e0f13;
+  /* Wash behind a review card's PROPOSAL zone. Theme-tuned for the same reason
+     --accent-bg is: dark mixes a pale accent into a near-black panel and LIFTS it, while
+     light mixes a deep saturated accent into white and DARKENS it — the light one reads
+     far heavier at equal strength, so it gets less. */
+  --chg-wash: color-mix(in srgb, var(--accent) 7%, transparent);
+  --chg-wash-hover: color-mix(in srgb, var(--accent) 13%, transparent);
   color-scheme: dark;
 
   /* motion tokens (shared reveal transition) */
@@ -31,6 +37,8 @@
   --accent: #9333ea;
   --accent-bg: rgba(147, 51, 234, 0.10);
   --art-bg: #e9ebf1;
+  --chg-wash: color-mix(in srgb, var(--accent) 4%, transparent);
+  --chg-wash-hover: color-mix(in srgb, var(--accent) 9%, transparent);
   color-scheme: light;
 }
 

@@ -3201,11 +3201,22 @@ span.idchip { color: color-mix(in srgb, var(--chip, var(--text)) 80%, var(--text
 .chg-scope-btn.sel { background: var(--accent); color: #fff; font-weight: 700; }
 .chg-scope-hint { font-size: 12px; color: var(--text-dim); flex: 1 1 240px; }
 /* per-finding cover before/after diff */
-.chg-media { border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); padding: 8px 12px; background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.chg-media { border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); padding: 8px 12px; }
+/* The PROPOSAL zone — identity, attributes and cover — shares one faint accent wash that
+   sets it apart from the factual context above it. Applied to every change section at the
+   same strength so the contiguous rows read as a single zone; giving them individual
+   tints is what previously made one card look like a stack of unrelated sections.
+   Composited over the panel via color-mix, so it holds in both themes. */
+.chg-group .chg-row,
+.chg-group .chg-attrs-h,
+.chg-group .chg-attrs-none,
+.chg-group .chg-media { background: var(--chg-wash); }
 /* "no cover changes" is a NULL result — it must not wear the accent band that marks a
    real one, or the change block ends up sandwiched between two emphasis zones and the
    card reads as a stack of equal sections. A quiet footnote instead. */
-.chg-media.chg-media-none { background: transparent; color: var(--text-dim, #9aa); }
+/* Keeps the zone's wash (it IS part of the proposal zone) but stays textually quiet — the
+   accent BAND it used to carry is what made a null result shout like a real change. */
+.chg-media.chg-media-none { color: var(--text-dim, #9aa); }
 /* Attribute changes are a RESERVED section, mirroring the cover section: present whether
    or not the scan proposed anything, so the card always answers "what about the other
    attributes?" rather than leaving the reviewer to infer silence from a missing row.
@@ -3267,7 +3278,9 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .chg-dismiss:disabled { opacity: 0.4; cursor: default; }
 .chg-warn { font-size: 12px; color: #d98a00; background: color-mix(in srgb, #d98a00 12%, transparent); padding: 6px 12px; }
 .chg-row { display: flex; align-items: center; gap: 10px; padding: 7px 12px; font-size: 13px; border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); cursor: pointer; }
-.chg-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+/* Must clear the zone wash, not sit level with it, or a selectable row stops signalling
+   that it's interactive. */
+.chg-row:hover { background: var(--chg-wash-hover); }
 .chg-row input { flex: none; }
 .chg-cover { width: 22px; height: 30px; object-fit: cover; border-radius: 3px; }
 .chg-label { color: var(--text); text-transform: capitalize; }
@@ -3963,7 +3976,10 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
   font-weight: 700; padding: 1px 6px; border-radius: 6px; text-transform: none; letter-spacing: 0;
   color: #e88c1e; background: rgba(230,140,30,0.16); border: 1px solid rgba(230,140,30,0.45); }
 .aim-attr-manual .aim-attr-k, .chg-manual .chg-label { color: #e88c1e; opacity: 1; }
-.chg-manual { background: rgba(230,140,30,0.07); border-radius: 7px; }
+/* Scoped to out-specify the proposal-zone wash (.chg-group .chg-row). This marks a change
+   that would OVERWRITE a manual edit — losing it to a background rule would silently drop
+   the one warning that says "you set this by hand". */
+.chg-manual, .chg-group .chg-row.chg-manual { background: rgba(230,140,30,0.07); border-radius: 7px; }
 .aim-accept-warn { box-shadow: 0 0 0 2px rgba(230,140,30,0.5); }
 .bs-auto { flex: 1 1 auto; display: flex; align-items: center; gap: 8px; }
 .bs-auto input { width: 90px; flex: 0 0 auto; }
