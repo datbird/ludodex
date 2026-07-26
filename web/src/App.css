@@ -3255,15 +3255,15 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
    on the new title with no idea what was being changed, and long titles wrapped so the
    arrow stranded at the end of a line. Vertical stacking fixes both. */
 .chg-rename { display: grid; gap: 3px; min-width: 0; }
-/* min-height carries the accent mark: the mark is deliberately taller than the 11px
-   label, so the row has to reserve space for it or it collides with the line below. */
 .chg-rename .chg-label {
   color: var(--text-h); text-transform: uppercase; font-size: 11px; font-weight: 600;
-  letter-spacing: 0.09em; display: flex; align-items: center; gap: 9px; min-height: 26px; }
-/* The accent rule is what draws the eye to the block — position and a structural mark
-   rather than type size, so a four-word label never outshouts the titles it describes. */
+  letter-spacing: 0.09em; display: flex; align-items: center; gap: 9px; }
+/* The accent mark is what draws the eye to the block — position and a structural mark
+   rather than type size, so a four-word label never outshouts the titles it describes.
+   Thickness carries that weight; height stays at the label's own scale so the mark reads
+   as a block beside the text rather than a rule running past it. */
 .chg-rename .chg-label::before {
-  content: ''; flex: none; width: 4px; height: 26px; border-radius: 2px;
+  content: ''; flex: none; width: 8px; height: 13px; border-radius: 2px;
   background: var(--accent); }
 /* Never clip an identity: the reviewer is judging exactly these strings. */
 .chg-rename .chg-from { max-width: none; white-space: normal; overflow: visible;
