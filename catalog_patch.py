@@ -211,3 +211,57 @@ def split(con, from_key, to_key, to_title, picked, data_dir):
         _recompute_denorm(con, gid, to_key, plat, title_ids, entry_ids)
     con.commit()
     return {"to_key": to_key, "new_entries": len(new_by_plat)}
+
+
+def materialize_members(con, data_dir):
+    """Insert catalog entries for the members of OWNED collections that have none.
+
+    DESIGN §13's defining property is that recording a collection takes effect
+    IMMEDIATELY — credit was computed at read time, so nothing had to be rebuilt. Making
+    members real entries put that property at risk: an accept would record 28 collections
+    and the library would show none of their games until someone happened to run a full
+    build. This is the surgical half, so the property holds.
+
+    Mirrors build_library's pass exactly (same ownership test, same skip rule, same
+    platform normalisation) per this module's correctness contract: a patched catalog and
+    a rebuilt one must agree. Idempotent — safe to call after every apply.
+    """
+    import compilations
+    from media import norm_system
+    if not any(r[1] == "via_collection" for r in con.execute("PRAGMA table_info(sources)")):
+        return 0                        # catalog predates the column; a rebuild will do it
+    owned = {r[0] for r in con.execute(
+        "SELECT DISTINCT g.base_key FROM games g JOIN sources s ON s.game_id=g.id "
+        "WHERE s.state='have'")}
+    have = {r[0] for r in con.execute("SELECT DISTINCT base_key FROM games")}
+    made = 0
+    for c in compilations.all_collections(data_dir):
+        if c["coll_key"] not in owned:
+            continue                    # only an OWNED bundle credits anything
+        full = compilations.get_collection(data_dir, c["coll_key"]) or {}
+        row = con.execute(
+            "SELECT g.platform, (SELECT s.source FROM sources s WHERE s.game_id=g.id "
+            "AND s.state='have' LIMIT 1) FROM games g WHERE g.base_key=? LIMIT 1",
+            (c["coll_key"],)).fetchone()
+        cplat, csrc = (row[0] or "pc", row[1] or "") if row else ("pc", "")
+        for m in full.get("members") or []:
+            mk = m["member_key"]
+            if not mk or mk in have:
+                continue                # a real entry wins; it keeps read-time credit
+            mplat = norm_system((m.get("member_platform") or cplat) or "pc") or "pc"
+            cur = con.execute(
+                "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,"
+                "game_key,n_sources,n_kinds,sources_summary,has_emulation,has_steam,"
+                "has_gog,has_epic,has_itch,has_archive,in_playnite,in_launchbox,wanted) "
+                "VALUES(?,?,?,?,?,?,1,0,?,0,0,0,0,0,0,0,0,0)",
+                (m["member_title"], mk, mplat, "%s@%s" % (mk, mplat), mk,
+                 "title:%s" % mk, "via:" + c["name"]))
+            con.execute(
+                "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,"
+                "state,via_collection) VALUES(?,?,?,?,?,?,'have',?)",
+                (cur.lastrowid, csrc, mplat, "", m["member_title"], c["name"],
+                 c["coll_key"]))
+            have.add(mk)
+            made += 1
+    con.commit()
+    return made

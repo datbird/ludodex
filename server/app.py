@@ -3452,15 +3452,65 @@ def _collection_candidates(nks):
             confirmed = set()               # catalog predates identity_review
     finally:
         lc.close()
+    # ONE PRODUCT = ONE COLLECTION. A store can grant several apps for a single purchase
+    # (Ys I & II Chronicles+ gives appids 223810 and 223870), and every one of them gets
+    # flagged as a bundle — so without this the same compilation is nominated twice and
+    # recorded under two coll_keys. appdetails' `steam_appid` resolves a sub-app to its
+    # parent, which we cache, so the duplicate is removable deterministically: keep the
+    # CANONICAL app's entry and drop its siblings.
+    canon = {}                              # norm_key -> canonical appid for its product
+    _sm = os.path.join(DATA, "steam-meta.sqlite")
+    if os.path.exists(_sm):
+        try:
+            _smc = sqlite3.connect(_sm)
+            _cmap = {str(a): str(c or a) for a, c in _smc.execute(
+                "SELECT appid, canonical_appid FROM steam_meta")}
+            _smc.close()
+            lc2 = ro(LIBRARY_DB)
+            try:
+                for _nk, _sid in lc2.execute(
+                        "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
+                        "ON s.game_id=g.id WHERE s.source='steam' AND s.source_id!=''"):
+                    _c = _cmap.get(str(_sid))
+                    if _c:
+                        canon.setdefault(_nk, (_c, str(_sid)))
+            finally:
+                lc2.close()
+        except sqlite3.OperationalError:
+            canon = {}                      # pre-migration cache; fall through unchanged
+
+    # Products already represented by a RECORDED collection. Without this the rule only
+    # held within a single batch: a sibling app nominated on a later run still became a
+    # second collection for the same product.
+    claimed = {}
+    for _k in known:
+        _p = canon.get(_k)
+        if _p:
+            claimed[_p[0]] = _k
+
     seen = set()
     for nk, title, platform in rows:
         if nk in seen or nk in known:
             continue
         if nk not in confirmed and not _looks_like_collection(title):
             continue
+        pair = canon.get(nk)
+        if pair:
+            _cid, _sid = pair
+            prev = claimed.get(_cid)
+            if prev is not None and prev != nk:
+                # a sibling already represents this product — keep the canonical app's
+                # entry, drop the other, whichever order they arrived in
+                if _sid != _cid:
+                    continue
+                out[:] = [o for o in out if o["norm_key"] != prev]
+                seen.discard(prev)
+            claimed[_cid] = nk
         seen.add(nk)
         out.append({"n": len(out), "norm_key": nk, "title": title, "platform": platform,
                     "provider_confirmed": nk in confirmed})
+    for i, o in enumerate(out):              # renumber after any drop
+        o["n"] = i
     return out
 
 
@@ -4797,14 +4847,31 @@ def _aimeta_apply(should_stop, only_ids=None):
         touched |= {m["norm_key"] for m in aimeta.accepted_ss_matches()}
     except Exception:
         pass
-    # accepted compilations -> durable collections store. Credit is computed at read
-    # time (game_detail), so this takes effect immediately — no rebuild dependency.
+    # accepted compilations -> durable collections store, then MATERIALIZE their member
+    # games. Credit for a member that already has an entry is still computed at read time
+    # (game_detail), but a member with no entry has to be created or the games inside a
+    # compilation stay invisible — which is what "recording 28 collections changed
+    # nothing" looked like. Done surgically so §13's defining property survives: recording
+    # a collection takes effect IMMEDIATELY, with no rebuild.
     try:
         for c in aimeta.accepted_collections():
             compilations.set_collection(DATA, c["coll_key"], c["name"],
                                         c["members"], origin="ai")
     except Exception as e:
         print("aimeta apply: collections write: %s" % str(e)[:150], file=sys.stderr)
+    try:
+        import catalog_patch as _cp
+        _lc = sqlite3.connect(LIBRARY_DB)
+        _lc.execute("PRAGMA busy_timeout=8000")
+        try:
+            _made = _cp.materialize_members(_lc, DATA)
+        finally:
+            _lc.close()
+        if _made:
+            print("aimeta apply: materialized %d collection member(s)" % _made,
+                  file=sys.stderr)
+    except Exception as e:                      # noqa: BLE001  never fail an apply
+        print("aimeta apply: member materialize: %s" % str(e)[:150], file=sys.stderr)
     mc = sqlite3.connect(cache)
     mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY "
                "KEY, igdb_id INTEGER, slug TEXT, matched_by TEXT, resolved_at INTEGER)")
