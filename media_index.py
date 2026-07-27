@@ -89,6 +89,14 @@ def index_con():
     # tri-state: "not yet measured" must not be treated as "fine", nor as "bad".
     if "filler" not in _cols:
         con.execute("ALTER TABLE media ADD COLUMN filler INTEGER")
+    # ai_pick: 1 = a vision model examined this game+kind's candidates and chose this
+    # asset. Durable — select() re-ranks deterministically on every pass and zeroes
+    # `chosen`, so without this flag a paid judgment would be erased by the next sync
+    # and then re-purchased. Ranked below user pins and below shape/filler EVIDENCE
+    # (a later measurement may prove the AI's pick is a padded filler) but above
+    # provider priority.
+    if "ai_pick" not in _cols:
+        con.execute("ALTER TABLE media ADD COLUMN ai_pick INTEGER")
     return con
 
 

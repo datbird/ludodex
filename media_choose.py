@@ -101,7 +101,7 @@ def select(con, kinds=None):
     pin_rank = _load_pins()
     rows = con.execute(
         "SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key, "
-        "width, height, filler "
+        "width, height, filler, ai_pick "
         "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
         % ",".join("'%s'" % k for k in scalar)
     ).fetchall()
@@ -136,8 +136,12 @@ def select(con, kinds=None):
         filler = 1 if r["filler"] == 1 else 0
         px = -(mw * mh) if (mw and mh) else 0        # bigger wins; unknown stays neutral
         # pin first (user authority), then shape, then authored-vs-placeholder, then
-        # provider priority, measured resolution, and the original tie-breakers.
-        sk = (pin, bad_shape, filler, pr, px, 0 if r["matched"] else 1,
+        # the durable AI verdict (a paid vision pick must survive re-selects — but it
+        # ranks BELOW shape/filler evidence, because a later measurement can prove the
+        # AI's pick wrong), then provider priority, measured resolution, and the
+        # original tie-breakers.
+        sk = (pin, bad_shape, filler, 0 if r["ai_pick"] else 1, pr, px,
+              0 if r["matched"] else 1,
               0 if r["ref_type"] == "file" else 1, r["id"])
         _sys = r["system"] or ""
         _gk = (r["game_key"] or "") if not _sys else ""
@@ -195,6 +199,31 @@ def _measure(path):
         return (None, None)
 
 
+def stamp_measured(con, r, sha, repo=None):
+    """The single write-back for a row whose bytes just landed in the repo: sha1 +
+    measured dimensions + the filler verdict, together, always.
+
+    Every path that materializes MUST go through this — materialize() only revisits
+    rows whose sha1 is NULL, so a path that backfills sha1 alone (serve-time fetch,
+    vision thumbnails) would permanently exclude the row from measurement: width/
+    height/filler stay NULL forever and the shape test + filler demotion can never
+    apply to it (in `ondemand` media mode that would kill the filler detector
+    entirely, since serve-time is the ONLY materialization that mode ever does).
+
+    filler stays tri-state: when the file can't be measured (no Pillow, not an
+    image) it remains NULL — "unmeasured", never "measured clean"."""
+    repo = repo or repo_dir()
+    ext = (r["ext"] or "jpg").split("?")[0]
+    path = os.path.join(repo, "%s.%s" % (sha, ext))
+    w, h = _measure(path)
+    fill = None
+    if w is not None and media.KIND_ORIENT.get(r["kind"]) == "portrait":
+        fill = 1 if media.looks_padded(path) else 0
+    con.execute("UPDATE media SET sha1=?, width=COALESCE(?,width), "
+                "height=COALESCE(?,height), filler=COALESCE(?,filler) "
+                "WHERE id=?", (sha, w, h, fill, r["id"]))
+
+
 def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
     """Download/copy assets lacking sha1 into the repo; demote dead refs and
     re-pick. Default = only the chosen asset per (game, kind); all_refs=True
@@ -221,17 +250,7 @@ def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
             # authoritative source (provider filenames lie: Steam serves
             # `library_600x900.jpg` at 300x450 for older titles). Feeds the shape test
             # and the resolution tie-break on the next select pass.
-            _path = os.path.join(
-                repo, "%s.%s" % (sha, (r["ext"] or "jpg").split("?")[0]))
-            _w, _h = _measure(_path)
-            # Confirm (or clear) the letterboxed-paste flag while the file is local.
-            # Only meaningful for kinds with an expected upright shape — a wide hero is
-            # SUPPOSED to have its content in a band.
-            _fill = (1 if media.looks_padded(_path) else 0) \
-                if media.KIND_ORIENT.get(r["kind"]) == "portrait" else None
-            con.execute("UPDATE media SET sha1=?, width=COALESCE(?,width), "
-                        "height=COALESCE(?,height), filler=COALESCE(?,filler) "
-                        "WHERE id=?", (sha, _w, _h, _fill, r["id"]))
+            stamp_measured(con, r, sha, repo)
             ok += 1
         else:
             # dead reference: drop it from contention and promote the next best
@@ -254,7 +273,7 @@ def _repick(con, norm_key, kind, system=None):
     the SAME system bucket (per-platform siloing, DESIGN §11.4)."""
     rank = {p: i for i, p in enumerate(media.priority(kind))}
     cands = con.execute("SELECT id, provider, matched, ref_type, ref, width, height, "
-                        "filler FROM media "
+                        "filler, ai_pick FROM media "
                         "WHERE norm_key=? AND kind=? AND COALESCE(system,'')=? "
                         "AND COALESCE(hidden,0)=0",
                         (norm_key, kind, system or "")).fetchall()
@@ -268,6 +287,7 @@ def _repick(con, norm_key, kind, system=None):
         sw, sh = (mw, mh) if (mw and mh) else media.derived_dims(r["ref"])
         return (0 if media.shape_ok(kind, sw, sh) else 1,
                 1 if r["filler"] == 1 else 0,
+                0 if r["ai_pick"] else 1,
                 rank.get(r["provider"], 99),
                 -(mw * mh) if (mw and mh) else 0,
                 0 if r["matched"] else 1,
