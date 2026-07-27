@@ -8,6 +8,42 @@ Last reviewed: 2026-07-23.
 
 ---
 
+## Shipped 2026-07-25/26 — verification across all tiers
+
+Spec: `docs/superpowers/specs/2026-07-24-match-verification-all-tiers-design.md`.
+22 commits, `8d0fae4`..`1a38efe`.
+
+**The governing invariant:** a record must be verified against the thing it describes. Both
+defects were one failure — *confidence without inspection*: identity trusted a provider match
+nothing had checked, media served an image nothing had looked at.
+
+**The structural insight:** every tier's AI step selected for a **gap** (Light=`unmatched`,
+Heavy=`missing`, Algo=no AI). A confidently-WRONG match has no gap — provider link present,
+attributes full, inherited from the wrong record — so **no tier ever examined it**. Nothing
+was mis-wired; the chain simply never received that class of game. `aimeta.review_targets()`
+now feeds Algo's refusals into Light/Heavy.
+
+| Area | What shipped |
+|---|---|
+| Identity | `_igdb_bundle_ids()` refuses a bundle's identity (IGDB `game_type`) before `_id_groups` can merge; `identity_review` table records why. **80 live.** Refused entries keep metadata. |
+| Media shape | `KIND_ORIENT`/`shape_ok`/`derived_dims` ranked ahead of provider priority. Orientation derivable from URL; resolution measured-only (Steam serves `library_600x900.jpg` at 300x450). |
+| Filler covers | `looks_padded()` detects Steam's blur-padded auto-`portrait.png` by a contiguous run of dead edge-energy bands. **146/150, 0 false positives.** Tri-state `media.filler`. |
+| Collections | Candidates from the provider signal not the title; members materialized as real entries (`sources.via_collection`); one product = one collection; `catalog_patch.materialize_members()` keeps §13's no-rebuild property. |
+| Review UI | Both sides of every change stated (`current_attrs` — the server had never sent old values); reserved attribute section; one content column; theme-tuned wash. |
+
+**Bugs found by running it (4.5h Light import):**
+- **All vision was dead** — `thinking_budget=0` 400s on `gemini-flash-latest`; `_vision_gemini`
+  never got the hardening `_call_gemini` had. Killed art pick, add-by-image, de-dup,
+  categorize and the manual "Pick best cover" button.
+- `select()` ran before `materialize()`, which is what populates `filler`/dims → re-select added.
+- A store sync fetched **only Steam art** → IGDB art now runs at every tier.
+- Platform display strings stored raw (`'PC'` vs `'pc'`) → `norm_system`.
+- De-dup suppressed the `also_owned_on` credit §13.3 promises.
+
+**Not yet executed in a real run:** re-select-after-materialize, IGDB-art-at-every-tier, the
+Light cover vision pass. A `curation`-scope reset + Light ingest is the validation
+(`library` scope keeps `collections.sqlite`, so the collection engine never re-fires).
+
 ## Big build — next major feature
 
 - **Tiered store ingest (Algo / Light AI / Heavy AI)** — **IMPLEMENTED 2026-07-23** (uncommitted
