@@ -5958,8 +5958,8 @@ def game_detail(norm_key: str):
                 "ON g2.id=s.game_id WHERE " + _bk_col + "=? AND s.via_collection IS NOT NULL",
                 (base,))} if _has_via_col else set()
             for c in compilations.credits_for(DATA, base):
-                if c["coll_key"] == base or c["coll_key"] in _real_via:
-                    continue                     # self-credit, or already a real row
+                if c["coll_key"] == base:
+                    continue                     # a collection never credits itself
                 owned = con.execute(
                     "SELECT s.source, g2.platform, g2.entry_key FROM games g2 "
                     "JOIN sources s ON s.game_id=g2.id "
@@ -5968,11 +5968,16 @@ def game_detail(norm_key: str):
                     (c["coll_key"], c["coll_key"])).fetchone()
                 if not owned:
                     continue                     # user doesn't own this collection
-                sources.append({
-                    "source": owned["source"], "platform": owned["platform"],
-                    "source_id": "", "title_raw": c["name"],
-                    "detail": "part of “%s”" % c["name"], "state": "have", "os": None,
-                    "collection": c["name"], "via_collection": owned["entry_key"]})
+                # Suppress only the duplicate OWNERSHIP row when build_library already
+                # materialized this membership — never the also_owned_on cross-reference
+                # below it, which is the whole point of §13.3: standalone Genesis Sonic
+                # must still read "also owned on: PC (via Sega Genesis Classics)".
+                if c["coll_key"] not in _real_via:
+                    sources.append({
+                        "source": owned["source"], "platform": owned["platform"],
+                        "source_id": "", "title_raw": c["name"],
+                        "detail": "part of “%s”" % c["name"], "state": "have", "os": None,
+                        "collection": c["name"], "via_collection": owned["entry_key"]})
                 if owned["platform"] and owned["platform"] not in _seen_plat:
                     _seen_plat.add(owned["platform"])
                     also.append({"entry_key": owned["entry_key"],
