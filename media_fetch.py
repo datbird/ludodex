@@ -107,6 +107,20 @@ def _resmap():
                 mc = sqlite3.connect(META_CACHE)
                 _RESMAP = {nk: iid for nk, iid in mc.execute(
                     "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0")}
+                # Mirror build_library's bundle refusal (game_type 3=bundle/13=pack):
+                # an identity-refused entry's games row says `title:<nk>`, so its media
+                # must be stamped the same or the serve-time game_key match fails and
+                # the entry loses its art. The art itself still fetches — the bundle
+                # record's images are the right images for the owned product.
+                try:
+                    _b = {r[0] for r in mc.execute(
+                        "SELECT igdb_id FROM igdb_meta "
+                        "WHERE json_extract(payload_json,'$.game_type') IN (3,13)")}
+                    if _b:
+                        _RESMAP = {nk: iid for nk, iid in _RESMAP.items()
+                                   if iid not in _b}
+                except sqlite3.OperationalError:
+                    pass
                 mc.close()
             except sqlite3.OperationalError:
                 _RESMAP = {}                    # cache exists but enrich hasn't run
@@ -135,6 +149,26 @@ def _backfill_game_key(con):
             con.execute("UPDATE media SET game_key='title:'||norm_key "
                         "WHERE game_key LIKE 'title:%@%'")
             con.commit()
+        # Repair rows stamped with a BUNDLE identity before the refusal existed:
+        # their entry now says `title:<nk>` (build_library refuses game_type 3/13),
+        # so media keyed `igdb:<bundle>` would never match at serve time and the
+        # entry loses its art. Runs BEFORE the fully-stamped early-return — these
+        # rows are stamped, just wrongly.
+        if os.path.exists(META_CACHE):
+            try:
+                con.execute("ATTACH ? AS mcb", (META_CACHE,))
+                con.execute(
+                    "UPDATE media SET game_key='title:'||norm_key WHERE game_key IN "
+                    "(SELECT 'igdb:'||igdb_id FROM mcb.igdb_meta "
+                    " WHERE json_extract(payload_json,'$.game_type') IN (3,13))")
+                con.commit()
+            except sqlite3.OperationalError:
+                pass
+            finally:
+                try:
+                    con.execute("DETACH mcb")
+                except sqlite3.OperationalError:
+                    pass
         if not con.execute("SELECT 1 FROM media WHERE game_key IS NULL "
                            "OR game_key='' LIMIT 1").fetchone():
             return                              # already fully stamped
@@ -146,7 +180,9 @@ def _backfill_game_key(con):
                     "(SELECT r.igdb_id FROM mc.igdb_resolution r "
                     " WHERE r.norm_key=media.norm_key AND r.igdb_id>0) "
                     "WHERE (game_key IS NULL OR game_key='') AND norm_key IN "
-                    "(SELECT norm_key FROM mc.igdb_resolution WHERE igdb_id>0)")
+                    "(SELECT norm_key FROM mc.igdb_resolution WHERE igdb_id>0 "
+                    " AND igdb_id NOT IN (SELECT igdb_id FROM mc.igdb_meta "
+                    "  WHERE json_extract(payload_json,'$.game_type') IN (3,13)))")
                 con.commit()                    # release mc read-lock before DETACH
             finally:
                 try:
@@ -824,6 +860,25 @@ def main(argv):
         fetch_steam_media(con, now, only=keys, refresh=("--refresh" in argv), limit=limit)
         con.commit()
         con.close()
+        return
+    if "--sync-art" in argv:
+        # Incremental per-sync art refresh: fetch NEW refs only. UNIQUE(provider,kind,ref)
+        # dedupes re-runs, so existing rows keep their sha1 / measured width+height /
+        # filler verdicts. The `--provider <p>` path below is a DESTRUCTIVE full refresh
+        # (DELETE every one of the provider's rows, then refetch) — right for a manual
+        # re-pull, wrong on every routine sync: it would discard the measurements and
+        # re-download every chosen asset each run. No global prune_dead() here either —
+        # it HTTP-probes every unmaterialized URL in the index (unscoped, slow; the
+        # scoped reconcile skips it for the same reason), and IGDB refs come from the
+        # API's own image manifest, so dead ones are rare.
+        prov = argv[argv.index("--sync-art") + 1]
+        if prov == "igdb" and config.media_enabled("igdb"):
+            fetch_igdb(con, now)
+        tot = con.execute("SELECT COUNT(*) FROM media WHERE provider=?",
+                          (prov,)).fetchone()[0]
+        con.commit()
+        con.close()
+        print("media_fetch: sync-art %s — %d refs indexed" % (prov, tot), file=sys.stderr)
         return
     if only in (None, "steam") and config.media_enabled("steam"):
         # kind-scoped delete: refresh only the constructed-URL art this pass owns, so the
