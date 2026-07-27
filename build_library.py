@@ -22,6 +22,7 @@ import config
 from titlenorm import norm      # shared dedupe normalizer (honors config prefs)
 import merges                   # durable user merges — fold duplicates into one
 import compilations             # collections/compilations — materialize owned members (§13)
+import catalog_patch            # shared member-platform resolver (patched==rebuilt contract)
 import splits                   # durable "peel apart" — split a merged-away game out
 import console_eras             # hardware timelines — catch era-impossible merges
 import homebrew                 # ROM release-type classifier (homebrew/hack/proto/…)
@@ -549,7 +550,16 @@ def _igdb_bundle_ids():
         return out
     _c = sqlite3.connect(_cache)
     try:
-        for _iid, _payload in _c.execute("SELECT igdb_id, payload_json FROM igdb_meta"):
+        # only RESOLVED ids can ever be refused — restrict the payload parse to them
+        # instead of json-decoding the whole igdb_meta table every build
+        try:
+            _rows = _c.execute(
+                "SELECT igdb_id, payload_json FROM igdb_meta WHERE igdb_id IN ("
+                "SELECT igdb_id FROM igdb_resolution WHERE igdb_id>0 "
+                "UNION SELECT igdb_id FROM entry_resolution WHERE igdb_id>0)").fetchall()
+        except sqlite3.OperationalError:      # entry_resolution may not exist yet
+            _rows = _c.execute("SELECT igdb_id, payload_json FROM igdb_meta").fetchall()
+        for _iid, _payload in _rows:
             try:
                 if (json.loads(_payload) or {}).get("game_type") in (3, 13):
                     out.add(_iid)
@@ -583,6 +593,44 @@ if _bundle_ids:
               "bundle/pack) — entries keep their own identity: %s"
               % (len(_refused), ", ".join(_refused[:12])
                  + (" …" if len(_refused) > 12 else "")), file=sys.stderr)
+
+# Signal 3 (spec 2026-07-24): MANY-TO-ONE. Two or more distinct owned source_ids from
+# ONE store, across DIFFERENT titles, resolving to a single IGDB identity is by
+# definition a duplicate listing or a bundle — refuse the merge and flag, no guessing.
+# This is the deterministic backstop for a bundle whose IGDB record is mis-typed
+# (game_type absent or 0), where signal 2 is blind: the Ys shape still can't merge.
+# STORE sources only, and only same-store: two owned ROM dumps of regional variants
+# ("Contra" + "Probotector") legitimately share one identity and must keep merging,
+# as do cross-store copies of one game.
+_m2o = {}                       # igdb_id -> {store: {(norm_key, source_id), ...}}
+for (_nk, _plat), _g in games.items():
+    _iid = _ids.get(_nk)
+    if not _iid:
+        continue
+    for _s in _g["sources"]:
+        if _s[0] in ("emulation", "archive") or not _s[2]:
+            continue
+        _m2o.setdefault(_iid, {}).setdefault(_s[0], set()).add((_nk, _s[2]))
+_m2o_refused = set()
+for _iid, _per_store in _m2o.items():
+    for _store, _pairs in _per_store.items():
+        _nks = {p[0] for p in _pairs}
+        _sids = {p[1] for p in _pairs}
+        if len(_nks) >= 2 and len(_sids) >= 2:
+            _m2o_refused |= _nks
+for _nk in sorted(_m2o_refused):
+    if _nk not in _ids:
+        continue                # already refused by signal 2
+    _identity_refused.append(
+        (_nk, "many_to_one",
+         "igdb:%s is claimed by 2+ distinct owned store apps with different titles; "
+         "refused as a single game's identity" % _ids[_nk]))
+    del _ids[_nk]
+if _m2o_refused:
+    print("build_library: refused %d many-to-one identity/ies (2+ owned store apps, "
+          "one igdb record): %s" % (len(_m2o_refused),
+          ", ".join(sorted(_m2o_refused)[:12])
+          + (" …" if len(_m2o_refused) > 12 else "")), file=sys.stderr)
 
 
 def _entry_igdb_ids():
@@ -626,6 +674,16 @@ def _entry_detached_set():
 
 
 _entry_ids = _entry_igdb_ids()   # (norm_key, platform) -> igdb_id (per-entry override)
+# A per-entry override pointing at a bundle id bypasses the refusal above (wand
+# adjudication paths can set entry_resolution) — the invariant holds for EVERY route
+# an identity can arrive by, so filter these too.
+if _bundle_ids:
+    _eb = [(k, v) for k, v in _entry_ids.items() if v in _bundle_ids]
+    for (_nk, _plat), _iid in _eb:
+        _identity_refused.append(
+            (_nk, "compilation_identity",
+             "entry override igdb:%s (%s) is a bundle/pack; refused" % (_iid, _plat)))
+        del _entry_ids[(_nk, _plat)]
 _entry_detached = _entry_detached_set()   # entries forced to their own (title) identity
 
 
@@ -1002,26 +1060,52 @@ for key, w in wanted.items():
 _owned_bases = {r[0] for r in cur.execute(
     "SELECT DISTINCT g.base_key FROM games g JOIN sources s ON s.game_id=g.id "
     "WHERE s.state='have'")}
-_coll_made = 0
+_lib_plats = [r[0] for r in cur.execute(
+    "SELECT DISTINCT platform FROM games WHERE platform IS NOT NULL AND platform!=''")]
+_coll_made = _coll_sat = 0
 for _c in compilations.all_collections(DATA):
     if _c["coll_key"] not in _owned_bases:
         continue                        # only an OWNED bundle credits anything
     _full = compilations.get_collection(DATA, _c["coll_key"]) or {}
-    # the store/platform the bundle is owned on — inherited by its members
+    # the store/platform the bundle is owned on — inherited by its members.
+    # Deterministic: constrained to an entry that actually HOLDS the owned source
+    # (a base with both an owned and a wishlist entry must not hand its members a
+    # platform/source picked by row luck), lowest id on ties.
     _crow = cur.execute(
         "SELECT g.platform, (SELECT s.source FROM sources s WHERE s.game_id=g.id "
-        "AND s.state='have' LIMIT 1) FROM games g WHERE g.base_key=? LIMIT 1",
+        "AND s.state='have' LIMIT 1) FROM games g WHERE g.base_key=? "
+        "AND EXISTS(SELECT 1 FROM sources s2 WHERE s2.game_id=g.id "
+        "AND s2.state='have') ORDER BY g.id LIMIT 1",
         (_c["coll_key"],)).fetchone()
     _cplat, _csrc = (_crow[0] or "pc", _crow[1] or "") if _crow else ("pc", "")
     for _m in _full.get("members") or []:
         _mk = _m["member_key"]
-        if not _mk or _mk in base_to_gids:
-            continue                    # real entry exists — don't duplicate it
+        if not _mk:
+            continue
         # Canonicalise: member_platform is an AI-supplied DISPLAY string ("PC",
-        # "Game Boy Advance") while the catalog stores canonical labels ("pc"). Storing it
-        # raw split the platform facet — 'pc' and 'PC' became two platforms. norm_system is
-        # the same normaliser every other source path goes through.
-        _mplat = norm_system((_m.get("member_platform") or _cplat) or "pc") or "pc"
+        # "Game Boy Advance") while the catalog stores canonical labels ("pc", "gba").
+        # member_platform_label prefers a label the library ALREADY uses for that
+        # platform (platmap equivalence), so the facet never splits — 'Game Boy' must
+        # land on the catalog's existing 'gameboy', not mint 'game boy'. Shared with
+        # catalog_patch.materialize_members per the patched==rebuilt contract.
+        _mplat = catalog_patch.member_platform_label(
+            _m.get("member_platform"), _cplat, _lib_plats)
+        if _mk in base_to_gids:
+            if _mk in _owned_bases:
+                continue                # standalone owned — read-time credit only
+            # WISHLIST-ONLY entry: §13.3 — "a want for G is satisfied when G is owned
+            # via a collection". Attach the via-ownership and clear the want, matching
+            # the wishlist pass's own rule ("now owned -> no longer wanted").
+            _gid = min(base_to_gids[_mk])
+            cur.execute(
+                "INSERT INTO sources(game_id,source,platform,source_id,title_raw,"
+                "detail,state,via_collection) VALUES(?,?,?,?,?,?,'have',?)",
+                (_gid, _csrc, _cplat, "", _m["member_title"], _c["name"],
+                 _c["coll_key"]))
+            cur.execute("UPDATE games SET wanted=0, n_sources=n_sources+1 "
+                        "WHERE id=?", (_gid,))
+            _coll_sat += 1
+            continue
         cur.execute(
             "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,"
             "game_key,n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,"
@@ -1037,9 +1121,9 @@ for _c in compilations.all_collections(DATA):
             "state,via_collection) VALUES(?,?,?,?,?,?,'have',?)",
             (_gid, _csrc, _mplat, "", _m["member_title"], _c["name"], _c["coll_key"]))
         _coll_made += 1
-if _coll_made:
-    print("build_library: materialized %d collection member(s) from %d owned "
-          "compilation(s)" % (_coll_made, len(_owned_bases & {
+if _coll_made or _coll_sat:
+    print("build_library: materialized %d collection member(s), satisfied %d want(s) "
+          "from %d owned compilation(s)" % (_coll_made, _coll_sat, len(_owned_bases & {
               c["coll_key"] for c in compilations.all_collections(DATA)})),
           file=sys.stderr)
 
@@ -1270,7 +1354,11 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
             # games (their title is just the filename, e.g. "0001 - F-Zero"). Store-owned
             # games already have clean titles, so leave those alone. norm_key is unchanged
             # (stays the dedupe key), and the ROM filename stays in the source's title_raw.
-            if name:
+            # A refused identity must never define the entry — its TITLE included.
+            # The bundle's metadata is retained (that's deliberate), but renaming a
+            # ROM/archive entry to the compilation's name would donate exactly the
+            # identity the refusal denied it.
+            if name and rec.get("game_type") not in (3, 13):
                 cur.execute(
                     "UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
                     "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
@@ -1298,7 +1386,7 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
                     "https://www.igdb.com/games/%s" % iid))
         n_link += 1
         name = (rec.get("name") or "").strip()
-        if name:
+        if name and rec.get("game_type") not in (3, 13):   # see the rename guard above
             cur.execute("UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
                         "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
                         "('emulation','archive'))", (name, gid, gid))

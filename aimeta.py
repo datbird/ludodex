@@ -326,21 +326,72 @@ def review_targets(limit=2000, sources=None):
     'missing' (its attributes are full — inherited from the wrong record). Algo proves
     the problem deterministically and parks it here; Light/Heavy adjudicate it. Scoped
     like targets(), so an import-driven scan still only spends on its own games."""
+    decided = set()                         # (norm_key, detail) already examined
+    try:
+        fc = _con()
+        try:
+            decided = {(r[0], r[1] or "") for r in fc.execute(
+                "SELECT norm_key, detail FROM review_decided")}
+        finally:
+            fc.close()
+    except sqlite3.OperationalError:
+        pass                                # marker table not created yet
     lib = _lib()
     try:
-        q = ("SELECT DISTINCT r.norm_key FROM identity_review r "
-             "JOIN games g ON g.norm_key=r.norm_key")
+        q = ("SELECT DISTINCT r.norm_key, COALESCE(r.detail, r.reason, '') "
+             "FROM identity_review r JOIN games g ON g.norm_key=r.norm_key")
         args = []
         if sources:
             sp = ",".join("?" * len(sources))
             q += (" WHERE EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
                   "AND s.source IN (%s))" % sp)
             args = list(sources)
-        return [r[0] for r in lib.execute(q + " LIMIT ?", args + [limit])]
+        out, seen = [], set()
+        for nk, det in lib.execute(q, args):
+            # A refusal Light/Heavy already examined (mark_reviewed) is done — without
+            # this exit every sync re-pays an analyze_game call for every refused
+            # entry, forever, even when the refusal was simply CORRECT. Keyed on the
+            # refusal detail, so a rebuild that refuses the same entry for a NEW
+            # identity/reason re-qualifies it.
+            if nk in seen or (nk, det) in decided:
+                continue
+            seen.add(nk)
+            out.append(nk)
+            if len(out) >= limit:
+                break
+        return out
     except sqlite3.OperationalError:
         return []                           # catalog predates identity_review
     finally:
         lib.close()
+
+
+def mark_reviewed(nk, lib=None):
+    """Record that a Light/Heavy scan examined this Algo-refused entry (see
+    review_targets). Marked per (norm_key, refusal detail) in the DURABLE findings
+    db — identity_review itself is rebuilt with every catalog build, so the marker
+    can't live there."""
+    own = lib is None
+    lc = lib or _lib()
+    try:
+        rows = lc.execute("SELECT reason, detail FROM identity_review "
+                          "WHERE norm_key=?", (nk,)).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    finally:
+        if own:
+            lc.close()
+    if not rows:
+        return
+    con = _con()
+    con.execute("CREATE TABLE IF NOT EXISTS review_decided("
+                "norm_key TEXT, detail TEXT, at REAL, "
+                "PRIMARY KEY(norm_key, detail))")
+    con.executemany(
+        "INSERT OR REPLACE INTO review_decided(norm_key,detail,at) VALUES(?,?,?)",
+        [(nk, (r[1] or r[0] or ""), time.time()) for r in rows])
+    con.commit()
+    con.close()
 
 
 def target_count(target="unmatched"):
@@ -424,7 +475,10 @@ def apply_selection(selections):
         if not fid:
             continue
         selj = json.dumps({"attributes": sel.get("attributes"),
-                           "match": bool(sel.get("match", True))})
+                           "match": bool(sel.get("match", True)),
+                           # collection membership is its own reviewable change; absent
+                           # (older clients / cards-view accept) means "as proposed"
+                           "collection": bool(sel.get("collection", True))})
         con.execute("UPDATE findings SET status='accepted', selection_json=? "
                     "WHERE id=?", (selj, int(fid)))
     con.commit()
@@ -582,13 +636,21 @@ def accepted_supplements():
 
 
 def accepted_collections():
-    """Accepted compilation findings — [{coll_key, name, members:[{title,platform,
-    year}]}] — for compilations.set_collection. coll_key = the collection entry's
-    norm_key (the finding's norm_key)."""
+    """Accepted-but-not-yet-applied compilation findings — [{coll_key, name,
+    members:[{title,platform,year}]}] — for compilations.set_collection. coll_key =
+    the collection entry's norm_key (the finding's norm_key).
+
+    'accepted' ONLY, not 'applied': the durable collections store already holds every
+    previously-applied finding, so replaying history on each apply would silently
+    reset a collection the user has since edited or deleted back to the AI's stale
+    member list — and re-materialize entries for it."""
     con = _con()
     out = []
-    for r in con.execute("SELECT norm_key, payload_json FROM findings "
-                         "WHERE kind='collection' AND status IN ('accepted','applied')"):
+    for r in con.execute("SELECT norm_key, payload_json, selection_json FROM findings "
+                         "WHERE kind='collection' AND status='accepted'"):
+        sel = json.loads(r["selection_json"] or "null")
+        if sel and sel.get("collection") is False:
+            continue                    # the reviewer unticked the membership change
         coll = (json.loads(r["payload_json"] or "{}").get("collection") or {})
         if coll.get("is_collection") and coll.get("members"):
             out.append({"coll_key": r["norm_key"],
