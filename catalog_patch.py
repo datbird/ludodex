@@ -38,6 +38,18 @@ def _load_resolutions(data_dir):
                 entry_ids[(nk, plat)] = iid
         except sqlite3.OperationalError:
             pass
+        # Bundle refusal, mirroring build_library._igdb_bundle_ids: a compilation's
+        # identity (IGDB game_type 3=bundle / 13=pack) may never define an entry, so a
+        # patched game_key must fall to the title bucket exactly like a rebuilt one.
+        try:
+            bundles = {r[0] for r in con.execute(
+                "SELECT igdb_id FROM igdb_meta "
+                "WHERE json_extract(payload_json,'$.game_type') IN (3,13)")}
+        except sqlite3.OperationalError:
+            bundles = set()
+        if bundles:
+            title_ids = {k: v for k, v in title_ids.items() if v not in bundles}
+            entry_ids = {k: v for k, v in entry_ids.items() if v not in bundles}
     finally:
         con.close()
     return title_ids, entry_ids
@@ -213,8 +225,29 @@ def split(con, from_key, to_key, to_title, picked, data_dir):
     return {"to_key": to_key, "new_entries": len(new_by_plat)}
 
 
+def member_platform_label(display, coll_platform, existing):
+    """Resolve a collection member's platform label — the ONE resolver BOTH member
+    passes (this module's and build_library's inline pass) go through, per the
+    patched==rebuilt contract.
+
+    `display` is an AI-supplied DISPLAY string ("PC", "Game Boy Advance",
+    "PlayStation"); the catalog stores canonical labels ("pc", "gba", "psx"). Prefer
+    a label the library already uses for the same platform (never split an existing
+    facet), else platmap's canonical token, else the generic normalizer, else the
+    collection's own platform."""
+    import platmap
+    from media import norm_system
+    d = (display or "").strip()
+    if d:
+        lbl = platmap.catalog_label(d, existing)
+        if lbl:
+            return lbl
+        return norm_system(d) or (coll_platform or "pc")
+    return coll_platform or "pc"
+
+
 def materialize_members(con, data_dir):
-    """Insert catalog entries for the members of OWNED collections that have none.
+    """Make the catalog agree with the recorded collections — in BOTH directions.
 
     DESIGN §13's defining property is that recording a collection takes effect
     IMMEDIATELY — credit was computed at read time, so nothing had to be rebuilt. Making
@@ -222,46 +255,114 @@ def materialize_members(con, data_dir):
     and the library would show none of their games until someone happened to run a full
     build. This is the surgical half, so the property holds.
 
-    Mirrors build_library's pass exactly (same ownership test, same skip rule, same
-    platform normalisation) per this module's correctness contract: a patched catalog and
-    a rebuilt one must agree. Idempotent — safe to call after every apply.
-    """
+    Three passes:
+    1. RECONCILE — remove `via_collection` source rows whose membership no longer
+       stands (collection deleted, member list shrunk, or the bundle's own purchase
+       gone). An entry a previous run created from nothing (sources_summary 'via:…')
+       is deleted outright; a pre-existing entry (a satisfied wishlist row) survives
+       and gets its want back if the credit was its only ownership.
+    2. SATISFY WANTS — a member whose only entry is wishlist (§13.3: "a want for G is
+       satisfied when G is owned via a collection") gets the via_collection ownership
+       attached and leaves the Wanted view, mirroring build_library's owned-removes-
+       wanted precedent.
+    3. CREATE — a member with no entry at all becomes one, exactly as build_library's
+       inline pass writes it (same ownership test, same skip rule, same platform
+       resolver, same game_key derivation via the metadata cache — bundle ids refused).
+
+    Idempotent — safe to call after every apply/record/delete."""
     import compilations
-    from media import norm_system
     if not any(r[1] == "via_collection" for r in con.execute("PRAGMA table_info(sources)")):
         return 0                        # catalog predates the column; a rebuild will do it
+    title_ids, entry_ids = _load_resolutions(data_dir)
+    # a collection is owned by its OWN purchase, never by a via-credit
     owned = {r[0] for r in con.execute(
         "SELECT DISTINCT g.base_key FROM games g JOIN sources s ON s.game_id=g.id "
-        "WHERE s.state='have'")}
-    have = {r[0] for r in con.execute("SELECT DISTINCT base_key FROM games")}
+        "WHERE s.state='have' AND s.via_collection IS NULL")}
+    colls = compilations.all_collections(data_dir)
+    full_by_key = {c["coll_key"]: compilations.get_collection(data_dir, c["coll_key"]) or {}
+                   for c in colls}
+
+    changed = 0
+    # -- 1. reconcile stale materialized rows --
+    valid = set()                       # (coll_key, member_key) memberships that stand
+    for ck, full in full_by_key.items():
+        if ck not in owned:
+            continue
+        for m in full.get("members") or []:
+            valid.add((ck, m["member_key"]))
+    for srow, gid, ck, bk, summary in con.execute(
+            "SELECT s.rowid, s.game_id, s.via_collection, g.base_key, g.sources_summary "
+            "FROM sources s JOIN games g ON g.id=s.game_id "
+            "WHERE s.via_collection IS NOT NULL").fetchall():
+        if (ck, bk) in valid:
+            continue
+        con.execute("DELETE FROM sources WHERE rowid=?", (srow,))
+        left = con.execute("SELECT COUNT(*) FROM sources WHERE game_id=?",
+                           (gid,)).fetchone()[0]
+        if left == 0 and (summary or "").startswith("via:"):
+            con.execute("DELETE FROM games WHERE id=?", (gid,))       # phantom entry
+            con.execute("DELETE FROM game_attributes WHERE game_id=?", (gid,))
+        elif left == 0:
+            # pre-existing entry whose only ownership was this credit: restore the want
+            con.execute("UPDATE games SET wanted=1, n_sources=0 WHERE id=?", (gid,))
+        else:
+            con.execute("UPDATE games SET n_sources=? WHERE id=?", (left, gid))
+        changed += 1
+
+    # -- 2 + 3. satisfy wants / create missing member entries --
+    base_gids = {}                      # base_key -> [gid, ...]
+    for gid, bk in con.execute("SELECT id, base_key FROM games"):
+        base_gids.setdefault(bk, []).append(gid)
+    lib_plats = [r[0] for r in con.execute(
+        "SELECT DISTINCT platform FROM games "
+        "WHERE platform IS NOT NULL AND platform!=''")]
     made = 0
-    for c in compilations.all_collections(data_dir):
-        if c["coll_key"] not in owned:
+    for c in colls:
+        ck = c["coll_key"]
+        if ck not in owned:
             continue                    # only an OWNED bundle credits anything
-        full = compilations.get_collection(data_dir, c["coll_key"]) or {}
+        full = full_by_key.get(ck) or {}
         row = con.execute(
             "SELECT g.platform, (SELECT s.source FROM sources s WHERE s.game_id=g.id "
-            "AND s.state='have' LIMIT 1) FROM games g WHERE g.base_key=? LIMIT 1",
-            (c["coll_key"],)).fetchone()
+            "AND s.state='have' AND s.via_collection IS NULL LIMIT 1) "
+            "FROM games g WHERE g.base_key=? AND EXISTS(SELECT 1 FROM sources s2 "
+            "WHERE s2.game_id=g.id AND s2.state='have' AND s2.via_collection IS NULL) "
+            "ORDER BY g.id LIMIT 1", (ck,)).fetchone()
         cplat, csrc = (row[0] or "pc", row[1] or "") if row else ("pc", "")
         for m in full.get("members") or []:
             mk = m["member_key"]
-            if not mk or mk in have:
-                continue                # a real entry wins; it keeps read-time credit
-            mplat = norm_system((m.get("member_platform") or cplat) or "pc") or "pc"
+            if not mk:
+                continue
+            mplat = member_platform_label(m.get("member_platform"), cplat, lib_plats)
+            existing = base_gids.get(mk)
+            if existing:
+                if mk in owned:
+                    continue            # standalone owned — read-time credit only
+                # wishlist-only entry: the want is satisfied by the bundle (§13.3)
+                gid = min(existing)
+                if con.execute("SELECT 1 FROM sources WHERE game_id=? AND "
+                               "via_collection=?", (gid, ck)).fetchone():
+                    continue            # already attached — idempotency
+                con.execute(
+                    "INSERT INTO sources(game_id,source,platform,source_id,title_raw,"
+                    "detail,state,via_collection) VALUES(?,?,?,?,?,?,'have',?)",
+                    (gid, csrc, cplat, "", m["member_title"], c["name"], ck))
+                con.execute("UPDATE games SET wanted=0, n_sources=n_sources+1 "
+                            "WHERE id=?", (gid,))
+                made += 1
+                continue
             cur = con.execute(
                 "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,"
                 "game_key,n_sources,n_kinds,sources_summary,has_emulation,has_steam,"
                 "has_gog,has_epic,has_itch,has_archive,in_playnite,in_launchbox,wanted) "
                 "VALUES(?,?,?,?,?,?,1,0,?,0,0,0,0,0,0,0,0,0)",
                 (m["member_title"], mk, mplat, "%s@%s" % (mk, mplat), mk,
-                 "title:%s" % mk, "via:" + c["name"]))
+                 _game_key(mk, mplat, title_ids, entry_ids), "via:" + c["name"]))
             con.execute(
                 "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,"
                 "state,via_collection) VALUES(?,?,?,?,?,?,'have',?)",
-                (cur.lastrowid, csrc, mplat, "", m["member_title"], c["name"],
-                 c["coll_key"]))
-            have.add(mk)
+                (cur.lastrowid, csrc, mplat, "", m["member_title"], c["name"], ck))
+            base_gids.setdefault(mk, []).append(cur.lastrowid)
             made += 1
     con.commit()
-    return made
+    return made + changed

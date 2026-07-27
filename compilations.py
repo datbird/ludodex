@@ -38,6 +38,14 @@ def _db(data_dir):
         added           REAL,
         PRIMARY KEY(coll_key, member_key))""")
     con.execute("CREATE INDEX IF NOT EXISTS ix_coll_member ON collection_members(member_key)")
+    # Durable NEGATIVE verdicts. Auto-detection nominates candidates every scan; a
+    # nominee the AI judged not-a-collection (or couldn't enumerate) must not be
+    # re-nominated — and re-BILLED — on every subsequent run. Recording a collection
+    # (any origin) clears its rejection, so a manual record always wins.
+    con.execute("""CREATE TABLE IF NOT EXISTS collection_rejected(
+        coll_key TEXT PRIMARY KEY,
+        reason   TEXT NOT NULL DEFAULT '',
+        at       REAL)""")
     return con
 
 
@@ -50,6 +58,7 @@ def set_collection(data_dir, coll_key, name, members, origin="ai"):
         return 0
     con = _db(data_dir)
     now = time.time()
+    con.execute("DELETE FROM collection_rejected WHERE coll_key=?", (coll_key,))
     con.execute("INSERT OR REPLACE INTO collections(coll_key,name,origin,updated) "
                 "VALUES(?,?,?,?)", (coll_key, name, origin, now))
     con.execute("DELETE FROM collection_members WHERE coll_key=?", (coll_key,))
@@ -75,6 +84,29 @@ def set_collection(data_dir, coll_key, name, members, origin="ai"):
     con.commit()
     con.close()
     return n
+
+
+def mark_rejected(data_dir, coll_key, reason=""):
+    """Persist an AI 'not a collection' verdict so auto-detection never re-nominates
+    (and re-bills) this candidate. Cleared automatically if the key is later recorded
+    as a real collection."""
+    coll_key = (coll_key or "").strip()
+    if not coll_key:
+        return
+    con = _db(data_dir)
+    con.execute("INSERT OR REPLACE INTO collection_rejected(coll_key,reason,at) "
+                "VALUES(?,?,?)", (coll_key, (reason or "")[:200], time.time()))
+    con.commit()
+    con.close()
+
+
+def rejected_keys(data_dir):
+    """coll_keys auto-detection must not re-nominate (see mark_rejected)."""
+    con = _db(data_dir)
+    try:
+        return {r[0] for r in con.execute("SELECT coll_key FROM collection_rejected")}
+    finally:
+        con.close()
 
 
 def get_collection(data_dir, coll_key):

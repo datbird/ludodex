@@ -120,6 +120,26 @@ def igdb_canons(platforms):
     return {canon(p.get("name")) for p in (platforms or []) if p.get("name")}
 
 
+def catalog_label(display, existing=()):
+    """Map a free-form platform DISPLAY string (an AI's "Game Boy Advance", "PC",
+    "PlayStation") to a catalog platform label, or None if unrecognized.
+
+    Prefers a label the library ALREADY uses whose canonical token matches — so a
+    member platform never splits an existing facet ('Game Boy' must land on the
+    catalog's 'gameboy', not mint a new 'game boy' value). Falls back to the
+    canonical token itself when the platform is known here but absent from the
+    library. Both collection-member passes (build_library's inline pass and
+    catalog_patch.materialize_members) MUST resolve through this same function,
+    per catalog_patch's patched==rebuilt contract."""
+    t = canon(display)
+    if not t:
+        return None
+    for p in existing:
+        if canon(p) == t:
+            return p
+    return t if t in KNOWN else None
+
+
 # Hardware generation per canonical platform (home-computer lines mapped to the nearest
 # console gen). Used ONLY to gate contamination SUSPECTS — a game can be ported FORWARD to
 # newer hardware, but a genuine game can't appear on hardware OLDER than its earliest
