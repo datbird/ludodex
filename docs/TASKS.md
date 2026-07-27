@@ -44,6 +44,94 @@ now feeds Algo's refusals into Light/Heavy.
 Light cover vision pass. A `curation`-scope reset + Light ingest is the validation
 (`library` scope keeps `collections.sqlite`, so the collection engine never re-fires).
 
+## Shipped 2026-07-26 — production-hardening review (4-agent audit of the range above)
+
+A four-reviewer audit (media/vision · collections · identity/spend · server/UI) of
+`bfd72f2..51f4a0c` found the deterministic core sound but flagged 2 spend-rule breaches,
+5 more Criticals and ~15 Importants. All fixed:
+
+**Vision/media**
+- **AI art picks are now DURABLE** (`media.ai_pick`, ranked pin → shape/filler evidence →
+  ai_pick → provider priority): `select()` re-ranks every sync and used to erase each paid
+  pick, which the next sync re-bought — indefinitely. `_ai_art_pass` now also gates on the
+  `art_adjudicated` marker (scope-aware: a Light 'cover' mark still lets Heavy judge the
+  other kinds), so a resync re-pays nothing.
+- `_ai_adjudicate_game` judges/clears only the **neutral system bucket, per game_key** —
+  it used to wipe `chosen` across every console bucket of the norm_key without replacing
+  them. Candidates are ranked (provider/resolution), not oldest-six.
+- **Every materialize path measures**: `media_choose.stamp_measured` is the single
+  write-back (batch, serve-time, vision thumbs). A sha1-only backfill permanently excluded
+  the row from measurement — in `ondemand` mode that killed the filler detector outright.
+  `filler` stays NULL when unmeasurable (was falsely stamped 0).
+- "Download now" re-selects after materialize (the named invariant path that skipped it).
+- Sync IGDB art uses the new **`--sync-art` incremental mode** — the old `--provider igdb`
+  call DELETEd every igdb row (losing sha1/dims/filler verdicts) + refetched + ran the
+  unscoped prune_dead HTTP sweep, every sync. Phase gate fixed to `media_enabled`.
+- `igdbart` + `artpick` registered as sync phases (they silently no-op'd before — a paid
+  pass with no visible receipt).
+
+**Collections**
+- **The provider-confirmed path can now actually complete**: `steam_meta.store_name` —
+  captured for exactly this and read by *nothing* — plus the provider-confirmed flag are
+  rendered into the `detect_collections` prompt ("the store lists this purchase as …"), so
+  the model judges the PRODUCT, not the member-shaped entry title.
+- **Negative verdicts persist** (`collection_rejected`, cleared by any later recording):
+  un-recorded nominees used to re-bill on every scan, forever.
+- Apply replays **'accepted' findings only** (durable store already holds 'applied') and
+  never overwrites an `origin='manual'` collection — re-apply used to reset hand-curated
+  member lists to the AI's stale version.
+- `materialize_members` now runs from **every** recording path (wand auto-detect, manual
+  endpoints, apply) and **reconciles both directions**: delete/shrink removes the phantom
+  entries it created (restoring a satisfied want); §13.3 want-satisfaction attaches the
+  via-ownership to wishlist-only members. Contract-tested: `test_materialize_members.py`.
+- Patched==rebuilt parity restored: game_key via `_load_resolutions`/`_game_key`
+  (bundle-refused), platform via the shared `member_platform_label` resolver
+  (platmap-equivalence to EXISTING library labels — 'Game Boy' lands on `gameboy`,
+  never a new `game boy` facet).
+- Cross-run one-product-one-collection holds in BOTH arrival orders (a recorded sibling
+  now blocks the canonical app's re-nomination); the canonical appid is preferred when a
+  norm_key holds several.
+- Materialized member rows carry their Collection label in game_detail again.
+
+**Identity / spend**
+- **Spec signal 3 implemented** (many-to-one: 2+ distinct same-store owned apps with
+  different titles on one IGDB id ⇒ refuse + `identity_review 'many_to_one'`) — the
+  deterministic backstop when `game_type` is missing/0. Emulation excluded on purpose
+  (two regional-variant ROM dumps must keep merging).
+- Bundle refusal now holds on EVERY identity route: entry-resolution overrides,
+  `media_fetch.game_key`/`_backfill_game_key` (media stamped `igdb:<bundle>` could never
+  match the refused entry's `title:` key at serve time — plus a repair pass for
+  previously-stamped rows), and the rename-on-match pass no longer donates a bundle's
+  title to a ROM entry.
+- **`review_targets` has an exit**: once Light/Heavy examines a refused entry it's marked
+  in the durable `review_decided` (keyed on the refusal detail, so a NEW refusal
+  re-qualifies) — it used to re-bill an analyze call per refused entry per sync, forever.
+
+**Review UI**
+- Collection findings **render** (kind chip, card body, and a tickable "Collection
+  membership" change row stating both sides) and the selection is **honored**
+  (`selection.collection`) — accepting one attribute used to silently record membership
+  and materialize entries the reviewer never saw.
+- Unknown ≠ absent: when the server omits finding context (large lists) the UI says
+  "current value unknown" / "current link unknown" instead of asserting "not set" /
+  "not linked" — statements that were often false.
+- Empty attribute section consults `payload.missing` ("N attributes still unknown (…)")
+  instead of claiming everything is set.
+- `--text-dim` defined per theme (light-mode "not set" was ~2:1 contrast);
+  `chg-warn`/`chg-sources` join the shared content-column gutter.
+
+**Known-remaining (deliberate):**
+- Spec signal 1's full shape (canonical sub-app ⇒ auto-attach the parent product entry)
+  is still nomination-dedupe only; signals 2+3 cover the merge-refusal half.
+- Member titles at AI fullness can still near-duplicate a shorter owned title (only
+  observed on Ys; the base_key skip mitigates exact matches). No fuzzy matching on
+  purpose — a token-prefix rule would wrongly skip "Portal 2" against owned "Portal".
+- `igdb_meta` payloads cached before `game_type` was requested have no bundle flag until
+  their TTL refetch — a plain rebuild alone does NOT cure a pre-existing bundle merge.
+- The collection's own entry keeps its member-shaped title ("Ys I"); the bundle's real
+  name lives on the collection record. Renaming the entry to the store title is polish,
+  not correctness.
+
 ## Big build — next major feature
 
 - **Tiered store ingest (Algo / Light AI / Heavy AI)** — **IMPLEMENTED 2026-07-23** (uncommitted
