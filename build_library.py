@@ -1017,7 +1017,11 @@ for _c in compilations.all_collections(DATA):
         _mk = _m["member_key"]
         if not _mk or _mk in base_to_gids:
             continue                    # real entry exists — don't duplicate it
-        _mplat = (_m.get("member_platform") or _cplat) or "pc"
+        # Canonicalise: member_platform is an AI-supplied DISPLAY string ("PC",
+        # "Game Boy Advance") while the catalog stores canonical labels ("pc"). Storing it
+        # raw split the platform facet — 'pc' and 'PC' became two platforms. norm_system is
+        # the same normaliser every other source path goes through.
+        _mplat = norm_system((_m.get("member_platform") or _cplat) or "pc") or "pc"
         cur.execute(
             "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,"
             "game_key,n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,"
