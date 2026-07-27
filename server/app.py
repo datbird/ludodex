@@ -1320,6 +1320,14 @@ def _media_worker(mode):
         media_choose.select(con)
         j["step"] = "Downloading media into the repo…"
         ok, dead = media_choose.materialize(con, all_refs=(mode == "all"))
+        # RE-SELECT: width/height and the filler flag are populated BY materialize,
+        # so the select above ran blind to them. Without this, a blur-padded Steam
+        # cover this download just confirmed as filler would stay the served art
+        # until some unrelated flow happened to re-select (media_choose.main has the
+        # same pairing).
+        if ok:
+            j["step"] = "Re-choosing with measured dimensions…"
+            media_choose.select(con)
         con.close()
         j.update({"ok": True, "downloaded": ok, "dead": dead, "step": "Done"})
     except Exception as e:
@@ -1947,12 +1955,18 @@ def collection_set(coll_key: str, body: dict = Body(...)):
     if not name:
         raise HTTPException(400, "name required")
     n = compilations.set_collection(DATA, base, name, members, origin="manual")
+    # recording (or shrinking) a collection takes effect immediately — §13's defining
+    # property — and reconciles members a smaller list no longer credits
+    _materialize_collection_members()
     return {"coll_key": base, "name": name, "members": n}
 
 
 @app.delete("/api/collections/{coll_key:path}")
 def collection_delete(coll_key: str):
     compilations.clear_collection(DATA, _split_entry_key(coll_key)[0])
+    # deleting must also remove the members it materialized — otherwise phantom
+    # `state='have'` entries linger, counted as owned, until a full rebuild
+    _materialize_collection_members()
     return {"ok": True}
 
 
@@ -3300,6 +3314,13 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
     done = found = skipped = errored = complete = unmatched = 0
     media_nks = set()                             # identified games -> fill their art after
     lib = aimeta._lib()
+    # Algo-refused entries in this scan: once examined, mark them decided so
+    # review_targets stops resubmitting them (a paid re-scan on every later sync,
+    # with no exit at all when the refusal was simply correct).
+    try:
+        _review_nks = set(aimeta.review_targets(100000)) & set(norm_keys)
+    except Exception:                             # noqa: BLE001
+        _review_nks = set()
     try:
         for nk in norm_keys:
             if should_stop():
@@ -3341,6 +3362,8 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                         complete += 1
                     else:                        # no match AND the AI couldn't identify it
                         unmatched += 1
+                    if nk in _review_nks:        # examined -> stop re-billing this refusal
+                        aimeta.mark_reviewed(nk, lib=lib)
             except Exception as e:               # one game's failure never aborts
                 errored += 1
                 print("aimeta scan: %s -> %s" % (nk, str(e)[:200]), file=sys.stderr)
@@ -3430,6 +3453,10 @@ def _collection_candidates(nks):
     if not nks:
         return []
     known = {c["coll_key"] for c in compilations.all_collections(DATA)}
+    # Durable negative verdicts: a candidate the AI already judged not-a-collection
+    # must not be re-nominated — and re-billed — every scan (recording it later, by
+    # any origin, clears the rejection).
+    rejected = compilations.rejected_keys(DATA)
     out = []
     lc = ro(LIBRARY_DB)
     try:
@@ -3459,12 +3486,24 @@ def _collection_candidates(nks):
     # parent, which we cache, so the duplicate is removable deterministically: keep the
     # CANONICAL app's entry and drop its siblings.
     canon = {}                              # norm_key -> canonical appid for its product
+    store_names = {}                        # appid -> Steam's own product (store) title
     _sm = os.path.join(DATA, "steam-meta.sqlite")
     if os.path.exists(_sm):
         try:
             _smc = sqlite3.connect(_sm)
             _cmap = {str(a): str(c or a) for a, c in _smc.execute(
                 "SELECT appid, canonical_appid FROM steam_meta")}
+            try:
+                # The store name is the ONE place the bundle's real title survives:
+                # an identity-refused entry is titled after a MEMBER ("Ys I"), so
+                # without this the AI is asked whether a single game is a compilation
+                # — the flagship scenario could never complete (and the spec captured
+                # store_name for exactly this).
+                store_names = {str(a): n for a, n in _smc.execute(
+                    "SELECT appid, store_name FROM steam_meta "
+                    "WHERE store_name IS NOT NULL AND store_name!=''")}
+            except sqlite3.OperationalError:
+                store_names = {}            # cache predates the column
             _smc.close()
             lc2 = ro(LIBRARY_DB)
             try:
@@ -3472,8 +3511,15 @@ def _collection_candidates(nks):
                         "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
                         "ON s.game_id=g.id WHERE s.source='steam' AND s.source_id!=''"):
                     _c = _cmap.get(str(_sid))
-                    if _c:
-                        canon.setdefault(_nk, (_c, str(_sid)))
+                    if not _c:
+                        continue
+                    # Prefer the pair where the owned appid IS the canonical product —
+                    # a norm_key holding several appids must not be represented by an
+                    # arbitrary sibling, or the `_sid != _cid` check below silently
+                    # drops the canonical nomination.
+                    _cur = canon.get(_nk)
+                    if _cur is None or (str(_sid) == _c and _cur[1] != _cur[0]):
+                        canon[_nk] = (_c, str(_sid))
             finally:
                 lc2.close()
         except sqlite3.OperationalError:
@@ -3490,7 +3536,7 @@ def _collection_candidates(nks):
 
     seen = set()
     for nk, title, platform in rows:
-        if nk in seen or nk in known:
+        if nk in seen or nk in known or nk in rejected:
             continue
         if nk not in confirmed and not _looks_like_collection(title):
             continue
@@ -3503,12 +3549,22 @@ def _collection_candidates(nks):
                 # entry, drop the other, whichever order they arrived in
                 if _sid != _cid:
                     continue
+                if prev in known:
+                    # the sibling's collection was RECORDED on an earlier run; one
+                    # product = one collection must hold across runs, so never
+                    # nominate a second coll_key for the same product. (The recorded
+                    # one keeps crediting the same members.)
+                    continue
                 out[:] = [o for o in out if o["norm_key"] != prev]
                 seen.discard(prev)
             claimed[_cid] = nk
         seen.add(nk)
         out.append({"n": len(out), "norm_key": nk, "title": title, "platform": platform,
-                    "provider_confirmed": nk in confirmed})
+                    "provider_confirmed": nk in confirmed,
+                    # the purchased product's own store title — for a refused identity
+                    # this is the bundle's REAL name, which the catalog no longer holds
+                    "store_title": store_names.get(pair[1] if pair else "")
+                    or store_names.get(pair[0] if pair else "")})
     for i, o in enumerate(out):              # renumber after any drop
         o["n"] = i
     return out
@@ -3537,6 +3593,11 @@ def _auto_detect_collections(nks, should_stop=lambda: False, threshold=None, chu
     for start in range(0, len(cands), chunk):
         if should_stop():
             break
+        try:                                  # budget cap: stop between chunks, don't raise
+            ai.check_limit(ai.provider_for_area("metadata"), ai.model_for_area("metadata"))
+        except Exception:
+            print("collection detect: budget cap reached", file=sys.stderr)
+            break
         batch = cands[start:start + chunk]
         local = [{**it, "n": j} for j, it in enumerate(batch)]
         try:
@@ -3548,21 +3609,72 @@ def _auto_detect_collections(nks, should_stop=lambda: False, threshold=None, chu
             n = v.get("n")
             if not isinstance(n, int) or not (0 <= n < len(batch)):
                 continue
-            if not v.get("is_collection") or float(v.get("confidence") or 0) < threshold:
+            it = batch[n]
+            if not v.get("is_collection"):
+                # Persist the NO verdict: without it this candidate is re-nominated —
+                # and re-billed — on every later scan, forever (an identity-refused
+                # entry never leaves the candidate pool any other way).
+                try:
+                    compilations.mark_rejected(DATA, it["norm_key"],
+                                               v.get("reason") or "ai: not a collection")
+                except Exception:
+                    pass
                 continue
+            if float(v.get("confidence") or 0) < threshold:
+                continue                      # low confidence: leave it re-examinable
             members = [m for m in (v.get("members") or []) if (m or {}).get("title")]
             if not members:
-                continue                      # a bundle with no known members records nothing
-            it = batch[n]
+                # a bundle with no establishable member list records nothing (§13.4
+                # standard of proof) — persist that too, or it re-bills every scan
+                try:
+                    compilations.mark_rejected(DATA, it["norm_key"],
+                                               "ai: members not establishable")
+                except Exception:
+                    pass
+                continue
             try:
+                # name preference: AI's > the store's product title > the entry title
+                # (for a refused identity the entry title is a MEMBER's name — the
+                # worst possible name for the bundle)
+                _cname = v.get("name") or it.get("store_title") or it["title"]
                 compilations.set_collection(DATA, it["norm_key"],
-                                            v.get("name") or it["title"], members, origin="ai")
-                recorded.append({"norm_key": it["norm_key"], "name": v.get("name"),
+                                            _cname, members, origin="ai")
+                recorded.append({"norm_key": it["norm_key"], "name": _cname,
                                  "members": len(members)})
             except Exception as e:
                 print("collection record %s: %s" % (it["norm_key"], str(e)[:120]),
                       file=sys.stderr)
+    if recorded:
+        # §13's defining property: recording a collection takes effect IMMEDIATELY.
+        # This path writes straight to collections.sqlite with no accept step, so it
+        # must materialize bundle-only members itself — otherwise a Light sync that
+        # auto-records above threshold shows none of the games inside until some
+        # unrelated apply or full rebuild happens ("recorded 28 collections and the
+        # library showed none").
+        _materialize_collection_members()
     return recorded
+
+
+def _materialize_collection_members():
+    """Run catalog_patch.materialize_members against the live catalog — the shared
+    tail of EVERY path that records or edits a collection (findings apply, wand
+    auto-detect, manual endpoints). Also reconciles stale members after a delete or
+    member-list shrink. Best-effort; never raises."""
+    try:
+        import catalog_patch as _cp
+        _lc = sqlite3.connect(LIBRARY_DB)
+        _lc.execute("PRAGMA busy_timeout=8000")
+        try:
+            _made = _cp.materialize_members(_lc, DATA)
+        finally:
+            _lc.close()
+        if _made:
+            print("collections: materialized/reconciled %d member entrie(s)" % _made,
+                  file=sys.stderr)
+        return _made
+    except Exception as e:                    # noqa: BLE001
+        print("collections: member materialize: %s" % str(e)[:150], file=sys.stderr)
+        return 0
 
 
 def _contamination_suspects(nks):
@@ -4388,10 +4500,12 @@ def aimeta_refresh_media(body: dict = Body(default={})):
 
 @app.post("/api/aimeta/pick-art")
 def aimeta_pick_art(body: dict = Body(default={})):
-    """On-demand AI art pick for ONE game — the wand's 'pick nicest art' button. This is
-    the ONLY place the paid vision pick_art runs unless ai_art_auto_pick is enabled; the
-    routine apply/rebuild path never calls it by default. Vision-picks the best image per
-    kind (kinds with ≥2 candidate providers) and marks the game adjudicated. Synchronous.
+    """On-demand AI art pick for ONE game — the wand's 'pick nicest art' button. The
+    paid vision pick_art otherwise runs only from the tier-scoped import pass
+    (_ai_art_pass — Light/Heavy syncs, gated per game by the art_adjudicated marker)
+    and, when ai_art_auto_pick is enabled, the apply/reconcile path; the routine
+    rebuild never calls it. Vision-picks the best image per kind (kinds with ≥2
+    candidate providers) and marks the game adjudicated. Synchronous.
     Body: {norm_key|entry_key}."""
     body = body or {}
     nk = (body.get("norm_key") or "").strip()
@@ -4666,32 +4780,55 @@ def _attr_norm(v):
     return str(v).strip().lower()
 
 
-def _art_adjudicated(nk):
-    """Has the AI already vision-picked art for this game? Marker lives in the media
-    index (durable across catalog rebuilds), so a rebuild never re-triggers the paid
-    vision call for a game already adjudicated."""
+def _art_adjudicated(nk, scope="all"):
+    """Has the AI already vision-picked art for this game at this depth? Marker lives
+    in the media index (durable across catalog rebuilds), so a rebuild or resync never
+    re-triggers the paid vision call for a game already adjudicated.
+
+    `scope`: 'cover' (the Light pass judges covers only) or 'all' (Heavy/wand judge
+    every kind). A game marked 'all' is covered for any request; one marked 'cover'
+    still qualifies for a later 'all' pass — Heavy must get to judge the kinds Light
+    never looked at."""
     try:
         c = ro(INDEX_DB)
         try:
-            return c.execute("SELECT 1 FROM art_adjudicated WHERE norm_key=?",
-                             (nk,)).fetchone() is not None
+            try:
+                row = c.execute("SELECT scope FROM art_adjudicated WHERE norm_key=?",
+                                (nk,)).fetchone()
+            except sqlite3.OperationalError:
+                # pre-scope marker table: every existing mark came from an all-kinds
+                # caller, so treat it as 'all'
+                return c.execute("SELECT 1 FROM art_adjudicated WHERE norm_key=?",
+                                 (nk,)).fetchone() is not None
+            if not row:
+                return False
+            marked = row[0] or "all"
+            return marked == "all" or marked == scope
         finally:
             c.close()
     except Exception:
         return False
 
 
-def _mark_art_adjudicated(nk, now):
+def _mark_art_adjudicated(nk, now, scope="all"):
     """Record that the AI art-pick has run for this game (see _art_adjudicated). Marked
     on ATTEMPT, not just success, so a persistent provider error can't loop the wand into
-    re-calling — and billing — on every rebuild. The on-demand button re-runs regardless."""
+    re-calling — and billing — on every rebuild. The on-demand button re-runs regardless.
+    An existing 'all' mark is never downgraded by a later 'cover' mark."""
     try:
         c = sqlite3.connect(INDEX_DB)
         try:
             c.execute("CREATE TABLE IF NOT EXISTS art_adjudicated("
                       "norm_key TEXT PRIMARY KEY, at INTEGER)")
-            c.execute("INSERT OR REPLACE INTO art_adjudicated(norm_key,at) VALUES(?,?)",
-                      (nk, now))
+            cols = {r[1] for r in c.execute("PRAGMA table_info(art_adjudicated)")}
+            if "scope" not in cols:
+                c.execute("ALTER TABLE art_adjudicated ADD COLUMN scope TEXT")
+            prev = c.execute("SELECT scope FROM art_adjudicated WHERE norm_key=?",
+                             (nk,)).fetchone()
+            if prev and (prev[0] or "all") == "all":
+                scope = "all"
+            c.execute("INSERT OR REPLACE INTO art_adjudicated(norm_key,at,scope) "
+                      "VALUES(?,?,?)", (nk, now, scope))
             c.commit()
         finally:
             c.close()
@@ -4706,12 +4843,19 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
     `only_kinds` restricts the vision pass (Light spends it on `cover` alone — the one
     asset the grid actually shows); None means every kind with a real choice to make.
     `attrs=False` skips the attribute adjudication, for callers that only want art."""
+    picked = 0
     if ai.area_available("art"):                       # media — vision pick per kind
         try:
             rc = ro(INDEX_DB)
             try:
+                # NEUTRAL bucket only: select() keys `chosen` per (norm_key, system,
+                # game_key, kind) — console art is siloed per system (DESIGN §11.4)
+                # and must not be judged against, or cleared alongside, store art.
+                # A store norm_key frequently also carries emulation art with system
+                # set; a nk+kind-wide reset would strip those consoles' chosen covers
+                # without replacing them.
                 q = ("SELECT kind FROM media WHERE norm_key=? "
-                     "AND COALESCE(hidden,0)=0 ")
+                     "AND COALESCE(system,'')='' AND COALESCE(hidden,0)=0 ")
                 args = [nk]
                 if only_kinds:
                     q += "AND kind IN (%s) " % ",".join("?" * len(only_kinds))
@@ -4719,11 +4863,12 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                 q += "GROUP BY kind HAVING COUNT(DISTINCT provider) >= 2"
                 kinds = [r["kind"] for r in rc.execute(q, args)]
                 for kind in kinds:
-                    cands = []
+                    groups = {}                # game_key -> candidate rows (§11.9 split)
                     for r in rc.execute(
-                            "SELECT id, ref_type, ref, ext, sha1, width, height, filler "
+                            "SELECT id, ref_type, ref, ext, sha1, width, height, filler, "
+                            "provider, matched, game_key "
                             "FROM media WHERE norm_key=? AND kind=? "
-                            "AND COALESCE(hidden,0)=0 ORDER BY id",
+                            "AND COALESCE(system,'')='' AND COALESCE(hidden,0)=0",
                             (nk, kind)).fetchall():
                         # Don't pay a vision call to weigh candidates Algo has already
                         # disqualified — a confirmed filler or a provably wrong shape.
@@ -4734,32 +4879,50 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                             _w, _h = media.derived_dims(r["ref"])
                         if not media.shape_ok(kind, _w, _h):
                             continue
-                        t = _thumb_bytes(r)
-                        if t:
-                            cands.append((r["id"], t))
-                        if len(cands) >= 6:
-                            break
-                    if len(cands) < 2:
-                        continue
-                    res = ai.pick_art(title, kind, [c[1] for c in cands],
-                                      provider=ai.provider_for_area("art"),
-                                      model=ai.model_for_area("art"),
-                                      language=config.get("media_language") or None)
-                    best = cands[res["index"]][0]
-                    w = sqlite3.connect(INDEX_DB)
-                    try:
-                        w.execute("UPDATE media SET chosen=0 WHERE norm_key=? AND kind=?",
-                                  (nk, kind))
-                        w.execute("UPDATE media SET chosen=1 WHERE id=?", (best,))
-                        w.commit()
-                    finally:
-                        w.close()
+                        groups.setdefault(r["game_key"] or "", []).append(r)
+                    prank = {p: i for i, p in enumerate(media.priority(kind))}
+                    for gk, grows in groups.items():
+                        # Judge the best-RANKED candidates, not the oldest rows: order
+                        # by the deterministic key so a newly-fetched IGDB cover is in
+                        # the judged set even on a candidate-rich game.
+                        grows.sort(key=lambda r: (
+                            prank.get(r["provider"], 99),
+                            -(r["width"] * r["height"])
+                            if (r["width"] and r["height"]) else 0,
+                            0 if r["matched"] else 1, r["id"]))
+                        cands = []
+                        for r in grows[:6]:
+                            t = _thumb_bytes(r)
+                            if t:
+                                cands.append((r["id"], t))
+                        if len(cands) < 2:
+                            continue
+                        res = ai.pick_art(title, kind, [c[1] for c in cands],
+                                          provider=ai.provider_for_area("art"),
+                                          model=ai.model_for_area("art"),
+                                          language=config.get("media_language") or None)
+                        best = cands[res["index"]][0]
+                        w = sqlite3.connect(INDEX_DB)
+                        try:
+                            # ai_pick is the DURABLE verdict — select() re-ranks (and
+                            # zeroes `chosen`) on every pass, so without it the paid
+                            # judgment would be erased by the next sync and re-billed.
+                            w.execute("UPDATE media SET chosen=0, ai_pick=NULL "
+                                      "WHERE norm_key=? AND kind=? "
+                                      "AND COALESCE(system,'')='' "
+                                      "AND COALESCE(game_key,'')=?", (nk, kind, gk))
+                            w.execute("UPDATE media SET chosen=1, ai_pick=1 WHERE id=?",
+                                      (best,))
+                            w.commit()
+                        finally:
+                            w.close()
+                        picked += 1
             finally:
                 rc.close()
         except Exception as e:
             print("adjudicate media %s: %s" % (nk, str(e)[:160]), file=sys.stderr)
     if not attrs:
-        return
+        return picked
     try:                                                # attributes — pick per conflict
         ig, sc = _igdb_attrs_for(nk), _ss_attrs_for(nk)
         conflicts = {k: {"igdb": ig[k], "screenscraper": sc[k]}
@@ -4775,10 +4938,12 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                         overrides.set_override(nk, k, sval, origin=prov)
     except Exception as e:
         print("adjudicate attrs %s: %s" % (nk, str(e)[:160]), file=sys.stderr)
+    return picked
 
 
 def _ai_art_pass(keys, heavy=False, should_stop=lambda: False):
-    """Vision art pass for a store import. Returns the number of games adjudicated.
+    """Vision art pass for a store import. Returns the number of games whose art the
+    model actually adjudicated (made at least one pick for).
 
     LIGHT spends vision on `cover` ONLY — the one asset the grid actually shows, and the
     one that surfaced this whole defect (Steam serves an auto-generated blur-padded
@@ -4786,21 +4951,31 @@ def _ai_art_pass(keys, heavy=False, should_stop=lambda: False):
     wrong, so only looking at it can tell). HEAVY covers every kind with a real choice.
     ALGO never reaches here — it has no model by definition.
 
-    Scoped to `keys` (this import's games) and bounded by the same ai.check_limit caps as
-    every other paid loop, so it can never become an open-ended sweep. Candidates Algo
-    already disqualified are skipped inside _ai_adjudicate_game, so the model is never
-    paid to weigh an image we can prove is wrong."""
+    Self-limiting in three layers, per the spend guardrail: (1) scoped to `keys`
+    (games owned via this import's sources); (2) skips games already vision-judged at
+    this depth — the durable `art_adjudicated` marker, so a RESYNC re-pays nothing
+    for games it already judged and only never-examined games cost anything; (3)
+    bounded by the same ai.check_limit caps as every other paid loop. Verdicts are
+    durable (`media.ai_pick` survives every deterministic re-select), so a paid pick
+    is never erased and re-purchased. Candidates Algo already disqualified are skipped
+    inside _ai_adjudicate_game, so the model is never paid to weigh an image we can
+    prove is wrong."""
     if not keys or not ai.area_available("art"):
         return 0
     kinds = None if heavy else ("cover",)
+    scope = "all" if heavy else "cover"
     provider, model = ai.provider_for_area("art"), ai.model_for_area("art")
+    now = int(time.time())
+    keys = list(keys)
     titles = {}
     lc = ro(LIBRARY_DB)
     try:
-        for k in keys:
-            r = lc.execute("SELECT canonical_title FROM games WHERE norm_key=? LIMIT 1",
-                           (k,)).fetchone()
-            titles[k] = (r["canonical_title"] if r and r["canonical_title"] else k)
+        for i in range(0, len(keys), 400):      # chunk: stay under SQLite's var limit
+            chunk = keys[i:i + 400]
+            ph = ",".join("?" * len(chunk))
+            for r in lc.execute("SELECT norm_key, canonical_title FROM games "
+                                "WHERE norm_key IN (%s)" % ph, chunk):
+                titles[r["norm_key"]] = r["canonical_title"] or r["norm_key"]
     except sqlite3.OperationalError:
         pass
     finally:
@@ -4809,14 +4984,19 @@ def _ai_art_pass(keys, heavy=False, should_stop=lambda: False):
     for k in keys:
         if should_stop():
             break
+        if _art_adjudicated(k, scope):
+            continue
         try:
             ai.check_limit(provider, model)     # budget cap reached -> stop, don't raise
         except Exception:
             print("art pass: budget cap reached after %d game(s)" % n, file=sys.stderr)
             break
         try:
-            _ai_adjudicate_game(k, titles.get(k, k), only_kinds=kinds, attrs=False)
-            n += 1
+            if _ai_adjudicate_game(k, titles.get(k, k), only_kinds=kinds, attrs=False):
+                n += 1
+            # marked on attempt (matching the wand path) so a game with nothing left
+            # to judge is never re-examined on the next sync
+            _mark_art_adjudicated(k, now, scope)
         except Exception as e:                  # noqa: BLE001  never abort the import
             print("art pass %s: %s" % (k, str(e)[:120]), file=sys.stderr)
     return n
@@ -4855,23 +5035,17 @@ def _aimeta_apply(should_stop, only_ids=None):
     # a collection takes effect IMMEDIATELY, with no rebuild.
     try:
         for c in aimeta.accepted_collections():
+            # Manual curation is PINNED: once the user has edited a collection's
+            # member list (origin 'manual'), an apply replaying an AI finding must
+            # not silently reset it to the AI's version.
+            _ex = compilations.get_collection(DATA, c["coll_key"])
+            if _ex and _ex.get("origin") == "manual":
+                continue
             compilations.set_collection(DATA, c["coll_key"], c["name"],
                                         c["members"], origin="ai")
     except Exception as e:
         print("aimeta apply: collections write: %s" % str(e)[:150], file=sys.stderr)
-    try:
-        import catalog_patch as _cp
-        _lc = sqlite3.connect(LIBRARY_DB)
-        _lc.execute("PRAGMA busy_timeout=8000")
-        try:
-            _made = _cp.materialize_members(_lc, DATA)
-        finally:
-            _lc.close()
-        if _made:
-            print("aimeta apply: materialized %d collection member(s)" % _made,
-                  file=sys.stderr)
-    except Exception as e:                      # noqa: BLE001  never fail an apply
-        print("aimeta apply: member materialize: %s" % str(e)[:150], file=sys.stderr)
+    _materialize_collection_members()
     mc = sqlite3.connect(cache)
     mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY "
                "KEY, igdb_id INTEGER, slug TEXT, matched_by TEXT, resolved_at INTEGER)")
@@ -5994,8 +6168,9 @@ def game_detail(norm_key: str):
                 also.append({"entry_key": row["entry_key"], "platform": row["platform"],
                              "title": row["canonical_title"]})
         _st = ", state" if _has_col(con, "sources", "state") else ""
+        _vc = ", via_collection" if _has_col(con, "sources", "via_collection") else ""
         sources = [dict(r) for r in con.execute(
-            "SELECT source, platform, source_id, title_raw, detail" + _st +
+            "SELECT source, platform, source_id, title_raw, detail" + _st + _vc +
             " FROM sources WHERE game_id=?", (gid,))]
         osmap = _os_map()
         for s in sources:
@@ -6007,7 +6182,16 @@ def game_detail(norm_key: str):
             else:
                 s["os"] = None
         for s in sources:
-            s.setdefault("collection", None)     # real rows aren't collection-credited
+            # A MATERIALIZED member's real source row carries via_collection — §13.2's
+            # Collection column must show the compilation's name on it, exactly like
+            # the synthetic read-time credit rows it replaced.
+            _via = s.get("via_collection")
+            if _via:
+                _cc = compilations.get_collection(DATA, _via)
+                s["collection"] = ((_cc or {}).get("name") or s.get("detail")
+                                   or _via)
+            else:
+                s.setdefault("collection", None)  # ordinary rows aren't credited
         # Collection credit (DESIGN §13): this game is owned via any COMPILATION the
         # user owns. Add a synthetic "in your library" row + an "also owned on" credit
         # for each owned collection whose member set includes this game.
@@ -7407,13 +7591,17 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
     if r["ref_type"] == "file" and os.path.exists(r["ref"]):
         return _serve(r["ref"], ext, size)
 
-    # 2. remote URL -> materialize on serve (fetch, cache, backfill sha1)
+    # 2. remote URL -> materialize on serve (fetch, cache, backfill sha1 + dims/filler:
+    # materialize() only revisits rows whose sha1 is NULL, so backfilling sha1 alone
+    # would permanently exclude this row from measurement — in `ondemand` media mode
+    # serve-time is the ONLY materialization, and the filler detector would never fire)
     if r["ref_type"] == "url":
         sha = media_choose._materialize_row(REPO, r)
         if sha:
             wcon = sqlite3.connect(INDEX_DB)          # write-back the backfill
             try:
-                wcon.execute("UPDATE media SET sha1=? WHERE id=?", (sha, r["id"]))
+                media_choose.stamp_measured(
+                    wcon, {"id": r["id"], "ext": r["ext"], "kind": kind}, sha, REPO)
                 wcon.commit()
             finally:
                 wcon.close()
@@ -8518,6 +8706,7 @@ def _sync_worker(job, services, media_ids=(), full=False):
         {"id": "meta", "label": "Descriptions & attributes", "state": "pending", "detail": ""},
         {"id": "scores", "label": "Scores & ratings", "state": "pending", "detail": ""},
         {"id": "os", "label": "OS / platform support", "state": "pending", "detail": ""},
+        {"id": "igdbart", "label": "IGDB art", "state": "pending", "detail": ""},
         {"id": "art", "label": "Missing art", "state": "pending", "detail": ""},
         {"id": "language", "label": "Language filter", "state": "pending", "detail": ""},
         {"id": "steammedia", "label": "Steam screenshots & trailers", "state": "pending",
@@ -8525,6 +8714,7 @@ def _sync_worker(job, services, media_ids=(), full=False):
         {"id": "media", "label": "Media downloaded" if mode != "ondemand" else "Media chosen",
          "state": "pending", "detail": ""},
         {"id": "supplement", "label": "AI supplement", "state": "pending", "detail": ""},
+        {"id": "artpick", "label": "AI art pick", "state": "pending", "detail": ""},
     ]
     job["phases"] = phases
 
@@ -8786,10 +8976,14 @@ def _sync_worker(job, services, media_ids=(), full=False):
         # placeholder (169 of 196 detected fillers were the sole cover their game had), so
         # both the filler demotion and the vision picker have no alternative to choose.
         # Previously this only ever ran via the AI reconcile path, which Algo never reaches.
-        if config.metadata_enabled("igdb") and not job.get("cancel"):
+        if config.media_enabled("igdb") and not job.get("cancel"):
             _phase("igdbart", "running")
             job["step"] = "Fetching IGDB art…"
-            ok_ig, err_ig = _run_script("media_fetch.py", args=["--provider", "igdb"],
+            # --sync-art, NOT --provider: the --provider path is a destructive full
+            # refresh (DELETE every igdb row, then refetch) — right for a manual
+            # re-pull, wrong on every routine sync, where it would discard the
+            # measured dims + filler verdicts and re-download every chosen asset.
+            ok_ig, err_ig = _run_script("media_fetch.py", args=["--sync-art", "igdb"],
                                         timeout=3600, job=job)
             _phase("igdbart", "ok" if ok_ig else "failed", None if ok_ig else err_ig[:120])
             if _stopped():
@@ -8924,12 +9118,20 @@ def _sync_worker(job, services, media_ids=(), full=False):
             _phase("artpick", "running")
             job["step"] = "Choosing best art…"
             try:
-                # derived here, not reused from the supplement block: `heavy` is bound
-                # inside that block's try and may not exist if it bailed early.
-                art_heavy = "heavy" in tiers.values()
-                art_keys = aimeta.targets("all", 5000, sources=ai_srcs)
-                done = _ai_art_pass(art_keys, heavy=art_heavy, should_stop=_stopped)
-                _phase("artpick", "ok", "%d game(s) reviewed" % done)
+                # Per-source tier: a heavy source gets the all-kinds pass, a lite
+                # source covers only — syncing both together must not upgrade the
+                # lite source to heavy-priced treatment. Heavy runs first so a game
+                # owned via both is judged once, at the deeper scope.
+                done = 0
+                hv = [s for s in ai_srcs if tiers.get(s) == "heavy"]
+                lt = [s for s in ai_srcs if tiers.get(s) == "lite"]
+                if hv:
+                    done += _ai_art_pass(aimeta.targets("all", 5000, sources=hv),
+                                         heavy=True, should_stop=_stopped)
+                if lt and not _stopped():
+                    done += _ai_art_pass(aimeta.targets("all", 5000, sources=lt),
+                                         heavy=False, should_stop=_stopped)
+                _phase("artpick", "ok", "%d game(s) art-picked" % done)
             except Exception as e:              # noqa: BLE001  never fail the import
                 _phase("artpick", "skipped", str(e)[:120])
 
@@ -9088,7 +9290,16 @@ def _asset_local_path(r):
         if sha:
             wcon = sqlite3.connect(INDEX_DB)
             try:
-                wcon.execute("UPDATE media SET sha1=? WHERE id=?", (sha, r["id"]))
+                # full measured stamp, not a bare sha1 write — a sha1-only backfill
+                # would exclude the row from measurement forever (materialize() only
+                # revisits sha1-NULL rows), so an unmeasured Steam filler among vision
+                # candidates would never get flagged and would keep re-entering every
+                # later judged set. The row handed in may lack `kind`; fetch it.
+                krow = wcon.execute("SELECT kind FROM media WHERE id=?",
+                                    (r["id"],)).fetchone()
+                media_choose.stamp_measured(
+                    wcon, {"id": r["id"], "ext": r["ext"],
+                           "kind": krow[0] if krow else None}, sha, REPO)
                 wcon.commit()
             finally:
                 wcon.close()

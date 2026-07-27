@@ -14,6 +14,10 @@
      far heavier at equal strength, so it gets less. */
   --chg-wash: color-mix(in srgb, var(--accent) 7%, transparent);
   --chg-wash-hover: color-mix(in srgb, var(--accent) 13%, transparent);
+  /* de-emphasized text that still must be READABLE — "not set"/"unknown" carry real
+     meaning in the review flow, so this is defined per theme instead of riding a
+     hardcoded #9aa fallback that drops to ~2:1 contrast on the light theme */
+  --text-dim: #8b93a3;
   color-scheme: dark;
 
   /* motion tokens (shared reveal transition) */
@@ -39,6 +43,7 @@
   --art-bg: #e9ebf1;
   --chg-wash: color-mix(in srgb, var(--accent) 4%, transparent);
   --chg-wash-hover: color-mix(in srgb, var(--accent) 9%, transparent);
+  --text-dim: #6b7488;
   color-scheme: light;
 }
 

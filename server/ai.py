@@ -1626,11 +1626,24 @@ def detect_collections(items, provider=None, model=None):
     fully-enriched compilation was never asked about."""
     provider, key, model = _resolve(provider or provider_for_area("metadata"),
                                     model or model_for_area("metadata"))
-    listing = "\n".join(
-        '%d. "%s"%s%s' % (it["n"], it["title"],
-                          " on %s" % it["platform"] if it.get("platform") else "",
-                          " (%s)" % it["year"] if it.get("year") else "")
-        for it in items)
+
+    def _line(it):
+        s = '%d. "%s"%s%s' % (it["n"], it["title"],
+                              " on %s" % it["platform"] if it.get("platform") else "",
+                              " (%s)" % it["year"] if it.get("year") else "")
+        # The store's own product title. For a provider-confirmed bundle the ENTRY is
+        # titled after a member (its identity was refused), so this is the only place
+        # the compilation's real name appears — without it the model is asked whether
+        # a single game is a compilation and correctly answers no.
+        if it.get("store_title") and it["store_title"] != it["title"]:
+            s += ' — the store lists this purchase as "%s"' % it["store_title"]
+        if it.get("provider_confirmed"):
+            s += (" — PROVIDER-CONFIRMED: the metadata provider states this purchased "
+                  "product is a multi-game bundle; the entry title above may be just "
+                  "ONE of the games inside it. Judge the PRODUCT, not the entry title.")
+        return s
+
+    listing = "\n".join(_line(it) for it in items)
     system = (
         "You identify COMPILATIONS in a video-game library. A compilation is ONE owned "
         "product that bundles multiple games which each also exist standalone — e.g. "
@@ -1641,6 +1654,10 @@ def detect_collections(items, provider=None, model=None):
         "name; a multi-disc release of one game; a 'Game of the Year' edition. "
         "A pirate/bootleg '150-in-1' cartridge IS a bundle, but its contents are unknowable "
         "— return is_collection false for those rather than inventing members. "
+        "Some entries carry the store's own product title and/or a PROVIDER-CONFIRMED "
+        "note: judge THAT product (e.g. the entry 'Ys I' whose purchase the store lists "
+        "as 'Ys I & II Chronicles+' is the two-game compilation, named after the store "
+        "listing). "
         "When it IS a compilation, list the standalone games it contains, using each game's "
         "own original platform and release year. List only members you are confident about; "
         "an incomplete member list is much better than an invented one. If unsure whether "

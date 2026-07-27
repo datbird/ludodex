@@ -3276,7 +3276,10 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
 .chg-dismiss { flex: none; width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text-dim); font-size: 13px; line-height: 1; cursor: pointer; }
 .chg-dismiss:hover:not(:disabled) { border-color: #ef4444; color: #ef4444; background: color-mix(in srgb, #ef4444 10%, transparent); }
 .chg-dismiss:disabled { opacity: 0.4; cursor: default; }
-.chg-warn { font-size: 12px; color: #d98a00; background: color-mix(in srgb, #d98a00 12%, transparent); padding: 6px 12px; }
+/* padding-left joins the shared --chg-gutter content column — a warning or source list
+   sitting flush-left broke the "one content column per card" alignment the row/rename/
+   media sections already share. */
+.chg-warn { font-size: 12px; color: #d98a00; background: color-mix(in srgb, #d98a00 12%, transparent); padding: 6px 12px 6px var(--chg-gutter); }
 .chg-row { display: flex; align-items: center; gap: 10px; padding: 7px 12px; font-size: 13px; border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); cursor: pointer; }
 /* Must clear the zone wash, not sit level with it, or a selectable row stops signalling
    that it's interactive. */
@@ -3333,7 +3336,8 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
   border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
 .chg-proposal b { color: var(--text-h); font-weight: 600; }
 .chg-match-src { font-size: 11px; color: var(--text-dim, #9aa); }
-.chg-sources { padding: 6px 12px; font-size: 12px; }
+.chg-sources { padding: 6px 12px 6px var(--chg-gutter); font-size: 12px;
+  background: var(--chg-wash); }
 .chg-sources ul { margin: 4px 0 0; padding-left: 18px; }
 
 /* factual context strip — what we KNOW about the ROM, above the AI's proposals.

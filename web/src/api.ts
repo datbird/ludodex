@@ -134,6 +134,7 @@ export interface AiMatch {
   suggested_title: string | null
   suggested_year: number | null
 }
+export interface AiCollectionMember { title: string; platform?: string; year?: number | null }
 export interface AiFindingPayload {
   match: AiMatch
   attributes: Record<string, string | string[]>
@@ -144,6 +145,10 @@ export interface AiFindingPayload {
   provider_matches?: ProviderMatch[]
   sources?: SourceCite[]
   web?: boolean
+  // compilation membership proposal (DESIGN §13) — accepting it records the collection
+  // AND materializes member entries, so it must render as a reviewable change
+  collection?: { is_collection: boolean; name?: string | null
+    members?: AiCollectionMember[] } | null
 }
 export interface FindingContext {
   title: string | null
@@ -173,7 +178,7 @@ export interface AiFinding {
   run_id: number
   norm_key: string
   title: string
-  kind: 'match' | 'identify' | 'supplement'
+  kind: 'match' | 'identify' | 'supplement' | 'collection'
   status: 'proposed' | 'accepted' | 'rejected' | 'applied'
   confidence: number
   model: string
@@ -188,6 +193,8 @@ export interface AiApplySelection {
   finding_id: number
   attributes: string[] | null
   match: boolean
+  // undefined = as proposed (cards view / older clients); false = membership unticked
+  collection?: boolean
 }
 export type AiFindingCounts = Record<string, Record<string, number>>
 // Per-platform cover diff for a finding: what accepting it does to the served cover.

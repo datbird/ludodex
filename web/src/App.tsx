@@ -8443,6 +8443,7 @@ function FileHistory() {
 // ---- AI metadata audit & supplement ----
 const AIM_KIND_LABEL: Record<string, string> = {
   match: 'Match flag', identify: 'Identify', supplement: 'Supplement',
+  collection: 'Collection',
 }
 
 function fmtAttrVal(v: string | string[]): string {
@@ -8533,6 +8534,15 @@ function AimFindingBody({ f }: { f: AiFinding }) {
           {p.current_match?.year ? ` (${p.current_match.year})` : ''}; AI thinks this is{' '}
           <b>{m.suggested_title || '—'}</b>{m.suggested_year ? ` (${m.suggested_year})` : ''}.
           {m.issue && <div className="aim-issue">{m.issue}</div>}
+        </div>
+      )}
+      {p.collection?.is_collection && (p.collection.members || []).length > 0 && (
+        <div className="aim-callout info">
+          📦 Compilation: <b>{p.collection.name || f.title}</b> — accepting records{' '}
+          {(p.collection.members || []).length} member game
+          {(p.collection.members || []).length === 1 ? '' : 's'} in your library:{' '}
+          {(p.collection.members || [])
+            .map((mm) => mm.title + (mm.year ? ` (${mm.year})` : '')).join(' · ')}
         </div>
       )}
       <ProviderMatchRows p={p} />
@@ -9069,6 +9079,7 @@ type Change =
       renameFrom?: string; renameTo?: string; idFrom?: string; idTo?: string }
   | { id: string; type: 'attr'; attrKind: string; label: string; value: string
       from?: string }
+  | { id: string; type: 'collection'; label: string; value: string; from: string }
 
 function findingChanges(f: AiFinding): Change[] {
   const out: Change[] = []
@@ -9088,9 +9099,12 @@ function findingChanges(f: AiFinding): Change[] {
     // to what the entry IS, and a reviewer ticking a box deserves to see both sides.
     const idTo = pms.map((m) => `${m.name}${m.year ? ` (${m.year})` : ''}`).join(' · ')
     const cm = f.context?.current_match
+    // Only assert "not linked" when we actually HAVE the context saying so — the
+    // server omits context on very large finding lists, and asserting a false
+    // current state is worse than admitting we don't know it.
     const idFrom = cm
       ? cm + (f.context?.current_match_year ? ` (${f.context.current_match_year})` : '')
-      : 'not linked to any provider'
+      : (f.context ? 'not linked to any provider' : 'current link unknown')
     out.push({
       id: `${f.id}:match`, type: 'match',
       label: '🔗 Link to ' + pms.map((m) => `${pmLabel(m)} #${pmId(m)}`).join(' + '),
@@ -9102,12 +9116,32 @@ function findingChanges(f: AiFinding): Change[] {
   }
   for (const k of Object.keys(f.payload.attributes || {})) {
     const cur = f.context?.current_attrs?.[k]
-    const from = (cur === null || cur === undefined || (Array.isArray(cur) && !cur.length))
-      ? '' : fmtAttrVal(cur)
+    // Three states, and they must render differently: a known value, a KNOWN blank
+    // ('' -> "not set"), and no context at all (undefined -> "current value unknown").
+    // Without context (omitted on large finding lists) "not set" would be a false
+    // statement about an attribute that may well be set.
+    const from = !f.context ? undefined
+      : (cur === null || cur === undefined || (Array.isArray(cur) && !cur.length))
+        ? '' : fmtAttrVal(cur)
     out.push({
       id: `${f.id}:attr:${k}`, type: 'attr', attrKind: k,
       label: k.replace(/_/g, ' '), value: fmtAttrVal(f.payload.attributes[k]),
       from,
+    })
+  }
+  const coll = f.payload.collection
+  if (coll?.is_collection && (coll.members || []).length) {
+    // Membership mutates the catalog on apply (records the collection AND
+    // materializes member entries), so it MUST be a visible, individually
+    // tickable change — never a silent rider on an attribute accept.
+    const members = coll.members || []
+    out.push({
+      id: `${f.id}:collection`, type: 'collection',
+      label: '📦 Collection membership',
+      from: 'not recorded',
+      value: `“${coll.name || f.title}” — ${members.length} member game`
+        + `${members.length === 1 ? '' : 's'}: `
+        + members.map((mm) => mm.title + (mm.year ? ` (${mm.year})` : '')).join(' · '),
     })
   }
   return out
@@ -9117,7 +9151,9 @@ function findingChanges(f: AiFinding): Change[] {
 function changeIsManual(f: AiFinding, c: Change): boolean {
   const mc = f.manual_conflicts
   if (!mc) return false
-  return c.type === 'match' ? mc.identity : mc.attrs.includes(c.attrKind)
+  if (c.type === 'match') return mc.identity
+  if (c.type === 'attr') return mc.attrs.includes(c.attrKind)
+  return false                      // collection membership has no manual-pin conflict
 }
 
 // The factual, non-AI things we KNOW about a ROM (platform, file name, folder, region
@@ -9418,8 +9454,13 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
       const attrs = g.changes.filter((c) => c.type === 'attr' && sel.has(c.id))
         .map((c) => (c as Extract<Change, { type: 'attr' }>).attrKind)
       const match = g.changes.some((c) => c.type === 'match' && sel.has(c.id))
-      if (attrs.length === 0 && !match) continue
-      selections.push({ finding_id: g.f.id, attributes: attrs, match })
+      const hasColl = g.changes.some((c) => c.type === 'collection')
+      const collSel = g.changes.some((c) => c.type === 'collection' && sel.has(c.id))
+      if (attrs.length === 0 && !match && !collSel) continue
+      // collection is stated explicitly whenever the finding proposes one, so an
+      // unticked membership row really is declined (not silently applied)
+      selections.push({ finding_id: g.f.id, attributes: attrs, match,
+        ...(hasColl ? { collection: collSel } : {}) })
     }
     return selections
   }
@@ -9576,9 +9617,11 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
                   <span className="chg-label">{c.label} change{tag}</span>
                   {/* State BOTH sides. "not set" is a real, meaningful left-hand side —
                       filling a blank and overwriting an existing value are different
-                      decisions, and the reviewer can only tell them apart if we say so. */}
+                      decisions, and the reviewer can only tell them apart if we say so.
+                      undefined from ≠ known-blank: without context we say "unknown"
+                      rather than assert a blank that may be false. */}
                   <span className={'chg-from' + (c.from ? '' : ' chg-unset')}>
-                    {c.from || 'not set'}</span>
+                    {c.from !== undefined ? (c.from || 'not set') : 'current value unknown'}</span>
                   <span className="chg-arrow">→</span>
                   <span className="chg-value">{c.value}</span>
                 </label>
@@ -9590,10 +9633,13 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
               // answers "what about the other attributes?" instead of leaving the
               // reviewer to infer silence from an absent row.
               const matchRows = changes.filter((c) => c.type === 'match')
+              const collRows = changes.filter((c) => c.type === 'collection')
               const attrRows = changes.filter((c) => c.type === 'attr')
+              const missing = f.payload.missing || []
               return (
                 <>
                   {matchRows.map(renderRow)}
+                  {collRows.map(renderRow)}
                   {attrRows.length > 0 ? (
                     <>
                       <div className="chg-attrs-h">🏷 Attribute changes</div>
@@ -9601,7 +9647,11 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
                     </>
                   ) : (
                     <div className="chg-attrs-none">
-                      🏷 No other proposed changes — every other attribute is already set.
+                      {missing.length > 0
+                        ? `🏷 No attribute changes proposed — ${missing.length} attribute`
+                          + `${missing.length === 1 ? '' : 's'} still unknown (`
+                          + missing.map((k) => k.replace(/_/g, ' ')).join(', ') + ').'
+                        : '🏷 No other proposed changes — every other attribute is already set.'}
                     </div>
                   )}
                 </>
