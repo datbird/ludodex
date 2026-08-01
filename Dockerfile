@@ -34,11 +34,17 @@ ENV PYTHONUNBUFFERED=1 \
 #   cifs-utils, nfs-common, smbclient→ mount SMB / NFS shares
 #   ca-certificates                  → TLS to providers
 #   bash, findutils                  → scan scripts
+#   ffmpeg (brings ffprobe)          → video frame sampling for the vision layer.
+#                                      Without it PIL can't open a container, so every
+#                                      video candidate is dropped before the model sees
+#                                      it — media_video degrades explicitly rather than
+#                                      scoring a trailer blind.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client rsync sshpass \
         p7zip-full zip unzip \
         cifs-utils nfs-common smbclient \
         ca-certificates bash findutils tzdata \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
