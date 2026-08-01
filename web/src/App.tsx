@@ -19,7 +19,7 @@ import type {
   GameRelease, SystemEntry,
 } from './api'
 import { providerColor, providerLabel, providerMark } from './providers'
-import { providerIconPath, providerIconViewBox, providerIconWide } from './provider-icons'
+import { providerIconPath, providerIconViewBox, providerIconWide, providerIconImage } from './provider-icons'
 import { useReveal, byKey } from './reveal'
 import { sparkleFrom } from './sparkle'
 import { honorReducedMotion, setHonorReducedMotion } from './motion'
@@ -6651,6 +6651,64 @@ function HeroConfig({ assets, heroPref, onPick, onClose }: {
   )
 }
 
+// ONE affordance for every provider this game is matched to. This was a row of brand
+// badges, which grew with each provider and crowded the media tabs off the line — and
+// the whole point of "every provider is a provider" is that the row keeps growing. The
+// chevron is part of the artwork, so the control reads as a menu without extra chrome.
+function ProviderLinksMenu({ links }: { links: { provider: string; url: string }[] }) {
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    window.addEventListener('keydown', esc)
+    return () => window.removeEventListener('keydown', esc)
+  }, [open])
+  const n = links.length
+  return (
+    <span className="prov-links">
+      <button className="prov-menu-btn" aria-haspopup="menu" aria-expanded={open}
+        title={`Open this game on its ${n} linked provider page${n === 1 ? '' : 's'}`}
+        onClick={() => setOpen((v) => !v)}>
+        <img src="/providers/providers.png" width="26" height="26" alt="Providers" />
+        <span className="prov-menu-n">{n}</span>
+      </button>
+      {open && (
+        <>
+          <div className="hero-cfg-backdrop" onClick={() => setOpen(false)} />
+          <div className="prov-menu" role="menu" onClick={(e) => e.stopPropagation()}>
+            <div className="prov-menu-h">Matched providers</div>
+            {links.map((l) => {
+              // A raster mark wins over the glyph table: it exists precisely because the
+              // logo's identity is its own colour, so it also drops the brand-colour chip.
+              const img = providerIconImage(l.provider)
+              const icon = img ? null : providerIconPath(l.provider)
+              const wide = icon ? providerIconWide(l.provider) : false
+              return (
+                <a key={l.provider + ':' + l.url} className="prov-menu-row" role="menuitem"
+                  href={l.url} target="_blank" rel="noopener noreferrer"
+                  onClick={() => setOpen(false)}>
+                  <span className={'prov-fav' + (icon || img ? ' has-logo' : '')
+                    + (wide ? ' wide' : '') + (img ? ' raster' : '')}
+                    style={img ? undefined : { background: providerColor(l.provider) }}>
+                    {img
+                      ? <img src={img} width="20" height="20" alt="" aria-hidden="true" />
+                      : icon
+                        ? <svg viewBox={providerIconViewBox(l.provider)} width={wide ? 36 : 16}
+                            height="16" fill="currentColor" aria-hidden="true"><path d={icon} /></svg>
+                        : providerMark(l.provider)}
+                  </span>
+                  <span className="prov-menu-lbl">{providerLabel(l.provider)}</span>
+                  <span className="prov-menu-go" aria-hidden="true">↗</span>
+                </a>
+              )
+            })}
+          </div>
+        </>
+      )}
+    </span>
+  )
+}
+
 // Horizontally-scrollable strip of every art asset the game actually has, with
 // image kinds that render into a fixed viewport, so framing (position+zoom) applies
 const FRAMABLE_KINDS = new Set(['cover', 'background', 'hero', 'header', 'fanart'])
@@ -6686,25 +6744,7 @@ function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links
   const provLinks = (links ?? []).filter((l) => l.url)
   return (
     <div className="media-strip">
-      {provLinks.length > 0 && (
-        <span className="prov-links" title="Open this game on its linked provider pages">
-          {provLinks.map((l) => {
-            const icon = providerIconPath(l.provider)
-            const wide = icon ? providerIconWide(l.provider) : false
-            return (
-              <a key={l.provider + ':' + l.url}
-                className={'prov-fav' + (icon ? ' has-logo' : '') + (wide ? ' wide' : '')} href={l.url}
-                target="_blank" rel="noopener noreferrer"
-                title={`Open on ${providerLabel(l.provider)}`}
-                style={{ background: providerColor(l.provider) }}>
-                {icon
-                  ? <svg viewBox={providerIconViewBox(l.provider)} width={wide ? 36 : 16} height="16"
-                      fill="currentColor" aria-hidden="true"><path d={icon} /></svg>
-                  : providerMark(l.provider)}</a>
-            )
-          })}
-        </span>
-      )}
+      {provLinks.length > 0 && <ProviderLinksMenu links={provLinks} />}
       {items.map((s) => (
         <button key={s.kind} className={'ms-btn' + (s.n ? '' : ' empty')} disabled={!s.n}
           title={s.n ? `View ${s.n} ${s.label.toLowerCase()}` : `No ${s.label.toLowerCase()} yet`}
