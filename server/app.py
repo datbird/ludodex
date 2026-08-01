@@ -38,6 +38,7 @@ import config          # noqa: E402  pipeline config store (config.sqlite)
 import media           # noqa: E402  pipeline vocab/priority (pure data)
 import media_choose    # noqa: E402  reuse _materialize_row (non-destructive)
 import media_index      # noqa: E402  media-index schema (for the first-run seed)
+import media_video     # noqa: E402  video frame sampling (vision payload for trailers)
 import titlenorm       # noqa: E402  shared title -> norm_key (matches build_library)
 import devices         # noqa: E402  device connections + library-manager pull
 import fileops         # noqa: E402  file-operations engine (profiles + runbooks)
@@ -9429,7 +9430,22 @@ def _prune_blank_media(norm_keys, kinds=("cover", "hero", "background", "header"
 
 
 def _thumb_bytes(r, px=256):
-    """Downscaled JPEG bytes for a media row (for vision). (mime, bytes) or None."""
+    """Downscaled JPEG bytes for a media row (for vision). (mime, bytes) or None.
+
+    VIDEO takes a different route on purpose, for two reasons. PIL cannot open a
+    container, which is why video candidates were silently dropped before the model ever
+    saw them — the whole reason video had no AI path. And `_asset_local_path`'s URL
+    branch MATERIALIZES the asset, which for a 40 MB trailer is a download we don't
+    need: `media_video.contact_sheet` samples frames straight off the URL with fast seek
+    and caches one tiled JPEG per video.
+
+    This is the single vision-payload builder for both consumers (`/api/ai/art-pick` and
+    `_ai_adjudicate_game`), so teaching it video gives both video support without either
+    knowing video exists."""
+    ext = (r["ext"] or "jpg").split("?")[0].lower()
+    if ext in media_video.VIDEO_EXTS:
+        sheet = media_video.contact_sheet(r["ref"], REPO, r["ref"], px=px)
+        return ("image/jpeg", sheet) if sheet else None
     p = _asset_local_path(r)
     if not p:
         return None
