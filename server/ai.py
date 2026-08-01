@@ -880,8 +880,16 @@ DEFAULT_PROMPTS = {
         "otherwise-standalone games (e.g. 'Sega Genesis Classics', 'Sonic Mega "
         "Collection', 'Mega Man Legacy Collection', 'Castlevania Anniversary "
         "Collection'). If so, set collection.is_collection=true, give its name, and "
-        "list the STANDALONE games it contains (each: title + original platform + "
-        "year). NOT a collection: a single game plus DLC/season pass; an 'Anniversary'/"
+        "list the STANDALONE games it contains (each: title + platform + os + year). "
+        "PLATFORM IS HARDWARE, OS IS SEPARATE: give the machine the bundled build runs "
+        "on ('PC', 'Apple II', 'Commodore 64', 'Sega Genesis', 'PlayStation') in "
+        "\"platform\", and put any operating system ('MS-DOS', 'Windows 3.1', 'Windows') "
+        "in \"os\" — NEVER in \"platform\". DOS and Windows games are BOTH 'PC'; they "
+        "differ only by os. Use the platform of the build this compilation actually "
+        "ships (a DOSBox-wrapped original is still 'PC'; an emulated Genesis ROM is "
+        "'Sega Genesis'), not the game's full release history. Leave \"os\" empty when "
+        "it doesn't apply or you don't know. "
+        "NOT a collection: a single game plus DLC/season pass; an 'Anniversary'/"
         "'HD'/'Definitive'/'Remastered' edition of ONE game; a franchise/series name. "
         "When unsure it's a real multi-game bundle, set is_collection=false.\n"
         "Use only well-established facts. If unsure, LOWER the confidence and say so — "
@@ -892,8 +900,8 @@ DEFAULT_PROMPTS = {
         '"suggested_year": <int or null>}, '
         '"attributes": {"<missing_kind>": <string or array of strings>}, '
         '"collection": {"is_collection": true|false, "name": "<compilation name>", '
-        '"members": [{"title": "<game>", "platform": "<original system>", '
-        '"year": <int or null>}]}, '
+        '"members": [{"title": "<game>", "platform": "<original HARDWARE>", '
+        '"os": "<operating system, or empty>", "year": <int or null>}]}, '
         '"notes": "<one short sentence>"}\n'
         "Attribute formats: release_year=\"YYYY\"; genres/themes/game_modes/"
         "player_perspectives/developers/publishers=arrays of strings; "
@@ -1659,12 +1667,19 @@ def detect_collections(items, provider=None, model=None):
         "as 'Ys I & II Chronicles+' is the two-game compilation, named after the store "
         "listing). "
         "When it IS a compilation, list the standalone games it contains, using each game's "
-        "own original platform and release year. List only members you are confident about; "
+        "own platform and release year. PLATFORM IS HARDWARE, OS IS SEPARATE: the machine "
+        "the bundled build runs on ('PC', 'Apple II', 'Sega Genesis') goes in \"platform\"; "
+        "an operating system ('MS-DOS', 'Windows 3.1') goes in \"os\" and NEVER in "
+        "\"platform\" — DOS and Windows games are BOTH 'PC'. Use the platform of the build "
+        "this compilation actually ships, not the game's full release history. Leave \"os\" "
+        "empty when it doesn't apply or you don't know. "
+        "List only members you are confident about; "
         "an incomplete member list is much better than an invented one. If unsure whether "
         "something is a real multi-game bundle, answer false. "
         'Respond ONLY with a JSON array of {"n": <num>, "is_collection": true|false, '
         '"name": "<compilation name>", "confidence": 0..1, '
-        '"members": [{"title": "<game>", "platform": "<original system>", "year": <int|null>}], '
+        '"members": [{"title": "<game>", "platform": "<HARDWARE>", '
+        '"os": "<operating system, or empty>", "year": <int|null>}], '
         '"reason": "<short>"}.')
     text = _complete_text(provider, key, model, system, "Entries:\n" + listing)
     obj = _json(text)

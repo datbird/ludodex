@@ -231,19 +231,108 @@ def member_platform_label(display, coll_platform, existing):
     patched==rebuilt contract.
 
     `display` is an AI-supplied DISPLAY string ("PC", "Game Boy Advance",
-    "PlayStation"); the catalog stores canonical labels ("pc", "gba", "psx"). Prefer
-    a label the library already uses for the same platform (never split an existing
-    facet), else platmap's canonical token, else the generic normalizer, else the
-    collection's own platform."""
+    "PlayStation"); the catalog stores canonical labels ("pc", "gba", "ps1").
+
+    The platform vocabulary is CLOSED. A free-text string that platmap doesn't
+    recognize falls back to the collection's own platform — it is never normalized
+    into a new label. The old `norm_system` fallback was the leak: it minted `ms-dos`,
+    `pc-8801` and `microsoft windows` as parallel platforms in a Steam-only catalog,
+    and since AI display strings vary per call, identical games split across facets
+    (King's Quest said "MS-DOS", Space Quest said "PC" — same publisher, same era)."""
     import platmap
-    from media import norm_system
     d = (display or "").strip()
     if d:
         lbl = platmap.catalog_label(d, existing)
         if lbl:
             return lbl
-        return norm_system(d) or (coll_platform or "pc")
     return coll_platform or "pc"
+
+
+_SUBTITLE_SEPS = (": ", ":", " - ", " – ", " — ")
+
+
+def _title_head(title):
+    """The part of a title BEFORE its first subtitle separator, or '' if it has none.
+
+    Separators are checked with surrounding spaces so a hyphenated name ('Spider-Man',
+    'Zone-of-the-Enders') is never split — only a real subtitle break is."""
+    t = (title or "").strip()
+    best = None
+    for sep in _SUBTITLE_SEPS:
+        i = t.find(sep)
+        if i > 0 and (best is None or i < best):
+            best = i
+    return t[:best].strip() if best else ""
+
+
+def purchase_siblings(con, data_dir, coll_key):
+    """base_keys of entries granted by the SAME store purchase as `coll_key`.
+
+    Steam can grant several apps for one product (Ys I & II Chronicles+ grants 223810
+    and 223870) and name them after the games inside. `canonical_appid` resolves a
+    sub-app to its parent, so two entries sharing a canonical appid are two faces of
+    ONE purchase — which is the only evidence that justifies collapsing a member onto
+    an existing entry.
+
+    Only DIRECT ownership counts (`via_collection IS NULL`): a phantom entry a previous
+    materialize created is not a purchase and must never become a collapse target.
+    Empty when there's no cache, no appid, or nothing shares the product — every caller
+    treats that as "no collapse", so absent evidence can only be conservative."""
+    sm = os.path.join(data_dir, "steam-meta.sqlite")
+    if not os.path.exists(sm):
+        return set()
+    try:
+        _c = sqlite3.connect(sm)
+        cmap = {str(a): str(k or a) for a, k in
+                _c.execute("SELECT appid, canonical_appid FROM steam_meta")}
+        _c.close()
+    except sqlite3.OperationalError:
+        return set()                    # cache predates the column
+    if not cmap:
+        return set()
+    owned_products = {}                 # base_key -> the canonical appids it owns directly
+    for bk, sid in con.execute(
+            "SELECT g.base_key, s.source_id FROM games g JOIN sources s "
+            "ON s.game_id=g.id WHERE s.source='steam' AND s.state='have' "
+            "AND s.via_collection IS NULL AND s.source_id!=''"):
+        k = cmap.get(str(sid))
+        if k:
+            owned_products.setdefault(bk, set()).add(k)
+    mine = owned_products.get(coll_key) or set()
+    if not mine:
+        return set()
+    return {bk for bk, ks in owned_products.items() if ks & mine}
+
+
+def resolve_member_key(con, member_title, member_key, siblings):
+    """The base_key a membership should credit — the member's own key, or a SIBLING APP
+    of the same purchase that the catalog already holds under a shorter title.
+
+    The AI enumerates a compilation's members under their full original titles ("Ys II:
+    Ancient Ys Vanished - The Final Chapter") while the store granted you the short one
+    ("Ys II"). Those normalize to different base_keys, so materialization created a
+    PHANTOM entry beside the game you already own — the opposite of §13, where a member
+    you own gets a credit and never a second entry.
+
+    TWO gates, and both are needed. Title shape alone is not evidence of sameness: a
+    live-catalog run collapsed "Tomb Raider: Chronicles" into the separately-bought 1996
+    "Tomb Raider" and "Contra: Hard Corps" into "Contra". So the head must ALSO name a
+    sibling app of this very purchase (see purchase_siblings) — the only situation where
+    "the bundle's own granted app" and "a game inside the bundle" are the same thing.
+
+    Matching is on the title's subtitle HEAD, never a prefix: 'Sonic the Hedgehog 2'
+    starts with 'Sonic the Hedgehog', and a sequel carries no subtitle separator, so it
+    cannot be reached from here even within one purchase."""
+    from titlenorm import norm
+    if not siblings:
+        return member_key
+    head = _title_head(member_title)
+    if not head:
+        return member_key
+    hk = norm(head)
+    if not hk or hk == member_key or hk not in siblings:
+        return member_key
+    return hk
 
 
 def materialize_members(con, data_dir):
@@ -282,20 +371,64 @@ def materialize_members(con, data_dir):
     full_by_key = {c["coll_key"]: compilations.get_collection(data_dir, c["coll_key"]) or {}
                    for c in colls}
 
+    lib_plats = [r[0] for r in con.execute(
+        "SELECT DISTINCT platform FROM games "
+        "WHERE platform IS NOT NULL AND platform!=''")]
+    # each collection's OWN platform — the fallback when a member's platform string
+    # isn't in platmap's closed vocabulary. Needed by BOTH passes, so it's resolved once.
+    coll_plat, coll_src = {}, {}
+    for c in colls:
+        row = con.execute(
+            "SELECT g.platform, (SELECT s.source FROM sources s WHERE s.game_id=g.id "
+            "AND s.state='have' AND s.via_collection IS NULL LIMIT 1) "
+            "FROM games g WHERE g.base_key=? AND EXISTS(SELECT 1 FROM sources s2 "
+            "WHERE s2.game_id=g.id AND s2.state='have' AND s2.via_collection IS NULL) "
+            "ORDER BY g.id LIMIT 1", (c["coll_key"],)).fetchone()
+        coll_plat[c["coll_key"]] = (row[0] or "pc") if row else "pc"
+        coll_src[c["coll_key"]] = (row[1] or "") if row else ""
+
     changed = 0
     # -- 1. reconcile stale materialized rows --
-    valid = set()                       # (coll_key, member_key) memberships that stand
+    # (coll_key, member_key) -> the platform this membership SHOULD resolve to. Keyed
+    # with the platform on purpose: a membership that still stands but now resolves
+    # elsewhere is stale too. Without this, a row materialized under an old resolver
+    # (the `ms-dos` / `microsoft windows` / `pc-8801` labels a since-removed free-text
+    # fallback minted) stays put forever — pass 1 matched on membership alone and
+    # pass 3 skips any member that already has an entry, platform-blind. Deleting it
+    # here lets pass 3 recreate it at the right platform, so the repair rides the
+    # existing reconcile path instead of a parallel mover.
+    # A member's STORED key is norm(the AI's full title); the entry it should actually
+    # credit may be the shorter one you already own (see resolve_member_key). Resolved
+    # once here and used by BOTH passes — pass 1 validates on the entry's base_key, so
+    # if the two ever disagreed it would delete a row pass 3 immediately recreates.
+    mkeys = {}                          # (coll_key, stored member_key) -> credited base_key
+    for ck, full in full_by_key.items():
+        sibs = purchase_siblings(con, data_dir, ck)
+        for m in full.get("members") or []:
+            mkeys[(ck, m["member_key"])] = resolve_member_key(
+                con, m.get("member_title"), m["member_key"], sibs)
+    valid = {}
     for ck, full in full_by_key.items():
         if ck not in owned:
             continue
         for m in full.get("members") or []:
-            valid.add((ck, m["member_key"]))
-    for srow, gid, ck, bk, summary in con.execute(
-            "SELECT s.rowid, s.game_id, s.via_collection, g.base_key, g.sources_summary "
-            "FROM sources s JOIN games g ON g.id=s.game_id "
+            rk = mkeys.get((ck, m["member_key"])) or m["member_key"]
+            if rk == ck:
+                continue                # the member IS the collection's own entry
+            valid[(ck, rk)] = member_platform_label(
+                m.get("member_platform"), coll_plat.get(ck, "pc"), lib_plats)
+    for srow, gid, ck, bk, plat, summary in con.execute(
+            "SELECT s.rowid, s.game_id, s.via_collection, g.base_key, g.platform, "
+            "g.sources_summary FROM sources s JOIN games g ON g.id=s.game_id "
             "WHERE s.via_collection IS NOT NULL").fetchall():
-        if (ck, bk) in valid:
-            continue
+        want_plat = valid.get((ck, bk))
+        if want_plat is not None:
+            # Only an entry MATERIALIZATION ITSELF created may be re-keyed. A
+            # pre-existing entry that merely had the credit attached (a satisfied
+            # wishlist row, §13.3) owns its platform legitimately — the member's
+            # resolved platform says nothing about where the user already filed it.
+            if want_plat == plat or not (summary or "").startswith("via:"):
+                continue
         con.execute("DELETE FROM sources WHERE rowid=?", (srow,))
         left = con.execute("SELECT COUNT(*) FROM sources WHERE game_id=?",
                            (gid,)).fetchone()[0]
@@ -313,27 +446,21 @@ def materialize_members(con, data_dir):
     base_gids = {}                      # base_key -> [gid, ...]
     for gid, bk in con.execute("SELECT id, base_key FROM games"):
         base_gids.setdefault(bk, []).append(gid)
-    lib_plats = [r[0] for r in con.execute(
-        "SELECT DISTINCT platform FROM games "
-        "WHERE platform IS NOT NULL AND platform!=''")]
     made = 0
     for c in colls:
         ck = c["coll_key"]
         if ck not in owned:
             continue                    # only an OWNED bundle credits anything
         full = full_by_key.get(ck) or {}
-        row = con.execute(
-            "SELECT g.platform, (SELECT s.source FROM sources s WHERE s.game_id=g.id "
-            "AND s.state='have' AND s.via_collection IS NULL LIMIT 1) "
-            "FROM games g WHERE g.base_key=? AND EXISTS(SELECT 1 FROM sources s2 "
-            "WHERE s2.game_id=g.id AND s2.state='have' AND s2.via_collection IS NULL) "
-            "ORDER BY g.id LIMIT 1", (ck,)).fetchone()
-        cplat, csrc = (row[0] or "pc", row[1] or "") if row else ("pc", "")
+        # SAME resolution pass 1 validated against (hoisted above) — if these two ever
+        # disagreed, pass 1 would delete a row pass 3 immediately recreates, forever.
+        cplat, csrc = coll_plat.get(ck, "pc"), coll_src.get(ck, "")
         for m in full.get("members") or []:
-            mk = m["member_key"]
-            if not mk:
-                continue
-            mplat = member_platform_label(m.get("member_platform"), cplat, lib_plats)
+            mk = mkeys.get((ck, m["member_key"])) or m["member_key"]
+            if not mk or mk == ck:
+                continue                # missing key, or the collection's own entry
+            mplat = valid.get((ck, mk)) or member_platform_label(
+                m.get("member_platform"), cplat, lib_plats)
             existing = base_gids.get(mk)
             if existing:
                 if mk in owned:

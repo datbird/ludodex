@@ -319,11 +319,56 @@ Three axes, only one is identity:
 |------|-------|------|-----------------------|
 | **Platform** | `sources.platform` (derived) | **identity** — one entry per value | 1 |
 | **Source** | `sources.source` | provenance ("owned via") | many |
-| **OS** | `os.sqlite` (win/mac/linux) | support metadata | many, attribute only |
+| **OS** | `os.sqlite` (win/mac/linux) | support metadata; identity **only on evidence** (§11.1.1) | many |
 
 - Two sources on the **same** platform **dedupe** into one entry (Steam **and** GOG of
   the same PC game → one `pc` entry with two source rows).
-- OS never splits an entry (a PC game on Windows+Linux is still one `pc` entry).
+- OS does not split an entry by default (a PC game on Windows+Linux is still one `pc`
+  entry). See §11.1.1 for the one exception.
+
+**Platform is HARDWARE, and `pc` is the home-computer bucket** (decision 2026-07-28).
+The test is the machine's shape: a keyboard and/or tape/floppy ⇒ `pc`. That covers
+6502/Z80 8-bits, Motorola 68k (Amiga, Atari ST, classic Mac), RISC (Archimedes) and
+x86 alike — an Amiga and a 486 are both "a computer you own games on". A keyboard-less
+cartridge/disc machine stays a console, which is why `amigacd32` is a platform and
+`amiga` is not. Two things are deliberately NOT platform:
+
+- **the OS** — DOS, Windows 3.1 and Windows 11 are three operating systems on ONE
+  machine, so all three are `pc`;
+- **the CPU / make** — a platform facet per micro is the thing this rule exists to
+  prevent.
+
+The vocabulary is CLOSED (`platmap.KNOWN`): a free-text platform string that platmap
+doesn't recognize resolves to the fallback, never to a new label. An open vocabulary
+let AI display strings mint `ms-dos`, `pc-8801` and `microsoft windows` as parallel
+platforms in a Steam-only catalog — and because those strings vary per call, identical
+games split across facets (King's Quest said "MS-DOS", Space Quest said "PC").
+
+### 11.1.1 OS as release identity — the one exception
+
+Folding every micro into `pc` removes what used to distinguish the Amiga release of a
+game from the DOS release. **The OS carries that load instead**, but only on evidence:
+
+- **An entry's OS is a SET, and merging is the DEFAULT.** One release shipped for
+  several OSes is ONE entry: a Win/Mac hybrid CD, or a simultaneous Amiga + DOS + ST
+  launch by the same team on the same date, is `{AmigaOS, MS-DOS, TOS}` on a single
+  record.
+- **It splits only on positive evidence the releases genuinely differ** — different
+  release year, different developer/publisher, different content or art. NOT because
+  there are two disk images, and NOT because there are two OSes. A store's
+  compatibility matrix (`os_support`'s win/mac/linux booleans) is support data and
+  never splits anything.
+- Same shape as the era/edition logic (`era_reheal`/`era_reject`, the `split` AI area
+  that peels Uno 2006 from Uno 2016): default to one entry, split when the facts say
+  two. No second identity mechanism.
+- **Split entries SHARE media by design.** §11.9's two tiers already give this: art
+  scoped to the entry, plus platform-neutral store/IGDB art matched by `game_key`.
+  OS-split entries of one game share a `game_key`, so they inherit the shared pool
+  while each keeps its own box art. The siloed tier must key on **system + os**, or an
+  Amiga cover and a DOS cover collide.
+- For 8-bits the OS field holds a machine name (`Commodore 64`, `ZX Spectrum`) beside
+  real OS names (`AmigaOS`, `MS-DOS`). It is a release-target label, not a strict OS
+  taxonomy — the alternative is reintroducing the micro-facets this rule removes.
 
 ### 11.2 Platform derivation — inherent to the source
 

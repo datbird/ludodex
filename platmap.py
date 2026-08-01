@@ -10,11 +10,7 @@ _ALIASES = {
     "atari2600": ["atari2600"],
     "atari5200": ["atari5200"],
     "atari7800": ["atari7800"],
-    "atari8bit": ["atari8bit", "atari800", "atari8bitfamily"],
-    "amiga": ["amiga", "commodoreamiga"],
     "amigacd32": ["amigacd32", "cd32"],
-    "apple2": ["apple2", "appleii", "appleiigs"],
-    "c64": ["c64", "commodorec64128max", "commodore64"],
     "3do": ["3do", "3dointeractivemultiplayer"],
     "3ds": ["3ds", "nintendo3ds", "newnintendo3ds"],
     "nds": ["nds", "nintendods"],
@@ -60,17 +56,50 @@ _ALIASES = {
             "turbografx16", "pcenginesupergrafx"],
     "pcecd": ["tuboduo", "turboduo", "turbografx16pcenginecd", "pcenginecd",
               "turbografxcd"],
-    "zxspectrum": ["zxspectrum", "sinclairzx81"],
-    "amstrad": ["amstradcpc"],
-    "msx": ["msx", "msx2"],
     "xbox": ["xbox"],
     "xbox360": ["xbox360"],
     "xboxone": ["xboxone"],
     "supervision": ["supervision", "watara", "wataraquickshotsupervision"],
-    "dos": ["dos"],
-    "pc": ["pcmicrosoftwindows", "windows", "pc"],
-    "mac": ["mac"],
-    "linux": ["linux"],
+    # `pc` = THE HOME-COMPUTER BUCKET, not just x86. The test is the machine's shape:
+    # a keyboard and/or tape/floppy => `pc`. That covers 6502/Z80 8-bits, Motorola
+    # 68k (Amiga, Atari ST, classic Mac), RISC (Archimedes) and x86 alike.
+    #
+    # Two axes are deliberately NOT platform:
+    #   OS       — DOS, Windows 3.1 and Windows 11 are three operating systems on ONE
+    #              machine (os.sqlite's win/mac/linux booleans carry this).
+    #   CPU/make — an Amiga and a 486 are both "a computer you own games on".
+    # Folding all of it here is what stops an AI display string ("MS-DOS", "PC-8801")
+    # from minting a parallel platform for a machine already covered.
+    #
+    # A keyboard-less, cartridge/disc games machine stays a console — which is why
+    # `amigacd32` is above and `amiga` is here.
+    "pc": [
+        # x86 / IBM-PC and its operating systems
+        "pc", "windows", "pcmicrosoftwindows", "microsoftwindows", "ibmpc",
+        "dos", "msdos", "pcdos", "ibmpcdos", "pcbooter", "ibmpcbooter",
+        "windows31", "windows3x", "windows9x", "win32", "win64",
+        "mac", "macintosh", "applemacintosh", "macos", "osx", "macosclassic",
+        "linux", "steamos",
+        # Commodore
+        "c64", "commodore64", "commodorec64128max", "commodore16", "commodoreplus4",
+        "vic20", "commodorevic20", "commodorepet", "cbmpet",
+        "amiga", "commodoreamiga",
+        # Apple
+        "apple2", "appleii", "appleiigs", "appleiie", "apple2gs", "apple1",
+        # Atari computers (the ST is 68k; the 8-bits are 6502) — NOT the consoles
+        "atari8bit", "atari800", "atari8bitfamily", "atarixegs",
+        "atarist", "ataristste", "ataristst",
+        # Sinclair / Amstrad / MSX / Acorn — European & Japanese 8-bits
+        "zxspectrum", "sinclairzx81", "zx81", "sinclairql",
+        "amstradcpc", "amstradpcw",
+        "msx", "msx2",
+        "acornarchimedes", "acornelectron", "bbcmicro", "bbcmicrocomputersystem",
+        # Japanese home computers
+        "pc8801", "necpc8801", "pc8001", "pc9801", "pc98", "pc9800series",
+        "sharpx1", "sharpx68000", "x68000", "fmtowns", "fm7",
+        # Tandy / TI
+        "trs80", "trs80colorcomputer", "tandycomputersystem", "ti994a",
+    ],
 }
 _CANON = {a: c for c, al in _ALIASES.items() for a in al}
 KNOWN = set(_ALIASES)             # canonicals we're confident about
@@ -132,29 +161,45 @@ def catalog_label(display, existing=()):
     catalog_patch.materialize_members) MUST resolve through this same function,
     per catalog_patch's patched==rebuilt contract."""
     t = canon(display)
-    if not t:
-        return None
-    for p in existing:
+    if t not in KNOWN:
+        return None            # GATE FIRST: an unrecognized string is never a platform.
+    # Only now prefer a label the library already uses for this canonical. Doing this
+    # before the gate was self-locking: a junk label that leaked in once (canon maps it
+    # to itself) matched `existing` and was returned forever, bypassing KNOWN entirely.
+    #
+    # The canonical itself ALWAYS wins when the library already uses it. Several labels
+    # can share a canonical while a junk one is still present ('pc' and a leaked
+    # 'ms-dos' both canonicalize to `pc`), and an unordered scan would resolve "PC" to
+    # whichever the set yielded first. Sorted otherwise, so the answer is deterministic.
+    if t in existing:
+        return t
+    for p in sorted(existing):
         if canon(p) == t:
-            return p
-    return t if t in KNOWN else None
+            return p               # library spells it its own way ('gameboy' for `gb`)
+    return t
 
 
-# Hardware generation per canonical platform (home-computer lines mapped to the nearest
-# console gen). Used ONLY to gate contamination SUSPECTS — a game can be ported FORWARD to
+# Hardware generation per canonical CONSOLE. Home computers are absent by construction —
+# they all canonicalize to `pc`, which spans 1977 to today and therefore has no generation
+# (see the note in the table). Used ONLY to gate contamination SUSPECTS — a game can be
+# ported FORWARD to
 # newer hardware, but a genuine game can't appear on hardware OLDER than its earliest
 # platform. So "entry generation < the game's earliest platform generation" = suspect (then
 # the AI decides). Approximate on purpose; the AI is the precision layer.
 GEN = {
     "atari2600": 2, "atari5200": 2, "atari7800": 3, "intellivision": 2, "colecovision": 2,
-    "vectrex": 2, "sg1000": 2, "apple2": 2, "c64": 2, "amstrad": 2, "zxspectrum": 2, "msx": 2,
-    "nes": 3, "sms": 3, "atari8bit": 2, "amiga": 3, "dos": 3, "gb": 3, "gamegear": 3,
-    "lynx": 3, "supervision": 3,
+    "vectrex": 2, "sg1000": 2,
+    "nes": 3, "sms": 3, "gb": 3, "gamegear": 3, "lynx": 3, "supervision": 3,
     "genesis": 4, "snes": 4, "neogeo": 4, "neogeocd": 4, "sega32x": 4, "segacd": 4,
     "amigacd32": 4, "pce": 4, "pcecd": 4, "gbc": 4, "ngp": 4, "ngpc": 4, "virtualboy": 4,
     "arcade": 4,
     "ps1": 5, "saturn": 5, "n64": 5, "3do": 5, "jaguar": 5, "jaguarcd": 5, "gba": 5,
-    "pc": 5, "mac": 5, "linux": 5,
+    # `pc` is DELIBERATELY absent: PC hardware isn't a generation, it spans DOS-era
+    # 1985 through today. Giving it a number made the gate lie in both directions — a
+    # 1988 DOS game looked like an impossible backport onto a contemporaneous Amiga,
+    # and a `pc` entry legitimately holding an emulated Genesis game (Sega Genesis
+    # Classics) looked like a suspect. With no generation, both sides fall through to
+    # the function's documented conservative default: not a suspect.
     "dreamcast": 6, "ps2": 6, "gamecube": 6, "xbox": 6, "nds": 6, "psp": 6,
     "ps3": 7, "xbox360": 7, "wii": 7, "psvita": 7, "3ds": 7,
     "ps4": 8, "xboxone": 8, "wiiu": 8, "switch": 8,

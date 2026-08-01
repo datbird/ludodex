@@ -32,12 +32,19 @@ def _db(data_dir):
         coll_key        TEXT NOT NULL,   -- FK -> collections.coll_key
         member_key      TEXT NOT NULL,   -- norm(member_title) = the member's base_key
         member_title    TEXT NOT NULL,
-        member_platform TEXT NOT NULL DEFAULT '',
+        member_platform TEXT NOT NULL DEFAULT '',   -- HARDWARE only (DESIGN §11.1)
         member_year     INTEGER,
         origin          TEXT NOT NULL DEFAULT 'ai',
         added           REAL,
         PRIMARY KEY(coll_key, member_key))""")
     con.execute("CREATE INDEX IF NOT EXISTS ix_coll_member ON collection_members(member_key)")
+    # OS is its own axis and must never reach `member_platform` — an AI answering
+    # "MS-DOS" or "Windows 3.1" to a bare "platform?" question was minting parallel
+    # platforms for one machine. Asked separately now, stored separately.
+    if not any(r[1] == "member_os" for r in
+               con.execute("PRAGMA table_info(collection_members)")):
+        con.execute("ALTER TABLE collection_members ADD COLUMN "
+                    "member_os TEXT NOT NULL DEFAULT ''")
     # Durable NEGATIVE verdicts. Auto-detection nominates candidates every scan; a
     # nominee the AI judged not-a-collection (or couldn't enumerate) must not be
     # re-nominated — and re-BILLED — on every subsequent run. Recording a collection
@@ -51,8 +58,12 @@ def _db(data_dir):
 
 def set_collection(data_dir, coll_key, name, members, origin="ai"):
     """Upsert a collection and REPLACE its member set. `members` = iterable of
-    {title, platform?, year?}. A member that normalizes to the collection's own key
-    is dropped (a compilation never contains itself). Returns the stored member count."""
+    {title, platform?, os?, year?}. A member that normalizes to the collection's own
+    key is dropped (a compilation never contains itself). Returns the stored member
+    count.
+
+    `platform` is HARDWARE ("Apple II", "Sega Genesis", "PC"); `os` is what ran on it
+    ("MS-DOS", "Windows 3.1") and never influences the entry's platform."""
     coll_key = (coll_key or "").strip()
     if not coll_key or not name:
         return 0
@@ -77,9 +88,10 @@ def set_collection(data_dir, coll_key, name, members, origin="ai"):
             yr = None
         con.execute(
             "INSERT INTO collection_members(coll_key,member_key,member_title,"
-            "member_platform,member_year,origin,added) VALUES(?,?,?,?,?,?,?)",
-            (coll_key, mkey, title, (m.get("platform") or "").strip(), yr,
-             m.get("origin") or origin, now))
+            "member_platform,member_os,member_year,origin,added) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (coll_key, mkey, title, (m.get("platform") or "").strip(),
+             (m.get("os") or "").strip(), yr, m.get("origin") or origin, now))
         n += 1
     con.commit()
     con.close()
@@ -119,7 +131,7 @@ def get_collection(data_dir, coll_key):
         if not c:
             return None
         members = [dict(r) for r in con.execute(
-            "SELECT member_key,member_title,member_platform,member_year,origin "
+            "SELECT member_key,member_title,member_platform,member_os,member_year,origin "
             "FROM collection_members WHERE coll_key=? ORDER BY member_title",
             (coll_key,))]
         return {"coll_key": c["coll_key"], "name": c["name"],
