@@ -85,6 +85,48 @@ Runs ② then ①, in that order, so the pick judges the ENLARGED candidate set.
 lesson as select-after-materialize from the 2026-07-26 audit: choosing before fetching
 means choosing from a set you already knew was incomplete.
 
+## 2.5 The deterministic sibling — "Fetch from <provider>"
+
+**Decision 2026-08-01: a MATCH is not an INGEST.** A provider is matched whether or not
+anything was ever taken from it. The match records "this game IS that record on
+ScreenScraper / SteamGridDB / IGDB / Steam", and that identity is what makes a later
+pull possible. Every configured provider is matched for every game — there are no
+primary and secondary providers, and a provider contributing zero metadata and zero
+media is still matched.
+
+That makes a second button worth having, sitting NEXT TO the wand in both placements —
+All Media and each category:
+
+**🪄 Magic Wand** — AI. Judges, chooses, decides. Costs money.
+**⬇ Fetch from…** — deterministic. No AI, no judgment, no spend. Lists the providers
+this game is MATCHED to, and pulls everything they have for the scope you are in.
+
+The use case in the user's words: *"I don't like any of these backgrounds, I want to
+grab all from ScreenScraper."* Previous ingestion may never have taken a single asset
+from ScreenScraper — irrelevant. The game is matched, so the pull is a straight fetch
+against a known id.
+
+- The menu lists ONLY providers with a real match for this game, each with what it
+  holds if known ("ScreenScraper · background"). A provider with no match is shown
+  disabled with "not matched" rather than hidden — absent is not the same as unmatched,
+  and hiding it makes a missing match look like a missing feature.
+- Scope follows the surface: in a category it fetches that kind; in All Media, all kinds.
+- It is another caller of `_pull_media_sources` (§7), narrowed by `provider=` and
+  `kinds=`. Not a new fetch path.
+- **Free by definition.** No AI area is consulted, so this button can never spend money
+  — which is what makes it the right default action for "just get me more art".
+
+### 2.5.1 What lands immediately vs what needs confirming
+
+Fetching is ADDITIVE: new candidate rows, nothing overwritten, nothing deleted. So the
+candidates land immediately — asking a user to confirm "may I add options?" is friction
+with no risk behind it.
+
+What DOES go through the standard review/accept diff is any change to the **chosen**
+asset, because that is what the library actually displays. So a fetch reports
+"+14 candidates · chosen unchanged", or "+14 candidates · cover would change" with the
+before/after — and only that second half needs a click.
+
 ## 3. Output — a job like any other
 
 The wand starts a job. **The job applies nothing.** It writes findings stating both
