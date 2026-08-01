@@ -1522,16 +1522,40 @@ def nl_to_query(question, sources, platforms, provider=None, model=None):
 
 
 # ----------------------------------------------------------------- art pick (vision)
-def pick_art(title, kind, images, provider=None, model=None, language=None):
+def pick_art(title, kind, images, provider=None, model=None, language=None, notes=None):
     """Pick the best of N candidate images. `images`=[(mime,bytes)].
     Returns {"index": <0-based>, "reason": str}. Raises on error. When `language`
-    is set, ties break toward media in that language (logos/titles/box art)."""
+    is set, ties break toward media in that language (logos/titles/box art).
+
+    `notes` = optional per-candidate MEASURED facts, same length and order as `images`.
+    Omitted, the prompt is byte-identical to before."""
     provider, key, model = _resolve(provider, model)
     system = area_prompt("art", kind=kind, title=title, count=len(images))
     instr = "Pick the best image."
     if language:
         instr += (" Prefer an image whose visible text, logo, or box-art language "
                   "is %s when overall quality is comparable." % language)
+    # A video candidate is a CONTACT SHEET of frames, not a poster, so the stock
+    # "right shape for this kind" scoring is meaningless for it. Ask the questions that
+    # actually apply (spec §5.2): is it this game, what IS it, which to feature.
+    if kind == "video":
+        instr = ("Each image is a CONTACT SHEET: five frames sampled across one video, "
+                 "left to right. Judge: (1) is it the RIGHT GAME; (2) what IS the video "
+                 "— trailer, gameplay, teaser, or cutscene; (3) which is best to FEATURE "
+                 "for this game. Prefer real gameplay or an official trailer over a "
+                 "logo-only teaser. Ignore that the frames are tiled — that is how they "
+                 "were sampled, not how the video looks.")
+        if language:
+            instr += (" Prefer a video whose visible text is %s when quality is "
+                      "comparable." % language)
+    # MEASURED facts the model cannot see. It is shown downscaled images, so resolution
+    # — which this prompt asks it to rank on — is invisible to it, and for a video so
+    # are duration and audio. Deterministic data feeds the judgment instead of the model
+    # guessing at it.
+    if notes:
+        instr += ("\n\nMeasured facts per candidate (trust these over your impression "
+                  "of the image):\n"
+                  + "\n".join("Image %d: %s" % (i + 1, n) for i, n in enumerate(notes)))
     text = _complete_vision(provider, key, model, system, instr, images)
     obj = _json(text) or {}
     raw = obj.get("index")

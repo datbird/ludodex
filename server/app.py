@@ -9513,8 +9513,19 @@ def art_pick(norm_key: str, kind: str = Query("cover")):
                 "recommended_id": cands[0]["id"] if cands else None,
                 "reason": ("Only one candidate reachable on this host."
                            if cands else "No candidates reachable on this host.")}
+    # Measured facts the model cannot see from the frames themselves — length, true
+    # resolution, whether it even has audio. Probe results are cached by ffprobe's own
+    # caller path; a video with no probe says "unknown" rather than reporting zeros.
+    notes = None
+    if kind == "video":
+        by_id = {r["id"]: r for r in rows}
+        notes = [media_video.evidence_line(
+                     media_video.probe(by_id[c["id"]]["ref"]) if c["id"] in by_id
+                     else None)
+                 for c in cands]
     try:
         res = ai.pick_art(title, kind, [c["thumb"] for c in cands],
+                          notes=notes,
                           provider=ai.provider_for_area("art"),
                           model=ai.model_for_area("art"),
                           language=config.get("media_language") or None)
