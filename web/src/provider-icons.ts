@@ -16,6 +16,20 @@ export const PROVIDER_ICON_PATH: Record<string, string> = {
 export function providerIconPath(id: string): string | null {
   return PROVIDER_ICON_PATH[(id || "").toLowerCase()] ?? null
 }
+
+// RASTER marks — the escape hatch for a logo that isn't a single-colour glyph.
+// The path table above renders white on the provider's brand colour, which works for
+// a Simple-Icons wordmark and destroys anything whose identity IS its colour (glow,
+// gradient, multi-tone). Those ship as an image instead, and the badge drops its
+// brand-colour chip for them — a glowing yellow-green mark on an amber square reads
+// as mud. Served from web/public, so nothing is fetched off-site.
+export const PROVIDER_ICON_IMAGE: Record<string, string> = {
+  screenscraper: "/providers/screenscraper.png",
+}
+
+export function providerIconImage(id: string): string | null {
+  return PROVIDER_ICON_IMAGE[(id || "").toLowerCase()] ?? null
+}
 // Some brand marks are WIDE wordmarks (short full-width bands) that read as mush in
 // a square badge. Crop the viewBox to the glyph's real bounds and render them in a
 // wider badge so the wordmark is legible — a zoom/crop rather than a tiny shrink.
