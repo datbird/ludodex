@@ -3447,6 +3447,122 @@ def _looks_like_collection(title):
     return any(re.search(r"\b%s\b" % re.escape(w), t) for w in _COLL_WORDS)
 
 
+def _steam_canon_map():
+    """(canon, store_names) from the steam-meta cache.
+
+    ONE PRODUCT = ONE COLLECTION. A store can grant several apps for a single purchase
+    (Ys I & II Chronicles+ gives appids 223810 and 223870), and every one of them gets
+    flagged as a bundle — so without this the same compilation is nominated twice and
+    recorded under two coll_keys. appdetails' `steam_appid` resolves a sub-app to its
+    parent, which we cache, so the duplicate is removable deterministically: keep the
+    CANONICAL app's entry and drop its siblings.
+
+    `canon` maps norm_key -> (canonical_appid, owned_appid); `store_names` maps
+    appid -> Steam's own product title. Both empty when the cache predates the
+    columns, which every caller must treat as "nothing to dedupe against".
+
+    Shared by the SCAN path (_collection_candidates) and the APPLY path
+    (_record_accepted_collections) — the rule has to hold wherever a collection is
+    recorded, not only where one is nominated."""
+    canon = {}                              # norm_key -> canonical appid for its product
+    store_names = {}                        # appid -> Steam's own product (store) title
+    _sm = os.path.join(DATA, "steam-meta.sqlite")
+    if not os.path.exists(_sm):
+        return canon, store_names
+    try:
+        _smc = sqlite3.connect(_sm)
+        _cmap = {str(a): str(c or a) for a, c in _smc.execute(
+            "SELECT appid, canonical_appid FROM steam_meta")}
+        try:
+            # The store name is the ONE place the bundle's real title survives:
+            # an identity-refused entry is titled after a MEMBER ("Ys I"), so
+            # without this the AI is asked whether a single game is a compilation
+            # — the flagship scenario could never complete (and the spec captured
+            # store_name for exactly this).
+            store_names = {str(a): n for a, n in _smc.execute(
+                "SELECT appid, store_name FROM steam_meta "
+                "WHERE store_name IS NOT NULL AND store_name!=''")}
+        except sqlite3.OperationalError:
+            store_names = {}                # cache predates the column
+        _smc.close()
+        lc2 = ro(LIBRARY_DB)
+        try:
+            for _nk, _sid in lc2.execute(
+                    "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
+                    "ON s.game_id=g.id WHERE s.source='steam' AND s.source_id!=''"):
+                _c = _cmap.get(str(_sid))
+                if not _c:
+                    continue
+                # Prefer the pair where the owned appid IS the canonical product —
+                # a norm_key holding several appids must not be represented by an
+                # arbitrary sibling, or _collection_candidates' `_sid != _cid` check
+                # silently drops the canonical nomination.
+                _cur = canon.get(_nk)
+                if _cur is None or (str(_sid) == _c and _cur[1] != _cur[0]):
+                    canon[_nk] = (_c, str(_sid))
+        finally:
+            lc2.close()
+    except sqlite3.OperationalError:
+        canon = {}                          # pre-migration cache; fall through unchanged
+    return canon, store_names
+
+
+def _collection_product_owner(coll_key, canon, known):
+    """The ALREADY-RECORDED coll_key representing `coll_key`'s product, or None.
+
+    None when the product is unclaimed, when `coll_key` is itself the recorded one
+    (re-recording a collection is an update, not a duplicate), or when the entry has
+    no canonical-appid pair to compare (a non-Steam or uncached game — never block on
+    absent evidence)."""
+    pair = canon.get(coll_key)
+    if not pair:
+        return None
+    if coll_key in known:
+        return None
+    for k in known:
+        p = canon.get(k)
+        if p and p[0] == pair[0]:
+            return k
+    return None
+
+
+def _record_accepted_collections(items):
+    """Write accepted compilation findings to the durable collections store.
+
+    Two rules apply here, and BOTH used to be missing from the apply path:
+
+    - Manual curation is PINNED: once the user has edited a collection's member list
+      (origin 'manual'), an apply replaying an AI finding must not silently reset it
+      to the AI's version.
+    - ONE PRODUCT = ONE COLLECTION (§13): the canonical-appid dedupe lived only in
+      _collection_candidates, so accepting a sibling app's review card — `ys 2`
+      proposing "Ys I & II Chronicles+" while `ys i` was already recorded for the same
+      purchase — wrote a SECOND collection and materialized its members again.
+
+    `known` is re-read per item on purpose: two sibling cards accepted in one batch
+    must dedupe against each other, not just against what was already stored.
+
+    Returns the number of collections written."""
+    n = 0
+    canon, _ = _steam_canon_map()
+    for c in items:
+        ck = c["coll_key"]
+        _ex = compilations.get_collection(DATA, ck)
+        if _ex and _ex.get("origin") == "manual":
+            continue
+        known = {x["coll_key"] for x in compilations.all_collections(DATA)}
+        other = _collection_product_owner(ck, canon, known)
+        if other is not None:
+            # a visible receipt: silently dropping an accepted card is the same class
+            # of lie as the review row that claimed "not recorded"
+            print("aimeta apply: collection %r skipped — same product already "
+                  "recorded as %r" % (ck, other), file=sys.stderr)
+            continue
+        compilations.set_collection(DATA, ck, c["name"], c["members"], origin="ai")
+        n += 1
+    return n
+
+
 def _collection_candidates(nks):
     """Titles among `nks` whose NAME suggests a compilation and that aren't already recorded
     as a collection. Returns the item dicts ai.detect_collections consumes."""
@@ -3479,51 +3595,8 @@ def _collection_candidates(nks):
             confirmed = set()               # catalog predates identity_review
     finally:
         lc.close()
-    # ONE PRODUCT = ONE COLLECTION. A store can grant several apps for a single purchase
-    # (Ys I & II Chronicles+ gives appids 223810 and 223870), and every one of them gets
-    # flagged as a bundle — so without this the same compilation is nominated twice and
-    # recorded under two coll_keys. appdetails' `steam_appid` resolves a sub-app to its
-    # parent, which we cache, so the duplicate is removable deterministically: keep the
-    # CANONICAL app's entry and drop its siblings.
-    canon = {}                              # norm_key -> canonical appid for its product
-    store_names = {}                        # appid -> Steam's own product (store) title
-    _sm = os.path.join(DATA, "steam-meta.sqlite")
-    if os.path.exists(_sm):
-        try:
-            _smc = sqlite3.connect(_sm)
-            _cmap = {str(a): str(c or a) for a, c in _smc.execute(
-                "SELECT appid, canonical_appid FROM steam_meta")}
-            try:
-                # The store name is the ONE place the bundle's real title survives:
-                # an identity-refused entry is titled after a MEMBER ("Ys I"), so
-                # without this the AI is asked whether a single game is a compilation
-                # — the flagship scenario could never complete (and the spec captured
-                # store_name for exactly this).
-                store_names = {str(a): n for a, n in _smc.execute(
-                    "SELECT appid, store_name FROM steam_meta "
-                    "WHERE store_name IS NOT NULL AND store_name!=''")}
-            except sqlite3.OperationalError:
-                store_names = {}            # cache predates the column
-            _smc.close()
-            lc2 = ro(LIBRARY_DB)
-            try:
-                for _nk, _sid in lc2.execute(
-                        "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
-                        "ON s.game_id=g.id WHERE s.source='steam' AND s.source_id!=''"):
-                    _c = _cmap.get(str(_sid))
-                    if not _c:
-                        continue
-                    # Prefer the pair where the owned appid IS the canonical product —
-                    # a norm_key holding several appids must not be represented by an
-                    # arbitrary sibling, or the `_sid != _cid` check below silently
-                    # drops the canonical nomination.
-                    _cur = canon.get(_nk)
-                    if _cur is None or (str(_sid) == _c and _cur[1] != _cur[0]):
-                        canon[_nk] = (_c, str(_sid))
-            finally:
-                lc2.close()
-        except sqlite3.OperationalError:
-            canon = {}                      # pre-migration cache; fall through unchanged
+    # ONE PRODUCT = ONE COLLECTION — see _steam_canon_map, which the apply path shares.
+    canon, store_names = _steam_canon_map()
 
     # Products already represented by a RECORDED collection. Without this the rule only
     # held within a single batch: a sibling app nominated on a later run still became a
@@ -5034,15 +5107,7 @@ def _aimeta_apply(should_stop, only_ids=None):
     # nothing" looked like. Done surgically so §13's defining property survives: recording
     # a collection takes effect IMMEDIATELY, with no rebuild.
     try:
-        for c in aimeta.accepted_collections():
-            # Manual curation is PINNED: once the user has edited a collection's
-            # member list (origin 'manual'), an apply replaying an AI finding must
-            # not silently reset it to the AI's version.
-            _ex = compilations.get_collection(DATA, c["coll_key"])
-            if _ex and _ex.get("origin") == "manual":
-                continue
-            compilations.set_collection(DATA, c["coll_key"], c["name"],
-                                        c["members"], origin="ai")
+        _record_accepted_collections(aimeta.accepted_collections())
     except Exception as e:
         print("aimeta apply: collections write: %s" % str(e)[:150], file=sys.stderr)
     _materialize_collection_members()
