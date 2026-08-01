@@ -6168,6 +6168,57 @@ _EDITABLE_ATTR_KINDS = [
 ]
 
 
+_IGDB_SLUGS = {}                       # igdb_id -> slug, lazily loaded from the cache
+
+
+def _igdb_slug(iid):
+    """The IGDB slug for an id, from the local metadata cache. Loaded once per process.
+
+    Needed because `metadata_links` overwhelmingly stores the igdb id and NOTHING else
+    (2020 of 2173 rows are id-only, live), while the slug — the only thing an igdb.com
+    URL can be built from — sits unused in every cached `igdb_meta` payload."""
+    if not _IGDB_SLUGS:
+        try:
+            mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+            try:
+                for iid_, payload in mc.execute(
+                        "SELECT igdb_id, payload_json FROM igdb_meta"):
+                    try:
+                        s = (json.loads(payload or "{}") or {}).get("slug")
+                    except Exception:
+                        s = None
+                    if s:
+                        _IGDB_SLUGS[int(iid_)] = s
+            finally:
+                mc.close()
+        except Exception:
+            pass
+        _IGDB_SLUGS.setdefault(0, "")   # mark loaded even when the cache is empty
+    try:
+        return _IGDB_SLUGS.get(int(iid)) or None
+    except (TypeError, ValueError):
+        return None
+
+
+def _provider_page_url(provider, provider_id, slug=None):
+    """A provider's public page for a match, DERIVED — the same trick the Steam store
+    link already uses on an owned appid, applied to the metadata providers.
+
+    A provider that matched a game but stored no URL renders no icon at all, so the
+    match is invisible in the link strip: live, IGDB had matched 98% of the library and
+    showed a link on 7%. Deriving at read time fixes every game at once and stays
+    correct for games matched later, with no backfill and no rebuild."""
+    p = (provider or "").lower()
+    if p == "igdb":
+        s = slug or _igdb_slug(provider_id)
+        return "https://www.igdb.com/games/%s" % s if s else None
+    if p == "screenscraper" and str(provider_id or "").isdigit():
+        return "https://www.screenscraper.fr/gameinfos.php?gameid=%s" % provider_id
+    if p == "steamgriddb" and str(provider_id or "").isdigit():
+        return "https://www.steamgriddb.com/game/%s" % provider_id
+    return None
+
+
 def _entry_rom_paths(sources, limit=40):
     """Full on-disk path(s) for this entry's emulation/archive ROM files, straight from
     the ROM index (which already has fullpath/filename per file) — so the detail view
@@ -6353,8 +6404,10 @@ def game_detail(norm_key: str):
         # skipped rather than guessed into a dead link.
         provider_links, _pl_seen = [], set()
         for l in links:
-            if l.get("url") and l["provider"] not in _pl_seen:
-                provider_links.append({"provider": l["provider"], "url": l["url"]})
+            url = l.get("url") or _provider_page_url(l["provider"], l.get("provider_id"),
+                                                     l.get("slug"))
+            if url and l["provider"] not in _pl_seen:
+                provider_links.append({"provider": l["provider"], "url": url})
                 _pl_seen.add(l["provider"])
         for s in sources:
             src, sid = s.get("source"), str(s.get("source_id") or "")
