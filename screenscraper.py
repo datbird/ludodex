@@ -66,6 +66,20 @@ MEDIA_KIND = {
     "mixrbv1": "mix", "mixrbv2": "mix",
     "video": "video", "video-normalized": "video", "manuel": "manual",
     "icon": "icon",
+    # --- observed live and previously falling through to `other` ---------------------
+    # ScreenScraper's vocabulary is larger than its docs and varies by system, so the
+    # safety net (unknown -> `other`, logged once) is the right default. But a type that
+    # lands in `other` is invisible to every kind-scoped consumer: `box-scan` IS box art
+    # and belongs in the cover pool, and `background` is self-evident. Leaving them in
+    # `other` is why console entries could hold 77 ScreenScraper assets and still show a
+    # cropped landscape as their cover.
+    "box-scan": "cover",             # flat scan of the box front
+    "background": "background",
+    # Sega/console "picto" art — small pictograms used as list/menu icons.
+    "pictoliste": "icon", "pictocouleur": "icon", "pictomonochrome": "icon",
+    # A photographed physical figure/statue. Genuinely not one of the 23 kinds, so it
+    # stays `other` DELIBERATELY — recorded here so it stops being re-investigated.
+    "figurine": "other",
 }
 
 # raw types we've already warned about (avoid log spam)
