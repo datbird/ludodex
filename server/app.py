@@ -5818,6 +5818,29 @@ def _pull_ss_media(con, nk, systems, queries, now):
     if not jeu:
         return 0
     system = m.get("system")
+    # A MATCH IS NOT AN INGEST. The provider link is what the Matched-providers menu
+    # reads, and it was written ONLY by the apply path — so a game matched here got its
+    # ScreenScraper art and stayed unlinked, with the match recorded nowhere the UI
+    # looks. Live: 62 cached SS matches, 41 links. Whether any media downloads is a
+    # separate question from whether we know what this game IS on ScreenScraper.
+    try:
+        _lw = sqlite3.connect(LIBRARY_DB)
+        try:
+            _lw.execute("PRAGMA busy_timeout=15000")
+            _gid = _lw.execute("SELECT id FROM games WHERE norm_key=? LIMIT 1",
+                               (nk,)).fetchone()
+            if _gid:
+                _lw.execute("DELETE FROM metadata_links WHERE game_id=? AND "
+                            "provider='screenscraper'", (_gid[0],))
+                _lw.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
+                            "slug,url) VALUES(?,?,?,?,?)",
+                            (_gid[0], "screenscraper", str(m["ss_id"]), None,
+                             _provider_page_url("screenscraper", m["ss_id"])))
+                _lw.commit()
+        finally:
+            _lw.close()
+    except Exception as e:                     # noqa: BLE001 — a link is never worth failing a fetch
+        print("ss link %s: %s" % (nk, str(e)[:110]), file=sys.stderr)
     try:                                       # cache for build_library's metadata union
         sc = sqlite3.connect(os.path.join(DATA, "screenscraper-cache.sqlite"))
         sc.execute("CREATE TABLE IF NOT EXISTS ss_game(norm_key TEXT, system TEXT, "
