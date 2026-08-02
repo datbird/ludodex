@@ -384,6 +384,19 @@ def _scores_con():
 # Steam appdetails `type`s that aren't games — hidden when hide_non_games is on.
 NON_GAME_TYPES = ("application", "tool", "music", "video", "hardware", "series", "mod")
 
+# Steam GENRES that only ever belong to software, never to a game. A second, independent
+# signal for the same question — needed because `steam_type` is populated only by
+# scores_fetch and was EMPTY for the whole library (0 of 2208 rows), which left the
+# type-based rule testing membership in an empty table and therefore hiding nothing, ever.
+# Genres are already on the entry, cost nothing to consult, and catch the case the type
+# signal cannot even in principle: Steam SELLS fpsVR and Wallpaper Engine as `game`, so
+# their type is right by Steam's lights and wrong by ours — but their genre says Utilities.
+# A manual content_type override still wins over this, so a real game tagged Utilities is
+# one click from being rescued.
+NON_GAME_GENRES = ("utilities", "software", "software training", "audio production",
+                   "video production", "photo editing", "animation & modeling",
+                   "design & illustration", "web publishing", "game development")
+
 
 def _non_game_hidden_sql():
     """SQL boolean (+args) that is TRUE for an entry to hide as a NON-game. The manual
@@ -393,13 +406,16 @@ def _non_game_hidden_sql():
     mis-tagged as a tool. With no manual override, fall back to the Steam type. Requires
     a connection with `ov` + `sco` attached (i.e. lib())."""
     ph = ",".join("?" * len(NON_GAME_TYPES))
+    gph = ",".join("?" * len(NON_GAME_GENRES))
     expr = ("CASE WHEN EXISTS(SELECT 1 FROM ov.overrides o WHERE o.norm_key=g.norm_key "
             "AND o.kind='content_type') "
             "THEN EXISTS(SELECT 1 FROM ov.overrides o WHERE o.norm_key=g.norm_key AND "
             "o.kind='content_type' AND lower(o.value)<>'game') "
-            "ELSE g.norm_key IN (SELECT norm_key FROM sco.steam_type WHERE type IN (%s)) "
-            "END" % ph)
-    return expr, list(NON_GAME_TYPES)
+            "ELSE (g.norm_key IN (SELECT norm_key FROM sco.steam_type WHERE type IN (%s)) "
+            "      OR EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
+            "                AND ga.kind='genres' AND lower(ga.value) IN (%s))) "
+            "END" % (ph, gph))
+    return expr, list(NON_GAME_TYPES) + list(NON_GAME_GENRES)
 
 # Storefront labels are Sources, not Systems — PC-store games get platform=source,
 # so exclude these (and the generic psn/xbox fallbacks) from the Systems facet.
