@@ -3822,7 +3822,10 @@ def _member_identity(nk, plat):
                     if any(platmap.canon(a) == want for a in (h.get("platforms") or []))]
             if len(same) == 1:
                 pick = same[0]
-        if pick is None:
+        if pick is None or not pick.get("igdb_id"):
+            # A falsy id is NOT a match. 33 igdb_resolution rows already carry id 0/NULL,
+            # and writing `igdb:0` as a game_key would make every one of them share an
+            # identity — neutral art from one game would then serve for all of them.
             return 0                        # ambiguous → leave unmatched, deliberately
         now = int(time.time())
         mc.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,slug,"
