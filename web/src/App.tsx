@@ -9486,8 +9486,46 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
     }).catch(() => {}).finally(() => setDiffLoading(false))
   }, [reviewScope, findings])
 
-  const groups = (findings || []).map((f) => ({ f, changes: findingChanges(f) }))
-    .filter((g) => g.changes.length > 0)
+  const scored = (findings || []).map((f) => ({ f, changes: findingChanges(f) }))
+  const groups = scored.filter((g) => g.changes.length > 0)
+  // Findings that propose NOTHING. aimeta records a finding when the AI could not
+  // identify a game (`actionable` includes status 'unmatched'), which is right — an
+  // unidentified game is worth surfacing. But it has no attributes, no match and no
+  // collection, so it renders zero change rows and used to vanish from this list
+  // entirely: the job badge counted it, this panel said "nothing left to review", and
+  // accept-all skipped it because this panel only accepts what it renders. The result
+  // was a queue item that could never be cleared except by X-ing it one at a time —
+  // harmless at 2 games, hundreds of stuck rows for a cryptic-filename ROM library.
+  const stuck = scored.filter((g) => g.changes.length === 0)
+  const dismissStuck = async () => {
+    if (!stuck.length) return
+    if (!window.confirm(`Dismiss ${stuck.length} unidentified game${stuck.length === 1 ? '' : 's'}? `
+      + `Nothing was proposed for ${stuck.length === 1 ? 'it' : 'them'} — dismissing just clears `
+      + `${stuck.length === 1 ? 'it' : 'them'} from review.`)) return
+    setBusy(true); setNote('')
+    try {
+      await Promise.all(stuck.map((g) => api.aimetaFindingAction(g.f.id, 'reject')))
+      setNote(`✕ Dismissed ${stuck.length} unidentified game${stuck.length === 1 ? '' : 's'}.`)
+      load()
+    } catch (e) { setNote((e as Error).message) } finally { setBusy(false) }
+  }
+  const stuckPanel = stuck.length > 0 && (
+    <div className="chg-stuck">
+      <div className="chg-stuck-h">
+        {stuck.length} game{stuck.length === 1 ? '' : 's'} the AI could not identify
+        <button className="apply-btn" disabled={busy} onClick={dismissStuck}>
+          Dismiss {stuck.length === 1 ? 'it' : 'all'}</button>
+      </div>
+      <div className="chg-stuck-note dim">Nothing was proposed for
+        {stuck.length === 1 ? ' this one' : ' these'} — no match, no attributes. There is
+        nothing to accept; dismissing clears {stuck.length === 1 ? 'it' : 'them'} from review.</div>
+      <ul className="chg-stuck-list">
+        {stuck.map((g) => (
+          <li key={g.f.id}>{g.f.title || g.f.norm_key}</li>
+        ))}
+      </ul>
+    </div>
+  )
   const allIds = groups.flatMap((g) => g.changes.map((c) => c.id))
   const selectedCount = allIds.filter((id) => sel.has(id)).length
   const gamesTouched = groups.filter((g) => g.changes.some((c) => sel.has(c.id))).length
@@ -9574,15 +9612,24 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
 
   if (!findings) return <div className="loading">Loading…</div>
   if (!groups.length) {
-    return <div className="sync-note dim">{runId
-      ? 'Nothing left to review here — these changes were already applied (or dismissed).'
-      : 'No proposed changes — run the ✨ Magic wand or a scan first.'}</div>
+    // Never claim "nothing left" while findings are still sitting in the queue — that
+    // is the lie that made these unclearable.
+    return (
+      <>
+        {stuckPanel}
+        {!stuck.length && <div className="sync-note dim">{runId
+          ? 'Nothing left to review here — these changes were already applied (or dismissed).'
+          : 'No proposed changes — run the ✨ Magic wand or a scan first.'}</div>}
+        {note && <div className="sync-note dim">{note}</div>}
+      </>
+    )
   }
 
   return (
     <div className="chg-wrap">
       <p className="dim">Here's everything the AI wants to change. Tick the changes to keep,
         then apply — like a runbook, nothing happens until you apply.</p>
+      {stuckPanel}
 
       <div className="chg-scope">
         <span className="chg-scope-lbl">Review &amp; apply</span>

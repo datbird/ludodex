@@ -4314,3 +4314,13 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
   border: 1px solid rgba(251,191,36,0.4); background: rgba(251,191,36,0.1); color: #fbbf24; }
 .tb-wrap { position: relative; display: inline-block; }
 .tb-menu { top: calc(100% + 4px); }
+
+/* Findings that proposed NOTHING (AI could not identify the game). Shown rather than
+   dropped: they are counted by the job badge, so hiding them produced a queue item that
+   could never be cleared except one X at a time. */
+.chg-stuck { margin: 10px 0 14px; padding: 10px 12px; border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--border); }
+.chg-stuck-h { display: flex; align-items: center; gap: 10px; justify-content: space-between;
+  font-weight: 700; color: var(--text-h); font-size: 13px; }
+.chg-stuck-note { font-size: 12px; margin: 4px 0 6px; }
+.chg-stuck-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-dim); }
