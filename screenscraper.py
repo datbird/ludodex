@@ -16,6 +16,7 @@ resumable across days. stdlib-only.
 """
 import json
 import os
+import socket
 import sys
 import time
 import urllib.error
@@ -89,13 +90,45 @@ class SSError(Exception):
         super().__init__("%s: %s" % (kind, msg))
 
 
-def _request(endpoint, creds, extra=None, timeout=40):
-    """GET an api2 endpoint -> parsed JSON 'response'. Classifies failures."""
+def _request(endpoint, creds, extra=None, timeout=90, attempts=3):
+    """GET an api2 endpoint -> parsed JSON 'response'. Classifies failures.
+
+    RETRIES ON TIMEOUT, and the timeout is generous on purpose. screenscraper.fr is a
+    volunteer-run service that routinely answers in 30-40s under load — measured live at
+    36.9s for a search that succeeded, and 40.6s for one that did not. At the old
+    timeout=40 with no retry, that put every call on a coin flip, and a lost flip was
+    SILENT: the caller catches, returns 0, and the game keeps no ScreenScraper art with
+    nothing recorded to say it was ever attempted. Slow is not the same as absent."""
     params = _auth(creds)
     params.update(extra or {})
     url = API + endpoint + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={
         "User-Agent": "%s (ludodex)" % creds.get("softname", "ludodex")})
+    last = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return _read(req, timeout)
+        except (socket.timeout, TimeoutError) as e:
+            last = e
+            if attempt + 1 < attempts:
+                time.sleep(2 * (attempt + 1))      # brief linear backoff, then retry
+                continue
+            raise SSError("error", "timed out after %d attempts (%ss each)"
+                          % (attempts, timeout))
+        except urllib.error.URLError as e:
+            if isinstance(getattr(e, "reason", None), (socket.timeout, TimeoutError)):
+                last = e
+                if attempt + 1 < attempts:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                raise SSError("error", "timed out after %d attempts (%ss each)"
+                              % (attempts, timeout))
+            raise
+    raise SSError("error", str(last)[:120])
+
+
+def _read(req, timeout):
+    """One HTTP attempt; the classification the caller relies on stays here."""
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read().decode("utf-8", "replace")
