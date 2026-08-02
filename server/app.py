@@ -3894,12 +3894,37 @@ def _ingest_new_members(created):
                     _pull_media_sources(con, nk)
                 except Exception as e:      # noqa: BLE001
                     print("member media %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
-            media_choose.select(con)        # candidates only count once they're ranked
+            # select -> MEASURE -> re-select. materialize is what populates
+            # width/height/filler, and selecting before it means ranking blind: a
+            # 460x215 grid won a `cover` slot for the Halo MCC members because at
+            # selection time nothing knew its shape, and nothing re-selected once the
+            # dimensions were stamped at serve time. That is the invariant the
+            # 2026-07-26 audit established, and this phase skipped it.
+            #
+            # Scoped deliberately: media_choose.materialize() has no per-game filter and
+            # would sweep the catalog's unmaterialized assets. _asset_local_path is the
+            # serve-time helper — non-destructive, per row — so measuring stays bounded
+            # to the members this run created.
+            media_choose.select(con)
+            con.commit()
+            keys = [nk for nk, _p in todo]
+            ph = ",".join("?" * len(keys))
+            rows = con.execute(
+                "SELECT id, ref_type, ref, ext, sha1, kind FROM media "
+                "WHERE chosen=1 AND kind!='video' AND (sha1 IS NULL OR sha1='') "
+                "AND norm_key IN (%s)" % ph, keys).fetchall()
+            for r in rows:
+                try:
+                    _asset_local_path(r)     # downloads + stamps measured dims/filler
+                except Exception:            # noqa: BLE001 — one dead ref never stops the pass
+                    pass
+            media_choose.select(con)         # re-rank now that shape is actually known
             con.commit()
         finally:
             con.close()
-        print("collections: member ingest — %d/%d identified, media pulled for %d"
-              % (got, len(todo), len(todo)), file=sys.stderr)
+        print("collections: member ingest — %d/%d identified, media pulled for %d, "
+              "%d assets measured then re-selected"
+              % (got, len(todo), len(todo), len(rows)), file=sys.stderr)
 
     threading.Thread(target=run, name="member-ingest", daemon=True).start()
 
