@@ -1581,6 +1581,7 @@ def _igdb_hits(raw):
                 yr = None
         out.append({
             "igdb_id": h.get("id"), "name": h.get("name"), "year": yr,
+            "slug": h.get("slug"),          # the only thing an igdb.com URL can be built from
             "platforms": [p.get("abbreviation") for p in (h.get("platforms") or [])
                           if p.get("abbreviation")],
             "cover": ("https://images.igdb.com/igdb/image/upload/t_cover_small/"
@@ -3738,17 +3739,127 @@ def _materialize_collection_members():
         import catalog_patch as _cp
         _lc = sqlite3.connect(LIBRARY_DB)
         _lc.execute("PRAGMA busy_timeout=8000")
+        _created = []
         try:
-            _made = _cp.materialize_members(_lc, DATA)
+            _made = _cp.materialize_members(_lc, DATA, created_out=_created)
         finally:
             _lc.close()
         if _made:
             print("collections: materialized/reconciled %d member entrie(s)" % _made,
                   file=sys.stderr)
+        if _created:
+            _ingest_new_members(_created)
         return _made
     except Exception as e:                    # noqa: BLE001
         print("collections: member materialize: %s" % str(e)[:150], file=sys.stderr)
         return 0
+
+
+MEMBER_INGEST_CAP = 60             # bounded: one apply can never sweep the catalog
+
+
+def _member_identity(nk, plat):
+    """Deterministic IGDB identity for ONE materialized member. 1 if resolved, else 0.
+
+    Conservative on purpose: an EXACT-name lookup only, and where several games share a
+    name, only the one whose platforms include the member's. Ambiguous means NO identity
+    — a confidently-wrong match is the exact failure the 2026-07-26 verification pass
+    existed to kill, and a member with no match is honest while a member pointing at the
+    wrong game poisons its art, attributes and scores."""
+    lc = ro(LIBRARY_DB)
+    try:
+        r = lc.execute("SELECT id, canonical_title FROM games WHERE norm_key=? LIMIT 1",
+                       (nk,)).fetchone()
+    finally:
+        lc.close()
+    if not r or not (r["canonical_title"] or "").strip():
+        return 0
+    gid, title = r["id"], r["canonical_title"].strip()
+    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    mc = sqlite3.connect(cache)
+    try:
+        mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY "
+                   "KEY, igdb_id INTEGER, slug TEXT, matched_by TEXT, resolved_at INTEGER)")
+        if mc.execute("SELECT 1 FROM igdb_resolution WHERE norm_key=?", (nk,)).fetchone():
+            return 0                        # already identified — never re-decide
+        hits = _igdb_by_name(title)
+        if not hits:
+            return 0
+        pick = hits[0] if len(hits) == 1 else None
+        if pick is None and plat:
+            import platmap
+            want = platmap.canon(plat)
+            same = [h for h in hits
+                    if any(platmap.canon(a) == want for a in (h.get("platforms") or []))]
+            if len(same) == 1:
+                pick = same[0]
+        if pick is None:
+            return 0                        # ambiguous → leave unmatched, deliberately
+        now = int(time.time())
+        mc.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,slug,"
+                   "matched_by,resolved_at) VALUES(?,?,?,?,?)",
+                   (nk, pick["igdb_id"], pick.get("slug"), "member_exact", now))
+        mc.commit()
+    finally:
+        mc.close()
+    url = _provider_page_url("igdb", pick["igdb_id"], pick.get("slug"))
+    lw = sqlite3.connect(LIBRARY_DB)
+    try:
+        lw.execute("PRAGMA busy_timeout=15000")
+        lw.execute("DELETE FROM metadata_links WHERE game_id=? AND provider='igdb'", (gid,))
+        lw.execute("INSERT INTO metadata_links(game_id,provider,provider_id,slug,url) "
+                   "VALUES(?,?,?,?,?)",
+                   (gid, "igdb", str(pick["igdb_id"]), pick.get("slug"), url))
+        lw.commit()
+    finally:
+        lw.close()
+    return 1
+
+
+def _ingest_new_members(created):
+    """Give a freshly materialized member the ingest its parent got (#20).
+
+    `materialize_members` creates a catalog ROW and stops — no identity, no media, no
+    attributes — so a member arrives as a stub (live: "Halo: Combat Evolved Anniversary",
+    0 of 26 attributes, 0 media, no provider match, while its parent carried 57
+    attributes and 75 media rows). Materialize must stay surgical or §13's
+    recording-needs-no-rebuild property dies, so the ingest is this separate phase.
+
+    DETERMINISTIC ONLY. Exact-name identity plus the ordinary provider media fetch; no
+    AI area is consulted, so this path can never spend money — which is what makes it
+    safe to run automatically off an apply. Bounded to exactly the keys materialize just
+    created, capped, and never widened to the catalog.
+
+    Runs on a thread: the apply that triggered it is a request the reviewer is waiting
+    on, and provider fetches are slow."""
+    todo = list(created)[:MEMBER_INGEST_CAP]
+    if len(created) > len(todo):
+        print("collections: member ingest capped at %d — %d deferred to the next run"
+              % (MEMBER_INGEST_CAP, len(created) - len(todo)), file=sys.stderr)
+
+    def run():
+        got = 0
+        for nk, plat in todo:
+            try:
+                got += _member_identity(nk, plat)
+            except Exception as e:          # noqa: BLE001 — one bad member never stops the rest
+                print("member identity %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+        con = media_choose.con_index()
+        try:
+            con.execute("PRAGMA busy_timeout=30000")
+            for nk, _plat in todo:
+                try:
+                    _pull_media_sources(con, nk)
+                except Exception as e:      # noqa: BLE001
+                    print("member media %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+            media_choose.select(con)        # candidates only count once they're ranked
+            con.commit()
+        finally:
+            con.close()
+        print("collections: member ingest — %d/%d identified, media pulled for %d"
+              % (got, len(todo), len(todo)), file=sys.stderr)
+
+    threading.Thread(target=run, name="member-ingest", daemon=True).start()
 
 
 def _contamination_suspects(nks):

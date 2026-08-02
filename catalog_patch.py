@@ -335,7 +335,7 @@ def resolve_member_key(con, member_title, member_key, siblings):
     return hk
 
 
-def materialize_members(con, data_dir):
+def materialize_members(con, data_dir, created_out=None):
     """Make the catalog agree with the recorded collections — in BOTH directions.
 
     DESIGN §13's defining property is that recording a collection takes effect
@@ -490,6 +490,12 @@ def materialize_members(con, data_dir):
                 "state,via_collection) VALUES(?,?,?,?,?,?,'have',?)",
                 (cur.lastrowid, csrc, mplat, "", m["member_title"], c["name"], ck))
             base_gids.setdefault(mk, []).append(cur.lastrowid)
+            # A CREATED member is an identity-less stub — no provider match, no media,
+            # no attributes (see the docstring). Report it so the caller can put it
+            # through the normal ingest; materialize itself must stay surgical, or
+            # §13's "recording a collection needs no rebuild" property dies.
+            if created_out is not None:
+                created_out.append((mk, mplat))
             made += 1
     con.commit()
     return made + changed

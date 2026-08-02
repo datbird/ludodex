@@ -203,6 +203,27 @@ def main():
           norm("Ys II: Ancient Ys Vanished - The Final Chapter") not in e)
     check("the two real entries survive", len(e) == 2)
 
+
+    print("6. created_out reports what materialize CREATED (#20's hook)")
+    # A created member is an identity-less stub; the ingest phase can only run over it
+    # if materialize says which keys it made. Reconciled/skipped members must NOT appear.
+    d = data_dir()
+    con = fresh_catalog()
+    add_entry(con, "Some Bundle", "10")
+    add_entry(con, "Already Owned", "11")
+    compilations.set_collection(d, norm("Some Bundle"), "Some Bundle", [
+        {"title": "Already Owned", "platform": "PC"},
+        {"title": "Brand New Member", "platform": "PC"}], origin="ai")
+    created = []
+    catalog_patch.materialize_members(con, d, created_out=created)
+    keys = [k for k, _p in created]
+    check("the newly created member is reported", norm("Brand New Member") in keys)
+    check("the already-owned member is NOT reported", norm("Already Owned") not in keys)
+    check("it carries the resolved platform", all(p for _k, p in created))
+    created2 = []
+    catalog_patch.materialize_members(con, d, created_out=created2)
+    check("a second run creates nothing, so reports nothing", created2 == [])
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 
