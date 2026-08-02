@@ -3759,7 +3759,7 @@ def _auto_detect_collections(nks, should_stop=lambda: False, threshold=None, chu
     return recorded
 
 
-def _materialize_collection_members():
+def _materialize_collection_members(created_out=None, ingest=True):
     """Run catalog_patch.materialize_members against the live catalog — the shared
     tail of EVERY path that records or edits a collection (findings apply, wand
     auto-detect, manual endpoints). Also reconciles stale members after a delete or
@@ -3776,7 +3776,13 @@ def _materialize_collection_members():
         if _made:
             print("collections: materialized/reconciled %d member entrie(s)" % _made,
                   file=sys.stderr)
-        if _created:
+        if _created and created_out is not None:
+            created_out.extend(_created)
+        if _created and ingest:
+            # No run is going to take these — give them the standalone deterministic
+            # ingest. Inside an apply the caller passes ingest=False and merges the keys
+            # into the run's working set instead, so members ride the SAME phases as
+            # every other touched game rather than a parallel pass (#20).
             _ingest_new_members(_created)
         return _made
     except Exception as e:                    # noqa: BLE001
@@ -5289,7 +5295,26 @@ def _aimeta_apply(should_stop, only_ids=None):
         _record_accepted_collections(aimeta.accepted_collections())
     except Exception as e:
         print("aimeta apply: collections write: %s" % str(e)[:150], file=sys.stderr)
-    _materialize_collection_members()
+    # MEMBERS JOIN THE RUN (#20). A member is created mid-apply, after the working set
+    # was decided, so it used to miss every phase that followed and got a parallel
+    # deterministic pass bolted on afterwards — which is how it ended up with its own
+    # (wrong) ordering and no AI art. Instead: materialize, resolve identity so the media
+    # phase has something to fetch against, then merge the keys into `touched`. From
+    # there members ride the SAME scoped media reconcile as every other touched game —
+    # same fetch, same select, and the same AI art pass — so they inherit the tier of
+    # the run that created them with no tier parameter threaded anywhere.
+    _new_members = []
+    _materialize_collection_members(created_out=_new_members, ingest=False)
+    _new_members = _new_members[:MEMBER_INGEST_CAP]
+    if len(_new_members) == MEMBER_INGEST_CAP:
+        print("collections: member ingest capped at %d this apply" % MEMBER_INGEST_CAP,
+              file=sys.stderr)
+    for _mnk, _mplat in _new_members:
+        try:
+            _member_identity(_mnk, _mplat)
+        except Exception as e:                  # noqa: BLE001 — one member never stops the apply
+            print("member identity %s: %s" % (_mnk, str(e)[:120]), file=sys.stderr)
+    touched |= {_mnk for _mnk, _ in _new_members}
     mc = sqlite3.connect(cache)
     mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY "
                "KEY, igdb_id INTEGER, slug TEXT, matched_by TEXT, resolved_at INTEGER)")
