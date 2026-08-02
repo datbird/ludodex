@@ -5444,7 +5444,7 @@ def _apply_surgical_meta(touched):
                     con.execute("INSERT INTO metadata_links(game_id,provider,"
                                 "provider_id,slug,url) VALUES(?,?,?,?,?)",
                                 (gid, "igdb", str(pm["igdb_id"]), None,
-                                 "https://www.igdb.com/games/%s" % pm["igdb_id"]))
+                                 _provider_page_url("igdb", pm["igdb_id"])))
                 for m in ssm.get(nk, []):
                     con.execute("DELETE FROM metadata_links WHERE game_id=? AND "
                                 "provider='screenscraper'", (gid,))
@@ -5653,10 +5653,15 @@ def _pull_media_sources(con, nk, want_web=False):
         ar = lc.execute("SELECT s.source_id FROM games g JOIN sources s ON s.game_id=g.id "
                         "WHERE g.norm_key=? AND s.source='steam' LIMIT 1", (nk,)).fetchone()
         appid = ar[0] if ar and str(ar[0] or "").isdigit() else None
+        # SS eligibility follows the entry's PLATFORM, not how you happen to own it.
+        # This used to require `s.source IN ('emulation','archive')`, which made
+        # ScreenScraper unreachable for every game in a store-only catalog — live, the
+        # only ownership source was `steam` (1624/1624), so SS never ran once. A Genesis
+        # game is a Genesis game whether it arrived as a ROM or inside a Steam bundle,
+        # and SS is the best art source for exactly that game.
         plats = [x[0] for x in lc.execute(
-            "SELECT DISTINCT g.platform FROM games g JOIN sources s ON s.game_id=g.id "
-            "WHERE g.norm_key=? AND s.source IN ('emulation','archive') "
-            "AND g.platform IS NOT NULL AND g.platform!=''", (nk,))]
+            "SELECT DISTINCT platform FROM games "
+            "WHERE norm_key=? AND platform IS NOT NULL AND platform!=''", (nk,))]
     finally:
         lc.close()
     _mf.fetch_igdb(con, now, only={nk})
@@ -6404,8 +6409,11 @@ def game_detail(norm_key: str):
         # skipped rather than guessed into a dead link.
         provider_links, _pl_seen = [], set()
         for l in links:
-            url = l.get("url") or _provider_page_url(l["provider"], l.get("provider_id"),
-                                                     l.get("slug"))
+            # DERIVED wins over stored. The apply path minted igdb.com/games/<numeric id>
+            # for 42 rows, which is not IGDB's canonical URL form — it is slug-based. A
+            # stored URL is only a fallback for the case the cache can't cover.
+            url = _provider_page_url(l["provider"], l.get("provider_id"),
+                                     l.get("slug")) or l.get("url")
             if url and l["provider"] not in _pl_seen:
                 provider_links.append({"provider": l["provider"], "url": url})
                 _pl_seen.add(l["provider"])

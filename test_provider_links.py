@@ -68,6 +68,16 @@ def main():
     check("unknown provider yields no link",
           srv._provider_page_url("mystery", 1) is None)
 
+
+    print("6. a stored id-based IGDB url loses to the slug-derived one")
+    # The apply path minted igdb.com/games/<numeric id> for 42 live rows. That is not
+    # IGDB's canonical form, so derivation must WIN over a stored URL, not defer to it.
+    check("derived beats a stored numeric url",
+          srv._provider_page_url("igdb", 7348)
+          == "https://www.igdb.com/games/halo-the-master-chief-collection")
+    check("and it is not the id form",
+          srv._provider_page_url("igdb", 7348) != "https://www.igdb.com/games/7348")
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 
