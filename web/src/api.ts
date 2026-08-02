@@ -630,7 +630,7 @@ export interface GamesQuery {
   include?: string[]
   exclude?: string[]
   sort?: string[]
-  status?: 'owned' | 'wanted' | 'all'   // ownership filter (default owned)
+  status?: 'owned' | 'utilities' | 'wanted' | 'all'   // ownership filter (default owned)
   identified?: 'only' | 'all' | 'unidentified'  // hide bare ROMs (default only)
   limit?: number
   offset?: number

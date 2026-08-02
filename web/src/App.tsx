@@ -488,7 +488,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [stats, setStats] = useState<Stats | null>(null)
   const [facets, setFacets] = useState<Facets | null>(null)
   const [q, setQ] = useState('')
-  const [status, setStatus] = useState<'owned' | 'wanted' | 'all'>('owned')
+  const [status, setStatus] = useState<'owned' | 'utilities' | 'wanted' | 'all'>('owned')
   // Bare unidentified ROMs (just a filename, no match) are hidden by default.
   const [showUnidentified, setShowUnidentified] = useState(false)
   // Search-mode selector: an expandable half-pill on the right edge of the
@@ -859,10 +859,18 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
               <div className="filter-own" role="group" aria-label="Ownership">
                 <span className="filter-own-label">Show</span>
                 <div className="own-seg">
-                  {(['owned', 'wanted', 'all'] as const).map((s) => (
+                  {/* 'Utilities' INVERTS the non-game filter rather than applying it —
+                      the tools and benchmarks hidden from every other view need one
+                      place they are reachable, or the only way to see something you own
+                      is to switch hide_non_games off globally. */}
+                  {(['owned', 'utilities', 'wanted', 'all'] as const).map((s) => (
                     <button key={s} type="button" className={'own-seg-btn' + (status === s ? ' on' : '')}
-                      onClick={() => setStatus(s)}>
-                      {s === 'owned' ? 'Owned' : s === 'wanted' ? 'Wanted' : 'All'}
+                      onClick={() => setStatus(s)}
+                      title={s === 'utilities'
+                        ? 'Tools, benchmarks and players — the non-games hidden from the other views'
+                        : undefined}>
+                      {s === 'owned' ? 'Owned' : s === 'utilities' ? 'Utilities'
+                        : s === 'wanted' ? 'Wanted' : 'All'}
                       {s === 'wanted' && !!stats?.wanted && <span className="own-seg-n">{stats.wanted}</span>}
                     </button>
                   ))}

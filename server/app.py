@@ -768,13 +768,24 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     """Core catalog query — shared by /api/games and AI /api/search.
     include/exclude are lists of FLAG_SQL keys (a flag can't be in both);
     sort is an ordered list of SORT_SQL keys (1st, 2nd, 3rd priority).
-    status: 'owned' (default, wanted=0) | 'wanted' (wanted=1) | 'all'.
-    identified: 'only' (default, hide bare unidentified ROMs) | 'all' | 'unidentified'."""
+    status: 'owned' (default, wanted=0) | 'utilities' | 'wanted' (wanted=1) | 'all'.
+    identified: 'only' (default, hide bare unidentified ROMs) | 'all' | 'unidentified'.
+
+    'utilities' INVERTS the non-game filter instead of applying it: the tools, benchmarks
+    and players `hide_non_games` takes out of every other view have to be reachable
+    SOMEWHERE, or the only way to see a thing you own is to turn the setting off
+    globally. It is the one status that shows them, and the only one that shows them."""
     where, args = [], []
     has_w = _has_col(con, "games", "wanted")
     has_ek = _has_col(con, "games", "entry_key")   # per-platform entries (DESIGN §11)
     if status == "wanted":
         where.append("g.wanted=1" if has_w else "0")
+    elif status == "utilities":
+        _ng, _nga = _non_game_hidden_sql()
+        where.append(_ng)
+        args += _nga
+        if has_w:
+            where.append("g.wanted=0")         # a utility you don't own is a wish, not a tool
     elif status != "all" and has_w:            # 'owned' (default): hide wishlist-only
         where.append("g.wanted=0")
     if identified == "only":
@@ -836,7 +847,9 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         where.append("g.norm_key IN (SELECT norm_key FROM m.media "
                      "WHERE chosen=1 AND kind=?)")
         args.append(has_kind)
-    if config.get_bool("hide_non_games", True):
+    # ...except in the 'utilities' view, which exists precisely to show them. Applying
+    # both would AND "is a non-game" with "is not a non-game" and always return nothing.
+    if status != "utilities" and config.get_bool("hide_non_games", True):
         _ex, _exargs = _non_game_hidden_sql()
         where.append("NOT (" + _ex + ")")
         args += _exargs
@@ -992,7 +1005,7 @@ def games(
     include: str = Query(None, description="comma-list of source/status flags a game MUST have"),
     exclude: str = Query(None, description="comma-list of source/status flags a game must NOT have"),
     sort: str = Query(None, description="comma-list of sort keys in priority order (1st,2nd,3rd)"),
-    status: str = Query("owned", description="ownership: owned (default) | wanted | all"),
+    status: str = Query("owned", description="ownership: owned (default) | utilities | wanted | all"),
     identified: str = Query("only", description="only (default, hide bare ROMs) | all | unidentified"),
     limit: int = Query(60, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -1003,7 +1016,7 @@ def games(
     con = lib()
     try:
         return _query_games(con, q, source, platform, has_kind, inc, exc, srt, limit, offset,
-                            status=status if status in ("owned", "wanted", "all") else "owned",
+                            status=status if status in ("owned", "utilities", "wanted", "all") else "owned",
                             identified=identified if identified in ("only", "all", "unidentified") else "only",
                             query=query)
     finally:
