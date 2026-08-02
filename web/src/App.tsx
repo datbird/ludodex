@@ -886,7 +886,11 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
                       <button key={f.id} type="button" className={'fa-chip ' + f.state}
                         onClick={() => setFlag(f.id, f.state)}
                         title={`Remove — ${f.state === 'include' ? 'including' : 'excluding'} ${f.name}`}>
-                        <span className="fa-tag">{f.state === 'include' ? 'Incl' : 'Excl'}</span>
+                        <span className="fa-tag"
+                          title={f.state === 'include'
+                            ? 'Include — keeping only games that match this'
+                            : 'Exclude — hiding games that match this'}>
+                          {f.state === 'include' ? 'Incl' : 'Excl'}</span>
                         <span className="fa-name">{f.name}</span>
                         <span className="fa-x" aria-hidden="true">×</span>
                       </button>
@@ -897,8 +901,10 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
               <div className="filter-scroll">
                 <div className="filter-grid">
                   <div className="fg-h">Name</div>
-                  <div className="fg-h fg-c">Incl</div>
-                  <div className="fg-h fg-c">Excl</div>
+                  {/* Abbreviated to keep the columns narrow — the full word and what it
+                      does live in the tooltip, so the header never has to explain itself. */}
+                  <div className="fg-h fg-c" title="Include — keep ONLY games that match this. Ticking several includes narrows to games matching all of them.">Incl</div>
+                  <div className="fg-h fg-c" title="Exclude — hide games that match this, however they matched otherwise. Exclude always wins over Include.">Excl</div>
                   {filterSections.map((sec) => {
                     const rows = fq
                       ? sec.rows.filter((r) => r.name.toLowerCase().includes(fq))

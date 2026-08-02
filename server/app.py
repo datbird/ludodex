@@ -3839,6 +3839,16 @@ def _member_identity(nk, plat):
         lw.execute("INSERT INTO metadata_links(game_id,provider,provider_id,slug,url) "
                    "VALUES(?,?,?,?,?)",
                    (gid, "igdb", str(pick["igdb_id"]), pick.get("slug"), url))
+        # The ENTRY's game_key must move with the identity. materialize stamped it
+        # `title:<key>` before any identity existed; media fetched afterwards is stamped
+        # `igdb:<id>`, and the serve resolver only shows neutral art when
+        # md.game_key = g.game_key (DESIGN §11.9). Leaving them mismatched makes every
+        # asset we just fetched INVISIBLE — the entry renders a monogram while holding a
+        # dozen images. Same failure the 2026-07-26 pass repaired for bundle-refused
+        # entries; it reappears here because identity now arrives AFTER the row exists.
+        if _has_col(lw, "games", "game_key"):
+            lw.execute("UPDATE games SET game_key=? WHERE id=? AND (game_key IS NULL "
+                       "OR game_key LIKE 'title:%')", ("igdb:%s" % pick["igdb_id"], gid))
         lw.commit()
     finally:
         lw.close()
