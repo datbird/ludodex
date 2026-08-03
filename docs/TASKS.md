@@ -219,6 +219,63 @@ the first sync + build:
   `FIRESTORE_EMULATOR_HOST=<host:port>` (also settable as config `firestore_emulator_host`).
   The adapter skips service-account token minting in that mode.
 
+## Identity congruence — the last of the "two derivations" bugs (2026-08-02)
+
+datbird: *"why didnt we pull in any other categories of media here? Very popular game so
+more media definitly exists"* — a title showing **Screenshots 0 / Videos 0 / Manuals 0**
+while holding 15-40 screenshots.
+
+Neutral art only serves when `media.game_key = games.game_key` (DESIGN §11.9), and THREE
+places derived that key:
+
+1. the catalog, stamping the entry;
+2. `media_fetch.game_key()` at fetch time, from `igdb_resolution`;
+3. `_backfill_game_key`'s repair, also from `igdb_resolution`, applying its own policy —
+   refusing anything IGDB calls a bundle (`game_type` 3/13).
+
+The catalog was free to give an entry exactly such a bundle identity, so (1) and (3)
+disagreed permanently. Live: **41 entries carrying `igdb:<bundle>` with all 990 of their
+neutral media rows still on `title:<base_key>`** — Halo MCC, Crash N. Sane Trilogy, the
+Contra/Castlevania Anniversary Collections, the D&D and Forgotten Realms series, DOOM 3
+BFG, DMC HD. Each still rendered a cover, which is why it never looked like an identity
+fault: own-console ScreenScraper art matches on `norm_key+system` and never consults
+`game_key` at all.
+
+**Fix:** the repair reads the CATALOG and follows it. (2) stays as a fetch-time first
+guess — the entry may not exist yet mid-ingest — but it is now guaranteed to be
+reconciled before any selection. The bundle refusal needs no special case: an entry that
+refused one reads back `title:<nk>`. Entries sharing a base_key that DISAGREE are skipped
+rather than guessed at.
+
+**Found by the ordering guard, not by inspection:** `_ingest_new_members` fetched via
+`_pull_media_sources` and selected with NO repair, so art it fetched was invisible on
+landing. The "download media into the repo" job took `media_choose.con_index()`, which
+(unlike `media_fetch`'s) never carried the repair either.
+
+### `check_invariants.py` — assert the finished data, not the units
+
+Every wrong-art report in this project traced to derived truth computed twice and
+drifting, and the symptom only ever showed up in the END STATE. So that is where it is
+now checked. **Read-only, safe against a live instance:**
+
+    docker exec -i ludodex python3 /app/check_invariants.py
+
+- **I1** neutral media identity matches its entry
+- **I2** no falsy identity (`igdb:0`) is used as a key
+- **I3** no chosen asset has a known-wrong shape
+- **I4** every viable candidate set elects a winner
+- **I5** exactly one chosen asset per (game, system, identity, kind)
+- **I6** media an entry *holds* is media an entry can *show* (eligible art only —
+  another console's art is siloed away on purpose, §11.4, and counting it would report
+  the design working)
+
+Run it after any ingest, wand run or repair. Live 2026-08-02 post-fix: **all six hold**
+(I1 41 → 0, I6 70 → 0).
+
+`test_ingest_order.py` pins the fresh-ingest guarantee itself: art stays visible through
+identity arriving late, moving again, and being revoked — and the build fails if any
+fetch path reaches `select()` without reconciling identity first.
+
 ## Incident 2026-08-02 — the test suite erased the live media index
 
 Running `test_*.py` inside the production container wiped all 66,280 rows of
