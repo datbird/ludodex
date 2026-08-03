@@ -98,20 +98,48 @@ media_choose.select(con)
 check(_chosen(con, "res", "cover") == "https://x/big.jpg",
       "larger measured image wins (the Ys case, by judgment not luck)")
 
-print("\nselect(): an all-wrong set still yields a pick (no starvation)")
+print("\nselect(): a MEASURED wrong shape is disqualified, not merely ranked last")
+# This case used to assert the opposite — that a sole 460x215 header still filled the
+# cover slot rather than starve it. That was wrong in the way the user actually sees:
+# an EMPTY slot falls back cleanly to the monogram card, whereas a wrong-shaped one is
+# displayed stretched, as if it were correct. Ranking it last still elected it whenever
+# nothing better existed, which is exactly how a landscape grid became a cover.
+# shape_ok() returns True for UNKNOWN dimensions, so this only excludes assets we have
+# actually looked at and know are wrong.
 con = _con()
 _put(con, "allbad", "cover", top, "https://x/header.jpg", 460, 215)
 media_choose.select(con)
-check(_chosen(con, "allbad", "cover") == "https://x/header.jpg",
-      "sole candidate still chosen when nothing better exists")
+check(_chosen(con, "allbad", "cover") is None,
+      "a known-wrong shape is left unchosen rather than stretched into the slot")
 
-print("\nselect(): unmeasured must not lose to measured on that basis alone")
+print("\nselect(): the IMAGE outranks the provider, with unknown size in the middle")
+# Also superseded deliberately. The user's ranking policy is tier 1 = deterministic
+# image facts (ratio, resolution), tier 2 = provider. So a measured 600x900 beats an
+# unmeasured candidate from a higher-priority provider — the live case that forced this
+# had IGDB's 264x352 thumbnail outranking a SteamGridDB cover five times its area purely
+# on provider order. Resolution is BANDED rather than raw, so unmeasured lands in the
+# middle: it loses to a known-large and still beats a known-small.
 con = _con()
 _put(con, "unk", "cover", top, "https://x/unknown.png")             # no dims at all
 _put(con, "unk", "cover", media.priority("cover")[-1], "https://x/known.jpg", 600, 900)
 media_choose.select(con)
-check(_chosen(con, "unk", "cover") == "https://x/unknown.png",
-      "unknown dims stay neutral; provider priority still decides")
+check(_chosen(con, "unk", "cover") == "https://x/known.jpg",
+      "a measured large cover beats an unmeasured one from a better provider")
+
+con = _con()
+_put(con, "unk2", "cover", media.priority("cover")[-1], "https://x/unknown.png")
+_put(con, "unk2", "cover", top, "https://x/small.jpg", 264, 352)    # measured, small
+media_choose.select(con)
+check(_chosen(con, "unk2", "cover") == "https://x/unknown.png",
+      "but an unmeasured candidate still beats a measured SMALL one")
+
+print("\nselect(): provider priority decides INSIDE a resolution band")
+con = _con()
+_put(con, "band", "cover", media.priority("cover")[-1], "https://x/lowprio.jpg", 600, 900)
+_put(con, "band", "cover", top, "https://x/topprio.jpg", 620, 880)  # same band, smaller
+media_choose.select(con)
+check(_chosen(con, "band", "cover") == "https://x/topprio.jpg",
+      "the tier-2 signal still governs once the images are comparable")
 
 print("\nselect(): a confirmed letterboxed paste loses to authored art")
 con = _con()

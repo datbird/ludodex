@@ -295,9 +295,7 @@ def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
             stamp_measured(con, r, sha, repo)
             ok += 1
         else:
-            # dead reference: drop it from contention and promote the next best
-            con.execute("DELETE FROM media WHERE id=?", (r["id"],))
-            _repick(con, r["norm_key"], r["kind"], r["system"])
+            drop_dead(con, r)
             dead += 1
         if progress:
             sys.stdout.write("PROG\t%d\t%d\t%s\t%s\n" % (i, n, r["norm_key"], r["kind"]))
@@ -310,33 +308,42 @@ def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
     return ok, dead
 
 
+def drop_dead(con, row):
+    """A reference whose bytes will not come down loses its slot, and the next-best
+    takes it.
+
+    Batch materialization always did this. The SERVE path — the only materialization
+    that happens at all in `ondemand` media mode — did not: it raised 502 and left the
+    dead row `chosen`, so the entry showed a monogram on every subsequent request while
+    good candidates sat unchosen, and nothing self-healed it short of a manual pass.
+    One rule, one implementation, called from both.
+
+    `row` needs id / norm_key / kind (a sqlite3.Row or a plain dict both work).
+    """
+    rid = row["id"] if not isinstance(row, dict) else row.get("id")
+    nk = row["norm_key"] if not isinstance(row, dict) else row.get("norm_key")
+    kind = row["kind"] if not isinstance(row, dict) else row.get("kind")
+    con.execute("DELETE FROM media WHERE id=?", (rid,))
+    if nk and kind:
+        _repick(con, nk, kind)
+    con.commit()
+
+
 def _repick(con, norm_key, kind, system=None):
-    """After a dead asset is removed, choose the next-best for this game+kind within
-    the SAME system bucket (per-platform siloing, DESIGN §11.4)."""
-    rank = {p: i for i, p in enumerate(media.priority(kind))}
-    cands = con.execute("SELECT id, provider, matched, ref_type, ref, width, height, "
-                        "filler, ai_pick FROM media "
-                        "WHERE norm_key=? AND kind=? AND COALESCE(system,'')=? "
-                        "AND COALESCE(hidden,0)=0",
-                        (norm_key, kind, system or "")).fetchall()
-    if not cands:
-        return
+    """After a dead asset is removed, re-elect this game+kind.
 
-    def _rk(r):
-        # Same ordering as select(): a promotion after a dead asset must not install
-        # a wrong-shaped replacement the main pass would have rejected.
-        mw, mh = r["width"], r["height"]
-        sw, sh = (mw, mh) if (mw and mh) else media.derived_dims(r["ref"])
-        return (0 if media.shape_ok(kind, sw, sh) else 1,
-                1 if r["filler"] == 1 else 0,
-                0 if r["ai_pick"] else 1,
-                rank.get(r["provider"], 99),
-                -(mw * mh) if (mw and mh) else 0,
-                0 if r["matched"] else 1,
-                0 if r["ref_type"] == "file" else 1, r["id"])
+    This used to carry a hand-copied sort key "same as select()", and the copy went
+    stale exactly as you'd expect: no resolution band, provider priority above size,
+    and a measured wrong shape merely ranked last rather than disqualified. So every
+    defect fixed in the real ranker came back the instant a provider URL 404'd. Two
+    implementations of one rule is the bug — call the ranker, scoped.
 
-    best = min(cands, key=_rk)
-    con.execute("UPDATE media SET chosen=1 WHERE id=?", (best["id"],))
+    `system` is now unused: the scoped select re-elects every system bucket for this
+    game+kind, which is a superset of the old single-bucket behaviour and keeps the
+    per-platform siloing (DESIGN §11.4) that select() already implements.
+    """
+    del system                                          # noqa: F841 — see docstring
+    select(con, kinds=[kind], only=[norm_key])
 
 
 def main(argv):

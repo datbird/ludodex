@@ -8032,6 +8032,26 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
             p = os.path.join(REPO, "%s.%s" % (sha, ext))
             if os.path.exists(p):
                 return _serve(p, ext, size)
+        # The fetch failed. In `ondemand` media mode this is the ONLY materialization
+        # there is, so leaving the row chosen meant a dead URL kept the slot forever:
+        # a monogram on every subsequent request with good candidates sitting unchosen,
+        # self-healing only if someone remembered to run a batch pass. Batch
+        # materialization always demoted a dead ref; make serve do the same thing, via
+        # the same function.
+        try:
+            wcon = sqlite3.connect(INDEX_DB)
+            try:
+                wcon.row_factory = sqlite3.Row
+                # the row's OWN norm_key, not the entry's: neutral art is matched across
+                # norm_keys by game_key, so `base` is not necessarily where it lives.
+                _dr = wcon.execute("SELECT id, norm_key, kind FROM media WHERE id=?",
+                                   (r["id"],)).fetchone()
+                if _dr:
+                    media_choose.drop_dead(wcon, _dr)
+            finally:
+                wcon.close()
+        except Exception as _e:      # noqa: BLE001 — the 502 below is the real answer
+            print("drop_dead %s/%s: %s" % (base, kind, str(_e)[:110]), file=sys.stderr)
         raise HTTPException(502, "failed to fetch remote asset")
 
     # 3. file ref that only exists on the producer
