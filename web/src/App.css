@@ -4324,3 +4324,8 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
   font-weight: 700; color: var(--text-h); font-size: 13px; }
 .chg-stuck-note { font-size: 12px; margin: 4px 0 6px; }
 .chg-stuck-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-dim); }
+
+/* Media-strip marks are images now, not emoji — keep them from inheriting text metrics
+   and dim them with the button when a kind is empty, so the row still reads as disabled. */
+img.ms-icon { display: block; object-fit: contain; flex: 0 0 auto; }
+.ms-btn.empty img.ms-icon { opacity: 0.4; }

@@ -6735,10 +6735,13 @@ const NON_ID_SRC = new Set(['emulation', 'archive', 'physical', 'rom', 'digital'
 // collections (screenshots / videos / manuals). Every other kind is still
 // collected + managed in the All Media tab — this just surfaces these three;
 // clicking one opens the per-kind overview (MediaKindOverlay).
+// Custom line-art marks rather than emoji: emoji render differently on every OS and
+// carry their own colour, so the strip never matched the app's accent. These are served
+// from web/public — nothing is fetched off-site.
 const STRIP_KINDS: { kind: string; icon: string; label: string }[] = [
-  { kind: 'screenshot', icon: '📷', label: 'Screenshots' },
-  { kind: 'video', icon: '🎬', label: 'Videos' },
-  { kind: 'manual', icon: '📖', label: 'Manuals' },
+  { kind: 'screenshot', icon: '/mediaicons/screenshots.png', label: 'Screenshots' },
+  { kind: 'video', icon: '/mediaicons/videos.png', label: 'Videos' },
+  { kind: 'manual', icon: '/mediaicons/manuals.png', label: 'Manuals' },
 ]
 function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links, heroPref, onHeroPref }: {
   nk: string; assets: MediaAsset[]; loading: boolean; kinds: MediaKind[]
@@ -6763,14 +6766,15 @@ function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links
         <button key={s.kind} className={'ms-btn' + (s.n ? '' : ' empty')} disabled={!s.n}
           title={s.n ? `View ${s.n} ${s.label.toLowerCase()}` : `No ${s.label.toLowerCase()} yet`}
           onClick={() => s.mk && setOpenKind(s.mk)}>
-          <span className="ms-icon">{s.icon}</span>
+          <img className="ms-icon" src={s.icon} width="20" height="20" alt="" aria-hidden="true" />
           <span className="ms-text">{s.label}</span>
           <span className="ms-count">{s.n || 0}</span>
         </button>
       ))}
       <button className="ms-btn ms-all" title="Browse & manage every media type — add, reorder, frame, ban"
         onClick={() => setAllOpen(true)}>
-        <span className="ms-icon">🗂</span>
+        <img className="ms-icon" src="/mediaicons/allmedia.png" width="20" height="20"
+          alt="" aria-hidden="true" />
         <span className="ms-text">All Media</span>
       </button>
       {openKind && (
