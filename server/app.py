@@ -6081,21 +6081,33 @@ def _match_providers(keys, should_stop=lambda: False, force=False):
             if not title:
                 continue
             found = {}
+            searched = False
             if ss_creds:
+                _before = provider_ids.cached(mc, "screenscraper", nk)
                 pid = provider_ids.resolve(
                     mc, "screenscraper", nk, title, plats,
                     lambda t, s: _ss_match([t], s), force=force)
+                searched = searched or _before is None or force
                 if pid:
                     found["screenscraper"] = pid
                     out["screenscraper"] += 1
             if sgdb_key:
+                _before = provider_ids.cached(mc, "steamgriddb", nk)
                 pid = provider_ids.resolve(
                     mc, "steamgriddb", nk, title, plats,
                     lambda t, s, _a=appid: {"sgdb_id": _mf._sgdb_game_id(sgdb_key, _a, t)},
                     force=force)
+                searched = searched or _before is None or force
                 if pid:
                     found["steamgriddb"] = pid
                     out["steamgriddb"] += 1
+            # Be a polite client on a library-wide sweep. ScreenScraper's own quota is
+            # read at runtime by ss_scrape (never hardcode it — it is per-deployment),
+            # but SGDB has no published budget, and a 2000-game sweep issuing
+            # back-to-back searches is rude regardless of what a rate limiter allows.
+            # Only pays the cost when a search actually happened.
+            if searched:
+                time.sleep(0.15)
             if not found:
                 continue
             # The link is a separate fact from the identity, and building a provider page
