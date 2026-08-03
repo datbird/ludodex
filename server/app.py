@@ -3456,19 +3456,37 @@ def _ss_match(queries, systems, year=None):
     # for every game by design. The fallback is still there (it is what finds a game
     # filed under a system we didn't guess), but it gets ONE query, not every variant,
     # and the whole match is bounded by a wall-clock budget.
+    #
+    # The budget must fit a COMPLETE attempt or it becomes a false-negative machine:
+    # 3 per-system searches (~10s each) plus one cross-system (~49s) is ~80s, and at
+    # the original 75s Mass Effect 2 tripped the limit and was recorded as having no
+    # ScreenScraper match — while the index held 83 ScreenScraper assets for it. 130s
+    # leaves headroom; exhausting it now RAISES rather than reporting a miss, so a
+    # too-tight budget can never again be mistaken for an answer.
     try:
-        budget = float(config.get("ss_match_budget_s") or 75)
+        budget = float(config.get("ss_match_budget_s") or 130)
     except (TypeError, ValueError):
-        budget = 75.0
+        budget = 130.0
     deadline = time.time() + max(10.0, budget)
+    # "We failed to look" is not "it isn't there". This function returned None for three
+    # different situations — searched and found nothing, every search errored, and the
+    # budget ran out part-way — and the caller recorded all three as a MISS. Live, Mass
+    # Effect 2 was written down as having no ScreenScraper match while the index already
+    # held 83 ScreenScraper assets for it. Only a COMPLETED search that found nothing is
+    # an answer; the other two must raise so provider_ids.resolve leaves the cache alone
+    # and the game is retried.
+    any_ok = False              # at least one search actually returned
+    completed = True            # we got through every query we intended to try
     for sid in sids:
         for q in (qlist[:1] if sid is None else qlist):
             if time.time() > deadline:
                 print("ss match %r: budget exhausted, giving up" % (queries,),
                       file=sys.stderr)
+                completed = False
                 break
             try:
                 cands = ss.jeu_recherche(creds, q, systemeid=sid, limit=8)
+                any_ok = True
             except Exception as e:               # surface, don't swallow silently
                 print("ss search %r sys=%s: %s" % (q, sid, str(e)[:120]), file=sys.stderr)
                 continue
@@ -3493,7 +3511,14 @@ def _ss_match(queries, systems, year=None):
         if best:                                 # matched on this system — done
             break
     if not best:
-        return None
+        if not any_ok or not completed:
+            # never looked, or stopped looking part-way — a non-answer. Raising is what
+            # keeps it OUT of the negative cache; returning None would record it as a
+            # definitive "ScreenScraper does not have this game".
+            raise RuntimeError(
+                "screenscraper search did not complete for %r (%s)"
+                % (queries, "no search succeeded" if not any_ok else "budget exhausted"))
+        return None                              # searched, genuinely not there
     _, j, nm, yr = best
     return {"provider": "screenscraper", "ss_id": j.get("id"), "name": nm,
             "year": int(yr) if yr and str(yr).isdigit() else None,
