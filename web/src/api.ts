@@ -567,6 +567,7 @@ export interface MediaAsset {
   pinned: boolean
   rank: number | null
   chosen?: boolean            // true = the asset actually used/displayed for this kind
+  used?: boolean          // the asset the SERVE resolver actually returns
   redistributable?: boolean   // false = keep locally, don't copy to other machines
   url: string
   thumb: string | null

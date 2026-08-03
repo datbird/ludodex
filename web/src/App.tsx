@@ -6840,7 +6840,11 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
   // Order = the priority actually used: pinned rank first; otherwise the chosen/used
   // asset floats to the top, then the rest by id (stable). So position #1 is always
   // what the game displays.
-  const sortKey = (a: MediaAsset) => a.rank != null ? a.rank : (a.chosen ? -1 : 1e9)
+  // `used` is the server's word for "this is the asset the grid actually displays",
+  // computed with the SERVE resolver. `chosen` is per-bucket and an entry has several,
+  // so ordering on it labelled the wrong asset "#1 USED" for 51 live entries.
+  const sortKey = (a: MediaAsset) =>
+    a.rank != null ? a.rank : (a.used ? -2 : a.chosen ? -1 : 1e9)
   const byRank = (list: MediaAsset[]) =>
     [...list].sort((a, b) => sortKey(a) - sortKey(b) || a.id - b.id)
   const framable = FRAMABLE_KINDS.has(kind.kind) && !!onFrame

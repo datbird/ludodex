@@ -7153,7 +7153,7 @@ def game_media(norm_key: str):
     console's), so the detail hero/candidates match the platform. `pinned`/`rank`
     come from the durable (title-level) pin store."""
     base, platform = _split_entry_key(norm_key)
-    _cols = ("id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1")
+    _cols = ("id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1, system")
     con = lib()
     try:
         if platform and _has_col(con, "games", "game_key"):
@@ -7201,11 +7201,30 @@ def game_media(norm_key: str):
             "width": r["width"], "height": r["height"],
             "is_image": is_img,
             "pinned": rank is not None, "rank": rank, "chosen": bool(r["chosen"]),
+            # `chosen` is per (norm_key, SYSTEM, game_key, kind) — an entry legitimately
+            # has SEVERAL chosen rows, one per bucket. `used` marks the ONE the serve
+            # resolver actually returns, so the picker can label the real thing instead
+            # of guessing. The panel used to call the lowest-id chosen row "#1 USED",
+            # which disagreed with what the grid displayed for 51 live entries.
+            "used": False,
+            "system": r["system"] if "system" in r.keys() else None,
             "redistributable": (r["kind"], r["provider"], r["ref"]) not in noredist,
             "url": "/api/media-asset/%d" % r["id"],
             "thumb": "/api/media-asset/%d?size=thumb" % r["id"] if has_preview else None,
             "user": False,
         })
+    # Mark the asset the SERVE resolver would actually return, per kind. Same rule as
+    # the grid and Spotlight (DESIGN §11.4/§11.9): own-console art wins over neutral,
+    # and among equals the chosen one. Computed here so the UI never has to re-derive
+    # a rule it can get wrong.
+    for _kind in {a["kind"] for a in assets}:
+        _cands = [a for a in assets if a["kind"] == _kind and a["chosen"]]
+        if not _cands:
+            continue
+        _own = [a for a in _cands if (a.get("system") or "") == (platform or "")]
+        _pick = (_own or _cands)[0]
+        _pick["used"] = True
+
     # durable user uploads (added via the All Media upload buttons) — always "active"
     uc = _umedia_con()
     try:
