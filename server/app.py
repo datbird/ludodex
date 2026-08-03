@@ -1379,6 +1379,14 @@ def _media_worker(mode):
     j = _MEDIA_JOB["job"]
     try:
         con = media_choose.con_index()
+        # media_choose.con_index() does NOT carry the identity repair (media_fetch's
+        # does), so this job — the user-facing "download media into the repo" — used to
+        # choose against whatever stamps were left behind by the last thing that fetched.
+        # It creates no rows itself, so this is a heal point rather than a correctness
+        # fix, but it is the one job a user runs when art looks wrong, and it should
+        # leave the index consistent rather than merely re-picking within stale buckets.
+        import media_fetch as _mf
+        _mf._backfill_game_key(con)
         j["step"] = "Choosing best assets…"
         media_choose.select(con)
         j["step"] = "Downloading media into the repo…"
@@ -3928,6 +3936,7 @@ def _ingest_new_members(created):
               % (MEMBER_INGEST_CAP, len(created) - len(todo)), file=sys.stderr)
 
     def run():
+        import media_fetch as _mf
         got = 0
         for nk, plat in todo:
             try:
@@ -3953,6 +3962,16 @@ def _ingest_new_members(created):
             # would sweep the catalog's unmaterialized assets. _asset_local_path is the
             # serve-time helper — non-destructive, per row — so measuring stays bounded
             # to the members this run created.
+            #
+            # The identity repair has to run first, and this path was the one place that
+            # skipped it. `put()` stamps game_key at fetch time from `igdb_resolution`
+            # (media_fetch.game_key) — a reasonable first guess, but NOT the catalog's
+            # decision: a member of a refused bundle gets `igdb:<bundle>` while its entry
+            # says `title:<nk>`, and neutral art only serves when the two agree
+            # (DESIGN §11.9). Every other media path reconciles the guess before choosing;
+            # without it here the art this run just fetched is invisible the moment it
+            # lands. test_ingest_order.py fails the build if any path drops this again.
+            _mf._backfill_game_key(con)
             media_choose.select(con)
             con.commit()
             keys = [nk for nk, _p in todo]
@@ -3966,6 +3985,8 @@ def _ingest_new_members(created):
                     _asset_local_path(r)     # downloads + stamps measured dims/filler
                 except Exception:            # noqa: BLE001 — one dead ref never stops the pass
                     pass
+            # NO-STAMP: a re-rank after measuring existing rows — no fetch, no new
+            # game_key to reconcile (the repair ran above, before the first select).
             media_choose.select(con)         # re-rank now that shape is actually known
             con.commit()
         finally:

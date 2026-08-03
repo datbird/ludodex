@@ -132,12 +132,21 @@ def main():
     # ---------------------------------------------------------------- I6: visible media
     # The user-facing consequence of I1, stated directly: an entry that holds media of a
     # kind but can SEE none of it.
+    #
+    # "Holds" means media ELIGIBLE for this entry — its own console's art, or
+    # platform-neutral art. Another console's art is siloed away on purpose (DESIGN
+    # §11.4): a PC entry legitimately shows none of the PS2 video ScreenScraper returned
+    # for the same title, and counting that as a violation would report the design
+    # working. What remains catchable is real: a neutral row whose identity does not
+    # match, or an own-console row hidden for some other reason.
     bad = []
     for r in g.execute("SELECT base_key, platform, COALESCE(game_key,'') gk, "
                        "canonical_title t FROM games"):
         for kind in ("screenshot", "video", "cover"):
-            held = m.execute("SELECT COUNT(*) FROM media WHERE norm_key=? AND kind=?",
-                             (r["base_key"], kind)).fetchone()[0]
+            held = m.execute(
+                "SELECT COUNT(*) FROM media WHERE norm_key=? AND kind=? "
+                "AND (COALESCE(system,'')='' OR COALESCE(system,'')=?)",
+                (r["base_key"], kind, r["platform"])).fetchone()[0]
             if not held:
                 continue
             seen = m.execute(
