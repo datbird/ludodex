@@ -135,7 +135,14 @@ def game_key(nk, system=None):
 
 
 def _backfill_game_key(con):
-    """One-time (idempotent) fill of game_key for rows that predate the column or
+    """Stamp + REPAIR game_key on media rows. Idempotent.
+
+    Not merely a fill: two repair passes run before the fully-stamped early-return,
+    because a row can be stamped and still WRONG. Identity changes after media is
+    fetched (bundle refusal in one direction, a later match in the other), and a stale
+    stamp makes the asset invisible rather than merely unlabelled.
+
+    Original contract — fill of game_key for rows that predate the column or
     came from a producer that doesn't stamp yet (media_index / importers). Cheap
     no-op once every row is stamped — guarded by an existence check. Identified
     rows take the igdb key (SQL join to the metadata cache); the rest fall to the
@@ -167,6 +174,35 @@ def _backfill_game_key(con):
             finally:
                 try:
                     con.execute("DETACH mcb")
+                except sqlite3.OperationalError:
+                    pass
+        # Repair rows stamped `title:<nk>` BEFORE the entry had an identity. Media is
+        # stamped at fetch time; identity can arrive later (a wand match, a member
+        # ingest, an accepted finding), and the entry's game_key moves while the media's
+        # does not. Neutral art only serves when the two agree (DESIGN §11.9), so the
+        # asset goes permanently invisible — a game can hold a 600x900 cover and render
+        # a 264x352 one because the good row is keyed to an identity the entry no longer
+        # has. Mirror image of the bundle repair above, and like it, runs BEFORE the
+        # fully-stamped early-return: these rows are stamped, just stale.
+        #
+        # Bundles are excluded, or this would immediately undo that refusal.
+        if os.path.exists(META_CACHE):
+            try:
+                con.execute("ATTACH ? AS mcs", (META_CACHE,))
+                con.execute(
+                    "UPDATE media SET game_key='igdb:'||"
+                    "(SELECT r.igdb_id FROM mcs.igdb_resolution r "
+                    " WHERE r.norm_key=media.norm_key AND r.igdb_id>0) "
+                    "WHERE game_key='title:'||norm_key AND norm_key IN "
+                    "(SELECT norm_key FROM mcs.igdb_resolution WHERE igdb_id>0 "
+                    " AND igdb_id NOT IN (SELECT igdb_id FROM mcs.igdb_meta "
+                    "  WHERE json_extract(payload_json,'$.game_type') IN (3,13)))")
+                con.commit()
+            except sqlite3.OperationalError:
+                pass
+            finally:
+                try:
+                    con.execute("DETACH mcs")
                 except sqlite3.OperationalError:
                     pass
         if not con.execute("SELECT 1 FROM media WHERE game_key IS NULL "
