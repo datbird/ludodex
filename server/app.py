@@ -1428,6 +1428,88 @@ def media_materialize_status():
     return {"media_job": _MEDIA_JOB["job"]}
 
 
+# --- provider identity sweep: match every game against every configured provider ------
+_MATCH_JOB = {"job": None}
+_MATCH_LOCK = threading.Lock()
+
+
+def _match_worker(force):
+    j = _MATCH_JOB["job"]
+    try:
+        import provider_ids
+        lc = ro(LIBRARY_DB)
+        try:
+            keys = [r[0] for r in lc.execute(
+                "SELECT DISTINCT norm_key FROM games WHERE norm_key IS NOT NULL "
+                "AND norm_key!='' ORDER BY norm_key")]
+        finally:
+            lc.close()
+        if not force:
+            # Only the games that have no recorded identity yet (or a stale miss) — the
+            # rule for "still to do" lives in one place, not in this loop.
+            mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+            try:
+                provider_ids.ensure_tables(sqlite3.connect(
+                    os.path.join(DATA, "metadata-cache.sqlite")))
+                todo = set()
+                for prov in provider_ids.PROVIDERS:
+                    todo.update(provider_ids.unlinked(mc, prov, keys))
+                keys = [k for k in keys if k in todo]
+            finally:
+                mc.close()
+        j["total"] = len(keys)
+        done = 0
+        for i in range(0, len(keys), 25):
+            if j.get("cancel"):
+                break
+            batch = keys[i:i + 25]
+            got = _match_providers(batch, lambda: bool(j.get("cancel")), force=force)
+            for p, n in got.items():
+                j["matched"][p] = j["matched"].get(p, 0) + n
+            done += len(batch)
+            j["done"] = done
+            j["step"] = "Matched %d/%d games…" % (done, len(keys))
+        j.update({"ok": True, "step": "Done"})
+    except Exception as e:                      # noqa: BLE001
+        j.update({"ok": False, "error": str(e)[:200], "step": "Failed"})
+    finally:
+        j["running"] = False
+        j["finished"] = True
+
+
+@app.post("/api/providers/match")
+def providers_match(body: dict = Body(default={})):
+    """Match every game against every configured provider — A MATCH IS NOT AN INGEST.
+
+    Records the identity and writes the provider link whether or not any metadata or
+    media is ever taken from that provider. Free and deterministic: no AI area is
+    consulted, so this can never spend. `force` re-searches games already decided.
+    """
+    with _MATCH_LOCK:
+        cur = _MATCH_JOB["job"]
+        if cur and cur.get("running"):
+            raise HTTPException(409, "a provider match is already running")
+        _MATCH_JOB["job"] = {"running": True, "finished": False, "step": "Starting…",
+                             "ok": None, "total": 0, "done": 0, "matched": {},
+                             "force": bool((body or {}).get("force"))}
+    threading.Thread(target=_match_worker,
+                     args=(bool((body or {}).get("force")),), daemon=True).start()
+    return {"match_job": _MATCH_JOB["job"]}
+
+
+@app.get("/api/providers/match")
+def providers_match_status():
+    return {"match_job": _MATCH_JOB["job"]}
+
+
+@app.delete("/api/providers/match")
+def providers_match_cancel():
+    j = _MATCH_JOB["job"]
+    if j and j.get("running"):
+        j["cancel"] = True
+    return {"match_job": j}
+
+
 @app.get("/api/prefs")
 def get_prefs():
     """Global app preferences (not per-service): hide non-game apps + how long each
@@ -5868,7 +5950,27 @@ def _pull_ss_media(con, nk, systems, queries, now):
     creds = config.screenscraper_creds()
     if not creds or not config.get_bool("screenscraper_media", True):
         return 0
-    m = _ss_match(queries, systems, None)
+    # CONSUME the recorded identity rather than re-deriving it. The match is its own
+    # fact, resolved and cached by _match_providers; searching again here would be a
+    # second derivation of it (and would re-spend the search on every media pull).
+    # Falls back to a live search only when nothing has been recorded yet.
+    m = None
+    try:
+        import provider_ids
+        mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+        try:
+            provider_ids.ensure_tables(mc)
+            _pid = provider_ids.resolve(mc, "screenscraper", nk,
+                                        (queries[0] if queries else ""), systems,
+                                        lambda t, s: _ss_match([t], s))
+        finally:
+            mc.close()
+        if _pid:
+            m = {"provider": "screenscraper", "ss_id": _pid,
+                 "system": systems[0] if systems else None}
+    except Exception as e:                     # noqa: BLE001
+        print("ss identity %s: %s" % (nk, str(e)[:110]), file=sys.stderr)
+        m = _ss_match(queries, systems, None)
     if not m:
         return 0
     import screenscraper as ss
@@ -5926,6 +6028,103 @@ def _pull_ss_media(con, nk, systems, queries, now):
     return n
 
 
+def _match_providers(keys, should_stop=lambda: False, force=False):
+    """Record EVERY configured provider's identity for `keys`. A MATCH IS NOT AN INGEST.
+
+    datbird's decision (2026-08-01): a provider is matched for every game whether or not
+    any metadata or media is ever taken from it — the match is what makes a later
+    on-demand pull possible, and it is what the Matched-providers menu shows.
+
+    Both providers already had a working matcher and both discarded the answer:
+    ScreenScraper's ran inside `_pull_ss_media`, so an id existed only as a side effect
+    of pulling art; SteamGridDB's ran inside `fetch_steamgriddb_targets`, whose work list
+    SKIPS any game that already has a cover/hero/logo — so a game with IGDB art never got
+    an id at all. Live before this: SS 151/2255 linked, SGDB 0 (against 177 entries that
+    hold SGDB media). System Shock: Classic showed IGDB + Steam and nothing else.
+
+    Free and deterministic — no AI area is consulted. IGDB is not handled here: it has its
+    own resolution pass and is already 2218/2255.
+
+    Returns {provider: matched_count}.
+    """
+    import media_fetch as _mf
+    import provider_ids
+    keys = [k for k in (keys or []) if k]
+    out = {"screenscraper": 0, "steamgriddb": 0}
+    if not keys:
+        return out
+    sgdb_key = config.steamgriddb_key()
+    ss_creds = config.screenscraper_creds()
+    if not (sgdb_key or ss_creds):
+        return out
+    mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    try:
+        mc.execute("PRAGMA busy_timeout=15000")
+        provider_ids.ensure_tables(mc)
+        for nk in keys:
+            if should_stop():
+                break
+            lc = ro(LIBRARY_DB)
+            try:
+                r = lc.execute("SELECT canonical_title FROM games WHERE norm_key=? "
+                               "LIMIT 1", (nk,)).fetchone()
+                title = ((r[0] if r else "") or "").strip()
+                ar = lc.execute(
+                    "SELECT s.source_id FROM games g JOIN sources s ON s.game_id=g.id "
+                    "WHERE g.norm_key=? AND s.source='steam' LIMIT 1", (nk,)).fetchone()
+                appid = ar[0] if ar and str(ar[0] or "").isdigit() else None
+                plats = [x[0] for x in lc.execute(
+                    "SELECT DISTINCT platform FROM games WHERE norm_key=? "
+                    "AND platform IS NOT NULL AND platform!=''", (nk,))]
+            finally:
+                lc.close()
+            if not title:
+                continue
+            found = {}
+            if ss_creds:
+                pid = provider_ids.resolve(
+                    mc, "screenscraper", nk, title, plats,
+                    lambda t, s: _ss_match([t], s), force=force)
+                if pid:
+                    found["screenscraper"] = pid
+                    out["screenscraper"] += 1
+            if sgdb_key:
+                pid = provider_ids.resolve(
+                    mc, "steamgriddb", nk, title, plats,
+                    lambda t, s, _a=appid: {"sgdb_id": _mf._sgdb_game_id(sgdb_key, _a, t)},
+                    force=force)
+                if pid:
+                    found["steamgriddb"] = pid
+                    out["steamgriddb"] += 1
+            if not found:
+                continue
+            # The link is a separate fact from the identity, and building a provider page
+            # URL already has exactly one home — this does not become a second one.
+            try:
+                lw = sqlite3.connect(LIBRARY_DB)
+                try:
+                    lw.execute("PRAGMA busy_timeout=15000")
+                    g = lw.execute("SELECT id FROM games WHERE norm_key=?",
+                                   (nk,)).fetchall()
+                    for (gid,) in g:
+                        for prov, pid in found.items():
+                            lw.execute("DELETE FROM metadata_links WHERE game_id=? "
+                                       "AND provider=?", (gid, prov))
+                            lw.execute(
+                                "INSERT INTO metadata_links(game_id,provider,provider_id,"
+                                "slug,url) VALUES(?,?,?,?,?)",
+                                (gid, prov, str(pid), None,
+                                 _provider_page_url(prov, pid)))
+                    lw.commit()
+                finally:
+                    lw.close()
+            except Exception as e:              # noqa: BLE001 — a link never fails a run
+                print("provider link %s: %s" % (nk, str(e)[:110]), file=sys.stderr)
+    finally:
+        mc.close()
+    return out
+
+
 def _pull_media_sources(con, nk, want_web=False):
     """Fetch (do NOT choose) media for ONE game from every configured provider — IGDB
     (incl. per-entry override ids), SteamGridDB (a huge community art DB), and ScreenScraper
@@ -5953,6 +6152,14 @@ def _pull_media_sources(con, nk, want_web=False):
             "WHERE norm_key=? AND platform IS NOT NULL AND platform!=''", (nk,))]
     finally:
         lc.close()
+    # A MATCH IS NOT AN INGEST: record every provider's identity FIRST, whether or not
+    # this run takes any media from it. Doing it here rather than inside each fetcher is
+    # the point — SGDB's fetcher skips games that already have art, so identity used to
+    # depend on whether art happened to be missing.
+    try:
+        _match_providers([nk])
+    except Exception as e:                     # noqa: BLE001 — never fails a media pull
+        print("provider match %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
     _mf.fetch_igdb(con, now, only={nk})
     if plats:                                  # ScreenScraper media (retro/console-rich)
         try:
@@ -6136,6 +6343,14 @@ def _scoped_media_reconcile(touched, media, should_stop):
         return
     now = int(time.time())
     import media_fetch as _mf
+    # A MATCH IS NOT AN INGEST — every configured provider is matched for every touched
+    # game, before and independently of whether any art is taken. Runs even when
+    # media:False, because knowing what a game IS on ScreenScraper is not a media
+    # question. Free and deterministic; no AI area is consulted.
+    try:
+        _match_providers(list(touched), should_stop)
+    except Exception as e:                     # noqa: BLE001
+        print("scoped reconcile provider match: %s" % str(e)[:150], file=sys.stderr)
     if media is not False:                     # media:False => skip art entirely
         con = media_choose.con_index()
         try:

@@ -159,6 +159,38 @@ def main():
     report("I6 media an entry holds is media an entry can show", bad,
            "this is what 'Screenshots 0' looks like on an entry with forty of them")
 
+    # ---------------------------------------------------------------- I7: provider match
+    # A MATCH IS NOT AN INGEST (datbird, 2026-08-01): every configured provider is matched
+    # for every game, whether or not any metadata or media is taken from it. The failure
+    # this catches is a game never ATTEMPTED — not a game legitimately not found, which is
+    # a recorded miss and a perfectly good outcome.
+    try:
+        import provider_ids
+        import config as _cfg
+        mc = sqlite3.connect("file:%s?mode=ro"
+                             % os.path.join(DATA, "metadata-cache.sqlite"), uri=True)
+        keys = [r[0] for r in g.execute("SELECT DISTINCT norm_key FROM games")]
+        configured = []
+        if _cfg.screenscraper_creds():
+            configured.append("screenscraper")
+        if _cfg.steamgriddb_key():
+            configured.append("steamgriddb")
+        bad = []
+        for prov in configured:
+            try:
+                never = [k for k in keys
+                         if provider_ids.cached(mc, prov, k) is None]
+            except sqlite3.OperationalError:
+                never = keys            # table absent = nothing was ever matched
+            if never:
+                bad.append("%s — %d of %d entries never attempted (e.g. %s)"
+                           % (prov, len(never), len(keys), ", ".join(never[:3])))
+        mc.close()
+        report("I7 every configured provider is attempted for every game", bad,
+               "a provider that is never asked can never be a provider")
+    except Exception as e:              # noqa: BLE001
+        print("  skipped   I7 provider match (%s)" % str(e)[:60])
+
     m.close()
     g.close()
     print()
