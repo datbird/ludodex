@@ -80,6 +80,12 @@ def select(con, kinds=None, only=None):
     scalar = [k for k in media.SCALAR_KINDS if not kinds or k in kinds]
     if not scalar:
         return 0
+    # This function reads rows BY NAME, so a caller handing it a plain connection would
+    # blow up on r["kind"] — AFTER the chosen=0 reset below had already run. A caller
+    # that swallowed the error then left the game with NO art at all, which is exactly
+    # what the serve-time re-rank did: every image viewed wiped that game's picks.
+    # Own the requirement here rather than trusting five call sites to remember it.
+    con.row_factory = sqlite3.Row
     # The reset must be scoped exactly like the re-rank below, or a scoped run would
     # clear `chosen` for the whole library and only restore it for `only`.
     _where, _wargs = [], []

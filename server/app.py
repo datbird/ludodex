@@ -8018,9 +8018,14 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
                                       (r["id"],)).fetchone()
                 if _nkrow and _nkrow[0]:
                     try:
+                        # select() reads rows by name — hand it a Row factory or it
+                        # raises AFTER its own chosen=0 reset, leaving the game with
+                        # NOTHING chosen. select() now sets this itself; belt and braces.
+                        wcon.row_factory = sqlite3.Row
                         media_choose.select(wcon, only=[_nkrow[0]])
-                    except Exception:      # noqa: BLE001 — never fail serving an image
-                        pass
+                    except Exception as _e:   # noqa: BLE001 — never fail serving an image
+                        print("re-rank %s: %s" % (_nkrow[0], str(_e)[:110]),
+                              file=sys.stderr)
                 wcon.commit()
             finally:
                 wcon.close()

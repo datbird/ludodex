@@ -111,6 +111,27 @@ def main():
           con2.execute("SELECT COUNT(*) FROM media WHERE norm_key='unknown' "
                        "AND chosen=1").fetchone()[0] == 1)
 
+
+    print("6. a PLAIN connection must not leave a game with nothing chosen")
+    # The live regression: the serve-time re-rank passed a bare sqlite3.connect. select()
+    # reads rows by name, so it raised — AFTER its own chosen=0 reset — and the caller
+    # swallowed it. Every image viewed wiped that game's art.
+    plain = sqlite3.connect(":memory:")            # deliberately NO row_factory
+    plain.executescript("""
+    CREATE TABLE media(id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, kind TEXT,
+      provider TEXT, ref TEXT, matched INT, ref_type TEXT, game_key TEXT,
+      width INT, height INT, filler INT, ai_pick INT, chosen INT DEFAULT 0,
+      sha1 TEXT, ext TEXT, hidden INT DEFAULT 0);
+    """)
+    plain.execute("INSERT INTO media(norm_key,system,kind,provider,ref,matched,ref_type,"
+                  "game_key,width,height,filler,ai_pick) VALUES"
+                  "('g','genesis','cover','igdb','http://x/c',1,'url','igdb:1',600,900,0,NULL)")
+    plain.commit()
+    media_choose.select(plain, only=["g"])
+    check("a plain connection still elects a winner",
+          plain.execute("SELECT COUNT(*) FROM media WHERE norm_key='g' "
+                        "AND chosen=1").fetchone()[0] == 1)
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 
