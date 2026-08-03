@@ -110,6 +110,22 @@ def main():
         check("%s calls _match_providers" % fn.split("(")[0].replace("def ", ""),
               "_match_providers(" in body)
 
+    print("5. the IMPORT path does too — the one that was still missing it")
+    # This is the gap that mattered most and was found last. `_match_providers` was wired
+    # into the wand, the apply and the scoped reconcile — but a first-run import runs
+    # `_sync_worker`, whose media steps are `media_fetch.py` SUBPROCESSES that cannot
+    # reach a function living in the server. So a clean ingest produced IGDB + Steam and
+    # nothing else, and would have done so again on every reset, no matter how many
+    # times the other three paths were fixed.
+    i = src.index("def _sync_worker(")
+    j = src.index("\ndef ", i + 10)
+    worker = src[i:j]
+    check("_sync_worker matches providers", "_match_providers(" in worker)
+    check("it does so BEFORE the media passes, so the fetchers have an identity to use",
+          worker.index("_match_providers(") < worker.index("for sid in media_targets:"))
+    check("and it is a declared phase, visible in the job monitor",
+          '"id": "provmatch"' in src)
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 

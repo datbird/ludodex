@@ -9541,8 +9541,10 @@ def _sync_worker(job, services, media_ids=(), full=False):
     _ = media_ids  # retained for API compatibility; media now always runs for Steam
     mode = config.get("media_mode") or "chosen"
     # + 4 fixed pipeline steps: Steam tags, catalog rebuild, IGDB enrich (with
-    # its merge rebuild), and the multi-source scores pass.
-    total = len(services) + 5 + len(planned_media) + 1 + (1 if mode != "ondemand" else 0)
+    # its merge rebuild), and the multi-source scores pass. +1 more for the provider
+    # match pass, which is its own step() — without counting it here the bar would sit
+    # one step short of full for the whole run.
+    total = len(services) + 6 + len(planned_media) + 1 + (1 if mode != "ondemand" else 0)
     job["prog"] = {"done": 0, "total": max(total, 1)}
 
     # Post-source pipeline phases, shown as their own checkmark rows in the sync
@@ -9555,6 +9557,7 @@ def _sync_worker(job, services, media_ids=(), full=False):
         {"id": "meta", "label": "Descriptions & attributes", "state": "pending", "detail": ""},
         {"id": "scores", "label": "Scores & ratings", "state": "pending", "detail": ""},
         {"id": "os", "label": "OS / platform support", "state": "pending", "detail": ""},
+        {"id": "provmatch", "label": "Provider matches", "state": "pending", "detail": ""},
         {"id": "igdbart", "label": "IGDB art", "state": "pending", "detail": ""},
         {"id": "art", "label": "Missing art", "state": "pending", "detail": ""},
         {"id": "language", "label": "Language filter", "state": "pending", "detail": ""},
@@ -9799,6 +9802,37 @@ def _sync_worker(job, services, media_ids=(), full=False):
     if any_ok and not job.get("error"):
         cover_before = _n_identified_with_cover()
         steam_meta_before = _steam_meta_count()   # Steam attr cache size pre-media
+        # A MATCH IS NOT AN INGEST — and this is the path where that decision was still
+        # unimplemented. `_match_providers` was wired into the wand, the apply and the
+        # scoped reconcile, but NOT here, and this is what a first-run import actually
+        # runs: the media steps below are `media_fetch.py` SUBPROCESSES, which cannot
+        # reach a function living in the server. So a clean ingest produced IGDB + Steam
+        # and nothing else — exactly the "System Shock: Classic shows two providers"
+        # report, reproducing on every fresh library.
+        #
+        # Runs BEFORE the media passes so the ScreenScraper and SteamGridDB fetchers have
+        # an identity to work from rather than each re-deriving one. Deterministic and
+        # free — no AI area is consulted — so it belongs at EVERY tier, Algo included,
+        # for the same reason the IGDB art pass below does.
+        if not job.get("cancel"):
+            _phase("provmatch", "running")
+            job["step"] = "Matching every provider…"
+            try:
+                _lc = ro(LIBRARY_DB)
+                try:
+                    _keys = [r[0] for r in _lc.execute(
+                        "SELECT DISTINCT norm_key FROM games "
+                        "WHERE norm_key IS NOT NULL AND norm_key!=''")]
+                finally:
+                    _lc.close()
+                _got = _match_providers(_keys, _stopped)
+                _phase("provmatch", "ok",
+                       ", ".join("%s %d" % (p, n) for p, n in sorted(_got.items())))
+            except Exception as e:              # noqa: BLE001 — never fails an import
+                _phase("provmatch", "failed", str(e)[:120])
+            step()
+            if _stopped():
+                return
         for sid in media_targets:
             job["step"] = "Fetching %s media…" % _SVC_NAME.get(sid, sid)
             _run_script("media_fetch.py",
