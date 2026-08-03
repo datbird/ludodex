@@ -12,11 +12,17 @@ Run:  LUDODEX_DATA=$(mktemp -d) python3 test_shape_select.py
 """
 import os
 import sys
-import tempfile
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
-os.environ.setdefault("LUDODEX_DATA", tempfile.mkdtemp(prefix="ludodex-shape-"))
+
+# MUST come before any ludodex import: they resolve their paths at import time. This
+# used to be `os.environ.setdefault(...)`, which KEEPS an inherited value — so inside
+# the container, where LUDODEX_DATA=/data is already set, the temp dir was ignored and
+# `_con()`'s `DELETE FROM media` below ran against the live 66,280-row media index. It
+# did, on 2026-08-02. isolate() assigns, and refuses outright if the result is live.
+import test_support                             # noqa: E402
+test_support.isolate("ludodex-shape-")
 
 import media                                    # noqa: E402
 import media_index                              # noqa: E402

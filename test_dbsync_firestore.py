@@ -22,8 +22,10 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ.setdefault("LUDODEX_DATA", "/tmp/ludodex-fs-test")
-os.makedirs(os.environ["LUDODEX_DATA"], exist_ok=True)
+# setdefault KEEPS an inherited value, so in the container this resolved to /data and
+# the test ran against live databases. See test_support for what that cost.
+import test_support                              # noqa: E402
+test_support.isolate("ludodex-fs-test-")
 
 import config                                    # noqa: E402
 import remote_db as _s                           # noqa: E402

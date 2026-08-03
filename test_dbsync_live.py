@@ -22,13 +22,24 @@ import os
 import sqlite3
 import sys
 
+if os.environ.get("LUDODEX_LIVE_TESTS") != "1":
+    # Its sqlite side is isolated, but it still creates and deletes rows in a REAL
+    # remote backing store using the live credentials. Same opt-in as the others.
+    sys.exit("SKIPPED: live test. It writes to a real backing-store backend with the "
+             "instance's credentials. Re-run with LUDODEX_LIVE_TESTS=1 and a backend "
+             "argument (postgres|mysql|pocketbase|firestore).")
+
 BACKEND = sys.argv[1] if len(sys.argv) > 1 else "postgres"
 LIVE_CONFIG = os.environ.get("LUDODEX_LIVE_CONFIG", "/data/config.sqlite")
-SCRATCH = os.environ.get("LUDODEX_DATA")
-if not SCRATCH or SCRATCH in ("/data", "/app"):
-    sys.exit("refusing to run: set LUDODEX_DATA to a scratch dir (not /data)")
-os.makedirs(SCRATCH, exist_ok=True)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, "/app")
+
+# This file had its own hand-rolled version of this check (`SCRATCH in ("/data","/app")`),
+# which is the same rule written twice — and the copy missed the host-side data dir. One
+# implementation, shared with every other test.
+import test_support                                 # noqa: E402
+SCRATCH = test_support.assert_isolated()
+os.makedirs(SCRATCH, exist_ok=True)
 
 import config                                       # noqa: E402
 import dbsync                                       # noqa: E402

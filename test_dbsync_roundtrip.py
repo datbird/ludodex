@@ -1,9 +1,19 @@
 """Two-way round-trip against the live PocketBase, using a sentinel record cleaned up at
 the end. Proves: local add -> push, remote add -> pull, local delete -> remote delete,
-remote delete -> local delete."""
+remote delete -> local delete.
+
+LIVE TEST — it writes to the running instance's `user_tags` and to the real PocketBase
+collection (namespaced to a sentinel key, removed at the end). Opt in deliberately with
+LUDODEX_LIVE_TESTS=1 so a blanket "run every test_*.py" sweep cannot fire it.
+"""
 import sys
 import os
 import sqlite3
+
+if os.environ.get("LUDODEX_LIVE_TESTS") != "1":
+    sys.exit("SKIPPED: live test. It mutates the running instance and the real backing "
+             "store. Re-run with LUDODEX_LIVE_TESTS=1 if that is what you want.")
+
 sys.path.insert(0, "/app")
 import remote_db as s
 import config
