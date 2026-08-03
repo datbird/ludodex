@@ -3441,9 +3441,17 @@ def _ss_match(queries, systems, year=None):
     raw = [q for q in (queries if isinstance(queries, (list, tuple)) else [queries]) if q]
     qlist, seenq = [], set()
     for q in raw:
+        # EDITION SUFFIXES are the single most common reason a real match is missed:
+        # the catalog stores the edition you own ("… Mirror of Fate HD"), ScreenScraper
+        # stores the game ("… Mirror of Fate"). Live, that one word turned a match into a
+        # recorded miss.
+        _ed = re.sub(r"\s+(hd|remastered|remaster|definitive|complete|deluxe|ultimate|"
+                     r"enhanced|anniversary|legendary|goty|game of the year)"
+                     r"(\s+edition)?\s*$", "", q, flags=re.I).strip()
         for cand in (q,
                      re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "",
                             re.sub(r"\.\w{2,4}$", "", q)).strip(),
+                     _ed,
                      re.split(r"\s*[:\-–]\s", q)[0].strip()):
             if cand and cand.lower() not in seenq:
                 seenq.add(cand.lower())
@@ -3464,9 +3472,9 @@ def _ss_match(queries, systems, year=None):
     # leaves headroom; exhausting it now RAISES rather than reporting a miss, so a
     # too-tight budget can never again be mistaken for an answer.
     try:
-        budget = float(config.get("ss_match_budget_s") or 130)
+        budget = float(config.get("ss_match_budget_s") or 200)
     except (TypeError, ValueError):
-        budget = 130.0
+        budget = 200.0
     deadline = time.time() + max(10.0, budget)
     # "We failed to look" is not "it isn't there". This function returned None for three
     # different situations — searched and found nothing, every search errored, and the
@@ -3477,8 +3485,16 @@ def _ss_match(queries, systems, year=None):
     # and the game is retried.
     any_ok = False              # at least one search actually returned
     completed = True            # we got through every query we intended to try
+    # `sids` is [per-system ids…, None]. For a PC game ScreenScraper has NO system id
+    # (`systeme_id('pc')` is None), so the list collapses to [None] and the cross-system
+    # pass is the game's ONLY search. Restricting it to one query — right when it is a
+    # fallback after a real per-system search — then meant most of the library was matched
+    # on its raw stored title alone, with no cleaned variant ever tried. That is what
+    # turned "Castlevania: Lords of Shadow - Mirror of Fate HD" into a recorded miss while
+    # ScreenScraper had it as id 11084.
+    cross_only = len(sids) == 1
     for sid in sids:
-        for q in (qlist[:1] if sid is None else qlist):
+        for q in (qlist if (sid is not None or cross_only) else qlist[:1]):
             if time.time() > deadline:
                 print("ss match %r: budget exhausted, giving up" % (queries,),
                       file=sys.stderr)
