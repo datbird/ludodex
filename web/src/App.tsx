@@ -4,7 +4,7 @@ import ErrorBoundary from './ErrorBoundary'
 import type {
   GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
   AiUsageModel, AiUsageDay, AiUsageSummary, AiPrice, Currency, Caps,
-  DedupeSuggestion, ArtPick, Service, ServiceConnect, Achievements as AchData,
+  DedupeSuggestion, Service, ServiceConnect, Achievements as AchData,
   MediaLibrary, MediaAsset, MediaKind, MatchedProvider, BannedMedia, BackupsState, BackupJob,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
@@ -4422,89 +4422,6 @@ function Dedupe({ onClose }: { onClose: () => void }) {
   )
 }
 
-// `frame` is the game's saved cover framing, so the preview crops/zooms exactly the
-// way the library poster will — otherwise you'd approve art that looks different once
-// applied.
-function ArtPicker({ nk, frame }: { nk: string; frame?: Frame }) {
-  const [res, setRes] = useState<ArtPick | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [err, setErr] = useState('')
-  const [applied, setApplied] = useState<number | null>(null)
-  // Which candidate the preview is showing; null = follow the AI recommendation.
-  const [preview, setPreview] = useState<number | null>(null)
-
-  async function run() {
-    setLoading(true); setErr(''); setRes(null); setApplied(null); setPreview(null)
-    try { setRes(await api.artPick(nk, 'cover')) }
-    catch (e) { setErr('Art pick unavailable (' + e + ')') }
-    finally { setLoading(false) }
-  }
-  async function apply(id: number) {
-    try { await api.artApply(id, nk, 'cover'); setApplied(id) } catch { /* ignore */ }
-  }
-
-  return (
-    <section className="artpick">
-      <h3>Smart art pick
-        <button className="run-btn" disabled={loading} onClick={run}>
-          {loading ? 'Analyzing…' : '✨ Pick best cover'}
-        </button>
-      </h3>
-      {err && <div className="dim">{err}</div>}
-      {res && (res.candidates.length < 2
-        ? <div className="dim">{res.reason}</div>
-        : (() => {
-          const shownId = preview ?? res.recommended_id ?? res.candidates[0]?.id
-          const shown = res.candidates.find((c) => c.id === shownId)
-          const fs = frameStyle(frame)
-          return (
-          <>
-            <div className="artpick-split">
-              {/* Live preview: the candidate rendered in the real poster box, with the
-                  game's own framing — what the library card will actually look like. */}
-              <div className="artpick-preview">
-                <div className="cover">
-                  {shown
-                    ? (fs
-                        ? <div className="frame-box" style={fs}>
-                            <img src={api.assetUrl(shown.id, true)} alt="" /></div>
-                        : <img src={api.assetUrl(shown.id, true)} alt="" />)
-                    : null}
-                </div>
-                <div className="artpick-preview-cap dim">
-                  Preview{shown ? ` — ${shown.provider}` : ''}
-                  {shown && shown.id === res.recommended_id && <span className="rec-tag">AI pick</span>}
-                </div>
-                {shown && (
-                  <button className="apply-btn wide" onClick={() => apply(shown.id)}>
-                    {shown.id === applied ? 'Set ✓' : 'Use this cover'}</button>
-                )}
-              </div>
-              <div className="cand-row">
-                {res.candidates.map((c) => (
-                  <figure key={c.id}
-                    className={(c.id === res.recommended_id ? 'rec ' : '')
-                      + (c.id === applied ? 'applied ' : '')
-                      + (c.id === shownId ? 'shown' : '')}
-                    onMouseEnter={() => setPreview(c.id)}
-                    onClick={() => setPreview(c.id)}>
-                    <img loading="lazy" src={api.assetUrl(c.id, true)} alt={c.provider} />
-                    <figcaption>{c.provider}
-                      {c.id === res.recommended_id && <span className="rec-tag">AI pick</span>}</figcaption>
-                    <button className="apply-btn" onClick={(e) => { e.stopPropagation(); apply(c.id) }}>
-                      {c.id === applied ? 'Set ✓' : 'Use'}</button>
-                  </figure>
-                ))}
-              </div>
-            </div>
-            <div className="dim artpick-reason">{res.reason}</div>
-          </>
-          )
-        })())}
-    </section>
-  )
-}
-
 function fmtBytes(n: number) {
   if (!n) return '0 B'
   const u = ['B', 'KB', 'MB', 'GB']
@@ -6671,7 +6588,7 @@ function MediaWand({ nk, kinds, label, onDone }: {
       onDone(changed ? `re-picked ${changed} ${changed === 1 ? 'category' : 'categories'}`
         : 'No clearer winner than what is already #1')
     } catch {
-      onDone('AI pick unavailable — set an AI provider for \u201cart\u201d in Settings \u203a AI')
+      onDone('AI pick unavailable — set an AI provider for “art” in Settings › AI')
     } finally { setBusy(''); setOpen(false) }
   }
 
@@ -6690,8 +6607,8 @@ function MediaWand({ nk, kinds, label, onDone }: {
       }
       onDone(added
         ? `+${added} candidate${added === 1 ? '' : 's'}` +
-          (changed.size ? ` \u00b7 ${[...changed].join(', ')} changed` : ' \u00b7 chosen unchanged')
-        : 'Nothing new to add \u2014 every provider already gave us what it has')
+          (changed.size ? ` · ${[...changed].join(', ')} changed` : ' · chosen unchanged')
+        : 'Nothing new to add — every provider already gave us what it has')
     } finally { setBusy(''); setOpen(false) }
   }
 
@@ -6702,11 +6619,11 @@ function MediaWand({ nk, kinds, label, onDone }: {
   // the fix is to use the primitives rather than approximate them.
   const rows: { key: string; icon: string; title: string; sub: string; go: string;
                 run: () => void }[] = [
-    { key: 'best', icon: '\u2728', title: 'Pick the best I already have',
+    { key: 'best', icon: '✨', title: 'Pick the best I already have',
       sub: 'Judges the candidates on screen', go: 'paid', run: pickBest },
-    { key: 'find', icon: '\u21bb', title: 'Go find more',
+    { key: 'find', icon: '↻', title: 'Go find more',
       sub: 'Every matched provider', go: 'free', run: () => findMore(false) },
-    { key: 'both', icon: '\u2b50', title: 'Both',
+    { key: 'both', icon: '⭐', title: 'Both',
       sub: 'Fetch first, then judge the enlarged set', go: 'paid',
       run: () => { findMore(true).then(pickBest) } },
   ]
@@ -6714,16 +6631,16 @@ function MediaWand({ nk, kinds, label, onDone }: {
   return (
     <span className="prov-links mw-wrap">
       <button className="prov-menu-btn mw-btn" aria-haspopup="menu" aria-expanded={open}
-        disabled={!!busy} title={`Magic wand \u2014 ${label}`}
+        disabled={!!busy} title={`Magic wand — ${label}`}
         onClick={() => setOpen((v) => !v)}>
-        <span className="mw-spark" aria-hidden="true">\u2728</span>
-        <span className="mw-lbl">{busy ? 'Working\u2026' : 'Magic wand'}</span>
+        <span className="mw-spark" aria-hidden="true">✨</span>
+        <span className="mw-lbl">{busy ? 'Working…' : 'Magic wand'}</span>
       </button>
       {open && (
         <>
           <div className="hero-cfg-backdrop" onClick={() => setOpen(false)} />
           <div className="prov-menu mw-menu" role="menu" onClick={(e) => e.stopPropagation()}>
-            <div className="prov-menu-h">Magic wand \u00b7 {label}</div>
+            <div className="prov-menu-h">Magic wand · {label}</div>
             {rows.map((r) => (
               <button key={r.key} className="prov-menu-row mw-row" role="menuitem"
                 onClick={r.run}>
@@ -6771,8 +6688,8 @@ function MediaFetchMenu({ nk, kinds, label, onDone }: {
       const r = await api.mediaFetch(nk, p, kinds ?? undefined)
       onDone(r.added
         ? `+${r.added} from ${providerLabel(p)}` +
-          (r.chosen_changed.length ? ` \u00b7 ${r.chosen_changed.join(', ')} changed`
-            : ' \u00b7 chosen unchanged')
+          (r.chosen_changed.length ? ` · ${r.chosen_changed.join(', ')} changed`
+            : ' · chosen unchanged')
         : `${providerLabel(p)} had nothing we don't already hold`)
     } catch { onDone(`Couldn't reach ${providerLabel(p)}`) }
     finally { setBusy(''); setOpen(false) }
@@ -6782,17 +6699,17 @@ function MediaFetchMenu({ nk, kinds, label, onDone }: {
     <span className="prov-links mw-wrap">
       <button className="prov-menu-btn mw-btn mw-fetch" aria-haspopup="menu"
         aria-expanded={open} disabled={!!busy}
-        title={`Fetch from a matched provider \u2014 ${label}. Deterministic, never uses AI.`}
+        title={`Fetch from a matched provider — ${label}. Deterministic, never uses AI.`}
         onClick={() => setOpen((v) => !v)}>
-        <span className="mw-spark" aria-hidden="true">\u2b07</span>
-        <span className="mw-lbl">{busy ? 'Fetching\u2026' : 'Fetch from\u2026'}</span>
+        <span className="mw-spark" aria-hidden="true">⬇</span>
+        <span className="mw-lbl">{busy ? 'Fetching…' : 'Fetch from…'}</span>
       </button>
       {open && (
         <>
           <div className="hero-cfg-backdrop" onClick={() => setOpen(false)} />
           <div className="prov-menu mw-menu" role="menu" onClick={(e) => e.stopPropagation()}>
-            <div className="prov-menu-h">Fetch into {label} \u00b7 free, no AI</div>
-            {provs === null && <div className="mw-empty dim">Checking matches\u2026</div>}
+            <div className="prov-menu-h">Fetch into {label} · free, no AI</div>
+            {provs === null && <div className="mw-empty dim">Checking matches…</div>}
             {provs?.map((p) => {
               const img = providerIconImage(p.provider)
               const icon = img ? null : providerIconPath(p.provider)
@@ -6817,12 +6734,12 @@ function MediaFetchMenu({ nk, kinds, label, onDone }: {
                     <span className="mw-sub">
                       {p.matched
                         ? (held.length
-                          ? `holds ${held.map(([k, n]) => `${k}\u00b7${n}`).join(', ')}`
-                          : 'matched \u2014 nothing taken yet')
+                          ? `holds ${held.map(([k, n]) => `${k}·${n}`).join(', ')}`
+                          : 'matched — nothing taken yet')
                         : 'not matched'}
                     </span>
                   </span>
-                  <span className="prov-menu-go">{p.matched ? 'pull' : '\u2014'}</span>
+                  <span className="prov-menu-go">{p.matched ? 'pull' : '—'}</span>
                 </button>
               )
             })}
@@ -6996,9 +6913,12 @@ function ArtStrip({ nk, assets, loading, kinds, onChange, frames, onFrame, links
                 onPick={(v) => { onHeroPref(v); setHeroCfg(false) }}
                 onClose={() => setHeroCfg(false)} />
             )}
+            {/* The cover-only "Smart art pick" section lived here. The wand in the
+                All Media header does the same job for EVERY kind, so keeping a
+                second cover-specific gesture is exactly the inconsistency the wand
+                was introduced to remove (spec §1). */}
             <AllMedia nk={nk} kinds={kinds} assets={assets} onChange={onChange}
               frames={frames} onFrame={onFrame} />
-            <ArtPicker nk={nk} frame={frames?.cover} />
           </div>
         </div>
       )}

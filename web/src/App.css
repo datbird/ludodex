@@ -822,18 +822,9 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
 .dup-titles .vs { color: var(--text); font-size: 12px; margin: 0 4px; }
 .dup-reason { color: var(--text); font-size: 12px; }
 
-/* art picker (in detail) */
-.artpick { margin-top: 4px; }
-.cand-row { display: flex; gap: 12px; flex-wrap: wrap; }
-.cand-row figure { margin: 0; width: 110px; text-align: center; position: relative; }
-.cand-row img { width: 110px; height: 150px; object-fit: cover; border-radius: 6px; border: 2px solid var(--border); }
-.cand-row figure.rec img { border-color: var(--accent); }
-.cand-row figure.applied img { border-color: #4ade80; }
-.cand-row figcaption { font-size: 11px; color: var(--text); margin-top: 3px; }
-.rec-tag { display: block; color: var(--accent); font-weight: 600; }
+/* .apply-btn survives the art-picker's removal: other surfaces still use it. */
 .apply-btn { margin-top: 4px; width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; color: var(--text-h); font-size: 11px; padding: 3px; cursor: pointer; }
 .apply-btn:hover { border-color: var(--accent); }
-.artpick-reason { margin-top: 8px; }
 
 .provider-keys { margin-top: 24px; border-top: 1px solid var(--border); padding-top: 14px; }
 .disclose {
@@ -4141,19 +4132,7 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
   .overlay, .overlay > * { animation: none; }
 }
 
-/* --- smart art pick: live cover preview (#4) --- */
-.artpick-split { display: flex; gap: 18px; align-items: flex-start; }
-.artpick-preview { flex: 0 0 190px; display: flex; flex-direction: column; gap: 8px; }
-.artpick-preview .cover { width: 190px; border-radius: 10px; border: 1px solid var(--border); }
-.artpick-preview-cap { font-size: 12px; display: flex; align-items: center; gap: 6px; }
-.apply-btn.wide { width: 100%; }
-.artpick-split .cand-row { flex: 1 1 auto; }
-.artpick-split .cand-row figure { cursor: pointer; }
-.artpick-split .cand-row figure.shown { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (max-width: 700px) {
-  .artpick-split { flex-direction: column; }
-  .artpick-preview { flex: 0 0 auto; }
-}
+
 
 /* inline text link inside body copy (e.g. the sync menu's jump to Settings) */
 .link-inline {
