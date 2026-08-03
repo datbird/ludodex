@@ -10179,11 +10179,24 @@ def _is_degenerate_image(data):
         return False
 
 
-def _prune_blank_media(norm_keys, kinds=("cover", "hero", "background", "header",
-                                         "logo", "icon", "box_back", "box_3d")):
+def _prune_blank_media(norm_keys, kinds=media.SCALAR_KINDS):
     """Download + inspect each candidate image for the given games and DELETE the
     blank/degenerate ones so media_choose then picks a real image instead. Returns
-    the number dropped. (Downloads are auth-aware and cached, so re-use is cheap.)"""
+    the number dropped. (Downloads are auth-aware and cached, so re-use is cheap.)
+
+    The guarded set is media.SCALAR_KINDS, DERIVED rather than listed. It used to be a
+    hand-written tuple of eight kinds, and the vocabulary grew past it: `mix`, `marquee`,
+    `title_screen`, `box_spine`, `bezel`, `arcade_cabinet`, `arcade_controls` and `pcb`
+    were never checked. Live, Shinobi III (Genesis) served a pure-black 745x745
+    ScreenScraper `mix` as its #1 asset — precisely the placeholder art this function
+    exists to catch, in a kind it had never been pointed at.
+
+    Scalar is the right boundary because it IS the rule: those kinds show exactly one
+    asset, so a blank one takes the slot and there is no second chance to be right.
+    Multi-kinds (screenshot, flyer, map, physical_media) are deliberately excluded — a
+    blank screenshot among twelve costs nothing, and sweeping them would mean
+    downloading every screenshot in the library.
+    """
     if not norm_keys:
         return 0
     ph = ",".join("?" * len(kinds))
