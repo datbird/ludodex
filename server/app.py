@@ -1459,16 +1459,36 @@ def _match_worker(force):
                 mc.close()
         j["total"] = len(keys)
         done = 0
-        for i in range(0, len(keys), 25):
+        # A ScreenScraper name search is seconds, not milliseconds, so a serial sweep of
+        # a whole library takes days. SS publishes its own concurrency budget at runtime
+        # (`ssuserInfos.maxthreads`, 6 for a donor account) — stay inside it rather than
+        # inventing a number, and never exceed it just because more would be faster.
+        try:
+            import screenscraper as _ss
+            _info = _ss.user_info(config.screenscraper_creds()) or {}
+            _maxt = int(((_info.get("ssuser") or {}).get("maxthreads")) or 0)
+        except Exception:                       # noqa: BLE001 — pacing must never fail a run
+            _maxt = 0
+        workers = max(1, min(4, _maxt or 2))
+        j["workers"] = workers
+        lock = threading.Lock()
+        from concurrent.futures import ThreadPoolExecutor
+        chunks = [keys[i:i + 5] for i in range(0, len(keys), 5)]
+
+        def _one(batch):
+            nonlocal done
             if j.get("cancel"):
-                break
-            batch = keys[i:i + 25]
+                return
             got = _match_providers(batch, lambda: bool(j.get("cancel")), force=force)
-            for p, n in got.items():
-                j["matched"][p] = j["matched"].get(p, 0) + n
-            done += len(batch)
-            j["done"] = done
-            j["step"] = "Matched %d/%d games…" % (done, len(keys))
+            with lock:
+                for p, n in got.items():
+                    j["matched"][p] = j["matched"].get(p, 0) + n
+                done += len(batch)
+                j["done"] = done
+                j["step"] = "Matched %d/%d games…" % (done, len(keys))
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(_one, chunks))
         j.update({"ok": True, "step": "Done"})
     except Exception as e:                      # noqa: BLE001
         j.update({"ok": False, "error": str(e)[:200], "step": "Failed"})
@@ -1500,6 +1520,103 @@ def providers_match(body: dict = Body(default={})):
 @app.get("/api/providers/match")
 def providers_match_status():
     return {"match_job": _MATCH_JOB["job"]}
+
+
+@app.get("/api/media/matched-providers/{norm_key}")
+def media_matched_providers(norm_key: str):
+    """Providers this game is MATCHED to, for the "Fetch from…" menu (spec §2.5).
+
+    A provider with no match is returned with matched:false rather than omitted —
+    "absent is not the same as unmatched, and hiding it makes a missing match look like
+    a missing feature".
+    """
+    base, _plat = _split_entry_key(norm_key)
+    known = ["igdb", "screenscraper", "steamgriddb", "steam"]
+    links, kinds = {}, {}
+    lc = ro(LIBRARY_DB)
+    try:
+        gid = lc.execute("SELECT id FROM games WHERE norm_key=? LIMIT 1",
+                         (base,)).fetchone()
+        if gid:
+            for r in lc.execute("SELECT provider, provider_id, url FROM metadata_links "
+                                "WHERE game_id=?", (gid[0],)):
+                links[r[0]] = {"id": r[1], "url": r[2]}
+            # Steam is not in metadata_links — its "match" is the appid already on the
+            # source row, so derive it rather than inventing a second record of it.
+            ar = lc.execute("SELECT s.source_id FROM games g JOIN sources s "
+                            "ON s.game_id=g.id WHERE g.norm_key=? AND s.source='steam' "
+                            "LIMIT 1", (base,)).fetchone()
+            if ar and str(ar[0] or "").isdigit():
+                links["steam"] = {"id": str(ar[0]),
+                                  "url": "https://store.steampowered.com/app/%s" % ar[0]}
+    finally:
+        lc.close()
+    try:
+        rc = ro(INDEX_DB)
+        try:
+            for r in rc.execute("SELECT provider, kind, COUNT(*) FROM media "
+                                "WHERE norm_key=? GROUP BY provider, kind", (base,)):
+                kinds.setdefault(r[0], {})[r[1]] = r[2]
+        finally:
+            rc.close()
+    except sqlite3.OperationalError:
+        pass
+    return {"providers": [{
+        "provider": p,
+        "matched": p in links,
+        "id": links.get(p, {}).get("id"),
+        "url": links.get(p, {}).get("url"),
+        "holds": kinds.get(p, {}),
+    } for p in known]}
+
+
+@app.post("/api/media/fetch/{norm_key}")
+def media_fetch_provider(norm_key: str, body: dict = Body(default={})):
+    """Deterministic "Fetch from <provider>" (spec §2.5) — the wand's free sibling.
+
+    Pulls everything a MATCHED provider holds for this game. No AI area is consulted, so
+    it can never spend: that is exactly what makes it the right default action for "just
+    get me more art".
+
+    Fetching is ADDITIVE — new candidate rows, nothing overwritten or deleted — so the
+    candidates land immediately; asking a user to confirm "may I add options?" is
+    friction with no risk behind it. What the response reports is whether the CHOSEN
+    asset would change, because that is what the library actually displays.
+    """
+    base, _plat = _split_entry_key(norm_key)
+    provider = (body or {}).get("provider") or None
+    kinds = [k for k in ((body or {}).get("kinds") or []) if k] or None
+    if provider and provider not in ("igdb", "screenscraper", "steamgriddb", "steam",
+                                     "web"):
+        raise HTTPException(400, "unknown provider %r" % provider)
+    con = media_choose.con_index()
+    try:
+        con.execute("PRAGMA busy_timeout=30000")
+        before_ids = {(r[0], r[1]): r[2] for r in con.execute(
+            "SELECT kind, COALESCE(system,''), id FROM media "
+            "WHERE norm_key=? AND chosen=1", (base,))}
+        before_n = con.execute("SELECT COUNT(*) FROM media WHERE norm_key=?",
+                               (base,)).fetchone()[0]
+        _pull_media_sources(con, base, want_web=(provider == "web"),
+                            provider=(None if provider == "web" else provider),
+                            kinds=kinds)
+        import media_fetch as _mf
+        _mf._backfill_game_key(con)
+        media_choose.select(con)
+        con.commit()
+        after_n = con.execute("SELECT COUNT(*) FROM media WHERE norm_key=?",
+                              (base,)).fetchone()[0]
+        after_ids = {(r[0], r[1]): r[2] for r in con.execute(
+            "SELECT kind, COALESCE(system,''), id FROM media "
+            "WHERE norm_key=? AND chosen=1", (base,))}
+    finally:
+        con.close()
+    changed = sorted({k[0] for k in set(before_ids) | set(after_ids)
+                      if before_ids.get(k) != after_ids.get(k)})
+    if kinds:
+        changed = [k for k in changed if k in kinds]
+    return {"added": max(0, after_n - before_n), "chosen_changed": changed,
+            "provider": provider or "all"}
 
 
 @app.delete("/api/providers/match")
@@ -3330,8 +3447,24 @@ def _ss_match(queries, systems, year=None):
                 seenq.add(cand.lower())
                 qlist.append(cand)
     best, seen = None, set()
+    # ScreenScraper's CROSS-SYSTEM search costs ~49s against ~10s for a per-system one
+    # (measured live 2026-08-02). `_ss_match` used to try every query variant against it,
+    # so a game SS simply doesn't have cost ~2.5 minutes — which is fine for one game and
+    # ruinous for an ingest: 2255 games would take days, and provider matching now runs
+    # for every game by design. The fallback is still there (it is what finds a game
+    # filed under a system we didn't guess), but it gets ONE query, not every variant,
+    # and the whole match is bounded by a wall-clock budget.
+    try:
+        budget = float(config.get("ss_match_budget_s") or 75)
+    except (TypeError, ValueError):
+        budget = 75.0
+    deadline = time.time() + max(10.0, budget)
     for sid in sids:
-        for q in qlist:
+        for q in (qlist[:1] if sid is None else qlist):
+            if time.time() > deadline:
+                print("ss match %r: budget exhausted, giving up" % (queries,),
+                      file=sys.stderr)
+                break
             try:
                 cands = ss.jeu_recherche(creds, q, systemeid=sid, limit=8)
             except Exception as e:               # surface, don't swallow silently
@@ -6137,11 +6270,17 @@ def _match_providers(keys, should_stop=lambda: False, force=False):
     return out
 
 
-def _pull_media_sources(con, nk, want_web=False):
+def _pull_media_sources(con, nk, want_web=False, provider=None, kinds=None):
     """Fetch (do NOT choose) media for ONE game from every configured provider — IGDB
     (incl. per-entry override ids), SteamGridDB (a huge community art DB), and ScreenScraper
     (media-rich for the retro/console long-tail) — plus AI open-web discovery (Wikimedia/
-    Google/LLM) when want_web. The caller runs media_choose.select once after a batch."""
+    Google/LLM) when want_web. The caller runs media_choose.select once after a batch.
+
+    `provider` narrows the pull to ONE provider and `kinds` to a set of media kinds —
+    the "Fetch from <provider>" button (spec §2.5) is another caller of this function
+    rather than a second fetch path. Both default to everything, which is the ingest
+    behaviour and unchanged.
+    """
     import media_fetch as _mf
     now = int(time.time())
     title, appid, plats = "", None, []
@@ -6172,23 +6311,32 @@ def _pull_media_sources(con, nk, want_web=False):
         _match_providers([nk])
     except Exception as e:                     # noqa: BLE001 — never fails a media pull
         print("provider match %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
-    _mf.fetch_igdb(con, now, only={nk})
-    if plats:                                  # ScreenScraper media (retro/console-rich)
+    def _want(p):
+        return provider is None or provider == p
+
+    if _want("igdb"):
+        _mf.fetch_igdb(con, now, only={nk})
+    if plats and _want("screenscraper"):       # ScreenScraper (retro/console-rich)
         try:
             _pull_ss_media(con, nk, plats, [title], now)
         except Exception as e:
             print("media ss %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
-    if _mf.config.steamgriddb_key():
+    if _mf.config.steamgriddb_key() and _want("steamgriddb"):
         try:
             _mf.fetch_steamgriddb_targets(con, now, [(nk, title, appid)])
         except Exception as e:
             print("media sgdb %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
     web_n = 0
-    if want_web:
+    if want_web and _want("web"):
         try:
             web_n = _fetch_media_web(con, nk, title, now)
         except Exception as e:
             print("media web %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+    # Kind narrowing is applied AFTER the fetch, not by asking each provider for one
+    # kind: the providers return whole records, and the spec is explicit that art
+    # returned for other kinds is KEPT, never discarded — "a fetch already paid for in
+    # bandwidth must not be thrown away". So `kinds` scopes what the caller REPORTS and
+    # what the wand judges, not what is allowed to land.
     return web_n
 
 
