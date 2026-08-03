@@ -6651,35 +6651,31 @@ function MediaWand({ nk, kinds, label, onDone }: {
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState('')
-  const ref = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     if (!open) return
-    const away = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', away)
-    return () => document.removeEventListener('mousedown', away)
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    window.addEventListener('keydown', esc)
+    return () => window.removeEventListener('keydown', esc)
   }, [open])
 
-  // ① judge what we already hold. Paid, and only ever from this click — scope is
+  // (1) judge what we already hold. Paid, and only ever from this click — scope is
   // exactly one game and exactly the kinds in scope, never the catalog.
   const pickBest = async () => {
-    const targets = kinds ?? []
     setBusy('best')
     try {
       let changed = 0
-      for (const k of (targets.length ? targets : [])) {
+      for (const k of (kinds ?? [])) {
         const p = await api.artPick(nk, k)
         if (p.recommended_id) { await api.artApply(p.recommended_id, nk, k); changed++ }
       }
-      onDone(changed ? `✨ re-picked ${changed} ${changed === 1 ? 'category' : 'categories'}`
+      onDone(changed ? `re-picked ${changed} ${changed === 1 ? 'category' : 'categories'}`
         : 'No clearer winner than what is already #1')
     } catch {
-      onDone('AI pick unavailable — set an AI provider for “art” in Settings › AI')
+      onDone('AI pick unavailable — set an AI provider for \u201cart\u201d in Settings \u203a AI')
     } finally { setBusy(''); setOpen(false) }
   }
 
-  // ② go find more. Deterministic providers first, then the open web — the paid
+  // (2) go find more. Deterministic providers first, then the open web — the paid
   // grounded search runs only against kinds still empty after the free sources.
   const findMore = async (alsoWeb: boolean) => {
     setBusy(alsoWeb ? 'both' : 'find')
@@ -6694,35 +6690,54 @@ function MediaWand({ nk, kinds, label, onDone }: {
       }
       onDone(added
         ? `+${added} candidate${added === 1 ? '' : 's'}` +
-          (changed.size ? ` · ${[...changed].join(', ')} changed` : ' · chosen unchanged')
-        : 'Nothing new to add — every provider already gave us what it has')
+          (changed.size ? ` \u00b7 ${[...changed].join(', ')} changed` : ' \u00b7 chosen unchanged')
+        : 'Nothing new to add \u2014 every provider already gave us what it has')
     } finally { setBusy(''); setOpen(false) }
   }
 
+  // Same menu primitives as every other dropdown in the app (ProviderLinksMenu et al):
+  // a .prov-menu panel, a .prov-menu-h header, .prov-menu-row items with an icon chip,
+  // a flexed label and a dim trailing hint, and the shared click-away backdrop. Written
+  // as a bespoke list first, which made it read as loose text next to the real menus —
+  // the fix is to use the primitives rather than approximate them.
+  const rows: { key: string; icon: string; title: string; sub: string; go: string;
+                run: () => void }[] = [
+    { key: 'best', icon: '\u2728', title: 'Pick the best I already have',
+      sub: 'Judges the candidates on screen', go: 'paid', run: pickBest },
+    { key: 'find', icon: '\u21bb', title: 'Go find more',
+      sub: 'Every matched provider', go: 'free', run: () => findMore(false) },
+    { key: 'both', icon: '\u2b50', title: 'Both',
+      sub: 'Fetch first, then judge the enlarged set', go: 'paid',
+      run: () => { findMore(true).then(pickBest) } },
+  ]
+
   return (
-    <div className="mw-wrap" ref={ref}>
-      <button className="mw-btn" disabled={!!busy} onClick={() => setOpen(!open)}
-        title={`Magic wand — ${label}`}>
-        <span className="mw-spark">✨</span>{busy ? ' Working…' : ' Magic wand'}
+    <span className="prov-links mw-wrap">
+      <button className="prov-menu-btn mw-btn" aria-haspopup="menu" aria-expanded={open}
+        disabled={!!busy} title={`Magic wand \u2014 ${label}`}
+        onClick={() => setOpen((v) => !v)}>
+        <span className="mw-spark" aria-hidden="true">\u2728</span>
+        <span className="mw-lbl">{busy ? 'Working\u2026' : 'Magic wand'}</span>
       </button>
       {open && (
-        <div className="mw-menu">
-          <div className="mw-scope">Scope: <b>{label}</b></div>
-          <button onClick={pickBest}>
-            <b>Pick the best I already have</b>
-            <span className="dim">Judges the candidates on screen. Uses your AI — paid.</span>
-          </button>
-          <button onClick={() => findMore(false)}>
-            <b>Go find more</b>
-            <span className="dim">Every matched provider. Free — no AI.</span>
-          </button>
-          <button onClick={() => findMore(true).then(pickBest)}>
-            <b>Both</b>
-            <span className="dim">Fetch first, then judge the enlarged set.</span>
-          </button>
-        </div>
+        <>
+          <div className="hero-cfg-backdrop" onClick={() => setOpen(false)} />
+          <div className="prov-menu mw-menu" role="menu" onClick={(e) => e.stopPropagation()}>
+            <div className="prov-menu-h">Magic wand \u00b7 {label}</div>
+            {rows.map((r) => (
+              <button key={r.key} className="prov-menu-row mw-row" role="menuitem"
+                onClick={r.run}>
+                <span className="prov-fav has-logo mw-chip" aria-hidden="true">{r.icon}</span>
+                <span className="prov-menu-lbl">{r.title}
+                  <span className="mw-sub">{r.sub}</span>
+                </span>
+                <span className="prov-menu-go">{r.go}</span>
+              </button>
+            ))}
+          </div>
+        </>
       )}
-    </div>
+    </span>
   )
 }
 
@@ -6734,22 +6749,20 @@ function MediaWand({ nk, kinds, label, onDone }: {
 //
 // FREE BY DEFINITION. No AI area is consulted, which is what makes it the right default
 // action for "just get me more art" — and why it sits next to the wand rather than
-// inside it.
+// inside it. It reuses the SAME provider marks as the providers dropdown, so a provider
+// looks like itself wherever it appears.
 function MediaFetchMenu({ nk, kinds, label, onDone }: {
   nk: string; kinds: string[] | null; label: string; onDone: (msg: string) => void
 }) {
   const [open, setOpen] = useState(false)
   const [provs, setProvs] = useState<MatchedProvider[] | null>(null)
   const [busy, setBusy] = useState('')
-  const ref = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     if (!open) return
     api.matchedProviders(nk).then((r) => setProvs(r.providers)).catch(() => setProvs([]))
-    const away = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', away)
-    return () => document.removeEventListener('mousedown', away)
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    window.addEventListener('keydown', esc)
+    return () => window.removeEventListener('keydown', esc)
   }, [open, nk])
 
   const pull = async (p: string) => {
@@ -6757,41 +6770,66 @@ function MediaFetchMenu({ nk, kinds, label, onDone }: {
     try {
       const r = await api.mediaFetch(nk, p, kinds ?? undefined)
       onDone(r.added
-        ? `+${r.added} from ${p}` +
-          (r.chosen_changed.length ? ` · ${r.chosen_changed.join(', ')} changed`
-            : ' · chosen unchanged')
-        : `${p} had nothing we don't already hold`)
-    } catch { onDone(`Couldn't reach ${p}`) } finally { setBusy(''); setOpen(false) }
+        ? `+${r.added} from ${providerLabel(p)}` +
+          (r.chosen_changed.length ? ` \u00b7 ${r.chosen_changed.join(', ')} changed`
+            : ' \u00b7 chosen unchanged')
+        : `${providerLabel(p)} had nothing we don't already hold`)
+    } catch { onDone(`Couldn't reach ${providerLabel(p)}`) }
+    finally { setBusy(''); setOpen(false) }
   }
 
   return (
-    <div className="mw-wrap" ref={ref}>
-      <button className="mw-btn mw-fetch" disabled={!!busy} onClick={() => setOpen(!open)}
-        title={`Fetch from a matched provider — ${label}. Deterministic, never uses AI.`}>
-        ⬇{busy ? ' Fetching…' : ' Fetch from…'}
+    <span className="prov-links mw-wrap">
+      <button className="prov-menu-btn mw-btn mw-fetch" aria-haspopup="menu"
+        aria-expanded={open} disabled={!!busy}
+        title={`Fetch from a matched provider \u2014 ${label}. Deterministic, never uses AI.`}
+        onClick={() => setOpen((v) => !v)}>
+        <span className="mw-spark" aria-hidden="true">\u2b07</span>
+        <span className="mw-lbl">{busy ? 'Fetching\u2026' : 'Fetch from\u2026'}</span>
       </button>
       {open && (
-        <div className="mw-menu">
-          <div className="mw-scope">Into: <b>{label}</b> · free, no AI</div>
-          {provs === null && <div className="mw-empty dim">Checking matches…</div>}
-          {provs?.map((p) => (
-            <button key={p.provider} disabled={!p.matched}
-              onClick={() => p.matched && pull(p.provider)}
-              title={p.matched ? `Pull everything ${p.provider} holds`
-                : `${p.provider} has no match for this game yet`}>
-              <b>{p.provider}</b>
-              <span className="dim">
-                {p.matched
-                  ? (Object.keys(p.holds).length
-                    ? `holds ${Object.entries(p.holds).map(([k, n]) => `${k}·${n}`).join(', ')}`
-                    : 'matched — nothing taken yet')
-                  : 'not matched'}
-              </span>
-            </button>
-          ))}
-        </div>
+        <>
+          <div className="hero-cfg-backdrop" onClick={() => setOpen(false)} />
+          <div className="prov-menu mw-menu" role="menu" onClick={(e) => e.stopPropagation()}>
+            <div className="prov-menu-h">Fetch into {label} \u00b7 free, no AI</div>
+            {provs === null && <div className="mw-empty dim">Checking matches\u2026</div>}
+            {provs?.map((p) => {
+              const img = providerIconImage(p.provider)
+              const icon = img ? null : providerIconPath(p.provider)
+              const wide = icon ? providerIconWide(p.provider) : false
+              const held = Object.entries(p.holds)
+              return (
+                <button key={p.provider} className="prov-menu-row mw-row" role="menuitem"
+                  disabled={!p.matched} onClick={() => p.matched && pull(p.provider)}
+                  title={p.matched ? `Pull everything ${providerLabel(p.provider)} holds`
+                    : `${providerLabel(p.provider)} has no match for this game yet`}>
+                  <span className={'prov-fav' + (icon || img ? ' has-logo' : '')
+                    + (wide ? ' wide' : '') + (img ? ' raster' : '')}
+                    style={img ? undefined : { background: providerColor(p.provider) }}>
+                    {img
+                      ? <img src={img} width="20" height="20" alt="" aria-hidden="true" />
+                      : icon
+                        ? <svg viewBox={providerIconViewBox(p.provider)} width={wide ? 36 : 16}
+                            height="16" fill="currentColor" aria-hidden="true"><path d={icon} /></svg>
+                        : providerMark(p.provider)}
+                  </span>
+                  <span className="prov-menu-lbl">{providerLabel(p.provider)}
+                    <span className="mw-sub">
+                      {p.matched
+                        ? (held.length
+                          ? `holds ${held.map(([k, n]) => `${k}\u00b7${n}`).join(', ')}`
+                          : 'matched \u2014 nothing taken yet')
+                        : 'not matched'}
+                    </span>
+                  </span>
+                  <span className="prov-menu-go">{p.matched ? 'pull' : '\u2014'}</span>
+                </button>
+              )
+            })}
+          </div>
+        </>
       )}
-    </div>
+    </span>
   )
 }
 

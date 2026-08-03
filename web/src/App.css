@@ -1386,37 +1386,33 @@ button.am-badge { border: 0; background: none; padding: 0; font-family: inherit;
 .mko-title { text-transform: capitalize; margin: 0 0 4px; }
 .mko-aimsg { text-transform: none; font-style: italic; }
 
-/* The media wand + its deterministic sibling. One appearance in both placements (All
-   Media header, each category header) because it is one gesture — the previous three
-   different-looking controls were the reason the same intent produced different results
-   depending on where you clicked. The wand carries the accent; Fetch-from is deliberately
-   quieter: it is the free one, and the visual weight should track which one spends. */
+/* The media wand + its deterministic sibling. These reuse the app's real dropdown
+   primitives (.prov-menu / .prov-menu-h / .prov-menu-row / .prov-menu-lbl /
+   .prov-menu-go / .prov-fav) rather than a second look-alike set, so a menu is a menu
+   wherever it appears. Everything below only ADDS what these two need: a text label on
+   the trigger, a two-line row, and the paid-vs-free distinction. */
 .mko-tools, .am-tools { display: inline-flex; gap: 8px; margin-left: 12px;
   vertical-align: middle; text-transform: none; }
 .mw-wrap { position: relative; display: inline-block; }
-.mw-btn { font-size: 12px; font-weight: 700; text-transform: none; white-space: nowrap;
-  padding: 4px 10px; border-radius: 7px; cursor: pointer; color: #fff;
-  background: var(--accent); border: 1px solid var(--accent); }
-.mw-btn:hover:not(:disabled) { filter: brightness(1.1); }
-.mw-btn:disabled { opacity: 0.5; cursor: default; }
-.mw-btn.mw-fetch { background: transparent; color: var(--text);
-  border-color: var(--border); font-weight: 600; }
-.mw-btn.mw-fetch:hover:not(:disabled) { border-color: var(--accent); filter: none; }
-.mw-spark { margin-right: 2px; }
-.mw-menu { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0;
-  min-width: 268px; padding: 6px; border-radius: 10px; text-align: left;
-  background: var(--panel); border: 1px solid var(--border);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); }
-.mw-scope { padding: 6px 8px 8px; font-size: 11px; color: var(--dim);
-  border-bottom: 1px solid var(--border); margin-bottom: 4px; }
-.mw-menu button { display: block; width: 100%; text-align: left; cursor: pointer;
-  padding: 7px 8px; border: 0; border-radius: 7px; background: transparent;
-  color: var(--text); font-size: 13px; }
-.mw-menu button:hover:not(:disabled) { background: var(--hover); }
-.mw-menu button:disabled { opacity: 0.45; cursor: default; }
-.mw-menu button b { display: block; font-weight: 600; }
-.mw-menu button .dim { display: block; font-size: 11px; margin-top: 1px; }
-.mw-empty { padding: 8px; font-size: 12px; }
+.mw-btn { padding: 0 11px 0 9px; gap: 7px; }
+.mw-lbl { font-size: 12px; font-weight: 700; color: var(--text-h); white-space: nowrap; }
+.mw-spark { font-size: 13px; line-height: 1; }
+/* The wand spends money; Fetch-from cannot. The accent tracks that, so the control that
+   costs something never looks the same as the one that doesn't. */
+.mw-btn:not(.mw-fetch) { border-color: var(--accent); }
+.mw-btn:not(.mw-fetch) .mw-lbl { color: var(--accent); }
+.mw-btn:disabled { opacity: 0.55; cursor: default; transform: none; filter: none; }
+.mw-menu { min-width: 292px; }
+/* .prov-menu-row is an <a> elsewhere and a <button> here — normalise the button. */
+button.mw-row { width: 100%; text-align: left; border: 0; background: transparent;
+  cursor: pointer; font: inherit; }
+button.mw-row:disabled { opacity: 0.45; cursor: default; }
+button.mw-row:disabled:hover { background: transparent; }
+.mw-row .prov-menu-lbl { display: flex; flex-direction: column; gap: 1px; }
+.mw-sub { font-size: 11px; font-weight: 400; color: var(--text-dim); }
+.mw-chip { display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; background: var(--hover, rgba(255,255,255,0.08)); }
+.mw-empty { padding: 8px 6px; font-size: 12px; }
 .am-note-line { font-size: 12px; margin: -4px 0 10px; }
 .mko-desc { margin: 0 0 10px; }
 .mko-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
