@@ -176,33 +176,53 @@ def _backfill_game_key(con):
                     con.execute("DETACH mcb")
                 except sqlite3.OperationalError:
                     pass
-        # Repair rows stamped `title:<nk>` BEFORE the entry had an identity. Media is
+        # Repair NEUTRAL rows whose stamp disagrees with the entry's identity. Media is
         # stamped at fetch time; identity can arrive later (a wand match, a member
         # ingest, an accepted finding), and the entry's game_key moves while the media's
         # does not. Neutral art only serves when the two agree (DESIGN §11.9), so the
         # asset goes permanently invisible — a game can hold a 600x900 cover and render
         # a 264x352 one because the good row is keyed to an identity the entry no longer
-        # has. Mirror image of the bundle repair above, and like it, runs BEFORE the
-        # fully-stamped early-return: these rows are stamped, just stale.
+        # has. Runs BEFORE the fully-stamped early-return: these rows are stamped, just
+        # stale.
         #
-        # Bundles are excluded, or this would immediately undo that refusal.
-        if os.path.exists(META_CACHE):
+        # This reads the CATALOG, not `igdb_resolution`. The previous version re-derived
+        # identity here and applied its own policy — refusing anything IGDB calls a bundle
+        # (game_type 3/13) — while the catalog was free to give an entry exactly such an
+        # identity. Live, 41 entries carried `igdb:<bundle>` with all 990 of their neutral
+        # media rows still on `title:<base_key>`: Halo MCC, Crash N. Sane Trilogy, the
+        # Contra/Castlevania Anniversary Collections, the D&D and Forgotten Realms series.
+        # Every one showed Screenshots 0 / Videos 0 / Manuals 0 while holding 15-40
+        # screenshots, and still rendered a cover, because own-console art matches on
+        # norm_key+system and never consults game_key. Two derivations of one fact, and
+        # the fix is one fewer: the catalog decides, the stamp follows. The bundle refusal
+        # needs no special case here — an entry that refused one simply reads back
+        # `title:<nk>`.
+        _lib = os.path.join(DATA, "game-library.sqlite")
+        if os.path.exists(_lib):
             try:
-                con.execute("ATTACH ? AS mcs", (META_CACHE,))
+                con.execute("ATTACH ? AS lgk", (_lib,))
+                # Only where every entry sharing the base_key agrees: one stamp per
+                # norm_key cannot satisfy two identities, and picking one would silently
+                # hide the other entry's art (DESIGN §11.9 era splits). Ambiguous means
+                # leave it, exactly like _member_identity refuses an ambiguous match.
                 con.execute(
-                    "UPDATE media SET game_key='igdb:'||"
-                    "(SELECT r.igdb_id FROM mcs.igdb_resolution r "
-                    " WHERE r.norm_key=media.norm_key AND r.igdb_id>0) "
-                    "WHERE game_key='title:'||norm_key AND norm_key IN "
-                    "(SELECT norm_key FROM mcs.igdb_resolution WHERE igdb_id>0 "
-                    " AND igdb_id NOT IN (SELECT igdb_id FROM mcs.igdb_meta "
-                    "  WHERE json_extract(payload_json,'$.game_type') IN (3,13)))")
+                    "UPDATE media SET game_key=("
+                    "  SELECT MIN(g.game_key) FROM lgk.games g "
+                    "  WHERE g.base_key=media.norm_key) "
+                    "WHERE COALESCE(system,'')='' AND norm_key IN ("
+                    "  SELECT base_key FROM lgk.games GROUP BY base_key "
+                    "  HAVING COUNT(DISTINCT COALESCE(game_key,''))=1 "
+                    "     AND MIN(COALESCE(game_key,''))!='') "
+                    "AND COALESCE(game_key,'') != ("
+                    "  SELECT MIN(g.game_key) FROM lgk.games g "
+                    "  WHERE g.base_key=media.norm_key)")
                 con.commit()
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as e:
+                print("media_fetch: entry-derived game_key repair deferred: %s"
+                      % str(e)[:120], file=sys.stderr)
             finally:
                 try:
-                    con.execute("DETACH mcs")
+                    con.execute("DETACH lgk")
                 except sqlite3.OperationalError:
                     pass
         if not con.execute("SELECT 1 FROM media WHERE game_key IS NULL "
