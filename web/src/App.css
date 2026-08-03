@@ -1384,12 +1384,40 @@ button.am-badge { border: 0; background: none; padding: 0; font-family: inherit;
 /* per-kind media gallery overlay (click a media type in All Media) */
 .mko-panel { max-width: 920px; width: 94vw; max-height: 90vh; overflow: auto; padding: 20px 22px; }
 .mko-title { text-transform: capitalize; margin: 0 0 4px; }
-.mko-aipick { margin-left: 10px; font-size: 12px; text-transform: none; vertical-align: middle;
-  padding: 4px 10px; border-radius: 7px; cursor: pointer; color: #fff;
-  background: var(--accent); border: 1px solid var(--accent); font-weight: 700; }
-.mko-aipick:hover:not(:disabled) { filter: brightness(1.1); }
-.mko-aipick:disabled { opacity: 0.5; cursor: default; }
 .mko-aimsg { text-transform: none; font-style: italic; }
+
+/* The media wand + its deterministic sibling. One appearance in both placements (All
+   Media header, each category header) because it is one gesture — the previous three
+   different-looking controls were the reason the same intent produced different results
+   depending on where you clicked. The wand carries the accent; Fetch-from is deliberately
+   quieter: it is the free one, and the visual weight should track which one spends. */
+.mko-tools, .am-tools { display: inline-flex; gap: 8px; margin-left: 12px;
+  vertical-align: middle; text-transform: none; }
+.mw-wrap { position: relative; display: inline-block; }
+.mw-btn { font-size: 12px; font-weight: 700; text-transform: none; white-space: nowrap;
+  padding: 4px 10px; border-radius: 7px; cursor: pointer; color: #fff;
+  background: var(--accent); border: 1px solid var(--accent); }
+.mw-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.mw-btn:disabled { opacity: 0.5; cursor: default; }
+.mw-btn.mw-fetch { background: transparent; color: var(--text);
+  border-color: var(--border); font-weight: 600; }
+.mw-btn.mw-fetch:hover:not(:disabled) { border-color: var(--accent); filter: none; }
+.mw-spark { margin-right: 2px; }
+.mw-menu { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0;
+  min-width: 268px; padding: 6px; border-radius: 10px; text-align: left;
+  background: var(--panel); border: 1px solid var(--border);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); }
+.mw-scope { padding: 6px 8px 8px; font-size: 11px; color: var(--dim);
+  border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.mw-menu button { display: block; width: 100%; text-align: left; cursor: pointer;
+  padding: 7px 8px; border: 0; border-radius: 7px; background: transparent;
+  color: var(--text); font-size: 13px; }
+.mw-menu button:hover:not(:disabled) { background: var(--hover); }
+.mw-menu button:disabled { opacity: 0.45; cursor: default; }
+.mw-menu button b { display: block; font-weight: 600; }
+.mw-menu button .dim { display: block; font-size: 11px; margin-top: 1px; }
+.mw-empty { padding: 8px; font-size: 12px; }
+.am-note-line { font-size: 12px; margin: -4px 0 10px; }
 .mko-desc { margin: 0 0 10px; }
 .mko-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
 .mko-item { position: relative; margin: 0; background: rgba(127,127,127,0.08); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }

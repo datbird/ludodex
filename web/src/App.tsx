@@ -5,7 +5,7 @@ import type {
   GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
   AiUsageModel, AiUsageDay, AiUsageSummary, AiPrice, Currency, Caps,
   DedupeSuggestion, ArtPick, Service, ServiceConnect, Achievements as AchData,
-  MediaLibrary, MediaAsset, MediaKind, BannedMedia, BackupsState, BackupJob,
+  MediaLibrary, MediaAsset, MediaKind, MatchedProvider, BannedMedia, BackupsState, BackupJob,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device, LibraryManager, ImportMode, ImportEstimate, ResetScope, ResetPlan,
@@ -6633,6 +6633,168 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   )
 }
 
+// ONE media affordance, used in both placements: the All Media header (scope = every
+// kind this game has) and each category header (scope = that one kind). Before this
+// there were three different gestures with three different result paths — a cover-only
+// "Smart art pick" in the detail panel, a per-category `✨ AI: pick best`, and nothing
+// at all in All Media — which is why the same intent produced different outcomes
+// depending on where you happened to click.
+//
+// The menu always states its own scope, so the gesture is never ambiguous about what it
+// will touch. The wand costs money; its sibling never can — that separation is the
+// point, not decoration (see MediaFetchMenu).
+function MediaWand({ nk, kinds, label, onDone }: {
+  nk: string
+  kinds: string[] | null              // null = every kind (All Media scope)
+  label: string                       // human scope, e.g. "all categories" / "marquee"
+  onDone: (msg: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState('')
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const away = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', away)
+    return () => document.removeEventListener('mousedown', away)
+  }, [open])
+
+  // ① judge what we already hold. Paid, and only ever from this click — scope is
+  // exactly one game and exactly the kinds in scope, never the catalog.
+  const pickBest = async () => {
+    const targets = kinds ?? []
+    setBusy('best')
+    try {
+      let changed = 0
+      for (const k of (targets.length ? targets : [])) {
+        const p = await api.artPick(nk, k)
+        if (p.recommended_id) { await api.artApply(p.recommended_id, nk, k); changed++ }
+      }
+      onDone(changed ? `✨ re-picked ${changed} ${changed === 1 ? 'category' : 'categories'}`
+        : 'No clearer winner than what is already #1')
+    } catch {
+      onDone('AI pick unavailable — set an AI provider for “art” in Settings › AI')
+    } finally { setBusy(''); setOpen(false) }
+  }
+
+  // ② go find more. Deterministic providers first, then the open web — the paid
+  // grounded search runs only against kinds still empty after the free sources.
+  const findMore = async (alsoWeb: boolean) => {
+    setBusy(alsoWeb ? 'both' : 'find')
+    try {
+      let added = 0
+      const changed = new Set<string>()
+      for (const p of ['igdb', 'screenscraper', 'steamgriddb', ...(alsoWeb ? ['web'] : [])]) {
+        try {
+          const r = await api.mediaFetch(nk, p, kinds ?? undefined)
+          added += r.added; r.chosen_changed.forEach((c) => changed.add(c))
+        } catch { /* one provider failing never stops the rest */ }
+      }
+      onDone(added
+        ? `+${added} candidate${added === 1 ? '' : 's'}` +
+          (changed.size ? ` · ${[...changed].join(', ')} changed` : ' · chosen unchanged')
+        : 'Nothing new to add — every provider already gave us what it has')
+    } finally { setBusy(''); setOpen(false) }
+  }
+
+  return (
+    <div className="mw-wrap" ref={ref}>
+      <button className="mw-btn" disabled={!!busy} onClick={() => setOpen(!open)}
+        title={`Magic wand — ${label}`}>
+        <span className="mw-spark">✨</span>{busy ? ' Working…' : ' Magic wand'}
+      </button>
+      {open && (
+        <div className="mw-menu">
+          <div className="mw-scope">Scope: <b>{label}</b></div>
+          <button onClick={pickBest}>
+            <b>Pick the best I already have</b>
+            <span className="dim">Judges the candidates on screen. Uses your AI — paid.</span>
+          </button>
+          <button onClick={() => findMore(false)}>
+            <b>Go find more</b>
+            <span className="dim">Every matched provider. Free — no AI.</span>
+          </button>
+          <button onClick={() => findMore(true).then(pickBest)}>
+            <b>Both</b>
+            <span className="dim">Fetch first, then judge the enlarged set.</span>
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// The wand's deterministic sibling. Lists the providers this game is MATCHED to and
+// pulls everything they hold for the scope you are in — "I don't like any of these
+// backgrounds, grab all from ScreenScraper". Whether a previous ingest ever took an
+// asset from that provider is irrelevant: the game is matched, so the pull is a
+// straight fetch against a known id.
+//
+// FREE BY DEFINITION. No AI area is consulted, which is what makes it the right default
+// action for "just get me more art" — and why it sits next to the wand rather than
+// inside it.
+function MediaFetchMenu({ nk, kinds, label, onDone }: {
+  nk: string; kinds: string[] | null; label: string; onDone: (msg: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [provs, setProvs] = useState<MatchedProvider[] | null>(null)
+  const [busy, setBusy] = useState('')
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    api.matchedProviders(nk).then((r) => setProvs(r.providers)).catch(() => setProvs([]))
+    const away = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', away)
+    return () => document.removeEventListener('mousedown', away)
+  }, [open, nk])
+
+  const pull = async (p: string) => {
+    setBusy(p)
+    try {
+      const r = await api.mediaFetch(nk, p, kinds ?? undefined)
+      onDone(r.added
+        ? `+${r.added} from ${p}` +
+          (r.chosen_changed.length ? ` · ${r.chosen_changed.join(', ')} changed`
+            : ' · chosen unchanged')
+        : `${p} had nothing we don't already hold`)
+    } catch { onDone(`Couldn't reach ${p}`) } finally { setBusy(''); setOpen(false) }
+  }
+
+  return (
+    <div className="mw-wrap" ref={ref}>
+      <button className="mw-btn mw-fetch" disabled={!!busy} onClick={() => setOpen(!open)}
+        title={`Fetch from a matched provider — ${label}. Deterministic, never uses AI.`}>
+        ⬇{busy ? ' Fetching…' : ' Fetch from…'}
+      </button>
+      {open && (
+        <div className="mw-menu">
+          <div className="mw-scope">Into: <b>{label}</b> · free, no AI</div>
+          {provs === null && <div className="mw-empty dim">Checking matches…</div>}
+          {provs?.map((p) => (
+            <button key={p.provider} disabled={!p.matched}
+              onClick={() => p.matched && pull(p.provider)}
+              title={p.matched ? `Pull everything ${p.provider} holds`
+                : `${p.provider} has no match for this game yet`}>
+              <b>{p.provider}</b>
+              <span className="dim">
+                {p.matched
+                  ? (Object.keys(p.holds).length
+                    ? `holds ${Object.entries(p.holds).map(([k, n]) => `${k}·${n}`).join(', ')}`
+                    : 'matched — nothing taken yet')
+                  : 'not matched'}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Hero display override popover (opened from the ⚙ in the All Media header): choose
 // what fills the detail banner — auto, the scrolling "dance", or a specific media kind.
 function HeroConfig({ assets, heroPref, onPick, onClose }: {
@@ -6815,9 +6977,21 @@ function AllMedia({ nk, kinds, assets, onChange, frames, onFrame }: {
 }) {
   const byKind: Record<string, MediaAsset[]> = {}
   assets.forEach((a) => { (byKind[a.kind] ??= []).push(a) })
+  const [note, setNote] = useState('')
+  // A wand run changes what is chosen, so the strip has to re-read rather than trust
+  // the copy it was handed.
+  const onChange2 = () => { api.mediaLibrary(nk).then(onChange).catch(() => { /* */ }) }
   return (
     <section className="all-media">
-      <h3>All Media <span className="am-note">every classification — click a count to open its media; frame the #1 image's position &amp; zoom with ⚙ there</span></h3>
+      <h3>All Media <span className="am-note">every classification — click a count to open its media; frame the #1 image's position &amp; zoom with ⚙ there</span>
+        <span className="am-tools">
+          <MediaWand nk={nk} kinds={kinds.map((k) => k.kind)} label="all categories"
+            onDone={(m) => { setNote(m); onChange2() }} />
+          <MediaFetchMenu nk={nk} kinds={null} label="all categories"
+            onDone={(m) => { setNote(m); onChange2() }} />
+        </span>
+      </h3>
+      {note && <div className="am-note-line dim">{note}</div>}
       <div className="am-grid">
         {kinds.map((k) => (
           <MediaKindCard key={k.kind} nk={nk} kind={k}
@@ -6855,7 +7029,7 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
   const dragRef = useRef<number | null>(null)
   const overRef = useRef<number | null>(null)
   const [busy, setBusy] = useState(false)
-  const [aiBusy, setAiBusy] = useState(false)
+  // status line for whichever of the two controls last ran
   const [aiMsg, setAiMsg] = useState('')
   useEffect(() => { setOrder(byRank(assets)) }, [assets])
   // Enlarged view: ← / → step through this category, Esc closes JUST the viewer.
@@ -6875,24 +7049,6 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
     setBusy(true)
     try { onChange(await api.setPins(nk, kind.kind, next.map((a) => a.id))) }
     catch { /* */ } finally { setBusy(false) }
-  }
-  // On-demand AI art pick for THIS kind — the only time the paid vision call fires
-  // (the routine wand apply/rebuild never does unless you turn ai_art_auto_pick on).
-  // Picks the nicest of the candidates and floats it to #1.
-  const aiPick = async () => {
-    setAiBusy(true); setAiMsg('')
-    try {
-      const p = await api.artPick(nk, kind.kind)
-      if (p.recommended_id) {
-        await api.artApply(p.recommended_id, nk, kind.kind)
-        onChange(await api.mediaLibrary(nk))
-        setAiMsg('✨ picked the best ' + kind.kind.replace(/_/g, ' '))
-      } else {
-        setAiMsg(p.reason || 'No clear winner to pick')
-      }
-    } catch {
-      setAiMsg('AI pick unavailable — set an AI provider for “art” in Settings › AI')
-    } finally { setAiBusy(false) }
   }
   // The one true reorder primitive — move item `from` to slot `to` and save. Both the
   // tap controls (▲ ▼ ★, the reliable path on mobile) and the drag handle route through
@@ -6958,11 +7114,17 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
         <h2 className="mko-title">{kind.kind.replace(/_/g, ' ')}
           <span className="dim"> · {order.length}</span>
           {busy && <span className="dim mko-saving"> · saving…</span>}
-          {order.length >= 2 && (
-            <button className="mko-aipick" disabled={aiBusy || busy} onClick={aiPick}
-              title="Have the AI look at the candidates and make the nicest one #1. Uses your configured AI — a paid call that runs only when you click it.">
-              {aiBusy ? '✨ Picking…' : '✨ AI: pick best'}</button>
-          )}
+          {/* The same two controls as All Media, scoped to this kind. This replaced a
+              bespoke `✨ AI: pick best` that only appeared with 2+ candidates — which
+              meant the one situation where you most want to GO FIND MORE (zero or one
+              candidate) offered no action at all. */}
+          <span className="mko-tools">
+            <MediaWand nk={nk} kinds={[kind.kind]} label={kind.kind.replace(/_/g, ' ')}
+              onDone={async (m) => { setAiMsg(m); onChange(await api.mediaLibrary(nk)) }} />
+            <MediaFetchMenu nk={nk} kinds={[kind.kind]}
+              label={kind.kind.replace(/_/g, ' ')}
+              onDone={async (m) => { setAiMsg(m); onChange(await api.mediaLibrary(nk)) }} />
+          </span>
           {aiMsg && <span className="dim mko-aimsg"> · {aiMsg}</span>}</h2>
         <p className="mko-desc dim">Set priority — <b>#1 is the one used.</b> Tap <b>★ Use</b> to promote,
           <b> ▲ ▼</b> to nudge, or drag the ⠿ handle · click to enlarge{framable ? ' · ⚙ on #1 frames its position & zoom' : ''}

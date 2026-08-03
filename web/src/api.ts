@@ -332,6 +332,14 @@ export interface ArtPick {
   reason: string
 }
 
+export interface MatchedProvider {
+  provider: string
+  matched: boolean
+  id: string | null
+  url: string | null
+  holds: Record<string, number>     // kind -> how many assets we already hold from it
+}
+
 export interface DupeCandidate {
   a: string; b: string; a_nk: string; b_nk: string; a_src: string; b_src: string; ratio: number
 }
@@ -943,6 +951,25 @@ export const api = {
       { method: 'POST' })
     if (!r.ok) throw new Error(`${r.status}`)
     return r.json() as Promise<ArtPick>
+  },
+  // Providers this game is MATCHED to — drives the "Fetch from…" menu. A provider
+  // with no match comes back matched:false rather than missing, because absent and
+  // unmatched are different things and hiding one makes it look like the other.
+  matchedProviders: async (nk: string) => {
+    const r = await fetch(`/api/media/matched-providers/${encodeURIComponent(nk)}`)
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{ providers: MatchedProvider[] }>
+  },
+  // Deterministic pull from one matched provider. Free by definition — no AI area is
+  // consulted — and additive, so candidates land immediately; only a change to the
+  // CHOSEN asset is worth reporting back.
+  mediaFetch: async (nk: string, provider: string, kinds?: string[]) => {
+    const r = await fetch(`/api/media/fetch/${encodeURIComponent(nk)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider, kinds: kinds ?? null }),
+    })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<{ added: number; chosen_changed: string[]; provider: string }>
   },
   artApply: async (id: number, norm_key: string, kind: string) => {
     const r = await fetch('/api/ai/art-apply', {
