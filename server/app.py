@@ -3441,6 +3441,13 @@ def _ss_match(queries, systems, year=None):
     raw = [q for q in (queries if isinstance(queries, (list, tuple)) else [queries]) if q]
     qlist, seenq = [], set()
     for q in raw:
+        # TRADEMARK SYMBOLS go straight to the provider unless we take them out, and
+        # they are frequently glued to a word: "ACE COMBAT\u21227" is one token to a search
+        # engine, so the query matches nothing. Live, that cost Ace Combat 7 (214893) and
+        # Age of Empires III. Replace with a SPACE, not nothing, or the glued case
+        # becomes "ACECOMBAT7".
+        q = re.sub(r"[\u2122\u00ae\u00a9\u2120]", " ", q)
+        q = re.sub(r"\s{2,}", " ", q).strip()
         # EDITION SUFFIXES are the single most common reason a real match is missed:
         # the catalog stores the edition you own ("… Mirror of Fate HD"), ScreenScraper
         # stores the game ("… Mirror of Fate"). Live, that one word turned a match into a
