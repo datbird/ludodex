@@ -148,7 +148,16 @@ def select(con, kinds=None, only=None):
         # materialize pass has actually measured the file.
         mw, mh = r["width"], r["height"]
         sw, sh = (mw, mh) if (mw and mh) else media.derived_dims(r["ref"])
-        bad_shape = 0 if media.shape_ok(r["kind"], sw, sh) else 1
+        # A MEASURED wrong shape is disqualifying, not merely bad. Ranking it last still
+        # elected it whenever nothing better existed, so a portrait IGDB artwork became
+        # the `background` and a landscape grid became the `cover` — the slot filled
+        # with something we had already measured and knew was wrong for it. An empty
+        # slot falls back cleanly; a wrong-shaped one is displayed, stretched, as if
+        # correct. shape_ok returns True for UNKNOWN dimensions, so this only ever
+        # excludes assets we have actually looked at.
+        if not media.shape_ok(r["kind"], sw, sh):
+            continue
+        bad_shape = 0
         # A confirmed letterboxed paste loses to ANY authored cover, whoever supplied it
         # — this is where Steam's "authoritative for its own games" precedence has to
         # yield, because the asset isn't Steam's art, it's Steam's placeholder. Only a

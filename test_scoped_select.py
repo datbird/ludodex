@@ -82,6 +82,35 @@ def main():
           con.execute("SELECT COUNT(*) FROM media WHERE norm_key='other game' "
                       "AND chosen=1").fetchone()[0] == 1)
 
+
+    print("5. a MEASURED wrong shape is disqualified, not merely ranked last")
+    con2 = sqlite3.connect(":memory:")
+    con2.row_factory = sqlite3.Row
+    con2.executescript("""
+    CREATE TABLE media(id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, kind TEXT,
+      provider TEXT, ref TEXT, matched INT, ref_type TEXT, game_key TEXT,
+      width INT, height INT, filler INT, ai_pick INT, chosen INT DEFAULT 0,
+      sha1 TEXT, ext TEXT, hidden INT DEFAULT 0);
+    """)
+    # the ONLY candidate for this cover is a measured landscape
+    con2.execute("INSERT INTO media(norm_key,system,kind,provider,ref,matched,ref_type,"
+                 "game_key,width,height,filler,ai_pick) VALUES"
+                 "('lonely','genesis','cover','screenscraper','http://x/a',1,'url',"
+                 "'igdb:9',460,215,0,NULL)")
+    # and an UNMEASURED one, which must still be electable
+    con2.execute("INSERT INTO media(norm_key,system,kind,provider,ref,matched,ref_type,"
+                 "game_key,width,height,filler,ai_pick) VALUES"
+                 "('unknown','genesis','cover','screenscraper','http://x/b',1,'url',"
+                 "'igdb:9',NULL,NULL,0,NULL)")
+    con2.commit()
+    media_choose.select(con2)
+    check("a known-wrong-shape sole candidate is NOT elected",
+          con2.execute("SELECT COUNT(*) FROM media WHERE norm_key='lonely' "
+                       "AND chosen=1").fetchone()[0] == 0)
+    check("an UNMEASURED sole candidate still is",
+          con2.execute("SELECT COUNT(*) FROM media WHERE norm_key='unknown' "
+                       "AND chosen=1").fetchone()[0] == 1)
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 
