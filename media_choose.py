@@ -140,7 +140,14 @@ def select(con, kinds=None):
         # ranks BELOW shape/filler evidence, because a later measurement can prove the
         # AI's pick wrong), then provider priority, measured resolution, and the
         # original tie-breakers.
-        sk = (pin, bad_shape, filler, 0 if r["ai_pick"] else 1, pr, px,
+        # The IMAGE wins, then the provider. Resolution BAND sits above provider
+        # priority so a 600x900 cover beats a 264x352 one whoever supplied it — the
+        # live case that exposed this had IGDB's thumbnail outranking a SteamGridDB
+        # cover more than five times its area purely on provider order. Banded rather
+        # than raw pixels so an unmeasured asset lands in the middle instead of last;
+        # `px` still breaks ties INSIDE a band.
+        band = media.res_band(mw, mh)
+        sk = (pin, bad_shape, filler, 0 if r["ai_pick"] else 1, band, pr, px,
               0 if r["matched"] else 1,
               0 if r["ref_type"] == "file" else 1, r["id"])
         _sys = r["system"] or ""

@@ -170,6 +170,29 @@ def looks_padded(path, bands=9, edge_ratio=6.0):
         return False
 
 
+# Measured-resolution BAND. Deliberately a band, not raw pixels, and deliberately
+# 3-valued: LARGE / UNKNOWN / SMALL.
+#
+# The ranking policy is: the image wins, then the provider. But raw pixels cannot sit
+# above provider directly, because an UNMEASURED asset has no pixel count and would lose
+# to every measured one — which silently re-privileges whichever provider happens to be
+# measurable (the same trap shape_ok's docstring warns about). Banding puts unknown in
+# the middle: a demonstrably LARGE image beats an unknown one, an unknown one beats a
+# demonstrably SMALL one, and provider only breaks ties inside a band.
+RES_LARGE, RES_UNKNOWN, RES_SMALL = 0, 1, 2
+_RES_MIN_PX = 250_000          # ~500x500; a 264x352 thumbnail is not a cover
+
+
+def res_band(w, h):
+    """LARGE / UNKNOWN / SMALL for the ranking sort. Unknown is never penalised."""
+    if not w or not h:
+        return RES_UNKNOWN
+    try:
+        return RES_LARGE if int(w) * int(h) >= _RES_MIN_PX else RES_SMALL
+    except (TypeError, ValueError):
+        return RES_UNKNOWN
+
+
 def shape_ok(kind, w, h):
     """False ONLY when the orientation is known AND contradicts the kind.
 
