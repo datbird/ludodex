@@ -7955,6 +7955,20 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
             try:
                 media_choose.stamp_measured(
                     wcon, {"id": r["id"], "ext": r["ext"], "kind": kind}, sha, REPO)
+                # RE-RANK now that this asset's shape and filler verdict are known.
+                # Measurement is lazy — it happens here, at first serve, AFTER the
+                # selection that ranked this row while it was unmeasured. Without this
+                # the stale pick stands forever: a 460x215 screenshot keeps the cover
+                # slot while eight measured 484x680 covers sit unused, because at
+                # ranking time nothing knew any of their shapes. Scoped to this game,
+                # so it is a few milliseconds rather than a library-wide pass.
+                _nkrow = wcon.execute("SELECT norm_key FROM media WHERE id=?",
+                                      (r["id"],)).fetchone()
+                if _nkrow and _nkrow[0]:
+                    try:
+                        media_choose.select(wcon, only=[_nkrow[0]])
+                    except Exception:      # noqa: BLE001 — never fail serving an image
+                        pass
                 wcon.commit()
             finally:
                 wcon.close()

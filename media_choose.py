@@ -73,18 +73,26 @@ def _load_pins():
     return out
 
 
-def select(con, kinds=None):
+def select(con, kinds=None, only=None):
     """Set chosen=1 on the best asset per (norm_key, scalar kind); 0 elsewhere.
     `kinds` restricts the pass to a subset of scalar kinds (non-destructive — other
     kinds keep their existing chosen flags), so a wand run can fill just covers."""
     scalar = [k for k in media.SCALAR_KINDS if not kinds or k in kinds]
     if not scalar:
         return 0
+    # The reset must be scoped exactly like the re-rank below, or a scoped run would
+    # clear `chosen` for the whole library and only restore it for `only`.
+    _where, _wargs = [], []
     if kinds:
-        con.execute("UPDATE media SET chosen=0 WHERE kind IN (%s)"
-                    % ",".join("'%s'" % k for k in scalar))
-    else:
-        con.execute("UPDATE media SET chosen=0")
+        _where.append("kind IN (%s)" % ",".join("'%s'" % k for k in scalar))
+    if only:
+        _ok = [k for k in only if k]
+        if not _ok:
+            return 0
+        _where.append("norm_key IN (%s)" % ",".join("?" * len(_ok)))
+        _wargs += _ok
+    con.execute("UPDATE media SET chosen=0"
+                + ((" WHERE " + " AND ".join(_where)) if _where else ""), _wargs)
     # playnite_media_overwrite=playnite-wins: your hand-curated Playnite art beats
     # every other provider for the slots Playnite owns, so it becomes the canonical
     # pick that propagates to the other frontends and the server.
@@ -99,12 +107,24 @@ def select(con, kinds=None):
     # media overlay) wins over provider priority, so the served art follows the user's
     # choice on every re-select. Keyed by (norm_key, kind, provider, ref) -> pin rank.
     pin_rank = _load_pins()
-    rows = con.execute(
-        "SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key, "
-        "width, height, filler, ai_pick "
-        "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
-        % ",".join("'%s'" % k for k in scalar)
-    ).fetchall()
+    # `only` scopes the re-rank to specific norm_keys. Needed because measurement is
+    # LAZY: dimensions and the filler verdict are stamped when an asset is first served,
+    # which is AFTER the selection that ranked it. Without a cheap way to re-rank one
+    # game, the pick made while the asset was unmeasured stands forever — a 460x215
+    # screenshot keeps the cover slot while eight measured 484x680 covers sit unused,
+    # because at ranking time nothing knew their shapes.
+    _q = ("SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key, "
+          "width, height, filler, ai_pick "
+          "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
+          % ",".join("'%s'" % k for k in scalar))
+    _args = []
+    if only:
+        only = [k for k in only if k]
+        if not only:
+            return 0
+        _q += " AND norm_key IN (%s)" % ",".join("?" * len(only))
+        _args = list(only)
+    rows = con.execute(_q, _args).fetchall()
     # chosen is per (norm_key, SYSTEM, kind): each console gets its own best asset, and
     # platform-neutral store art (system NULL/'') is its own bucket — so a per-platform
     # library entry serves its own console's art (DESIGN §11.4), the serve resolver
