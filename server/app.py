@@ -3848,8 +3848,17 @@ def _member_identity(nk, plat):
     try:
         mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY "
                    "KEY, igdb_id INTEGER, slug TEXT, matched_by TEXT, resolved_at INTEGER)")
-        if mc.execute("SELECT 1 FROM igdb_resolution WHERE norm_key=?", (nk,)).fetchone():
-            return 0                        # already identified — never re-decide
+        # `igdb_resolution` doubles as a NEGATIVE cache: `igdb_id=0, matched_by='none'`
+        # records that a pass searched and found nothing. Treating any row as "already
+        # identified" made that miss PERMANENT — the 40 live rows carrying id 0 could
+        # never be identified again, and they are not all non-games (crash bandicoot 3
+        # warped, ys i ancient ys vanished, three Space Quest chapters). A real id is a
+        # decision to respect; a falsy id is the absence of one. A MANUAL row is always a
+        # decision, including a deliberate "this matches nothing".
+        _prev = mc.execute("SELECT igdb_id, matched_by FROM igdb_resolution "
+                           "WHERE norm_key=?", (nk,)).fetchone()
+        if _prev and ((_prev[0] or 0) > 0 or (_prev[1] or "") == "manual"):
+            return 0                        # a real decision — never re-decide
         hits = _igdb_by_name(title)
         if not hits:
             return 0
