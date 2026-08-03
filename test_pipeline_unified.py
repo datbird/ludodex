@@ -147,6 +147,33 @@ def main():
             offenders.append("%s:%d" % (owner, i + 1))
     check("no unexpected caller of stamp/prune: %s" % (offenders or "none"), not offenders)
 
+    print("6. METADATA: one identity-consequence chain, same rule")
+    # An identity is not one fact, it is four that must move together: games.game_key
+    # (or neutral art goes invisible, §11.9), the metadata_links row, the canonical title,
+    # and the provider-record ATTRIBUTES. `_member_identity` wrote the key and the link and
+    # stopped, so a game identified as a collection member got no genres, no developer and
+    # no publisher, while the same game pinned by hand got all of them — two different
+    # meanings of "identified" depending on which door you came through.
+    ident = body_of("_apply_identity") or ""
+    check("_apply_identity is defined", bool(ident))
+    for piece, pat in (("moves games.game_key", r"UPDATE games SET game_key"),
+                       ("writes the provider link", r"INSERT INTO metadata_links"),
+                       ("fills provider attributes", r"_fill_provider_attrs\(")):
+        check("_apply_identity %s" % piece, bool(re.search(pat, ident)))
+
+    IDENT_ONRAMPS = ["_member_identity", "aimeta_pin", "resolve_per_entry_identity"]
+    for name in IDENT_ONRAMPS:
+        b = body_of(name)
+        check("%s exists" % name, b is not None)
+        check("%s routes through _apply_identity" % name, "_apply_identity(" in b)
+        # and does not hand-write the consequences itself
+        raw = [lbl for lbl, pat in
+               (("game_key", r"UPDATE games SET game_key"),
+                ("links", r"INSERT INTO metadata_links"))
+               if re.search(pat, b)]
+        check("%s does not re-write identity consequences: %s" % (name, raw or "none"),
+              not raw)
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 

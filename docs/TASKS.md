@@ -442,3 +442,23 @@ path that never learned about a function*, which no unit test of that function c
 it works perfectly, nobody called it. It fails the build if an onramp re-implements a
 step, if the tail's order changes, or if a new caller of stamp/prune appears outside the
 declared exemptions.
+
+### Metadata: one identity-consequence chain (same day)
+
+The media audit's twin. An identity is not one fact, it is **four that must move
+together**:
+
+1. `games.game_key` → `igdb:<id>` — neutral art only serves when `media.game_key` agrees
+   (DESIGN §11.9), so leaving it behind makes the art a run just fetched invisible;
+2. the IGDB `metadata_links` row — what the Matched-providers menu reads;
+3. the canonical title, for ROM/archive-only entries;
+4. the provider-record **attributes** — genres, themes, developer, publisher, release.
+
+`_pin_live` did all four. `_member_identity` did the first two and stopped, so **a game
+identified as a collection member got no genres, no developer and no publisher**, while
+the same game pinned by hand got all of them — two different meanings of "identified"
+depending on which door you came through.
+
+`_pin_live` is now **`_apply_identity`**, the single chain, called by `_member_identity`,
+`aimeta_pin` and `resolve_per_entry_identity`. `test_pipeline_unified.py` (39) fails the
+build if an onramp hand-writes `game_key` or a `metadata_links` row instead of calling it.

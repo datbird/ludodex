@@ -4107,27 +4107,12 @@ def _member_identity(nk, plat):
         mc.commit()
     finally:
         mc.close()
-    url = _provider_page_url("igdb", pick["igdb_id"], pick.get("slug"))
-    lw = sqlite3.connect(LIBRARY_DB)
-    try:
-        lw.execute("PRAGMA busy_timeout=15000")
-        lw.execute("DELETE FROM metadata_links WHERE game_id=? AND provider='igdb'", (gid,))
-        lw.execute("INSERT INTO metadata_links(game_id,provider,provider_id,slug,url) "
-                   "VALUES(?,?,?,?,?)",
-                   (gid, "igdb", str(pick["igdb_id"]), pick.get("slug"), url))
-        # The ENTRY's game_key must move with the identity. materialize stamped it
-        # `title:<key>` before any identity existed; media fetched afterwards is stamped
-        # `igdb:<id>`, and the serve resolver only shows neutral art when
-        # md.game_key = g.game_key (DESIGN §11.9). Leaving them mismatched makes every
-        # asset we just fetched INVISIBLE — the entry renders a monogram while holding a
-        # dozen images. Same failure the 2026-07-26 pass repaired for bundle-refused
-        # entries; it reappears here because identity now arrives AFTER the row exists.
-        if _has_col(lw, "games", "game_key"):
-            lw.execute("UPDATE games SET game_key=? WHERE id=? AND (game_key IS NULL "
-                       "OR game_key LIKE 'title:%')", ("igdb:%s" % pick["igdb_id"], gid))
-        lw.commit()
-    finally:
-        lw.close()
+    # ONE consequence chain. This used to hand-write the link and the game_key move and
+    # stop there — so a member ended up "identified" with no genres, no developer and no
+    # publisher, while the same game pinned by hand got all of them. _apply_identity does
+    # the key, the link, the rename guard and the provider attributes together, so a
+    # member is identified the same way as anything else.
+    _apply_identity(nk, pick["igdb_id"], None, None)
     return 1
 
 
@@ -4250,7 +4235,7 @@ def _detach_entry(nk, platform, now):
             idx.close()
     except Exception as e:
         print("detach ss purge %s: %s" % (nk, str(e)[:150]), file=sys.stderr)
-    _pin_live(nk, None, platform, None, detach=True)
+    _apply_identity(nk, None, platform, detach=True)
 
 
 def _adjudicate_suspects(suspects, chunk=20, should_stop=lambda: False):
@@ -4426,7 +4411,7 @@ def resolve_per_entry_identity(nks, should_stop=lambda: False, threshold=None, a
                             mc.commit()
                         finally:
                             mc.close()
-                        _pin_live(nk, pe["igdb_id"], plat, cand_name.get(pe["igdb_id"]))
+                        _apply_identity(nk, pe["igdb_id"], plat, cand_name.get(pe["igdb_id"]))
                         result["set"].append({"norm_key": nk, "platform": plat,
                                               "igdb_id": pe["igdb_id"]})
                         touched.add(nk)
@@ -4774,13 +4759,28 @@ def _fill_provider_attrs(con, gid, *mapped_origins):
                         "VALUES(?,?,?,?)", rows)
 
 
-def _pin_live(nk, iid, plat, name, detach=False):
-    """Write a manual identity decision straight into the LIVE catalog for the affected
-    entries. Pin: game_key = igdb:<iid>, the IGDB link, the rename, AND the provider-record
-    attributes — so a pinned game is fully complete instantly (no rebuild). Detach: the
-    entry forfeits the title's game → game_key = title:<nk> and its IGDB link is removed
-    (a homebrew/different game sharing the name). A per-entry decision (`plat`) touches only
-    that platform's entry; a title pin touches every non-era-separated entry."""
+def _apply_identity(nk, iid, plat=None, name=None, detach=False):
+    """THE consequence chain for "this game's identity just changed". Every onramp that
+    decides an identity calls this — there is no second version.
+
+    An identity is not one fact, it is four, and they have to move together:
+      * `games.game_key` -> `igdb:<iid>`, because neutral art only serves when
+        media.game_key agrees with it (DESIGN §11.9). Leave it behind and the art the
+        run just fetched is invisible.
+      * the IGDB `metadata_links` row, which is what the Matched-providers menu reads.
+      * the canonical title, for ROM/archive-only entries (build_library's own guard).
+      * the provider-record ATTRIBUTES — genres, themes, developer, publisher, release.
+
+    That fourth one is why this had to be shared. `_member_identity` wrote the key and
+    the link and stopped, so a game identified as a collection member got no genres, no
+    developer and no publisher, while the same game pinned by hand got all of them —
+    two different notions of "identified" depending on which door you came through.
+
+    Detach is the inverse decision: the entry forfeits the title's game, so
+    game_key = title:<nk> and the IGDB link is removed (a homebrew or different game
+    sharing the name). A per-entry decision (`plat`) touches only that platform's entry;
+    a title-level one touches every non-era-separated entry.
+    """
     con = sqlite3.connect(LIBRARY_DB)
     try:
         con.execute("PRAGMA busy_timeout=8000")
@@ -4963,7 +4963,7 @@ def aimeta_pin(body: dict = Body(default={})):
     # manual pin no longer rebuilds the whole catalog (associations are read-time on
     # game_key, already correct). For a global re-derivation use the Rebuild button.
     try:
-        _pin_live(nk, iid, plat, name, detach=detach)
+        _apply_identity(nk, iid, plat, name, detach=detach)
         _reconcile_media_now({nk}, now)
     except Exception as e:
         print("aimeta pin: reconcile failed: %s" % str(e)[:200], file=sys.stderr)
