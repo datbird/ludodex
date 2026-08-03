@@ -1597,13 +1597,15 @@ def media_fetch_provider(norm_key: str, body: dict = Body(default={})):
             "WHERE norm_key=? AND chosen=1", (base,))}
         before_n = con.execute("SELECT COUNT(*) FROM media WHERE norm_key=?",
                                (base,)).fetchone()[0]
-        _pull_media_sources(con, base, want_web=(provider == "web"),
-                            provider=(None if provider == "web" else provider),
-                            kinds=kinds)
-        import media_fetch as _mf
-        _mf._backfill_game_key(con)
-        media_choose.select(con)
-        con.commit()
+        # Same pipeline as every other onramp — this endpoint is a NARROWING of it, not
+        # a shortcut around it. Written first as fetch -> stamp -> select, which skipped
+        # measure and prune and so could leave a blank asset chosen: the exact defect the
+        # unified chain exists to make impossible.
+        con.close()
+        _enrich_media([base], web=(provider == "web"),
+                      provider=(None if provider == "web" else provider), kinds=kinds)
+        con = media_choose.con_index()
+        con.execute("PRAGMA busy_timeout=30000")
         after_n = con.execute("SELECT COUNT(*) FROM media WHERE norm_key=?",
                               (base,)).fetchone()[0]
         after_ids = {(r[0], r[1]): r[2] for r in con.execute(
@@ -4151,64 +4153,20 @@ def _ingest_new_members(created):
               % (MEMBER_INGEST_CAP, len(created) - len(todo)), file=sys.stderr)
 
     def run():
-        import media_fetch as _mf
         got = 0
         for nk, plat in todo:
             try:
                 got += _member_identity(nk, plat)
             except Exception as e:          # noqa: BLE001 — one bad member never stops the rest
                 print("member identity %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
-        con = media_choose.con_index()
-        try:
-            con.execute("PRAGMA busy_timeout=30000")
-            for nk, _plat in todo:
-                try:
-                    _pull_media_sources(con, nk)
-                except Exception as e:      # noqa: BLE001
-                    print("member media %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
-            # select -> MEASURE -> re-select. materialize is what populates
-            # width/height/filler, and selecting before it means ranking blind: a
-            # 460x215 grid won a `cover` slot for the Halo MCC members because at
-            # selection time nothing knew its shape, and nothing re-selected once the
-            # dimensions were stamped at serve time. That is the invariant the
-            # 2026-07-26 audit established, and this phase skipped it.
-            #
-            # Scoped deliberately: media_choose.materialize() has no per-game filter and
-            # would sweep the catalog's unmaterialized assets. _asset_local_path is the
-            # serve-time helper — non-destructive, per row — so measuring stays bounded
-            # to the members this run created.
-            #
-            # The identity repair has to run first, and this path was the one place that
-            # skipped it. `put()` stamps game_key at fetch time from `igdb_resolution`
-            # (media_fetch.game_key) — a reasonable first guess, but NOT the catalog's
-            # decision: a member of a refused bundle gets `igdb:<bundle>` while its entry
-            # says `title:<nk>`, and neutral art only serves when the two agree
-            # (DESIGN §11.9). Every other media path reconciles the guess before choosing;
-            # without it here the art this run just fetched is invisible the moment it
-            # lands. test_ingest_order.py fails the build if any path drops this again.
-            _mf._backfill_game_key(con)
-            media_choose.select(con)
-            con.commit()
-            keys = [nk for nk, _p in todo]
-            ph = ",".join("?" * len(keys))
-            rows = con.execute(
-                "SELECT id, ref_type, ref, ext, sha1, kind FROM media "
-                "WHERE chosen=1 AND kind!='video' AND (sha1 IS NULL OR sha1='') "
-                "AND norm_key IN (%s)" % ph, keys).fetchall()
-            for r in rows:
-                try:
-                    _asset_local_path(r)     # downloads + stamps measured dims/filler
-                except Exception:            # noqa: BLE001 — one dead ref never stops the pass
-                    pass
-            # NO-STAMP: a re-rank after measuring existing rows — no fetch, no new
-            # game_key to reconcile (the repair ran above, before the first select).
-            media_choose.select(con)         # re-rank now that shape is actually known
-            con.commit()
-        finally:
-            con.close()
-        print("collections: member ingest — %d/%d identified, media pulled for %d, "
-              "%d assets measured then re-selected"
-              % (got, len(todo), len(todo), len(rows)), file=sys.stderr)
+        # Identity FIRST, then the one pipeline. This used to be a hand-rolled
+        # fetch -> stamp -> select -> measure -> re-select copy living here, which is how
+        # it ended up skipping prune and, before that, skipping the stamp entirely.
+        keys = [nk for nk, _p in todo]
+        res = _enrich_media(keys)
+        print("collections: member ingest — %d/%d identified, %s"
+              % (got, len(todo), ", ".join("%s %d" % kv for kv in sorted(res.items()))),
+              file=sys.stderr)
 
     threading.Thread(target=run, name="member-ingest", daemon=True).start()
 
@@ -5974,16 +5932,12 @@ def _reconcile_media_now(touched, now):
     background reconcile; this just makes the touched games right in seconds, not ~30 min."""
     if not touched:
         return
-    import media_fetch as _mf
-    con = media_choose.con_index()         # Row factory — media_choose.select needs it
-    try:
-        con.execute("PRAGMA busy_timeout=30000")
-        _mf.fetch_igdb(con, now, only=set(touched))   # incl. entry-override art
-        _mf._backfill_game_key(con)                   # stamp any legacy/unstamped rows
-        media_choose.select(con)                      # re-choose best per (nk,system,gkey,kind)
-        con.commit()
-    finally:
-        con.close()
+    del now                                # the pipeline stamps its own timestamps
+    # The one pipeline, scoped to the touched games. This was IGDB-only with its own
+    # stamp/select and no measure or prune — so the "immediate" result an apply showed
+    # could be a blank or unmeasured asset that the background pass would later replace,
+    # which reads to a user as the app changing its mind.
+    _enrich_media(list(touched))
 
 
 def _fetch_media_web(con, nk, title, now):
@@ -6159,6 +6113,157 @@ def _pull_ss_media(con, nk, systems, queries, now):
                        "format": md.get("format")})
         n += 1
     return n
+
+
+def _media_finish(keys, measure=True, prune=True, should_stop=lambda: False):
+    """Steps 3-7 of the media pipeline: stamp -> select -> measure -> prune -> re-select.
+
+    Split out because the IMPORT fetches through `media_fetch.py` subprocesses (it needs
+    streamed progress over a whole library) rather than the in-process fetch loop, and it
+    must still finish the same way. The batching differs; the chain must not.
+
+    Each step depends on the previous one — see `_enrich_media` for why the order is what
+    it is. Getting only part of this right, in one place and not another, is the defect
+    that produced every wrong-art report in this project.
+    """
+    keys = [k for k in (keys or []) if k]
+    out = {"measured": 0, "pruned": 0}
+    if not keys:
+        return out
+    import media_fetch as _mf
+    con = media_choose.con_index()
+    try:
+        con.execute("PRAGMA busy_timeout=30000")
+        _mf._backfill_game_key(con)                    # 3. identity congruence
+        media_choose.select(con, only=keys)            # 4. something is chosen
+        con.commit()
+        if measure:                                    # 5. bytes -> dims + filler
+            # scoped by hand: media_choose.materialize() has no per-game filter and would
+            # sweep the whole catalog's unmaterialized assets.
+            for i in range(0, len(keys), 400):         # bounded SQL variable count
+                chunk = keys[i:i + 400]
+                ph = ",".join("?" * len(chunk))
+                rows = con.execute(
+                    "SELECT id, ref_type, ref, ext, sha1, kind FROM media "
+                    "WHERE chosen=1 AND kind!='video' AND (sha1 IS NULL OR sha1='') "
+                    "AND norm_key IN (%s)" % ph, chunk).fetchall()
+                for r in rows:
+                    if should_stop():
+                        break
+                    try:
+                        _asset_local_path(r)
+                        out["measured"] += 1
+                    except Exception:          # noqa: BLE001 — a dead ref never stops the pass
+                        pass
+                con.commit()
+    finally:
+        con.close()
+    if prune:                                          # 6. blanks, now detectable
+        try:
+            out["pruned"] = _prune_blank_media(keys)
+        except Exception as e:                 # noqa: BLE001
+            print("media finish prune: %s" % str(e)[:150], file=sys.stderr)
+    wcon = media_choose.con_index()                    # 7. re-rank knowing everything
+    try:
+        wcon.execute("PRAGMA busy_timeout=30000")
+        media_choose.select(wcon, only=keys)
+        wcon.commit()
+    finally:
+        wcon.close()
+    return out
+
+
+def _enrich_media(keys, con=None, web=False, provider=None, kinds=None,
+                  measure=True, prune=True, ai_art=None, should_stop=lambda: False):
+    """THE media pipeline. Every onramp runs this — there is no second one.
+
+    Before this existed, each entry point had grown its own subset of the steps in its
+    own order, and an audit of the eight of them found exactly ONE running the full
+    chain. The wand's own media step never measured and never pruned, so it selected
+    blind and could elect a blank or wrong-shaped asset; member ingest never pruned;
+    the "Fetch from…" endpoint did neither. That is why the same fix had to be applied
+    three or four times this session and still missed a path each time.
+
+    The ORDER is the product of every bug this session, and each step depends on the one
+    before it:
+
+      1. match   — every configured provider gets an identity, whether or not media is
+                   taken from it. A match is not an ingest.
+      2. fetch   — candidates from the providers (and the open web when asked).
+      3. stamp   — reconcile media.game_key to the CATALOG's identity. Fetch-time
+                   stamping is a guess; neutral art only serves when the two agree
+                   (DESIGN §11.9), so a stale stamp makes good art invisible.
+      4. select  — something is chosen, so nothing renders a monogram while we work.
+      5. measure — dimensions and the filler verdict, which only exist once bytes are in
+                   hand. Selecting BEFORE this is selecting blind.
+      6. prune   — blank/placeholder art can only be detected after measure, and must go
+                   before the final pick or it keeps a slot it does not deserve.
+      7. reselect— re-rank now that shape, size and filler are known, and refill any slot
+                   prune just emptied. This is the step whose absence produced every
+                   "wrong cover displayed" report.
+      8. ai      — optional, paid, off by default, once per game.
+
+    Scoped throughout: `select(only=keys)` and a per-row measure, never a catalog-wide
+    sweep, so running this for one game costs one game.
+
+    Returns {step: count} for the caller to report.
+    """
+    keys = [k for k in (keys or []) if k]
+    out = {"matched": 0, "fetched": 0, "measured": 0, "pruned": 0, "adjudicated": 0}
+    if not keys:
+        return out
+    import media_fetch as _mf
+
+    # 1. identity for every provider
+    try:
+        got = _match_providers(keys, should_stop)
+        out["matched"] = sum(got.values())
+    except Exception as e:                     # noqa: BLE001 — never fails the pipeline
+        print("enrich match: %s" % str(e)[:150], file=sys.stderr)
+
+    own = con is None
+    con = con or media_choose.con_index()
+    try:
+        con.execute("PRAGMA busy_timeout=30000")
+        # 2. fetch
+        for nk in keys:
+            if should_stop():
+                break
+            try:
+                _pull_media_sources(con, nk, want_web=web, provider=provider, kinds=kinds)
+                out["fetched"] += 1
+            except Exception as e:             # noqa: BLE001 — one game never stops the rest
+                print("enrich fetch %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+    finally:
+        if own:
+            con.close()
+
+    # 3-7. the shared tail
+    fin = _media_finish(keys, measure=measure, prune=prune, should_stop=should_stop)
+    out.update(fin)
+
+    # 8. AI art adjudication — paid, so it never fires unless explicitly enabled
+    want_ai = config.get_bool("ai_art_auto_pick", False) if ai_art is None else ai_art
+    if want_ai:
+        now = int(time.time())
+        lcon = ro(LIBRARY_DB)
+        try:
+            titles = {r["norm_key"]: r["canonical_title"] for r in lcon.execute(
+                "SELECT norm_key, canonical_title FROM games")}
+        finally:
+            lcon.close()
+        for nk in keys:
+            if should_stop():
+                break
+            if _art_adjudicated(nk):
+                continue
+            try:
+                _ai_adjudicate_game(nk, titles.get(nk, nk))
+                _mark_art_adjudicated(nk, now)
+                out["adjudicated"] += 1
+            except Exception as e:             # noqa: BLE001
+                print("enrich ai %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+    return out
 
 
 def _match_providers(keys, should_stop=lambda: False, force=False):
@@ -6342,21 +6447,16 @@ def _pull_media_sources(con, nk, want_web=False, provider=None, kinds=None):
 
 def _fetch_media_for(nk, want_web=False):
     """One-game media hunt + choose (the wand's media step, also the refresh endpoint)."""
-    import media_fetch as _mf
+    res = _enrich_media([nk], web=want_web)
     con = media_choose.con_index()
-    web_n = 0
     try:
-        con.execute("PRAGMA busy_timeout=30000")
-        web_n = _pull_media_sources(con, nk, want_web=want_web)
-        _mf._backfill_game_key(con)
-        media_choose.select(con)
-        con.commit()
         have = {r[0]: r[1] for r in con.execute(
             "SELECT kind, COUNT(*) FROM media WHERE norm_key=? AND chosen=1 GROUP BY kind",
             (nk,))}
     finally:
         con.close()
-    return {"has_cover": bool(have.get("cover")), "chosen": have, "web_added": web_n}
+    return {"has_cover": bool(have.get("cover")), "chosen": have,
+            "web_added": res.get("fetched", 0)}
 
 
 def _wand_fill_media(nks, want_web, should_stop):
@@ -6396,16 +6496,15 @@ def _wand_fill_media(nks, want_web, should_stop):
         if want_web and not do_web:
             print("aimeta wand: web media discovery skipped (%d games > cap %d); providers "
                   "only" % (len(need), WEB_CAP), file=sys.stderr)
-        for nk in need:
-            if should_stop():
-                break
-            try:
-                _pull_media_sources(con, nk, want_web=do_web)
-            except Exception as e:
-                print("aimeta wand media %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
-        _mf._backfill_game_key(con)
-        media_choose.select(con)
-        con.commit()
+        # ONE pipeline. This used to be fetch -> stamp -> select inline, which skipped
+        # measure and prune entirely: the wand chose art it had never looked at, and
+        # could leave a blank placeholder as the pick. Every onramp runs _enrich_media,
+        # so a fix to the chain reaches the wand for free.
+        con.close()
+        con = None
+        _enrich_media(need, web=do_web, should_stop=should_stop)
+        con = media_choose.con_index()
+        con.execute("PRAGMA busy_timeout=30000")
 
         # RESCUE PASS — the wand's "just make it correct" promise, not an opt-in.
         #
@@ -6431,19 +6530,17 @@ def _wand_fill_media(nks, want_web, should_stop):
                       % (len(stranded), len(rescue),
                          " (capped)" if len(stranded) > RESCUE_CAP else ""),
                       file=sys.stderr)
-                for nk in rescue:
-                    if should_stop():
-                        break
-                    try:
-                        _pull_media_sources(con, nk, want_web=True)
-                    except Exception as e:
-                        print("aimeta wand rescue %s: %s" % (nk, str(e)[:120]),
-                              file=sys.stderr)
-                _mf._backfill_game_key(con)
-                media_choose.select(con)
-                con.commit()
+                # The rescue is a NARROWER SCOPE of the same pipeline, not a second
+                # one — web on, the stranded games only. Running its own fetch/select
+                # here is how the wand ended up with two different notions of "done".
+                con.close()
+                con = None
+                _enrich_media(rescue, web=True, should_stop=should_stop)
+                con = media_choose.con_index()
+                con.execute("PRAGMA busy_timeout=30000")
     finally:
-        con.close()
+        if con is not None:
+            con.close()
 
 
 
@@ -6494,82 +6591,29 @@ def _apply_ss_matches(now):
 
 def _scoped_media_reconcile(touched, media, should_stop):
     """Background media reconcile for the games a wand apply touched — SCOPED to just
-    those games, never the whole catalog. Pulls their provider art (IGDB + ScreenScraper +
-    SteamGridDB gap-fill), re-chooses the best per kind, materializes the new bytes (content-
-    addressed, so only new art downloads), refreshes scores, and — only if ai_art_auto_pick
-    is on — AI-adjudicates once per game. This replaced the old ~18-min full media_fetch +
-    ~10-min full build_library that ran on every apply."""
+    those games, never the whole catalog.
+
+    This was the ONLY onramp that ran the full media chain; every other one had grown a
+    partial copy. It is now a thin caller of `_enrich_media` like the rest, so the chain
+    has exactly one definition and this function is left with the two things that are
+    genuinely its own: the media:False escape hatch, and refreshing scores afterwards.
+    """
     if not touched:
         return
-    now = int(time.time())
-    import media_fetch as _mf
-    # A MATCH IS NOT AN INGEST — every configured provider is matched for every touched
-    # game, before and independently of whether any art is taken. Runs even when
-    # media:False, because knowing what a game IS on ScreenScraper is not a media
-    # question. Free and deterministic; no AI area is consulted.
-    try:
-        _match_providers(list(touched), should_stop)
-    except Exception as e:                     # noqa: BLE001
-        print("scoped reconcile provider match: %s" % str(e)[:150], file=sys.stderr)
     if media is not False:                     # media:False => skip art entirely
-        con = media_choose.con_index()
+        _enrich_media(list(touched), should_stop=should_stop)
+    else:
+        # Knowing what a game IS on ScreenScraper is not a media question, so the match
+        # still runs when art is skipped. A match is not an ingest.
         try:
-            con.execute("PRAGMA busy_timeout=30000")
-            _mf.fetch_igdb(con, now, only=set(touched))            # scoped IGDB art
-            try:
-                _mf.fetch_screenscraper(con, now, only=set(touched))  # scoped SS art
-            except Exception as e:
-                print("scoped reconcile ss: %s" % str(e)[:150], file=sys.stderr)
-            try:                                # SteamGridDB gap-fill (heroes/logos/covers)
-                if _mf.config.steamgriddb_key():
-                    ph = ",".join("?" * len(touched))
-                    lc = ro(LIBRARY_DB)
-                    try:
-                        titles = {r["norm_key"]: r["canonical_title"] for r in lc.execute(
-                            "SELECT norm_key, canonical_title FROM games "
-                            "WHERE norm_key IN (%s)" % ph, tuple(touched))}
-                        appids = {r["norm_key"]: r["source_id"] for r in lc.execute(
-                            "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
-                            "ON s.game_id=g.id WHERE s.source='steam' AND g.norm_key "
-                            "IN (%s)" % ph, tuple(touched))}
-                    finally:
-                        lc.close()
-                    tgts = [(nk, titles.get(nk, ""), appids.get(nk)) for nk in touched]
-                    _mf.fetch_steamgriddb_targets(con, now, tgts)
-            except Exception as e:
-                print("scoped reconcile sgdb: %s" % str(e)[:150], file=sys.stderr)
-            # no global prune_dead() here — it HTTP-probes every speculative URL in the
-            # index (unscoped, slow). _prune_blank_media(touched) below covers these games;
-            # the on-demand/scan rebuild does the whole-library dead-URL sweep.
-            _mf._backfill_game_key(con)
-            media_choose.select(con)                              # re-choose best per group
-            con.commit()
-        finally:
-            con.close()
-        try:
-            _prune_blank_media(list(touched))
-        except Exception:
-            pass
-        # NB: no materialize() here — like the old reconcile, chosen art serves from its
-        # live reference until the separate materialize/publish step. Materializing here
-        # would be a whole-library download (not scoped) and defeat the point.
+            _match_providers(list(touched), should_stop)
+        except Exception as e:                 # noqa: BLE001
+            print("scoped reconcile provider match: %s" % str(e)[:150], file=sys.stderr)
     # scores read the cached IGDB ratings (no network) so a new match's score lands now
     _run_script("scores_fetch.py", args=["igdb"], timeout=180)
-    # AI art adjudication — OFF by default (paid); once per game when on (see _art_adjudicated)
-    if touched and config.get_bool("ai_art_auto_pick", False):
-        lcon = ro(LIBRARY_DB)
-        try:
-            titles = {r["norm_key"]: r["canonical_title"]
-                      for r in lcon.execute("SELECT norm_key, canonical_title FROM games")}
-        finally:
-            lcon.close()
-        for nk in touched:
-            if should_stop():
-                break
-            if _art_adjudicated(nk):
-                continue
-            _ai_adjudicate_game(nk, titles.get(nk, nk))
-            _mark_art_adjudicated(nk, now)
+    # AI art adjudication is NOT repeated here — _enrich_media owns it, gated on
+    # ai_art_auto_pick and once per game. It used to be a second copy of that logic,
+    # which is precisely how the two drifted apart.
 
 
 # --- scoped media reconcile job (apply path): its own single-flight queue, distinct from
@@ -9828,6 +9872,14 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 _got = _match_providers(_keys, _stopped)
                 _phase("provmatch", "ok",
                        ", ".join("%s %d" % (p, n) for p, n in sorted(_got.items())))
+                # NB the import deliberately runs the MATCH here and leaves fetching to
+                # the `media_fetch.py` passes below. Those are subprocesses that stream
+                # progress for a whole-library pull, which is what an import needs; the
+                # in-process pipeline (_enrich_media) is the per-game path used by every
+                # other onramp. The steps and their ORDER are identical either way — the
+                # difference is batching, not behaviour — and `_media_finish` below runs
+                # the same stamp -> select -> measure -> prune -> re-select tail so the
+                # import cannot end in a state the pipeline would never produce.
             except Exception as e:              # noqa: BLE001 — never fails an import
                 _phase("provmatch", "failed", str(e)[:120])
             step()
@@ -9919,6 +9971,24 @@ def _sync_worker(job, services, media_ids=(), full=False):
                            _mat_prog, timeout=3600, job=job)
         else:
             _run_script("media_choose.py", timeout=900, job=job)
+        # The SAME tail every other onramp runs: stamp -> select -> measure -> prune ->
+        # re-select. The import fetches via subprocesses (streamed progress over a whole
+        # library), but it must not therefore END somewhere the pipeline would never
+        # leave a game — before this it never pruned, so a placeholder fetched during an
+        # import kept its slot until something else happened to notice.
+        try:
+            _lc2 = ro(LIBRARY_DB)
+            try:
+                _fk = [r[0] for r in _lc2.execute(
+                    "SELECT DISTINCT norm_key FROM games "
+                    "WHERE norm_key IS NOT NULL AND norm_key!=''")]
+            finally:
+                _lc2.close()
+            _fin = _media_finish(_fk, measure=(mode != "ondemand"), should_stop=_stopped)
+            if _fin.get("pruned"):
+                _phase("media", "running", "dropped %d blank assets" % _fin["pruned"])
+        except Exception as e:                  # noqa: BLE001 — never fails an import
+            print("import media finish: %s" % str(e)[:150], file=sys.stderr)
         # report how much art coverage the run produced
         cover_after = _n_identified_with_cover()
         if cover_after is not None:

@@ -388,3 +388,57 @@ the Steam-attr feed. The Steam-attr cache fills on the next Steam-media pass. Ne
 `HANDOFF.md` predates the server build and still describes the AI-forward server as the one
 open task. It needs a rewrite (or retirement in favour of `DESIGN.md` + this file) before it
 misleads anyone picking the project up.
+
+## Pipeline unification — one chain, every onramp (2026-08-03)
+
+datbird: *"these should be unified functions where we utilize modules and functions
+consistently through the entire product… no matter what onramp/offramp we're taking to
+enrich, correct metadata/media the pipelines remain consistent, which means any fixes,
+improvements and changes made easily apply to all onramps/offramps."*
+
+An audit of the entry points found exactly what that predicted. **Only one of them ran
+the full chain:**
+
+| onramp | what it actually ran |
+|---|---|
+| `_sync_worker` (import) | match only |
+| `_wand_fill_media` (the wand!) | fetch → stamp → select |
+| `_scoped_media_reconcile` | match → fetch → stamp → select → measure → prune → ai |
+| `_ingest_new_members` | fetch → measure → stamp → select |
+| `_reconcile_media_now` | fetch(IGDB only) → stamp → select |
+| `_fetch_media_for` | fetch → stamp → select |
+| `media_fetch_provider` | fetch → stamp → select |
+
+The wand's own media step **never measured and never pruned** — it chose art it had never
+looked at and could leave a blank placeholder as the pick. Member ingest never pruned.
+`_reconcile_media_now` fetched IGDB only, so the "immediate" result an apply showed could
+be replaced later by the background pass — which reads as the app changing its mind.
+
+### The one chain
+
+- **`_enrich_media(keys, …)`** = match → fetch → `_media_finish`
+- **`_media_finish(keys, …)`** = stamp → select → measure → prune → **re-select**
+
+Each step depends on the one before it, and the order is the product of every bug this
+session: stamp before select (neutral art only serves when identity agrees, §11.9);
+measure before the final pick (selecting first is selecting blind); prune after measure
+(a blank can only be detected once bytes are in hand); **re-select after prune** (the step
+whose absence produced every "wrong cover displayed" report).
+
+Scoped throughout — `select(only=keys)` and a per-row measure — so running it for one
+game costs one game.
+
+### Deliberate exemptions
+
+- `_sync_worker` fetches through `media_fetch.py` **subprocesses** (streamed progress over
+  a whole library) and then runs `_media_finish`. The batching differs; the chain does not.
+- `_media_worker` is bulk repo hydration — no fetch, no enrichment.
+- `media_asset` repairs a single dead reference at serve time.
+
+### Guard
+
+`test_pipeline_unified.py` (26) is source-level on purpose: the failure mode is *a code
+path that never learned about a function*, which no unit test of that function can catch —
+it works perfectly, nobody called it. It fails the build if an onramp re-implements a
+step, if the tail's order changes, or if a new caller of stamp/prune appears outside the
+declared exemptions.
