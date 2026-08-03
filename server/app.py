@@ -546,8 +546,8 @@ def stats():
         # `identified`.
         total_with = con.execute(
             "SELECT COUNT(*) FROM games g WHERE " + IDENTIFIED_SQL + and_w +
-            " AND EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
-            "AND md.chosen=1 AND md.kind='cover')").fetchone()[0]
+            " AND " + _has_cover_sql(_has_col(con, "games", "entry_key"),
+                                     _has_col(con, "games", "game_key"))).fetchone()[0]
         for row in con.execute("SELECT kind, COUNT(DISTINCT norm_key) c "
                                "FROM m.media WHERE chosen=1 GROUP BY kind"):
             coverage[row["kind"]] = row["c"]
@@ -629,6 +629,8 @@ SORT_SQL = {
     "n_sources": ("g.n_sources", "DESC"),
     "n_kinds": ("g.n_kinds", "DESC"),
     "matched": ("EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)", "DESC"),
+    # NB: resolved at query time via _has_cover_sql so it sorts on the DISPLAY rule —
+    # the literal here is only a fallback for callers that sort without a connection.
     "has_cover": ("EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
                   "AND md.chosen=1 AND md.kind='cover')", "DESC"),
     "cross_source": ("(g.n_sources>1)", "DESC"),
@@ -762,6 +764,38 @@ def _parse_query(qstr):
     return where, args
 
 
+def _has_cover_sql(has_ek=True, has_gk=True):
+    """SQL boolean: does this entry have a cover the UI can actually DISPLAY?
+
+    ONE definition of "has a cover", shared by the stats card, the has_cover filter,
+    the has_cover sort, the library grid and Spotlight. It mirrors the serve resolver
+    exactly (DESIGN §11.4/§11.9): own-console art, or platform-neutral art whose
+    identity matches this entry, or a user upload.
+
+    It exists because those five places each wrote the rule out by hand, and three of
+    them wrote a NAIVE version — `chosen=1 AND kind='cover'` with no system or identity
+    gate. So a game whose only chosen cover belonged to another console counted as
+    "has cover" in the stats, passed the has_cover filter and sorted as covered, then
+    rendered a placeholder in the grid. The rule agreed only as long as somebody kept
+    five copies in step; nothing enforced it."""
+    own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')" if has_ek else ""
+    parts = ["EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
+             "AND md.chosen=1 AND md.kind='cover'%s)" % own]
+    if has_ek:
+        neutral = " AND COALESCE(md.system,'')=''" + (
+            " AND md.game_key=g.game_key" if has_gk else "")
+        parts.append("EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key "
+                     "AND md.chosen=1 AND md.kind='cover'%s)" % neutral)
+        if has_gk:
+            parts.append("EXISTS(SELECT 1 FROM m.media md WHERE md.game_key=g.game_key "
+                         "AND md.chosen=1 AND md.kind='cover' "
+                         "AND COALESCE(md.system,'')='')")
+    parts.append("EXISTS(SELECT 1 FROM u.user_media um WHERE um.norm_key=g.norm_key "
+                 "AND um.kind='cover')")
+    return "(" + " OR ".join(parts) + ")"
+
+
+
 def _query_games(con, q=None, source=None, platform=None, has_kind=None,
                  include=None, exclude=None, sort=None, limit=60, offset=0,
                  status="owned", identified="only", query=None):
@@ -802,6 +836,8 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     def _fexpr(tok):
         """Filter token -> (sql, args). Bare tokens hit FLAG_SQL; 'source:<x>'
         and 'system:<x>' match the sources table dynamically."""
+        if tok == "has_cover":               # display rule, not the naive one
+            return _has_cover_sql(has_ek, _has_col(con, "games", "game_key")), []
         if tok in FLAG_SQL:
             return FLAG_SQL[tok], []
         if tok == "low_confidence":              # task #13 — threshold is a live config value
@@ -904,17 +940,10 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         cover_v = "COALESCE(" + ",".join(_cv) + ") AS cover_v, "
         # has_cover reflects SERVABLE art (own console or gated neutral), so a card with
         # only another console's art shows the placeholder, not a broken/foreign image.
-        has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
-                   "md.chosen=1 AND md.kind='cover'" + _own + ") OR EXISTS(SELECT 1 FROM "
-                   "m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 AND "
-                   "md.kind='cover'" + _neutral + ")" + _neu_gk_ex + ") OR EXISTS(SELECT 1 "
-                   "FROM u.user_media um WHERE um.norm_key=g.norm_key AND um.kind='cover')) "
-                   "AS has_cover, ")
+        has_cov = _has_cover_sql(True, _hasgk) + " AS has_cover, "
     else:
         cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v, "
-        has_cov = ("(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
-                   "md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media "
-                   "um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
+        has_cov = _has_cover_sql(False, False) + " AS has_cover, "
     base = (
         "SELECT g.norm_key, " + eksel + "g.canonical_title, g.n_sources, g.n_kinds, "
         "g.sources_summary, g.has_emulation AS is_emulation, " + wsel +
@@ -931,7 +960,11 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "(SELECT group_concat('ludodex:'||ut.tag, char(31)) FROM t.user_tags ut "
         "   WHERE ut.norm_key=g.norm_key) AS usr_tags "
         "FROM games g" + clause +
-        _order_by(sort, {"ludodex_score": (score, "DESC")}) + " LIMIT ? OFFSET ?")
+        _order_by(sort, {"ludodex_score": (score, "DESC"),
+                         # sort on the DISPLAY rule, same as the filter and the grid
+                         "has_cover": (_has_cover_sql(
+                             has_ek, _has_col(con, "games", "game_key")), "DESC")})
+        + " LIMIT ? OFFSET ?")
     # imported-origin tags live in the catalog's game_tags (absent in an older DB)
     imp = ("(SELECT group_concat(gt.origin||':'||gt.tag, char(31)) FROM game_tags gt "
            "   WHERE gt.game_id=g.id AND gt.origin<>'ludodex') AS imp_tags, ")
