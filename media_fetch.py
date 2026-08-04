@@ -665,7 +665,11 @@ def _sgdb_game_id(key, appid=None, title=None):
     if title:
         try:
             d = _sgdb_get("/search/autocomplete/%s"
-                          % urllib.parse.quote(title.strip()), key)
+                          # safe="" or a slash in the title breaks OUT of the URL path:
+                          # "FINAL FANTASY X/X-2 HD Remaster" became a request for a
+                          # different endpoint entirely, which is why two games could
+                          # never be asked at all.
+                          % urllib.parse.quote(title.strip(), safe=""), key)
             looked = True
             items = d.get("data") or []
             if items:
