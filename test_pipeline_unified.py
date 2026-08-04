@@ -189,6 +189,21 @@ def main():
     # the picker's own ordering must agree
     check("the media picker ranks by `used` too", "a.used ? -2" in app)
 
+    print("8. ONE serve rule — the endpoint, the checker and the UI all defer to it")
+    # This one is personal: check_invariants.py had its OWN copy of the serve query, so
+    # fixing the resolver left the checker asserting the old behaviour. The checker whose
+    # whole purpose is catching duplicated rules had duplicated a rule.
+    mc = open(os.path.join(DIR, "media_choose.py"), encoding="utf-8").read()
+    check("media_choose.serve_pick exists", "def serve_pick(" in mc)
+    ma = body_of("media_asset") or ""
+    check("the serve endpoint calls it", "media_choose.serve_pick(" in ma)
+    check("and no longer inlines the query",
+          "OR (COALESCE(system,'')='' AND game_key=?)" not in ma)
+    ci = open(os.path.join(DIR, "check_invariants.py"), encoding="utf-8").read()
+    check("the invariant checker calls it too", "media_choose.serve_pick(" in ci)
+    check("and does not restate the query",
+          "ORDER BY (norm_key=? AND COALESCE(system,'')=?) DESC" not in ci)
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 

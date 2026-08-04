@@ -329,6 +329,35 @@ def drop_dead(con, row):
     con.commit()
 
 
+def serve_pick(con, base, platform, game_key, kind):
+    """THE rule for "which asset does this entry actually display for this kind".
+
+    Precedence, most specific first, and deterministic:
+      1. this entry's own-console art (system = the entry's platform)
+      2. this entry's own platform-neutral art whose identity matches (DESIGN §11.9)
+      3. neutral art from ANOTHER norm_key sharing the identity — the deliberate rescue
+         for a title that parsed into two norm_keys but has one fetched cover
+      4. ties broken by id, so the answer is stable rather than whatever the query
+         planner happens to return
+
+    It lives here, once, because it was previously written inline in the serve endpoint
+    AND copied into the invariant checker AND approximated a third time in the UI. (3)
+    used to outrank (2) by accident — the neutral branch has no norm_key constraint —
+    so "Battlerite Public Test" served "Battlerite"'s background while its own media
+    panel showed its own, the page and the panel disagreeing on one screen.
+
+    Returns the media row id, or None.
+    """
+    r = con.execute(
+        "SELECT id FROM media WHERE kind=? AND chosen=1 AND ("
+        "(norm_key=? AND COALESCE(system,'')=?) "
+        "OR (COALESCE(system,'')='' AND game_key=?)) "
+        "ORDER BY (norm_key=? AND COALESCE(system,'')=?) DESC, (norm_key=?) DESC, id "
+        "LIMIT 1",
+        (kind, base, platform or "", game_key, base, platform or "", base)).fetchone()
+    return (r[0] if not hasattr(r, "keys") else r["id"]) if r else None
+
+
 def _repick(con, norm_key, kind, system=None):
     """After a dead asset is removed, re-elect this game+kind.
 

@@ -23,6 +23,7 @@ IDX = os.path.join(DATA, "media-index.sqlite")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, "/app")
 import media                                            # noqa: E402
+import media_choose                                     # noqa: E402
 
 VIOLATIONS = []
 
@@ -190,6 +191,50 @@ def main():
                "a provider that is never asked can never be a provider")
     except Exception as e:              # noqa: BLE001
         print("  skipped   I7 provider match (%s)" % str(e)[:60])
+
+    # ---------------------------------------------------------------- I8: displayed==used
+    # The panel labels one asset "#1 USED" and the page renders one asset. If those are
+    # not the same row the user is looking at a contradiction on one screen — which is
+    # exactly what Beyond Oasis showed for `logo`. That bug was in the UI's own rule, but
+    # the two computations can also diverge in the DATA: game_media() drops `file` refs
+    # whose bytes are missing locally (the serve resolver does not), and when a bucket
+    # holds more than one chosen row both sides pick "the first" by different orderings.
+    #
+    # This replicates BOTH and compares them per (entry, kind) — every kind, not just the
+    # one that was reported.
+    bad = []
+    per_kind = {}
+    for r in g.execute("SELECT base_key, platform, COALESCE(game_key,'') gk, "
+                       "canonical_title t FROM games"):
+        base, plat, gk = r["base_key"], r["platform"] or "", r["gk"] or "\x00"
+        # what game_media() offers this entry (the picker's candidate set)
+        cands = m.execute(
+            "SELECT id, kind, COALESCE(system,'') sys, ref_type, ref, sha1 FROM media "
+            "WHERE norm_key=? AND (COALESCE(system,'')=? OR (COALESCE(system,'')='' "
+            "AND COALESCE(game_key,'')=?)) AND chosen=1 ORDER BY kind, id",
+            (base, plat, gk)).fetchall()
+        by_kind = {}
+        for c in cands:
+            # game_media() hides a local file that is not present on this host
+            if c["ref_type"] == "file" and not c["sha1"] and not os.path.exists(c["ref"]):
+                continue
+            by_kind.setdefault(c["kind"], []).append(c)
+        for kind, lst in by_kind.items():
+            own = [c for c in lst if c["sys"] == plat]
+            used_id = (own or lst)[0]["id"]
+            # call the REAL rule, do not restate it — this checker having its own copy
+            # of the serve query is the very defect it exists to catch, and it did
+            # exactly that: the resolver was fixed and this kept asserting the old rule.
+            srv_id = media_choose.serve_pick(m, base, plat, r["gk"], kind)
+            if srv_id and srv_id != used_id:
+                bad.append("%s (%s) %s — panel says %d, serve returns %d"
+                           % (r["t"][:30], plat, kind, used_id, srv_id))
+                per_kind[kind] = per_kind.get(kind, 0) + 1
+    if per_kind:
+        print("  (by kind: %s)" % ", ".join("%s %d" % kv for kv in
+                                            sorted(per_kind.items(), key=lambda x: -x[1])))
+    report("I8 the asset labelled USED is the asset actually served", bad,
+           "the panel and the page would show different art for the same entry")
 
     m.close()
     g.close()

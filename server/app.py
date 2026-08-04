@@ -7800,8 +7800,11 @@ def game_media(norm_key: str):
         _cands = [a for a in assets if a["kind"] == _kind and a["chosen"]]
         if not _cands:
             continue
+        # Same precedence and the same stable tie-break as the serve resolver above:
+        # own-console first, then by id. `_cands` is already limited to this entry's
+        # eligible art, so "this norm_key" is implicit here.
         _own = [a for a in _cands if (a.get("system") or "") == (platform or "")]
-        _pick = (_own or _cands)[0]
+        _pick = sorted(_own or _cands, key=lambda a: a["id"])[0]
         _pick["used"] = True
 
     # durable user uploads (added via the All Media upload buttons) — always "active"
@@ -8504,13 +8507,13 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
                 # art is matched by game IDENTITY (game_key) across norm_keys, so a game
                 # whose title parsed into two norm_keys (Intl Karate "+"/"plus") still serves
                 # its one fetched cover. Own-console preferred via the ORDER BY.
+                # ONE rule, in media_choose.serve_pick — it was written inline here,
+                # copied into the invariant checker, and approximated a third time in the
+                # UI. Fixing it here left the other two asserting the old behaviour.
+                _pid = media_choose.serve_pick(rcon, base, platform, gkey, kind)
                 r = rcon.execute(
-                    "SELECT id, ref_type, ref, ext, sha1, provider FROM media "
-                    "WHERE kind=? AND chosen=1 AND ("
-                    "(norm_key=? AND COALESCE(system,'')=?) "
-                    "OR (COALESCE(system,'')='' AND game_key=?)) "
-                    "ORDER BY (norm_key=? AND COALESCE(system,'')=?) DESC LIMIT 1",
-                    (kind, base, platform, gkey, base, platform)).fetchone()
+                    "SELECT id, ref_type, ref, ext, sha1, provider FROM media WHERE id=?",
+                    (_pid,)).fetchone() if _pid else None
             else:
                 # pre-migration fallback: own console art, or any platform-neutral art.
                 r = rcon.execute(
