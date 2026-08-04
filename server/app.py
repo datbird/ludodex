@@ -3523,6 +3523,10 @@ def _ss_match(queries, systems, year=None):
             if cand and cand.lower() not in seenq:
                 seenq.add(cand.lower())
                 qlist.append(cand)
+    # SS ranks by relevance and buries an exact SHORT title under its own sequels — the
+    # same trap `_igdb_by_name` documents for IGDB. "Mega Man X4" was not in the first 8
+    # results for its own name (Wily Wars, Sequel Wars, Mega Man 2 came back instead).
+    SS_SEARCH_LIMIT = 30
     best, seen = None, set()
     # ScreenScraper's CROSS-SYSTEM search costs ~49s against ~10s for a per-system one
     # (measured live 2026-08-02). `_ss_match` used to try every query variant against it,
@@ -3568,7 +3572,7 @@ def _ss_match(queries, systems, year=None):
                 completed = False
                 break
             try:
-                cands = ss.jeu_recherche(creds, q, systemeid=sid, limit=8)
+                cands = ss.jeu_recherche(creds, q, systemeid=sid, limit=SS_SEARCH_LIMIT)
                 any_ok = True
             except Exception as e:               # surface, don't swallow silently
                 print("ss search %r sys=%s: %s" % (q, sid, str(e)[:120]), file=sys.stderr)
@@ -3585,6 +3589,14 @@ def _ss_match(queries, systems, year=None):
                 inter = len(qtok & ntok)
                 qc = inter / len(qtok)           # query tokens covered by the SS name
                 nc = inter / len(ntok)           # SS-name tokens covered by the query
+                # Token sets cannot see that "Megaman X4" and "Mega Man X4" are the same
+                # game: {megaman,x4} vs {mega,man,x4} share ONE token, scoring 0.50 and
+                # failing the 0.8 gate — so SS returned the exact match and we rejected
+                # it. Compare with spaces squashed out as well; an equal squash IS an
+                # exact match, whatever the word breaks.
+                if (titlenorm.norm(q).replace(" ", "")
+                        == titlenorm.norm(ss.jeu_name(j)).replace(" ", "")):
+                    qc = nc = 1.0
                 yr = ss.jeu_year(j)
                 score = qc + nc + (0.4 if year and yr == str(year) else 0)
                 if qc >= 0.8 and (best is None or score > best[0]):
