@@ -446,7 +446,12 @@ def provider_allowed(name, platform=None, sources=()):
     game owned on both Steam and as a ROM is still a ROM, and turning Steam off should not
     remove it from a provider that covers the ROM side.
     """
-    if not (metadata_enabled(name) if name == "igdb" else media_enabled(name)):
+    # Its OWN switch, deliberately not the media_/metadata_ enable flag. Those govern
+    # whether art or metadata is TAKEN from a provider; this governs whether the provider
+    # is asked what the game IS. A match is not an ingest — and reusing the media flag
+    # would have silently stopped SteamGridDB matching entirely, since
+    # media_steamgriddb_enabled defaults to OFF.
+    if not get_bool("provider_%s_enabled" % name, True):
         return False
     if platform and platform in provider_off_platforms(name):
         return False

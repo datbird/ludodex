@@ -1603,8 +1603,7 @@ def providers_scope():
         lc.close()
     out = []
     for name in ("igdb", "steam", "screenscraper", "steamgriddb"):
-        on = (config.metadata_enabled(name) if name == "igdb"
-              else config.media_enabled(name))
+        on = config.get_bool("provider_%s_enabled" % name, True)
         out.append({
             "provider": name,
             "enabled": bool(on),
@@ -1623,8 +1622,7 @@ def providers_scope_set(body: dict = Body(...)):
     if name not in ("igdb", "steam", "screenscraper", "steamgriddb"):
         raise HTTPException(400, "unknown provider %r" % name)
     if "enabled" in b:
-        key = ("metadata_%s_enabled" if name == "igdb" else "media_%s_enabled") % name
-        config.set_(key, "1" if b["enabled"] else "0")
+        config.set_("provider_%s_enabled" % name, "1" if b["enabled"] else "0")
     config.set_provider_scope(name, b.get("off_sources"), b.get("off_platforms"))
     return providers_scope()
 

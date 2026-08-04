@@ -33,7 +33,10 @@ def check(label, cond):
 
 def main():
     print("1. everything is on by default, with nothing stored")
-    config.set_("media_screenscraper_enabled", "1")
+    # deliberately NOT set — the default must be on, including for steamgriddb, whose
+    # media_ flag defaults OFF. Matching is not taking art.
+    check("a provider with nothing configured is on",
+          config.provider_allowed("steamgriddb", "pc", {"steam"}))
     check("no platform excluded", config.provider_off_platforms("screenscraper") == set())
     check("no source excluded", config.provider_off_sources("screenscraper") == set())
     check("a pc/steam game is allowed",
@@ -42,9 +45,9 @@ def main():
           config.provider_allowed("screenscraper", "genesis", {"emulation"}))
 
     print("2. the master switch overrides everything")
-    config.set_("media_screenscraper_enabled", "0")
+    config.set_("provider_screenscraper_enabled", "0")
     check("off means off", not config.provider_allowed("screenscraper", "genesis", {"x"}))
-    config.set_("media_screenscraper_enabled", "1")
+    config.set_("provider_screenscraper_enabled", "1")
 
     print("3. per-PLATFORM exclusion — the 'consoles only' case")
     config.set_provider_scope("screenscraper", off_platforms=["pc"])
@@ -66,7 +69,7 @@ def main():
           config.provider_allowed("screenscraper", "pc", set()))
 
     print("5. scope is per provider, not global")
-    config.set_("media_steamgriddb_enabled", "1")
+    config.set_("provider_steamgriddb_enabled", "1")
     check("steamgriddb is unaffected by screenscraper's exclusions",
           config.provider_allowed("steamgriddb", "pc", {"steam"}))
 
