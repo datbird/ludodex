@@ -174,6 +174,21 @@ def main():
         check("%s does not re-write identity consequences: %s" % (name, raw or "none"),
               not raw)
 
+    print("7. the UI asks the SERVER which asset is primary, it does not re-derive it")
+    # `used` is computed server-side with the serve resolver's own rule (own-console art
+    # over neutral, §11.4/§11.9). Every surface that shows "the" asset for a kind must
+    # read it. The detail hero had its own `pinned ?? of[0]` rule and therefore rendered
+    # a different logo than the picker labelled #1 USED — the panel and the page
+    # disagreeing about the same asset, on the same screen.
+    app = open(os.path.join(DIR, "web", "src", "App.tsx"), encoding="utf-8").read()
+    i = app.index("const pickKind = (kind: string)")
+    body = app[i:i + 420]
+    check("pickKind consults `used`", "a.used" in body)
+    check("and no longer falls straight to the first array element",
+          "a.pinned) ?? of[0]" not in body)
+    # the picker's own ordering must agree
+    check("the media picker ranks by `used` too", "a.used ? -2" in app)
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 

@@ -6276,9 +6276,19 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   }, [])
 
   const assets = media?.assets ?? []
+  // The primary asset for a kind is the one the SERVE resolver actually returns, which
+  // the server marks as `used` (own-console art over neutral, DESIGN §11.4/§11.9). This
+  // used to be `pinned ?? of[0]` — a fourth, independent notion of "primary" that
+  // consulted neither `chosen` nor `used`, so the hero showed whatever happened to come
+  // first in the array. Live, Beyond Oasis (Genesis) rendered the EU "The Story of Thor"
+  // wheel in the hero while the picker correctly marked the US "BEYOND OASIS" wheel as
+  // #1 USED — the panel and the page disagreeing about the same asset, which is the exact
+  // complaint the `used` flag was added to end. `used` already honours pins, because
+  // select() ranks a pinned asset first.
   const pickKind = (kind: string) => {
     const of = assets.filter((a) => a.kind === kind && a.is_image)
-    return of.find((a) => a.pinned) ?? of[0] ?? null
+    return of.find((a) => a.used) ?? of.find((a) => a.pinned)
+      ?? of.find((a) => a.chosen) ?? of[0] ?? null
   }
   // a game is "identified" once it's a known title (a provider match or a real
   // store/manual source); a bare ROM (emulation/archive only, no match) is not.
