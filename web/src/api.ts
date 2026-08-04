@@ -332,6 +332,17 @@ export interface ArtPick {
   reason: string
 }
 
+export interface ProviderScope {
+  provider: string
+  enabled: boolean
+  off_sources: string[]      // exclusions only — everything else is ON
+  off_platforms: string[]
+  cost: string               // measured per-game wall clock, shown in the UI
+}
+export interface ProviderScopeState {
+  providers: ProviderScope[]; sources: string[]; platforms: string[]
+}
+
 export interface MatchedProvider {
   provider: string
   matched: boolean
@@ -955,6 +966,22 @@ export const api = {
   // Providers this game is MATCHED to — drives the "Fetch from…" menu. A provider
   // with no match comes back matched:false rather than missing, because absent and
   // unmatched are different things and hiding one makes it look like the other.
+  providerScope: async () => {
+    const r = await fetch('/api/providers/scope')
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<ProviderScopeState>
+  },
+  setProviderScope: async (body: {
+    provider: string; enabled?: boolean
+    off_sources?: string[]; off_platforms?: string[]
+  }) => {
+    const r = await fetch('/api/providers/scope', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error(`${r.status}`)
+    return r.json() as Promise<ProviderScopeState>
+  },
   matchedProviders: async (nk: string) => {
     const r = await fetch(`/api/media/matched-providers/${encodeURIComponent(nk)}`)
     if (!r.ok) throw new Error(`${r.status}`)

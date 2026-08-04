@@ -1571,6 +1571,64 @@ def providers_match_status():
     return {"match_job": _MATCH_JOB["job"]}
 
 
+# Per-game wall-clock a provider adds, MEASURED on this deployment rather than guessed.
+# The numbers are the point of the whole scope feature: they are what makes "turn this off
+# for PC" an informed decision instead of a shot in the dark.
+PROVIDER_COST = {
+    "igdb": "~0s · resolved once by id, no per-game search",
+    "steam": "~0s · the appid is already on the entry",
+    "steamgriddb": "~1s · exact lookup by Steam appid",
+    "screenscraper": "~10s when it has the game, ~2min when it does not "
+                     "(name search; no `pc` system id, so PC titles take the slow "
+                     "cross-system path)",
+}
+
+
+@app.get("/api/providers/scope")
+def providers_scope():
+    """Per-provider on/off, plus the sources and platforms it is switched off for.
+
+    Everything is ON by default — only EXCLUSIONS are stored — so a newly imported store
+    or platform is automatically included rather than silently skipped. `sources` and
+    `platforms` are the real vocabulary from the catalog, not a hardcoded list.
+    """
+    lc = ro(LIBRARY_DB)
+    try:
+        sources = [r[0] for r in lc.execute(
+            "SELECT DISTINCT source FROM sources WHERE source IS NOT NULL ORDER BY 1")]
+        platforms = [r[0] for r in lc.execute(
+            "SELECT DISTINCT platform FROM games WHERE platform IS NOT NULL "
+            "AND platform!='' ORDER BY 1")]
+    finally:
+        lc.close()
+    out = []
+    for name in ("igdb", "steam", "screenscraper", "steamgriddb"):
+        on = (config.metadata_enabled(name) if name == "igdb"
+              else config.media_enabled(name))
+        out.append({
+            "provider": name,
+            "enabled": bool(on),
+            "off_sources": sorted(config.provider_off_sources(name)),
+            "off_platforms": sorted(config.provider_off_platforms(name)),
+            "cost": PROVIDER_COST.get(name, ""),
+        })
+    return {"providers": out, "sources": sources, "platforms": platforms}
+
+
+@app.post("/api/providers/scope")
+def providers_scope_set(body: dict = Body(...)):
+    """{provider, enabled?, off_sources?, off_platforms?} — omitted fields are unchanged."""
+    b = body or {}
+    name = (b.get("provider") or "").strip()
+    if name not in ("igdb", "steam", "screenscraper", "steamgriddb"):
+        raise HTTPException(400, "unknown provider %r" % name)
+    if "enabled" in b:
+        key = ("metadata_%s_enabled" if name == "igdb" else "media_%s_enabled") % name
+        config.set_(key, "1" if b["enabled"] else "0")
+    config.set_provider_scope(name, b.get("off_sources"), b.get("off_platforms"))
+    return providers_scope()
+
+
 @app.get("/api/media/matched-providers/{norm_key}")
 def media_matched_providers(norm_key: str):
     """Providers this game is MATCHED to, for the "Fetch from…" menu (spec §2.5).
@@ -6438,9 +6496,26 @@ def _match_providers(keys, should_stop=lambda: False, force=False):
                 lc.close()
             if not title:
                 continue
+            # Per-provider SCOPE: skip a provider this game is out of scope for. This is
+            # what makes "ScreenScraper: consoles only" possible — a PC-heavy library
+            # otherwise spends ~2 minutes per game on a provider that mostly covers
+            # consoles, because SS has no `pc` system id and falls to the slow
+            # cross-system search.
+            _srcs = set()
+            try:
+                _lc2 = ro(LIBRARY_DB)
+                try:
+                    _srcs = {r[0] for r in _lc2.execute(
+                        "SELECT DISTINCT s.source FROM games g JOIN sources s "
+                        "ON s.game_id=g.id WHERE g.norm_key=?", (nk,)) if r[0]}
+                finally:
+                    _lc2.close()
+            except sqlite3.OperationalError:
+                pass
+            _plat = plats[0] if plats else None
             found = {}
             searched = False
-            if ss_creds:
+            if ss_creds and config.provider_allowed("screenscraper", _plat, _srcs):
                 _before = provider_ids.cached(mc, "screenscraper", nk)
                 pid = provider_ids.resolve(
                     mc, "screenscraper", nk, title, plats,
@@ -6449,7 +6524,7 @@ def _match_providers(keys, should_stop=lambda: False, force=False):
                 if pid:
                     found["screenscraper"] = pid
                     out["screenscraper"] += 1
-            if sgdb_key:
+            if sgdb_key and config.provider_allowed("steamgriddb", _plat, _srcs):
                 _before = provider_ids.cached(mc, "steamgriddb", nk)
                 pid = provider_ids.resolve(
                     mc, "steamgriddb", nk, title, plats,

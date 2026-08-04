@@ -5,7 +5,7 @@ import type {
   GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
   AiUsageModel, AiUsageDay, AiUsageSummary, AiPrice, Currency, Caps,
   DedupeSuggestion, Service, ServiceConnect, Achievements as AchData,
-  MediaLibrary, MediaAsset, MediaKind, MatchedProvider, BannedMedia, BackupsState, BackupJob,
+  MediaLibrary, MediaAsset, MediaKind, MatchedProvider, ProviderScopeState, BannedMedia, BackupsState, BackupJob,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device, LibraryManager, ImportMode, ImportEstimate, ResetScope, ResetPlan,
@@ -4135,6 +4135,7 @@ function Credentials() {
         <strong> Sources</strong> establish what you own; <strong>Providers</strong> enrich
         games with metadata/art — a few services do both.
       </p>
+      <ProviderScopePanel />
       {groups.map((g) => {
         const svcs = data.filter((s) => g.roles.includes(s.role))
         if (!svcs.length) return null
@@ -6773,6 +6774,91 @@ function MediaFetchMenu({ nk, kinds, label, onDone }: {
         </>
       )}
     </span>
+  )
+}
+
+// Per-provider scope (datbird 2026-08-04): a master on/off, plus a control that opens
+// per-SOURCE and per-PLATFORM switches. Everything is on by default; only exclusions are
+// stored, so a store or platform you import later is included automatically instead of
+// being silently skipped.
+//
+// It exists because the cost is wildly uneven and invisible: ScreenScraper answers in
+// ~10s for a game it has and ~2 MINUTES for one it does not. Each provider therefore
+// states its own per-game cost here — that number is what makes "turn this off for PC"
+// an informed decision rather than a guess.
+function ProviderScopePanel() {
+  const [st, setSt] = useState<ProviderScopeState | null>(null)
+  const [open, setOpen] = useState<string | null>(null)
+  const [busy, setBusy] = useState('')
+  useEffect(() => { api.providerScope().then(setSt).catch(() => setSt(null)) }, [])
+
+  const save = async (body: Parameters<typeof api.setProviderScope>[0]) => {
+    setBusy(body.provider)
+    try { setSt(await api.setProviderScope(body)) } catch { /* */ }
+    finally { setBusy('') }
+  }
+  const toggleIn = (list: string[], v: string) =>
+    list.includes(v) ? list.filter((x) => x !== v) : [...list, v]
+
+  if (!st) return null
+  return (
+    <div className="svc-group">
+      <div className="svc-group-title">Provider scope</div>
+      <p className="dim ps-intro">
+        Every provider runs for every source and platform by default. Turn one off
+        entirely, or narrow it — the per-game cost below is measured on this server.
+      </p>
+      {st.providers.map((p) => {
+        const isOpen = open === p.provider
+        const narrowed = p.off_sources.length + p.off_platforms.length
+        return (
+          <div key={p.provider} className={'ps-row' + (p.enabled ? '' : ' off')}>
+            <div className="ps-head">
+              <label className="ps-toggle">
+                <input type="checkbox" checked={p.enabled} disabled={busy === p.provider}
+                  onChange={(e) => save({ provider: p.provider, enabled: e.target.checked })} />
+                <b>{providerLabel(p.provider)}</b>
+              </label>
+              {/* greys out with the provider — narrowing something switched off is
+                  meaningless, and a live-looking control that does nothing is worse
+                  than a disabled one */}
+              <button className="ps-scope-btn" disabled={!p.enabled}
+                title={p.enabled ? 'Choose which sources and platforms this provider runs for'
+                  : `${providerLabel(p.provider)} is off — turn it on to narrow its scope`}
+                onClick={() => setOpen(isOpen ? null : p.provider)}>
+                {narrowed ? `Scope · ${narrowed} off` : 'Scope · all'}
+              </button>
+              <span className="ps-cost dim">{p.cost}</span>
+            </div>
+            {isOpen && p.enabled && (
+              <div className="ps-body">
+                {([['Platforms', st.platforms, p.off_platforms, 'off_platforms'],
+                   ['Sources', st.sources, p.off_sources, 'off_sources']] as const)
+                  .map(([label, all, offList, field]) => (
+                    <div key={label} className="ps-grid-wrap">
+                      <div className="ps-sub">{label}</div>
+                      <div className="ps-grid">
+                        {all.map((v) => (
+                          <label key={v} className={'ps-chip' + (offList.includes(v) ? ' off' : '')}>
+                            <input type="checkbox" checked={!offList.includes(v)}
+                              disabled={busy === p.provider}
+                              onChange={() => save({
+                                provider: p.provider,
+                                [field]: toggleIn(offList as string[], v),
+                              } as Parameters<typeof api.setProviderScope>[0])} />
+                            {v}
+                          </label>
+                        ))}
+                        {!all.length && <span className="dim">none in the catalog yet</span>}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
   )
 }
 

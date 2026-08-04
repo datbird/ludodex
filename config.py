@@ -408,6 +408,54 @@ def media_enabled(name):
     return get_bool("media_%s_enabled" % name, name != "steamgriddb")
 
 
+# Per-provider SCOPE. A provider is on for every source and every platform by default;
+# these hold only the EXCLUSIONS, so "default on" needs no migration and a newly-imported
+# platform or store is automatically included rather than silently skipped.
+#
+# Why it exists: ScreenScraper costs ~10s per game it has and ~2min per game it does not
+# (its search is per-name, and it has no `pc` system id, so PC titles get the slow
+# cross-system path). On a 2000-game PC library that is hours of wall clock for a provider
+# that mostly covers consoles. Being able to say "ScreenScraper: consoles only" turns that
+# into minutes without giving up the coverage it is actually good at.
+def provider_off_sources(name):
+    """Ownership sources this provider is switched OFF for (e.g. {'steam'})."""
+    raw = get("provider_%s_off_sources" % name) or ""
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+def provider_off_platforms(name):
+    """Platforms this provider is switched OFF for (e.g. {'pc'})."""
+    raw = get("provider_%s_off_platforms" % name) or ""
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+def set_provider_scope(name, off_sources=None, off_platforms=None):
+    if off_sources is not None:
+        set_("provider_%s_off_sources" % name,
+             ",".join(sorted({str(x).strip() for x in off_sources if str(x).strip()})))
+    if off_platforms is not None:
+        set_("provider_%s_off_platforms" % name,
+             ",".join(sorted({str(x).strip() for x in off_platforms if str(x).strip()})))
+
+
+def provider_allowed(name, platform=None, sources=()):
+    """Should `name` be consulted for a game on `platform` owned via `sources`?
+
+    Master switch first, then the exclusions. A game is skipped when its platform is
+    switched off, or when EVERY source it came from is switched off — "every", because a
+    game owned on both Steam and as a ROM is still a ROM, and turning Steam off should not
+    remove it from a provider that covers the ROM side.
+    """
+    if not (metadata_enabled(name) if name == "igdb" else media_enabled(name)):
+        return False
+    if platform and platform in provider_off_platforms(name):
+        return False
+    srcs = {s for s in (sources or []) if s}
+    if srcs and srcs <= provider_off_sources(name):
+        return False
+    return True
+
+
 def rate_limits(service):
     """Resolved rate-limit settings for a service (Settings › Services › Limits).
     Returns {cooldown_ms, per_min, per_day}; 0 means unset / unlimited."""
