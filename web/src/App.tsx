@@ -6466,6 +6466,22 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                   <section className="coll-section">
                     <h3>📦 This is a collection
                       <span className="sec-help">a compilation you own — it credits ownership to each game inside, so they show “owned … via {d.collection.name}”</span>
+                      {/* The delete endpoint and api.deleteCollection existed since the
+                          feature shipped and NOTHING in the UI ever called them, so a
+                          collection the wand recorded could never be removed by a user
+                          (#19). It lives here because this is the only surface that
+                          already knows a collection exists. */}
+                      <button className="coll-del" title={`Remove the “${d.collection.name}” collection. The member entries it created are removed with it; the collection game itself stays in your library.`}
+                        onClick={async () => {
+                          if (!window.confirm(`Remove the collection “${d.collection!.name}”?\n\n` +
+                            `Its ${d.collection!.members.length} member entr${d.collection!.members.length === 1 ? 'y' : 'ies'} will be removed too. ` +
+                            `“${d.title}” itself stays in your library.`)) return
+                          try {
+                            await api.deleteCollection(d.collection!.coll_key)
+                            setMediaDirty(true)   // the library grid must re-read
+                            reloadDetail()
+                          } catch { window.alert('Could not remove the collection') }
+                        }}>Remove collection</button>
                     </h3>
                     <ul className="coll-members">
                       {d.collection.members.map((m) => (

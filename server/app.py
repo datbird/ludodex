@@ -381,6 +381,55 @@ def _scores_con():
     return con
 
 
+def _sync_steam_type():
+    """Populate `sco.steam_type` from the Steam appdetails extract we ALREADY hold.
+
+    The table was created for `scores_fetch.py` to fill and that never produced a single
+    row — 0 of 2255 — so the type-based non-game rule tested membership in an empty table
+    and hid nothing, ever. Meanwhile `steam-meta.sqlite` had the answer for all 2124
+    Steam-owned entries the whole time, under `content_type`, cached by the media pass
+    that runs at every tier.
+
+    So this derives the table from data on disk instead of a network pass that never
+    happens. Free, offline, idempotent. Returns the number of rows written.
+    """
+    src = os.path.join(DATA, "steam-meta.sqlite")
+    if not os.path.exists(src):
+        return 0
+    now = time.time()
+    rows = []
+    try:
+        sm = ro(src)
+        try:
+            for nk, pj in sm.execute("SELECT norm_key, payload_json FROM steam_meta "
+                                     "WHERE payload_json IS NOT NULL"):
+                if not nk:
+                    continue
+                try:
+                    t = (json.loads(pj).get("content_type") or "").strip().lower()
+                except (ValueError, AttributeError):
+                    continue
+                if t:
+                    rows.append((nk, t, now))
+        finally:
+            sm.close()
+    except sqlite3.OperationalError as e:
+        print("steam_type sync: %s" % str(e)[:120], file=sys.stderr)
+        return 0
+    if not rows:
+        return 0
+    con = _scores_con()
+    try:
+        con.execute("PRAGMA busy_timeout=15000")
+        con.executemany("INSERT INTO steam_type(norm_key,type,updated) VALUES(?,?,?) "
+                        "ON CONFLICT(norm_key) DO UPDATE SET type=excluded.type, "
+                        "updated=excluded.updated", rows)
+        con.commit()
+    finally:
+        con.close()
+    return len(rows)
+
+
 # Steam appdetails `type`s that aren't games — hidden when hide_non_games is on.
 NON_GAME_TYPES = ("application", "tool", "music", "video", "hardware", "series", "mod")
 
@@ -10032,6 +10081,15 @@ def _sync_worker(job, services, media_ids=(), full=False):
                     "WHERE norm_key IS NOT NULL AND norm_key!=''")]
             finally:
                 _lc2.close()
+            # Derive steam_type from the appdetails extract the media pass just
+            # refreshed. Offline, and the only thing that ever fills that table —
+            # scores_fetch was supposed to and produced 0 rows for the whole library.
+            try:
+                _nt = _sync_steam_type()
+                if _nt:
+                    print("steam_type: %d rows derived" % _nt, file=sys.stderr)
+            except Exception as e:              # noqa: BLE001 — never fails an import
+                print("steam_type sync: %s" % str(e)[:120], file=sys.stderr)
             _fin = _media_finish(_fk, measure=(mode != "ondemand"), should_stop=_stopped)
             if _fin.get("pruned"):
                 _phase("media", "running", "dropped %d blank assets" % _fin["pruned"])
