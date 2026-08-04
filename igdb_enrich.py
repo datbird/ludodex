@@ -731,8 +731,15 @@ def main(argv):
                 "games",
                 'search "%s"; fields id,name,slug,first_release_date,alternative_names.name; limit 8;'
                 % title, cid, tok)
-        except Exception:               # one bad title shouldn't abort the run
-            hits = []
+        except Exception as e:          # one bad title shouldn't abort the run
+            # ...but it must not be recorded as an ANSWER either. This used to set
+            # hits=[] and fall through to the write below, stamping matched_by='none' —
+            # so a transient IGDB failure became a stored "IGDB has no match for this
+            # game", indistinguishable from a real miss and sticky until something
+            # cleared it. Skip the row entirely; the next run retries it.
+            print("igdb_enrich: search failed for %r (%s) — leaving unresolved, will "
+                  "retry" % (nk, str(e)[:80]), file=sys.stderr)
+            continue
         # Accept ONLY an exact normalized-title match that is era-plausible for the
         # game's console(s). We used to fall back to IGDB's top fuzzy hit when nothing
         # matched, but `search` ranks by relevance and would bind e.g. "gods" (Bitmap

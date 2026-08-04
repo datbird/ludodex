@@ -643,11 +643,20 @@ SGDB_KINDS = {"grids": ("cover", "600x900"), "heroes": ("hero", None),
 
 
 def _sgdb_game_id(key, appid=None, title=None):
-    """Resolve a SteamGridDB game id — by Steam appid (exact) when we have one,
-    else by name search (best autocomplete match). None if nothing matches."""
+    """Resolve a SteamGridDB game id — by Steam appid (exact) when we have one, else by
+    name search (best autocomplete match).
+
+    Returns None only for "looked and found nothing". RAISES when it could not look at
+    all, because the caller records the result in a negative cache and those are two
+    completely different facts: swallowing the error here turned an API hiccup into a
+    stored "SteamGridDB does not have this game". Same defect as ScreenScraper's, found
+    by auditing for the class after the Mass Effect 2 report.
+    """
+    looked = False
     if appid:
         try:
             g = _sgdb_get("/games/steam/%s" % appid, key)
+            looked = True
             gid = (g.get("data") or {}).get("id")
             if gid:
                 return gid
@@ -657,11 +666,15 @@ def _sgdb_game_id(key, appid=None, title=None):
         try:
             d = _sgdb_get("/search/autocomplete/%s"
                           % urllib.parse.quote(title.strip()), key)
+            looked = True
             items = d.get("data") or []
             if items:
                 return items[0].get("id")
         except Exception:
             pass
+    if not looked:
+        raise RuntimeError("steamgriddb lookup failed for %r/%r — not a miss"
+                           % (appid, title))
     return None
 
 
