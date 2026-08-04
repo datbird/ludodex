@@ -4227,7 +4227,7 @@ def _materialize_collection_members(created_out=None, ingest=True):
 MEMBER_INGEST_CAP = 60             # bounded: one apply can never sweep the catalog
 
 
-def _member_identity(nk, plat):
+def _member_identity(nk, plat, ai_rescue=False):
     """Deterministic IGDB identity for ONE materialized member. 1 if resolved, else 0.
 
     Conservative on purpose: an EXACT-name lookup only, and where several games share a
@@ -4261,6 +4261,17 @@ def _member_identity(nk, plat):
         if _prev and ((_prev[0] or 0) > 0 or (_prev[1] or "") == "manual"):
             return 0                        # a real decision — never re-decide
         hits = _igdb_by_name(title)
+        if not hits:
+            # Same last-resort rescue every other provider gets: alternate names, then
+            # IGDB's own exact lookup on each. IGDB confirms the identity, so a wrong
+            # alias just finds nothing. Off unless the caller opted in (paid path).
+            for _alt in _title_aliases(nk, title, [plat] if plat else [],
+                                       allow_ai=ai_rescue) or []:
+                hits = _igdb_by_name(_alt)
+                if hits:
+                    print("igdb rescue: %r matched as %r" % (title, _alt),
+                          file=sys.stderr)
+                    break
         if not hits:
             return 0
         pick = hits[0] if len(hits) == 1 else None
@@ -6442,7 +6453,59 @@ def _enrich_media(keys, con=None, web=False, provider=None, kinds=None,
     return out
 
 
-def _match_providers(keys, should_stop=lambda: False, force=False):
+def _title_aliases(nk, title, platforms, allow_ai=False):
+    """Alternate titles to retry a provider search with, when its exact search missed.
+
+    THE MATCH IS FOUNDATIONAL (datbird, 2026-08-04): once a game is matched on a
+    provider, every other operation — art, metadata, a later on-demand pull — is cheap
+    and low-risk and can happen whenever the user wants. An unmatched game forecloses all
+    of it. So a missed search deserves a second attempt, for EVERY provider, not just
+    IGDB.
+
+    The model's job here is deliberately narrow: produce alternate NAMES, not provider
+    ids. It cannot know ScreenScraper's internal id, but it does know that "Crash
+    Bandicoot 3: Warped" is released elsewhere as "Crash Bandicoot: Warped", that
+    "Mega Man X4" is filed as "Megaman X4", and that a Complete Edition is the base game.
+    Each provider then confirms the identity through its OWN search, so the provider
+    still has the final say and a hallucinated name simply finds nothing.
+
+    Cached per game, so a rescue is paid for ONCE and reused across every provider that
+    missed. `allow_ai` is off by default — this is the paid path, and it only ever runs
+    where a tier has opted in.
+    """
+    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    con = sqlite3.connect(cache)
+    try:
+        con.execute("PRAGMA busy_timeout=15000")
+        con.execute("CREATE TABLE IF NOT EXISTS title_aliases(norm_key TEXT PRIMARY KEY, "
+                    "aliases_json TEXT, resolved_at INTEGER)")
+        row = con.execute("SELECT aliases_json FROM title_aliases WHERE norm_key=?",
+                          (nk,)).fetchone()
+        if row:
+            try:
+                return [a for a in json.loads(row[0] or "[]") if a]
+            except ValueError:
+                return []
+        if not allow_ai or not ai.area_available("metadata"):
+            return []
+        try:
+            out = ai.title_aliases(title, platforms)
+        except Exception as e:                  # noqa: BLE001 — a rescue never fails a run
+            print("title aliases %s: %s" % (nk, str(e)[:110]), file=sys.stderr)
+            return []
+        # Record even an EMPTY result: "the model looked and had nothing" is an answer,
+        # and without storing it every sweep would pay for the same miss again.
+        con.execute("INSERT OR REPLACE INTO title_aliases(norm_key,aliases_json,"
+                    "resolved_at) VALUES(?,?,?)",
+                    (nk, json.dumps(out, ensure_ascii=False), int(time.time())))
+        con.commit()
+        return out
+    finally:
+        con.close()
+
+
+def _match_providers(keys, should_stop=lambda: False, force=False,
+                     ai_rescue=False):
     """Record EVERY configured provider's identity for `keys`. A MATCH IS NOT AN INGEST.
 
     datbird's decision (2026-08-01): a provider is matched for every game whether or not
@@ -6513,11 +6576,43 @@ def _match_providers(keys, should_stop=lambda: False, force=False):
             _plat = plats[0] if plats else None
             found = {}
             searched = False
+            # Alternate names, fetched at most ONCE per game and shared by every
+            # provider that misses. Lazy: nothing is paid for unless a search actually
+            # fails, which is the whole point of a last resort.
+            _alias_cache = []
+            _alias_done = [False]
+
+            def _aliases():
+                if not _alias_done[0]:
+                    _alias_done[0] = True
+                    _alias_cache.extend(
+                        _title_aliases(nk, title, plats, allow_ai=ai_rescue) or [])
+                return _alias_cache
+
+            def _search_with_aliases(fn):
+                """Run a provider's own search on the real title, then on each alias.
+
+                The provider always confirms the identity through its OWN lookup, so an
+                alias that is wrong simply finds nothing. Exceptions propagate: a failed
+                search must never be recorded as a miss."""
+                hit = fn(title)
+                if hit:
+                    return hit
+                for alt in _aliases():
+                    if should_stop():
+                        break
+                    hit = fn(alt)
+                    if hit:
+                        print("provider rescue: %r matched as %r" % (title, alt),
+                              file=sys.stderr)
+                        return hit
+                return None
             if ss_creds and config.provider_allowed("screenscraper", _plat, _srcs):
                 _before = provider_ids.cached(mc, "screenscraper", nk)
                 pid = provider_ids.resolve(
                     mc, "screenscraper", nk, title, plats,
-                    lambda t, s: _ss_match([t], s), force=force)
+                    lambda t, s: _search_with_aliases(lambda q: _ss_match([q], s)),
+                    force=force)
                 searched = searched or _before is None or force
                 if pid:
                     found["screenscraper"] = pid
@@ -6526,7 +6621,9 @@ def _match_providers(keys, should_stop=lambda: False, force=False):
                 _before = provider_ids.cached(mc, "steamgriddb", nk)
                 pid = provider_ids.resolve(
                     mc, "steamgriddb", nk, title, plats,
-                    lambda t, s, _a=appid: {"sgdb_id": _mf._sgdb_game_id(sgdb_key, _a, t)},
+                    lambda t, s, _a=appid: _search_with_aliases(
+                        lambda q: {"sgdb_id": _mf._sgdb_game_id(sgdb_key, _a, q)}
+                        if _mf._sgdb_game_id(sgdb_key, _a, q) else None),
                     force=force)
                 searched = searched or _before is None or force
                 if pid:
@@ -10065,7 +10162,14 @@ def _sync_worker(job, services, media_ids=(), full=False):
                         "WHERE norm_key IS NOT NULL AND norm_key!=''")]
                 finally:
                     _lc.close()
-                _got = _match_providers(_keys, _stopped)
+                # ai_rescue follows the TIER: Algo stays free and deterministic,
+                # Lite/Heavy have already opted into spending, and the match is the one
+                # thing worth spending on first — everything downstream is cheap once a
+                # game is identified, and impossible while it is not.
+                _rescue = any(import_mode_for(sid) in ("lite", "heavy")
+                              for sid in services
+                              if job["services"].get(sid, {}).get("state") == "ok")
+                _got = _match_providers(_keys, _stopped, ai_rescue=_rescue)
                 _phase("provmatch", "ok",
                        ", ".join("%s %d" % (p, n) for p, n in sorted(_got.items())))
                 # NB the import deliberately runs the MATCH here and leaves fetching to

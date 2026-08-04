@@ -1317,6 +1317,52 @@ def _complete_text_web(provider, key, model, system, user):
 
 
 # --------------------------------------------------------------------- NL → query
+def title_aliases(title, platforms=(), limit=6):
+    """Alternate titles for a game whose exact name found nothing at a provider.
+
+    Names only — never provider ids. The model knows a game is released under different
+    names; it cannot know ScreenScraper's internal id. Each provider then confirms
+    through its own search, so a hallucinated name simply finds nothing and costs one
+    lookup, while a real alias rescues a match that exact-title lookup had to refuse.
+    """
+    title = (title or "").strip()
+    if not title:
+        return []
+    prov, key, model = provider_for_area("metadata"), None, model_for_area("metadata")
+    prov, key, model = _resolve(prov, model)
+    sys_p = (
+        "You list ALTERNATE TITLES for a video game. An exact-title search at a metadata "
+        "provider already failed, so the goal is names the SAME game is catalogued under "
+        "elsewhere.\n"
+        "Cover: regional titles (Gradius/Nemesis, Contra/Probotector, Rockman/Mega Man); "
+        "sequence numbers that move in or out ('Crash Bandicoot 3: Warped' is also "
+        "'Crash Bandicoot: Warped'); subtitles added or dropped; spacing and "
+        "capitalisation ('Megaman X4' vs 'Mega Man X4'); the BASE game for a "
+        "Complete/Deluxe/GOTY/HD/Remastered edition; romanised Japanese names.\n"
+        "Do NOT list sequels, remakes, spin-offs, or different games that merely share a "
+        "name — those are wrong answers, worse than none. If you have no confident "
+        "alternate name, return an empty array.\n"
+        'Reply with ONLY a JSON array of strings, most likely first, at most %d.' % limit
+    )
+    user = "Title: %s" % title
+    if platforms:
+        user += "\nPlatform(s): %s" % ", ".join(str(p) for p in platforms if p)
+    txt = _complete_text(prov, key, model, sys_p, user)
+    try:
+        out = _json(txt)
+    except Exception:                           # noqa: BLE001
+        return []
+    if not isinstance(out, list):
+        return []
+    seen, res = {title.lower()}, []
+    for a in out:
+        a = (a or "").strip() if isinstance(a, str) else ""
+        if a and a.lower() not in seen:
+            seen.add(a.lower())
+            res.append(a)
+    return res[:limit]
+
+
 def _system_prompt(sources, platforms):
     return area_prompt("search", sources=", ".join(sources),
                        platforms=", ".join(platforms[:40]))
