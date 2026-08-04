@@ -921,6 +921,11 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
+  /* Hug the buttons and sit centred. As a block-level flex this stretched to the panel
+     width, so the bordered pill ran the full row with both buttons pinned left and a
+     dead gap beside them — it read as a broken container rather than a control. */
+  width: fit-content;
+  margin-inline: auto;
 }
 .view-toggle button {
   display: inline-flex;
