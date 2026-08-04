@@ -282,8 +282,8 @@ def game_context(norm_key, lib=None):
 
 def targets(target="unmatched", limit=200, sources=None):
     """norm_keys to scan for a target set: 'unmatched' (no provider link),
-    'matched' (verify existing matches), 'missing' (holes in SUPPLEMENT_KINDS),
-    or 'all'.
+    'unidentified' (no IGDB identity, whatever else matched), 'matched' (verify existing
+    matches), 'missing' (holes in SUPPLEMENT_KINDS), or 'all'.
 
     `sources` (e.g. ['steam','gog']) restricts the result to games owned via those
     sources — so an import-driven scan spends the model on the games that import
@@ -293,6 +293,21 @@ def targets(target="unmatched", limit=200, sources=None):
         if target == "unmatched":
             q = ("SELECT g.norm_key FROM games g WHERE NOT EXISTS("
                  "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)")
+            args = []
+        elif target == "unidentified":
+            # No IGDB IDENTITY, whatever else matched. 'unmatched' means "no provider
+            # link at all", so a game that matched ScreenScraper and SteamGridDB but
+            # whose IGDB title differs from yours is invisible to it — and IGDB identity
+            # is what carries genres, developer, release and the game_key that binds its
+            # art. Live: Crash Bandicoot 3: Warped, which IGDB calls "Crash Bandicoot:
+            # Warped" (alt names have the 3 but drop the Warped), so exact-title matching
+            # correctly refuses it and nothing ever looked again.
+            #
+            # This is the LAST RESORT set: everything here has already failed the free
+            # deterministic pass, which is exactly when a model is worth paying for.
+            q = ("SELECT g.norm_key FROM games g WHERE NOT EXISTS("
+                 "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id "
+                 "AND ml.provider='igdb')")
             args = []
         elif target == "matched":
             q = ("SELECT g.norm_key FROM games g WHERE EXISTS("

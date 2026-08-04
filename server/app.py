@@ -10240,6 +10240,20 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 _seen = set(keys)
                 keys += [k for k in aimeta.review_targets(2000, sources=ai_srcs)
                          if k not in _seen]
+                # LAST RESORT identity, at Lite and Heavy. A game can match
+                # ScreenScraper and SteamGridDB and still have no IGDB identity —
+                # because IGDB's canonical title differs from the one you own ("Crash
+                # Bandicoot 3: Warped" is "Crash Bandicoot: Warped" there). Exact-title
+                # matching correctly refuses to guess, and nothing looked again, so the
+                # game kept no genres, no developer, no release and no game_key.
+                # 'unmatched' cannot see it: it HAS provider links.
+                #
+                # Everything in this set has already failed the free deterministic pass,
+                # which is precisely when a model earns its cost. Bounded and scoped to
+                # this import's sources like every other target.
+                _seen = set(keys)
+                keys += [k for k in aimeta.targets("unidentified", 2000, sources=ai_srcs)
+                         if k not in _seen]
                 if not keys:
                     _phase("supplement", "ok", "nothing left to fill")
                 else:
