@@ -696,7 +696,16 @@ DEFAULT_PROMPTS = {
     "art": (
         "You help pick the best <<kind>> image for the video game '<<title>>'. You "
         "will see <<count>> candidate images labeled 'Image N'. Judge on, in order:\n"
-        "1. CORRECT game (right title/region, not a placeholder/blank/wrong game).\n"
+        "1. CORRECT game, and the RIGHT REGIONAL TITLE. Read the title text ON the "
+        "artwork. Many games ship under different names by region — Beyond Oasis is 'The "
+        "Story of Thor' in Europe and Japan, Contra is 'Probotector', Gradius is "
+        "'Nemesis', Mega Man is 'Rockman' — and the text is often in another script "
+        "entirely (Japanese, Korean, Cyrillic). The game is owned as '<<title>>', so art "
+        "whose visible title reads '<<title>>' (or is text-free) MUST be preferred over "
+        "art showing a different regional name, EVEN IF the other image is sharper, "
+        "larger or better composed. Only fall back to another region's art when there is "
+        "no acceptable image bearing the owned name.<<aliases>> A placeholder, blank or "
+        "different-game image is rejected outright.\n"
         "2. RIGHT SHAPE for a '<<kind>>': a cover/box is UPRIGHT (portrait ~3:4); a "
         "hero/background is WIDE (landscape ~16:9); a logo is a transparent wordmark; "
         "a screenshot is in-game. Reject an image whose orientation is wrong for the "
@@ -1580,7 +1589,8 @@ def nl_to_query(question, sources, platforms, provider=None, model=None):
 
 
 # ----------------------------------------------------------------- art pick (vision)
-def pick_art(title, kind, images, provider=None, model=None, language=None, notes=None):
+def pick_art(title, kind, images, provider=None, model=None, language=None, notes=None,
+             aliases=None):
     """Pick the best of N candidate images. `images`=[(mime,bytes)].
     Returns {"index": <0-based>, "reason": str}. Raises on error. When `language`
     is set, ties break toward media in that language (logos/titles/box art).
@@ -1588,7 +1598,17 @@ def pick_art(title, kind, images, provider=None, model=None, language=None, note
     `notes` = optional per-candidate MEASURED facts, same length and order as `images`.
     Omitted, the prompt is byte-identical to before."""
     provider, key, model = _resolve(provider, model)
-    system = area_prompt("art", kind=kind, title=title, count=len(images))
+    # Name the other-region titles explicitly when we know them: the model reads the
+    # artwork, and telling it WHICH names mean "same game, wrong region" is the
+    # difference between recognising 'The Story of Thor' as a demotion and treating it
+    # as an unrelated image.
+    alias_txt = ""
+    if aliases:
+        alias_txt = (" This game is also released as: %s — those are the SAME game, so "
+                     "such art is valid to keep but must NOT be the primary pick."
+                     % ", ".join("'%s'" % a for a in aliases[:8]))
+    system = area_prompt("art", kind=kind, title=title, count=len(images),
+                         aliases=alias_txt)
     instr = "Pick the best image."
     if language:
         instr += (" Prefer an image whose visible text, logo, or box-art language "

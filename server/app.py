@@ -5578,10 +5578,17 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                                 cands.append((r["id"], t))
                         if len(cands) < 2:
                             continue
+                        # The other-region names, from the alias cache the identity
+                        # rescue already fills. Vision reads the title text ON the art;
+                        # knowing that "The Story of Thor" IS Beyond Oasis is what turns
+                        # a foreign-region cover from an unrelated image into a
+                        # deliberate demotion. Read-only, never paid for here.
+                        _al = _title_aliases(nk, title, [], allow_ai=False)
                         res = ai.pick_art(title, kind, [c[1] for c in cands],
                                           provider=ai.provider_for_area("art"),
                                           model=ai.model_for_area("art"),
-                                          language=config.get("media_language") or None)
+                                          language=config.get("media_language") or None,
+                                          aliases=_al)
                         best = cands[res["index"]][0]
                         w = sqlite3.connect(INDEX_DB)
                         try:
@@ -6199,7 +6206,10 @@ def _fetch_media_web(con, nk, title, now):
         pick = 0
         if len(imgs) > 1:
             try:
-                pick = int(ai.pick_art(title, "cover", imgs).get("index", 0))
+                pick = int(ai.pick_art(
+                    title, "cover", imgs,
+                    aliases=_title_aliases(nk, title, [], allow_ai=False)
+                ).get("index", 0))
             except Exception:
                 pick = 0
         pick = max(0, min(pick, len(imgs) - 1))
