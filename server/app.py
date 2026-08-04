@@ -3496,6 +3496,17 @@ def _ss_match(queries, systems, year=None):
         # Age of Empires III. Replace with a SPACE, not nothing, or the glued case
         # becomes "ACECOMBAT7".
         q = re.sub(r"[\u2122\u00ae\u00a9\u2120]", " ", q)
+        # TYPOGRAPHIC PUNCTUATION is worse than the trademark symbols: it does not merely
+        # mis-tokenise, it returns ZERO candidates. Measured against ScreenScraper:
+        #   "Baldur\u2019s Gate 3"  -> 0 results
+        #   "Baldur's Gate 3"   -> 5 results
+        # Steam stores curly quotes in plenty of titles, so this silently removed those
+        # games from consideration entirely. Fold to the ASCII equivalents the providers
+        # actually index.
+        q = (q.replace("\u2019", "'").replace("\u2018", "'")
+              .replace("\u201c", '"').replace("\u201d", '"')
+              .replace("\u2013", "-").replace("\u2014", "-")
+              .replace("\u2026", " "))
         q = re.sub(r"\s{2,}", " ", q).strip()
         # EDITION SUFFIXES are the single most common reason a real match is missed:
         # the catalog stores the edition you own ("… Mirror of Fate HD"), ScreenScraper

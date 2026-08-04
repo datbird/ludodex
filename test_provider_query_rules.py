@@ -73,6 +73,21 @@ def main():
         check("the symbol became a SPACE, so '7' stays its own token",
               any(re.search(r"\bcombat\b\s*7", q, re.I) for q, _ in sent))
 
+        print("A1b. typographic punctuation is folded to ASCII")
+        # Worse than the trademark case: a curly apostrophe returns ZERO candidates from
+        # ScreenScraper, so those titles were removed from consideration entirely rather
+        # than merely mis-scored. Steam stores plenty of them.
+        sent.clear()
+        try:
+            srv._ss_match(["Baldur\u2019s Gate 3"], ["pc"])
+        except Exception:
+            pass
+        allq = " | ".join(q for q, _ in sent)
+        check("no curly quote or dash survives: %r" % allq[:60],
+              not re.search(r"[\u2018\u2019\u201c\u201d\u2013\u2014\u2026]", allq))
+        check("it became a straight apostrophe, not nothing",
+              any("baldur's gate 3" == q.lower() for q, _ in sent))
+
         print("A2. an edition suffix is tried stripped as well as intact")
         sent.clear()
         try:
