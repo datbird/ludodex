@@ -135,15 +135,66 @@ A second, separate control — **Rebuild learned matches** — clears `learned` 
 lets them re-accumulate. Deliberately distinct: one throws away YOUR work, the other
 throws away the app's, and a single button doing both is how people lose things.
 
-## 6. Seeding
+## 6. Three distinct population paths
 
-Generated, not hand-written. `matchmap_seed.py` builds the shipped seed from a resolved
-library: every `(canonical_title, provider_id)` already confirmed, plus the regional-name
-families that recur across libraries (Rockman/Mega Man, Probotector/Contra,
-Nemesis/Gradius, Akumajou Dracula/Castlevania).
+These are separate jobs and were conflated in the first draft of this spec. Naming them
+apart matters, because only one of them runs on an existing install.
 
-Ships as a data file, imported on first run with `origin='seed'`, so a brand-new install
-starts with intelligence rather than earning it from zero.
+### 6a. Schema creation — every open
+
+`matchmap.ensure_tables(con)`, called from `matchmap.con()` on every open, exactly as
+`provider_ids.ensure_tables()` already works. No migration step, no install hook that can
+be skipped: a deployment that has never seen the file gets a valid empty one the first
+time anything touches it, including a fresh container with an empty `/data`.
+
+### 6b. Shipped seed — build time, in the repo
+
+`tools/matchmap_seed.py` GENERATES `data/matchmap-seed.json` and that artifact is
+committed. It carries the regional-name families that recur across every library
+(Rockman/Mega Man, Probotector/Contra, Nemesis/Gradius, Akumajou Dracula/Castlevania)
+plus any provider ids stable enough to ship.
+
+Imported with `origin='seed'` on first open of an empty map, so a brand-new install
+starts with intelligence instead of earning it from zero. Idempotent: re-importing an
+unchanged seed is a no-op.
+
+### 6c. Adoption pass — ONE TIME, over the library you already have
+
+**This is the "first default iteration" of the map, and it is the reason the feature is
+worth building on day one rather than day thirty.** A working install already knows
+thousands of confirmed identities; without this they stay locked in per-provider tables
+and the map starts empty on a machine that had the answers all along.
+
+`matchmap.adopt()` harvests, with **zero network calls**:
+
+| from | becomes |
+|---|---|
+| `igdb_resolution` (igdb_id > 0) | `provider_id` igdb, `origin='learned'`, `confirmed_at` = its `resolved_at` |
+| `ss_resolution` / `sgdb_resolution` (id > 0) | `provider_id` for that provider, same treatment |
+| `metadata_links` | `provider_id` for steam and anything else linked |
+| `games.canonical_title` vs the provider's stored `name` | an `alias` row whenever they differ — this is where `007 First Light` → `James Bond 007: First Light` becomes durable |
+| `title_aliases` (the AI rescue cache) | `alias` rows with `origin='ai'` |
+| `igdb_resolution.matched_by='manual'` and pinned entries | `origin='user'` — a hand-pin was always the user teaching it |
+
+Properties it must have:
+
+* **Idempotent** — safe to run repeatedly; re-running writes nothing new.
+* **Resumable** — batched and interruptible like every other long job here.
+* **Offline** — it reads what is already on disk. It must never call a provider, so it
+  cannot fail partway for a network reason and cannot cost anything.
+* **Runs automatically once**, on first open of an empty map on an install that has a
+  catalog, and is re-runnable from Settings → Database as **Rebuild learned matches**
+  (§5), which is the same operation.
+
+Expected yield on the current library at time of writing: ~2,255 games × up to four
+providers, plus every alias the 2026-08-04 rescue pass discovered — i.e. the map arrives
+already knowing essentially everything this install has ever resolved.
+
+### 6d. Ordering
+
+`ensure_tables` → `seed import` (empty map only) → `adopt` (catalog present, once). All
+three are no-ops on an install that has already done them, so the sequence is safe to
+attempt on every boot.
 
 ## 7. Fitting the rest of the infra
 
@@ -168,6 +219,9 @@ already fought.
 
 1. A second identical ingest performs **zero** provider name-searches for anything the
    first one resolved.
+0. After the adoption pass (§6c) on the CURRENT library, the map already contains every
+   confirmed identity the install holds — verified by comparing its `provider_id` count
+   against `igdb_resolution` + `ss_resolution` + `sgdb_resolution` + `metadata_links`.
 2. Clearing `learned` and re-running reproduces the same identities.
 3. A user mapping survives a library reset (it is `user` origin, synced, and backed up).
 4. `check_invariants.py` I9 holds.
