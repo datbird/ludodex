@@ -31,6 +31,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
+import matchgate
 import medialang
 
 INDEX = os.path.join(DATA, "media-index.sqlite")
@@ -720,8 +721,15 @@ def _sgdb_game_id(key, appid=None, title=None):
                           % urllib.parse.quote(title.strip(), safe=""), key)
             looked = True
             items = d.get("data") or []
-            if items:
-                return items[0].get("id")
+            # NAME-CHECK the autocomplete result. This used to be
+            # `return items[0].get("id")` — the first row whatever it was called — so a
+            # title SteamGridDB does not have was bound to whatever the search happened
+            # to surface, and 26 titles ended up sharing ids with each other. Autocomplete
+            # is a search, not an answer; `matchgate` is the same gate ScreenScraper now
+            # uses, so the two providers cannot disagree about what counts as a match.
+            for it in items:
+                if matchgate.score([title], it.get("name") or "")[0]:
+                    return it.get("id")
         except Exception:
             pass
     if not looked:

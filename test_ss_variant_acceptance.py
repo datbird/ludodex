@@ -85,6 +85,24 @@ def main():
     check("an empty owned title never matches", ok([""], "Doom")[0] is False)
     check("no owned titles never matches", ok([], "Doom")[0] is False)
 
+    # --- ONE gate, every provider ------------------------------------------------
+    # Each provider got this wrong differently: ScreenScraper judged against the variant
+    # it searched, SteamGridDB did not judge at all (`return items[0].get("id")`).
+    # A second copy of the rule is how they drifted apart in the first place.
+    import matchgate
+    import media_fetch
+    check("the server's SS gate delegates to the shared one",
+          srv._ss_candidate_score(["Doom"], "Doom") == matchgate.score(["Doom"], "Doom"))
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "media_fetch.py")).read()
+    # match the STATEMENT, not the substring — the fix's own comment quotes the old
+    # line, and a check that cannot tell code from a comment about code is not a check.
+    check("SteamGridDB no longer takes the first autocomplete row unchecked",
+          not any(l.strip().startswith("return items[0]") for l in src.splitlines()))
+    check("SteamGridDB uses the shared gate", "matchgate.score" in src)
+    check("media_fetch imports it rather than reimplementing it",
+          "import matchgate" in src)
+
     print("\n%d/%d passed" % (sum(1 for _, ok_ in PASS if ok_), len(PASS)))
 
 

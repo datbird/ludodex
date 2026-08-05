@@ -60,6 +60,7 @@ import splits          # noqa: E402  durable "peel apart" (split a merged entry 
 import ingesthints     # noqa: E402  AI ingest hints (lite/heavy import path rewrites)
 import reset           # noqa: E402  scoped reset (library / curation / factory)
 import provider_links  # noqa: E402  metadata_links derived from the identity cache
+import matchgate       # noqa: E402  shared provider candidate-acceptance gate
 import devicesync      # noqa: E402  outbound push (ROM+media+gamelist) to RetroDECK/ES-DE
 import auth            # noqa: E402  local username/password accounts + sessions
 import cf_access       # noqa: E402  Cloudflare Access SSO (verify the Access JWT)
@@ -3698,46 +3699,10 @@ def _ss_match(queries, systems, year=None):
 
 
 def _ss_candidate_score(owned, cand_name, year=None, cand_year=None):
-    """Is `cand_name` acceptable as a match for one of the OWNED titles, and how good?
-
-    Returns (ok, score). Split out of `_ss_match` because the acceptance test used to be
-    applied to whichever cleaned VARIANT had been searched, not to the title the user
-    owns. Variants exist so that "Mega Man X4" can find ScreenScraper's "Megaman X4";
-    they must not also let a subtitle-stripped variant match its own parent game:
-    "Half-Life: Opposing Force" searched as "Half-Life" scored a perfect 1.0 against
-    Half-Life and was recorded as Opposing Force's identity. Live that bound 191 titles
-    onto 86 ScreenScraper ids, and the loser of each collision inherited the winner's art.
-
-    So both directions are measured against the owned title:
-      qc  how much of the OWNED title the candidate covers — a candidate missing
-          "opposing force" is a different game, however exactly it matches the rest;
-      nc  how much of the candidate the owned title covers — tolerant, because
-          providers append edition and region words we do not carry.
-    """
-    best = (False, 0.0)
-    cn = titlenorm.norm(cand_name or "")
-    ntok = set(cn.split())
-    if not ntok:
-        return best
-    for t in (owned or []):
-        qn = titlenorm.norm(t or "")
-        qtok = set(qn.split())
-        if not qtok:
-            continue
-        inter = len(qtok & ntok)
-        qc = inter / len(qtok)
-        nc = inter / len(ntok)
-        # Token sets cannot see that "Megaman X4" and "Mega Man X4" are the same game:
-        # they share ONE token and score 0.50. Squashing the spaces out makes an equal
-        # string an exact match whatever the word breaks.
-        if qn.replace(" ", "") == cn.replace(" ", ""):
-            qc = nc = 1.0
-        score = qc + nc + (0.4 if year and cand_year == str(year) else 0)
-        if qc >= 0.8 and score > best[1]:
-            best = (True, score)
-        elif not best[0] and score > best[1]:
-            best = (False, score)
-    return best
+    """The shared provider acceptance gate — see `matchgate`. Kept as a name here
+    because `_ss_match` and its tests read better with it, but the rule itself has one
+    home so ScreenScraper and SteamGridDB cannot drift apart on what counts as a match."""
+    return matchgate.score(owned, cand_name, year, cand_year)
 
 
 def _score_confidence_ai(nks, should_stop=lambda: False, chunk=20):
