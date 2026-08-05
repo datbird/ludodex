@@ -120,13 +120,21 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search")
     if pid > 0 and matched_by not in ("manual", "steam_appid"):
         other = holder(con, provider, pid, norm_key)
         if other:
-            return 0
+            # Record it as a MISS tagged `collision`, not as nothing. A refusal is an
+            # attempt with a known outcome — "the provider's best match belongs to
+            # another game in this library" — and writing nothing made the game look
+            # never-attempted, which is a different fact and one I7 rightly complains
+            # about. As a miss it carries MISS_TTL, so it is re-asked once the provider
+            # has had time to add a record of its own.
+            pid, matched_by = 0, "collision"
     con.execute(
         "INSERT INTO %s(norm_key,%s,name,matched_by,resolved_at) VALUES(?,?,?,?,?) "
         "ON CONFLICT(norm_key) DO UPDATE SET %s=excluded.%s, name=excluded.name, "
         "matched_by=excluded.matched_by, resolved_at=excluded.resolved_at"
         % (table, idcol, idcol, idcol),
-        (norm_key, pid, name, matched_by if pid else "none", int(time.time())))
+        (norm_key, pid, name,
+         matched_by if pid else ("collision" if matched_by == "collision" else "none"),
+         int(time.time())))
     con.commit()
     return pid
 

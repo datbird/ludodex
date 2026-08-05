@@ -35,8 +35,10 @@ def main():
           P.record(con,"screenscraper","ninja gaiden sigma 2",25266)==25266)
     check("a second game cannot take the same searched id",
           P.record(con,"screenscraper","ninja gaiden ii black",25266)==0)
-    check("the refusal writes nothing at all, so it is re-asked later",
-          P.cached(con,"screenscraper","ninja gaiden ii black") is None)
+    r=P.cached(con,"screenscraper","ninja gaiden ii black")
+    check("the refusal is recorded as a MISS, not as nothing (it WAS attempted)",
+          r is not None and r[0]==0)
+    check("...and it is tagged so the reason is legible", r[1]=="collision")
     check("the original keeps its id",
           P.cached(con,"screenscraper","ninja gaiden sigma 2")[0]==25266)
     check("re-recording the SAME game with the same id still works",
