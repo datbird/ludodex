@@ -23,6 +23,7 @@ of a decision — cached so a sweep doesn't re-search 2000 titles every run, but
 stale, so a later and better-informed pass tries again. A miss must never become
 permanent by being written down.
 """
+import sqlite3
 import time
 
 # provider -> (table, id column). Adding one here is all a new provider needs from this
@@ -73,13 +74,53 @@ def is_identified(con, provider, norm_key):
     return bool(row and row[0] > 0)
 
 
+def holder(con, provider, provider_id, norm_key=None):
+    """The norm_key already holding `provider_id` on this provider, if it is another
+    game. None when the id is free or already ours."""
+    table, idcol = _spec(provider)
+    try:
+        pid = int(provider_id or 0)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        r = con.execute("SELECT norm_key FROM %s WHERE %s=? AND norm_key<>? LIMIT 1"
+                        % (table, idcol), (pid, norm_key or "")).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return r[0] if r else None
+
+
 def record(con, provider, norm_key, provider_id, name=None, matched_by="search"):
-    """Write an identity (or a miss, with a falsy provider_id). Idempotent."""
+    """Write an identity (or a miss, with a falsy provider_id). Idempotent.
+
+    A SEARCHED id that another game already holds is refused. One provider id is one
+    game, so two titles arriving at the same id means at least one of them is wrong —
+    and a search is exactly where that happens: an AI-proposed alias drops a
+    distinguishing word ("Ninja Gaiden Sigma 2" searched as "Ninja Gaiden 2"), the
+    provider answers with its nearest record, and the acceptance gate judges against the
+    alias rather than the game we own. That is how "Ninja Gaiden Sigma 2" and "Ninja
+    Gaiden II Black" ended up sharing ScreenScraper 25266, and Hammerwatch II shared
+    SteamGridDB 5462929 with Heroes of Hammerwatch II.
+
+    Deliberately narrow. It does NOT apply to `steam_appid` or `manual` matches: an
+    appid lookup is exact, and a DLC or beta appid legitimately resolves to its parent's
+    record, which is the provider modelling one product where our catalog lists two.
+    Refusing those would delete correct matches to satisfy a rule about wrong ones.
+
+    A refusal writes nothing — not even a miss — so the game is re-asked later rather
+    than being remembered as having no match.
+    """
     table, idcol = _spec(provider)
     try:
         pid = int(provider_id or 0)
     except (TypeError, ValueError):
         pid = 0
+    if pid > 0 and matched_by not in ("manual", "steam_appid"):
+        other = holder(con, provider, pid, norm_key)
+        if other:
+            return 0
     con.execute(
         "INSERT INTO %s(norm_key,%s,name,matched_by,resolved_at) VALUES(?,?,?,?,?) "
         "ON CONFLICT(norm_key) DO UPDATE SET %s=excluded.%s, name=excluded.name, "

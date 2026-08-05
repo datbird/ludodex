@@ -129,12 +129,34 @@ def sync(lib_con, cache_path, blocked_gids=(), only=None):
                             "WHERE COALESCE(igdb_id,0)>0").fetchall()
         except sqlite3.OperationalError:
             ig = []
+        # An entry whose game_key is `title:<nk>` has NO adopted IGDB identity — that is
+        # what the key means (unidentified, detached, or an era collision), and the
+        # detach path deletes the link for exactly that reason. But fill-only meant a
+        # link written under some earlier state was never removed again, so a wrong one
+        # was permanent: `Ys I` and `Ys II` both still carried IGDB 21032 long after both
+        # had become unidentified. A link must not outlive the identity it asserts.
+        try:
+            lib_con.execute(
+                "DELETE FROM metadata_links WHERE provider='igdb' AND game_id IN "
+                "(SELECT id FROM games WHERE COALESCE(game_key,'') NOT LIKE 'igdb:%')")
+        except sqlite3.OperationalError:
+            pass                               # no game_key column (old schema)
         have = {r[0] for r in lib_con.execute(
             "SELECT DISTINCT game_id FROM metadata_links WHERE provider='igdb'")}
+        # …and the same rule governs FILLING, not just removal: an entry build_library
+        # left on a `title:` key has had its IGDB identity refused (bundle, era
+        # collision, detach), so a resolution row is not licence to link it.
+        try:
+            ident = {r[0] for r in lib_con.execute(
+                "SELECT id FROM games WHERE COALESCE(game_key,'') LIKE 'igdb:%'")}
+        except sqlite3.OperationalError:
+            ident = None                       # old schema: no game_key to consult
         n = 0
         for nk, iid, slug in ig:
             for gid in gids.get(nk, ()):
                 if gid in blocked or gid in have:
+                    continue
+                if ident is not None and gid not in ident:
                     continue
                 lib_con.execute(
                     "INSERT INTO metadata_links(game_id,provider,provider_id,slug,url) "

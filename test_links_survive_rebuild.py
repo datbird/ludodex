@@ -143,6 +143,10 @@ def main():
     cc.commit()
     provider_links.sync(lib, cache, blocked_gids={4})
     lib.commit()
+    lib.execute("ALTER TABLE games ADD COLUMN game_key TEXT")
+    lib.execute("UPDATE games SET game_key='igdb:'||id")   # all identified for this part
+    provider_links.sync(lib, cache, blocked_gids={4})
+    lib.commit()
     check("a payload-less igdb identity still becomes a link",
           (2, "igdb", "8732") in links())
     check("filling igdb did not disturb the link build_library owns",
@@ -155,6 +159,15 @@ def main():
                     ).fetchone()[0]
     check("the filled igdb link has a usable url",
           (u or "").endswith("igdb.com/games/8732"))
+
+    # an igdb link must not outlive the identity it asserts
+    lib.execute("UPDATE games SET game_key='title:orphan' WHERE id=2")
+    lib.execute("INSERT INTO metadata_links VALUES(2,'igdb','21032',NULL,'u')")
+    provider_links.sync(lib, cache, blocked_gids={4})
+    lib.commit()
+    check("an igdb link on an UNidentified entry is removed",
+          not any(g == 2 and p == "igdb" for g, p, _ in links()))
+    check("an igdb link on an identified entry survives", (1, "igdb", "7") in links())
 
     check("every provider_ids provider is covered by sync",
           set(provider_links.PAGE_URL) >= set(provider_ids.PROVIDERS))
