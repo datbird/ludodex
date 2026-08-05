@@ -136,6 +136,14 @@ def main():
     check("no rejects is a no-op",
           srv._apply_art_rejects(con, "pq1", "cover", cands, []) == 0)
 
+    # ---- 4. a lone candidate is still questioned --------------------------------
+    # Ranking needs two candidates; "is this even this game?" does not. A single asset
+    # is the dangerous case — nothing competes with it, so it is served unchallenged.
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "server", "app.py")).read()
+    check("no vision path skips a game for having only one candidate",
+          "len(cands) < 2" not in src)
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 

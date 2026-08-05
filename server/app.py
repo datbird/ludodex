@@ -5642,7 +5642,13 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                                 cands.append((r["id"], t))
                                 crows.append({"id": r["id"], "provider": r["provider"],
                                               "ref": r["ref"]})
-                        if len(cands) < 2:
+                        # ONE candidate is still judged. Ranking needs two; asking
+                        # "is this even this game?" does not — and a lone asset is the
+                        # dangerous case, because nothing competes with it, so it is
+                        # served by default and never questioned. Police Quest: In
+                        # Pursuit of the Death Angel wore Police Quest II's cover with
+                        # no AI verdict on any of its rows.
+                        if not cands:
                             continue
                         # The other-region names, from the alias cache the identity
                         # rescue already fills. Vision reads the title text ON the art;
@@ -10874,11 +10880,11 @@ def art_pick(norm_key: str, kind: str = Query("cover")):
         if len(cands) >= 6:
             break
     listed = [{"id": c["id"], "provider": c["provider"]} for c in cands]
-    if len(cands) < 2:
-        return {"kind": kind, "candidates": listed,
-                "recommended_id": cands[0]["id"] if cands else None,
-                "reason": ("Only one candidate reachable on this host."
-                           if cands else "No candidates reachable on this host.")}
+    if not cands:
+        return {"kind": kind, "candidates": listed, "recommended_id": None,
+                "reason": "No candidates reachable on this host."}
+    # A single candidate is not a free pass: it still gets asked whether it is this
+    # game, because with nothing to rank against it is served unchallenged.
     # Measured facts the model cannot see from the frames themselves — length, true
     # resolution, whether it even has audio. Probe results are cached by ffprobe's own
     # caller path; a video with no probe says "unknown" rather than reporting zeros.
