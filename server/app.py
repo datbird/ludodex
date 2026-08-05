@@ -444,7 +444,33 @@ NON_GAME_TYPES = ("application", "tool", "music", "video", "hardware", "series",
 # one click from being rescued.
 NON_GAME_GENRES = ("utilities", "software", "software training", "audio production",
                    "video production", "photo editing", "animation & modeling",
-                   "design & illustration", "web publishing", "game development")
+                   "design & illustration", "web publishing", "game development",
+                   "accounting")
+
+# The same genres by Steam's OWN id — the only form of this rule that survives a
+# localised catalog. Steam returns `{"id": "57", "description": "Utilities"}`, and the id
+# is language-independent while the description is not: 3DMark is 57 as "Utilities",
+# "Utilitários" and "Werkzeuge" alike (verified live 2026-08-04). Matching the NAME meant
+# a Portuguese-localised ingest quietly hid nothing at all.
+#
+# Keyed BY the English name so the two lists cannot drift apart unnoticed — a genre with
+# no Steam id (our own "software" catch-all, and anything IGDB-sourced) simply has no
+# entry and is still caught by the name branch. `test_genre_language.py` asserts every
+# key here names a real NON_GAME_GENRES entry.
+STEAM_GENRE_IDS = {"accounting": "50", "animation & modeling": "51",
+                   "audio production": "52", "design & illustration": "53",
+                   "photo editing": "55", "software training": "56",
+                   "utilities": "57", "video production": "58",
+                   "web publishing": "59", "game development": "60"}
+NON_GAME_GENRE_IDS = tuple(sorted(set(STEAM_GENRE_IDS.values()), key=int))
+
+# Attribute kinds that exist for CODE, not for people. They live in game_attributes
+# because that is where per-game facts go, but they are machine keys or free text, so
+# they must never appear as a filter facet — nobody wants to browse by "genre ids: 57".
+# One list, because the facet builder used to carry its own inline copy and every kind
+# added since had to remember to be added to it.
+INTERNAL_ATTR_KINDS = ("description", "genre_ids", "match_confidence", "match_reason",
+                       "match_confidence_ss", "match_reason_ss")
 
 
 def _non_game_hidden_sql():
@@ -456,15 +482,22 @@ def _non_game_hidden_sql():
     a connection with `ov` + `sco` attached (i.e. lib())."""
     ph = ",".join("?" * len(NON_GAME_TYPES))
     gph = ",".join("?" * len(NON_GAME_GENRES))
+    iph = ",".join("?" * len(NON_GAME_GENRE_IDS))
     expr = ("CASE WHEN EXISTS(SELECT 1 FROM ov.overrides o WHERE o.norm_key=g.norm_key "
             "AND o.kind='content_type') "
             "THEN EXISTS(SELECT 1 FROM ov.overrides o WHERE o.norm_key=g.norm_key AND "
             "o.kind='content_type' AND lower(o.value)<>'game') "
             "ELSE (g.norm_key IN (SELECT norm_key FROM sco.steam_type WHERE type IN (%s)) "
             "      OR EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
+            "                AND ga.kind='genre_ids' AND ga.value IN (%s)) "
+            "      OR EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
             "                AND ga.kind='genres' AND lower(ga.value) IN (%s))) "
-            "END" % (ph, gph))
-    return expr, list(NON_GAME_TYPES) + list(NON_GAME_GENRES)
+            "END" % (ph, iph, gph))
+    # id branch FIRST because it is the language-proof one; the name branch stays so
+    # rows written before genre_ids existed — and non-Steam genres, which have no id —
+    # keep being caught without waiting for a re-fetch.
+    return expr, (list(NON_GAME_TYPES) + list(NON_GAME_GENRE_IDS)
+                  + list(NON_GAME_GENRES))
 
 # Storefront labels are Sources, not Systems — PC-store games get platform=source,
 # so exclude these (and the generic psn/xbox fallbacks) from the Systems facet.
@@ -634,10 +667,9 @@ def facets():
         # kinds (description) aren't value-filterable, so they're skipped.
         attributes = {}
         kinds = [r["kind"] for r in con.execute(
-            "SELECT DISTINCT kind FROM game_attributes "
-            "WHERE kind NOT IN ('description','match_confidence','match_reason',"
-            "'match_confidence_ss','match_reason_ss') "
-            "ORDER BY kind")]
+            "SELECT DISTINCT kind FROM game_attributes WHERE kind NOT IN (%s) "
+            "ORDER BY kind" % ",".join("?" * len(INTERNAL_ATTR_KINDS)),
+            INTERNAL_ATTR_KINDS)]
         for k in kinds:
             vals = [r["value"] for r in con.execute(
                 "SELECT value, COUNT(*) c FROM game_attributes WHERE kind=? "

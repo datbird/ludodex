@@ -31,6 +31,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
+import medialang
 
 INDEX = os.path.join(DATA, "media-index.sqlite")
 META_CACHE = os.path.join(DATA, "metadata-cache.sqlite")
@@ -375,6 +376,13 @@ def _extract_steam_attrs(data):
     genres = [g.get("description") for g in (data.get("genres") or []) if g.get("description")]
     if genres:
         out["genres"] = genres
+    # The genre ID, not just its name. Steam's id is language-independent (3DMark is 57
+    # whether it renders "Utilities", "Utilitários" or "Werkzeuge"); the name is not.
+    # `NON_GAME_GENRES` used to match the NAME, so a localised catalog silently stopped
+    # hiding utilities altogether. Rules match this; humans read `genres`.
+    gids = [str(g["id"]) for g in (data.get("genres") or []) if g.get("id")]
+    if gids:
+        out["genre_ids"] = gids
     cats = [c.get("description") for c in (data.get("categories") or []) if c.get("description")]
     if cats:
         out["categories"] = cats
@@ -426,18 +434,47 @@ def fetch_steam(con, now, only=None):
 
 
 UA = "ludodex/1.0 (+https://github.com/datbird/ludodex)"
-# PIN THE LANGUAGE. Without `l=`, Steam localises appdetails by the requesting IP, so
-# the server's egress decides what language your catalog is in — live, this instance was
-# getting Brazilian Portuguese, giving 3DMark a pt-BR description and the genre
-# "Utilitários".
+
+# PIN THE LANGUAGE — always, and from the ONE place the user sets it.
 #
-# That is not merely cosmetic. `NON_GAME_GENRES` is an English vocabulary, so a localised
-# genre silently defeats the non-game filter: "Utilitários" is not "utilities", and every
-# benchmark, wallpaper tool and video player stays visible no matter how the filter is
-# configured. The attribute vocabulary, the genre rules and the AI prompts are all
-# English, so the ingest language has to be too.
+# Without `l=`, Steam localises appdetails by the requesting IP, so the server's egress
+# decides what language your catalog is in. Live, this instance was being served
+# Brazilian Portuguese: 3DMark arrived with a pt-BR description and the genre
+# "Utilitários", and nobody had chosen that.
+#
+# The description is cosmetic and belongs to the user. The genre is not: it is a rule
+# input, and matching it as text is what let a localised catalog silently defeat the
+# non-game filter. That is fixed at the source — `_extract_steam_attrs` now persists
+# Steam's language-independent genre id and `_non_game_hidden_sql` matches THAT — which
+# is precisely what makes it safe for the display language to follow the user again.
+#
+# So the language is not hardcoded here. It comes from `media_languages`, the ordered
+# preference the user already sets in Settings, with English as the fallback: one
+# setting, no constant beside it quietly disagreeing.
 STEAM_APPDETAILS = ("https://store.steampowered.com/api/appdetails"
-                    "?appids=%s&l=english&cc=us")
+                    "?appids=%s&l=%s&cc=us")
+# Canonical language name (medialang.LANGUAGES, the picker's vocabulary) -> Steam's own
+# `l=` code. Mostly identity, but Steam spells two of them its own way, and a wrong code
+# is silently ignored — which would put us straight back on IP-guessed localisation.
+STEAM_LANG = {"english": "english", "japanese": "japanese", "french": "french",
+              "german": "german", "spanish": "spanish", "italian": "italian",
+              "portuguese": "portuguese", "dutch": "dutch", "korean": "koreana",
+              "chinese": "schinese", "russian": "russian", "polish": "polish",
+              "swedish": "swedish", "danish": "danish", "norwegian": "norwegian",
+              "finnish": "finnish", "greek": "greek", "turkish": "turkish",
+              "czech": "czech", "hungarian": "hungarian"}
+
+
+def appdetails_url(appid):
+    """The appdetails URL for `appid`, in the user's preferred language.
+
+    Every caller goes through here, so there is no path that can request an unpinned
+    (IP-localised) page. An unset or unrecognised preference falls back to English —
+    never to unpinned, because "whatever the egress IP implies" is not a language
+    anyone chose.
+    """
+    want = (medialang.preferred() or ["English"])[0]
+    return STEAM_APPDETAILS % (appid, STEAM_LANG.get(str(want).strip().lower(), "english"))
 # Highest-quality trailer file, constructed from the movie id (appdetails stopped
 # listing direct files, but this path still serves a real playable .webm).
 STEAM_MOVIE = "https://cdn.akamai.steamstatic.com/steam/apps/%s/movie_max.webm"
@@ -504,7 +541,7 @@ def fetch_steam_media(con, now, only=None, refresh=False, limit=None, art=True):
             time.sleep(wait)
         last = time.monotonic()
         try:
-            req = urllib.request.Request(STEAM_APPDETAILS % appid,
+            req = urllib.request.Request(appdetails_url(appid),
                                          headers={"User-Agent": UA})
             with urllib.request.urlopen(req, timeout=25) as r:
                 d = json.load(r)

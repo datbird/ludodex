@@ -2356,10 +2356,11 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
       </div>
 
       <div className="pref-section">
-        <div className="pref-name">Media language</div>
-        <span className="pref-hint">Your preferred languages for artwork &amp; media (box art, logos,
-          manuals), most preferred first. The ✨ smart art picker prefers your 1st language where
-          quality is comparable.</span>
+        <div className="pref-name">Language</div>
+        <span className="pref-hint">Your preferred languages, most preferred first. Your 1st
+          language is what store descriptions are fetched in, and the ✨ smart art picker prefers
+          artwork in it where quality is comparable. Genres and other filters stay language-proof
+          either way.</span>
         <div className="lang-slots">
           {[0, 1, 2].map((i) => (
             <select key={i} className="pref-select"
