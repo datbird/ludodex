@@ -84,6 +84,22 @@ def sync(lib_con, cache_path, blocked_gids=(), only=None):
                                   % (idcol, table, idcol)).fetchall()
             except sqlite3.OperationalError:
                 continue                       # provider never ran on this install
+            # AUTHORITATIVE, not incremental. Clearing only the games we are about to
+            # write leaves a link behind whenever an identity DISAPPEARS — a re-match
+            # that correctly resolves to nothing, a detach, a provider retiring a record.
+            # Live, `dune awakening` kept ScreenScraper 12706 (Dune: Imperium) after the
+            # re-match had decided SS does not have it, because a game with no identity
+            # was never visited. A link is a claim about an identity; with no identity
+            # there is no claim, so the provider's rows are cleared across the whole
+            # scope first and rebuilt from what the cache actually holds.
+            if want is None:
+                lib_con.execute("DELETE FROM metadata_links WHERE provider=?",
+                                (provider,))
+            else:
+                for _nk in want:
+                    for _gid in gids.get(_nk, ()):
+                        lib_con.execute("DELETE FROM metadata_links WHERE game_id=? "
+                                        "AND provider=?", (_gid, provider))
             n = 0
             for nk, pid in rows:
                 for gid in gids.get(nk, ()):

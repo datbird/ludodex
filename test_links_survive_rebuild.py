@@ -159,6 +159,26 @@ def main():
     check("every provider_ids provider is covered by sync",
           set(provider_links.PAGE_URL) >= set(provider_ids.PROVIDERS))
 
+    # An identity that BECOMES a miss must take its link with it. sync() only visited
+    # games that still had an identity, so a corrected match that resolved to nothing
+    # left the old link in place: live, `dune awakening` kept ScreenScraper 12706 (Dune:
+    # Imperium) after the re-match had correctly decided SS does not have it. A link is
+    # a claim about an identity; with no identity there is no claim.
+    provider_ids.record(cc, "screenscraper", "arcadia", 0)     # was 4321, now a miss
+    cc.commit()
+    provider_links.sync(lib, cache, blocked_gids={4})
+    lib.commit()
+    check("a link whose identity became a miss is removed",
+          not any(p == "screenscraper" and g in (1, 9) for g, p, _ in links()))
+    check("the other provider's link is untouched by that",
+          (1, "steamgriddb", "999") in links())
+    provider_ids.record(cc, "screenscraper", "arcadia", 4321, name="Arcadia")
+    cc.commit()
+    provider_links.sync(lib, cache, blocked_gids={4})
+    lib.commit()
+    check("and it comes back when the identity does",
+          (1, "screenscraper", "4321") in links())
+
     # ---- the regression itself: a full rebuild keeps the links -------------------
     # Simulate what build_library does — drop and recreate the table — then sync.
     lib.execute("DELETE FROM metadata_links")
