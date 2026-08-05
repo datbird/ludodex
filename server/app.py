@@ -59,6 +59,7 @@ import merges          # noqa: E402  durable game merges (fold duplicate entries
 import splits          # noqa: E402  durable "peel apart" (split a merged entry out)
 import ingesthints     # noqa: E402  AI ingest hints (lite/heavy import path rewrites)
 import reset           # noqa: E402  scoped reset (library / curation / factory)
+import provider_links  # noqa: E402  metadata_links derived from the identity cache
 import devicesync      # noqa: E402  outbound push (ROM+media+gamelist) to RetroDECK/ES-DE
 import auth            # noqa: E402  local username/password accounts + sessions
 import cf_access       # noqa: E402  Cloudflare Access SSO (verify the Access JWT)
@@ -7257,11 +7258,9 @@ def _provider_page_url(provider, provider_id, slug=None):
     if p == "igdb":
         s = slug or _igdb_slug(provider_id)
         return "https://www.igdb.com/games/%s" % s if s else None
-    if p == "screenscraper" and str(provider_id or "").isdigit():
-        return "https://www.screenscraper.fr/gameinfos.php?gameid=%s" % provider_id
-    if p == "steamgriddb" and str(provider_id or "").isdigit():
-        return "https://www.steamgriddb.com/game/%s" % provider_id
-    return None
+    # everything else is a plain id -> page template, and `provider_links` owns those
+    # because the rebuild has to build the identical URL without importing the server.
+    return provider_links.page_url(p, provider_id)
 
 
 def _entry_rom_paths(sources, limit=40):

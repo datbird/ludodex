@@ -1408,7 +1408,7 @@ if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
 # ScreenScraper (emulation metadata; one scrape yields metadata + media, media is
 # indexed separately). Unioned with IGDB per the merge above.
 SS_CACHE = os.path.join(DATA, "screenscraper-cache.sqlite")
-ss_link = ss_attr = 0
+ss_attr = 0
 if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
     from screenscraper import extract_metadata as ss_map
     sc = sqlite3.connect(SS_CACHE)
@@ -1422,7 +1422,6 @@ if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
     # entry platform per gid (IGDB block defines its own copy; recompute here so SS
     # confidence works even when IGDB enrichment is disabled/absent).
     ss_gid_platform = {gid: plat for (nk, plat), gid in key_to_gid.items()}
-    linked = set()
     _ss_conf = {}                            # gid -> (score, reason)
     for nk, ss_id, payload in ss_rows:
         gids = base_to_gids.get(nk)          # metadata is title-level → every platform entry
@@ -1442,14 +1441,11 @@ if config.metadata_enabled("screenscraper") and os.path.exists(SS_CACHE):
         for gid in gids:
             if gid in blocked_gids:          # homebrew/hack/unlicensed: NOT this game
                 continue
-            if ss_id and (gid, ss_id) not in linked:
-                cur.execute("INSERT INTO metadata_links(game_id,provider,provider_id,"
-                            "slug,url) VALUES(?,?,?,?,?)",
-                            (gid, "screenscraper", str(ss_id), None,
-                             "https://www.screenscraper.fr/gameinfos.php?gameid=%s"
-                             % ss_id))
-                linked.add((gid, ss_id))
-                ss_link += 1
+            # NB the ScreenScraper LINK is not written here. It used to be, and only for
+            # games that happened to have a cached SS payload — so a rebuild kept 152 of
+            # 1807 recorded matches and silently dropped the rest. Links for every
+            # non-IGDB provider now come from `provider_links.sync()` below, straight off
+            # the identity cache, so a rebuild is lossless.
             _ss_conf[gid] = _mc.ss_match_confidence(
                 _mb, nk, ss_names, ss_plat_canons, ss_gid_platform.get(gid))
             for kind, val in mapped.items():
@@ -1575,6 +1571,21 @@ CREATE INDEX IF NOT EXISTS ix_gtag_game ON game_tags(game_id);
 """)
 con.commit()
 
+# Provider links for everything that isn't IGDB, rebuilt from the identity cache.
+#
+# This has to happen HERE, after the catalog exists, because a rebuild recreates
+# `metadata_links` from nothing: before this, every ScreenScraper match without a cached
+# payload and EVERY SteamGridDB match was simply lost, and nothing downstream could tell
+# a match had ever been made. Since the tiered ingest runs this script again after its
+# media phase, that quietly threw away the matching done earlier in the same job.
+import provider_links                          # noqa: E402
+_pl = provider_links.sync(con, CACHE_DB, blocked_gids=blocked_gids)
+con.commit()
+for _p, _n in sorted(_pl.items()):
+    if _n:
+        print("# %s: linked %d entr(y/ies) from the identity cache" % (_p, _n),
+              file=sys.stderr)
+
 # summary to stderr
 tot = cur.execute("SELECT COUNT(*) FROM games").fetchone()[0]
 multi = cur.execute("SELECT COUNT(*) FROM games WHERE n_kinds>1").fetchone()[0]
@@ -1588,8 +1599,6 @@ if _pn:
     print("# games also in Playnite (provenance): %d" % _pn, file=sys.stderr)
 if n_link:
     print("# IGDB: linked %d games" % n_link, file=sys.stderr)
-if ss_link:
-    print("# ScreenScraper: linked %d games" % ss_link, file=sys.stderr)
 if n_attr:
     print("# provider attributes: +%d rows (IGDB+SS unioned per value, origins kept)"
           % n_attr, file=sys.stderr)
