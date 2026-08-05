@@ -426,7 +426,18 @@ def fetch_steam(con, now, only=None):
 
 
 UA = "ludodex/1.0 (+https://github.com/datbird/ludodex)"
-STEAM_APPDETAILS = "https://store.steampowered.com/api/appdetails?appids=%s"
+# PIN THE LANGUAGE. Without `l=`, Steam localises appdetails by the requesting IP, so
+# the server's egress decides what language your catalog is in — live, this instance was
+# getting Brazilian Portuguese, giving 3DMark a pt-BR description and the genre
+# "Utilitários".
+#
+# That is not merely cosmetic. `NON_GAME_GENRES` is an English vocabulary, so a localised
+# genre silently defeats the non-game filter: "Utilitários" is not "utilities", and every
+# benchmark, wallpaper tool and video player stays visible no matter how the filter is
+# configured. The attribute vocabulary, the genre rules and the AI prompts are all
+# English, so the ingest language has to be too.
+STEAM_APPDETAILS = ("https://store.steampowered.com/api/appdetails"
+                    "?appids=%s&l=english&cc=us")
 # Highest-quality trailer file, constructed from the movie id (appdetails stopped
 # listing direct files, but this path still serves a real playable .webm).
 STEAM_MOVIE = "https://cdn.akamai.steamstatic.com/steam/apps/%s/movie_max.webm"
