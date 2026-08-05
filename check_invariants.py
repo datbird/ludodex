@@ -236,6 +236,25 @@ def main():
     report("I8 the asset labelled USED is the asset actually served", bad,
            "the panel and the page would show different art for the same entry")
 
+    # ------------------------------------------------------- I9: one id, one game
+    # A provider id identifies ONE game. Two different titles holding the same id means
+    # the matcher bound one of them wrong, and the consequence is silent: the loser
+    # inherits the winner's art and metadata and looks merely mediocre rather than
+    # broken. Live this was Police Quest: In Pursuit of the Death Angel and Police Quest
+    # II: The Vengeance both on ScreenScraper 31435 — PQ1 showed PQ2's cover.
+    #
+    # Same-title-different-platform is legitimate (one game, several entries), so the
+    # comparison is on norm_key, not on entry.
+    bad = []
+    for prov, pid, n, names in g.execute(
+            "SELECT m.provider, m.provider_id, COUNT(DISTINCT gg.norm_key) c, "
+            "GROUP_CONCAT(DISTINCT gg.canonical_title) "
+            "FROM metadata_links m JOIN games gg ON gg.id=m.game_id "
+            "GROUP BY m.provider, m.provider_id HAVING c>1 ORDER BY c DESC"):
+        bad.append("%s %s claimed by %d titles: %s" % (prov, pid, n, (names or "")[:90]))
+    report("I9 a provider id identifies exactly one game", bad,
+           "the loser silently inherits the winner's art and metadata")
+
     m.close()
     g.close()
     print()

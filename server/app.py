@@ -3666,29 +3666,17 @@ def _ss_match(queries, systems, year=None):
             except Exception as e:               # surface, don't swallow silently
                 print("ss search %r sys=%s: %s" % (q, sid, str(e)[:120]), file=sys.stderr)
                 continue
-            qtok = set(titlenorm.norm(q).split())
             for j in cands:
                 jid = j.get("id")
                 if jid in seen:
                     continue
                 seen.add(jid)
-                ntok = set(titlenorm.norm(ss.jeu_name(j)).split())
-                if not (qtok and ntok):
-                    continue
-                inter = len(qtok & ntok)
-                qc = inter / len(qtok)           # query tokens covered by the SS name
-                nc = inter / len(ntok)           # SS-name tokens covered by the query
-                # Token sets cannot see that "Megaman X4" and "Mega Man X4" are the same
-                # game: {megaman,x4} vs {mega,man,x4} share ONE token, scoring 0.50 and
-                # failing the 0.8 gate — so SS returned the exact match and we rejected
-                # it. Compare with spaces squashed out as well; an equal squash IS an
-                # exact match, whatever the word breaks.
-                if (titlenorm.norm(q).replace(" ", "")
-                        == titlenorm.norm(ss.jeu_name(j)).replace(" ", "")):
-                    qc = nc = 1.0
                 yr = ss.jeu_year(j)
-                score = qc + nc + (0.4 if year and yr == str(year) else 0)
-                if qc >= 0.8 and (best is None or score > best[0]):
+                # Scored against the OWNED titles, never against `q`. `q` may be a
+                # subtitle-stripped variant, and judging by it is how "Half-Life:
+                # Opposing Force" came to be ScreenScraper's Half-Life.
+                acc, score = _ss_candidate_score(queries, ss.jeu_name(j), year, yr)
+                if acc and (best is None or score > best[0]):
                     best = (score, j, ss.jeu_name(j), yr)
             if best and best[0] >= 1.7:          # near-exact (qc≈1 + nc≈1) — stop
                 break
@@ -3707,6 +3695,49 @@ def _ss_match(queries, systems, year=None):
     return {"provider": "screenscraper", "ss_id": j.get("id"), "name": nm,
             "year": int(yr) if yr and str(yr).isdigit() else None,
             "system": systems[0] if systems else None}
+
+
+def _ss_candidate_score(owned, cand_name, year=None, cand_year=None):
+    """Is `cand_name` acceptable as a match for one of the OWNED titles, and how good?
+
+    Returns (ok, score). Split out of `_ss_match` because the acceptance test used to be
+    applied to whichever cleaned VARIANT had been searched, not to the title the user
+    owns. Variants exist so that "Mega Man X4" can find ScreenScraper's "Megaman X4";
+    they must not also let a subtitle-stripped variant match its own parent game:
+    "Half-Life: Opposing Force" searched as "Half-Life" scored a perfect 1.0 against
+    Half-Life and was recorded as Opposing Force's identity. Live that bound 191 titles
+    onto 86 ScreenScraper ids, and the loser of each collision inherited the winner's art.
+
+    So both directions are measured against the owned title:
+      qc  how much of the OWNED title the candidate covers — a candidate missing
+          "opposing force" is a different game, however exactly it matches the rest;
+      nc  how much of the candidate the owned title covers — tolerant, because
+          providers append edition and region words we do not carry.
+    """
+    best = (False, 0.0)
+    cn = titlenorm.norm(cand_name or "")
+    ntok = set(cn.split())
+    if not ntok:
+        return best
+    for t in (owned or []):
+        qn = titlenorm.norm(t or "")
+        qtok = set(qn.split())
+        if not qtok:
+            continue
+        inter = len(qtok & ntok)
+        qc = inter / len(qtok)
+        nc = inter / len(ntok)
+        # Token sets cannot see that "Megaman X4" and "Mega Man X4" are the same game:
+        # they share ONE token and score 0.50. Squashing the spaces out makes an equal
+        # string an exact match whatever the word breaks.
+        if qn.replace(" ", "") == cn.replace(" ", ""):
+            qc = nc = 1.0
+        score = qc + nc + (0.4 if year and cand_year == str(year) else 0)
+        if qc >= 0.8 and score > best[1]:
+            best = (True, score)
+        elif not best[0] and score > best[1]:
+            best = (False, score)
+    return best
 
 
 def _score_confidence_ai(nks, should_stop=lambda: False, chunk=20):
@@ -5604,11 +5635,13 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                             -(r["width"] * r["height"])
                             if (r["width"] and r["height"]) else 0,
                             0 if r["matched"] else 1, r["id"]))
-                        cands = []
+                        cands, crows = [], []
                         for r in grows[:6]:
                             t = _thumb_bytes(r)
                             if t:
                                 cands.append((r["id"], t))
+                                crows.append({"id": r["id"], "provider": r["provider"],
+                                              "ref": r["ref"]})
                         if len(cands) < 2:
                             continue
                         # The other-region names, from the alias cache the identity
@@ -5620,11 +5653,21 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                         res = ai.pick_art(title, kind, [c[1] for c in cands],
                                           provider=ai.provider_for_area("art"),
                                           model=ai.model_for_area("art"),
-                                          language=config.get("media_language") or None,
+                                          language=_pref_language(),
                                           aliases=_al)
-                        best = cands[res["index"]][0]
                         w = sqlite3.connect(INDEX_DB)
                         try:
+                            # act on "that is not this game" BEFORE promoting anything —
+                            # a confident reject is banned, so it cannot come back on the
+                            # next sync and cannot be the fallback if the pick is dropped.
+                            _apply_art_rejects(w, nk, kind, crows,
+                                               res.get("rejects"))
+                            if res["index"] is None:
+                                # every candidate is the wrong game: leave the kind with
+                                # no primary rather than promote art that isn't this game
+                                w.commit()
+                                continue
+                            best = cands[res["index"]][0]
                             # ai_pick is the DURABLE verdict — select() re-ranks (and
                             # zeroes `chosen`) on every pass, so without it the paid
                             # judgment would be erased by the next sync and re-billed.
@@ -6239,14 +6282,15 @@ def _fetch_media_web(con, nk, title, now):
         pick = 0
         if len(imgs) > 1:
             try:
-                pick = int(ai.pick_art(
+                _v = ai.pick_art(
                     title, "cover", imgs,
-                    aliases=_title_aliases(nk, title, [], allow_ai=False)
-                ).get("index", 0))
+                    aliases=_title_aliases(nk, title, [], allow_ai=False))
+                pick = _v["index"]
             except Exception:
                 pick = 0
-        pick = max(0, min(pick, len(imgs) - 1))
-        _add(urls[pick], "cover", imgs[pick][0]); added += 1
+        if pick is not None:                    # None = none of these is this game
+            pick = max(0, min(pick, len(imgs) - 1))
+            _add(urls[pick], "cover", imgs[pick][0]); added += 1
     # 3) LLM-proposed direct urls (low-yield last resort)
     for c in ai.find_media_urls(title, systems=systems, year=year):
         u = (c.get("url") or "").strip()
@@ -7244,6 +7288,63 @@ def _igdb_slug(iid):
         return _IGDB_SLUGS.get(int(iid)) or None
     except (TypeError, ValueError):
         return None
+
+
+def _pref_language():
+    """The user's 1st preferred language, or None.
+
+    One reader, because there are two keys: `media_languages` is the ordered picker the
+    Settings UI writes, and `media_language` is the old single value it superseded.
+    Callers reading only the old key saw nothing once the user set the new one — the art
+    picker was silently language-blind for exactly the people who had expressed a
+    preference.
+    """
+    try:
+        return (medialang.preferred() or [None])[0]
+    except Exception:                              # noqa: BLE001 — never fail a pick
+        return None
+
+
+# How sure vision has to be that an asset is the WRONG GAME before we stop keeping it.
+# Deliberately high: demoting a good image costs a nicer cover, deleting one costs work
+# the user may have to redo, and the failure this guards against (Police Quest II art on
+# Police Quest I) is unambiguous when it is real. Below the bar the asset simply stays,
+# unpromoted — the pick already ignores it.
+ART_REJECT_BAN_AT = 0.8
+
+
+def _apply_art_rejects(con, nk, kind, cands, rejects, ban_at=ART_REJECT_BAN_AT):
+    """Act on vision's "this is not this game" verdicts. Returns the number banned.
+
+    Every path that asks a model to pick art goes through here, so the consequence of a
+    rejection is defined once. Two tiers, because the two mistakes are not symmetric:
+
+      * confident  -> BAN. `mediaflags.ban` is durable and provider-aware, so the asset
+        is not silently re-downloaded by the next sync — which is what "don't retain it"
+        has to mean for anything fetched from a provider.
+      * unsure     -> leave it. It loses nothing by staying: it was not picked, and a
+        guess must never delete a user's art.
+
+    A banned row also drops `chosen` immediately, so the wrong cover stops being served
+    now rather than at the next selection pass.
+    """
+    n = 0
+    for r in (rejects or []):
+        i = r.get("index")
+        if not isinstance(i, int) or not 0 <= i < len(cands):
+            continue
+        if float(r.get("confidence") or 0) < ban_at:
+            continue
+        c = cands[i]
+        prov = c.get("provider") if isinstance(c, dict) else None
+        ref = c.get("ref") if isinstance(c, dict) else None
+        if not ref:
+            continue
+        mediaflags.ban(nk, kind, prov, ref)
+        con.execute("UPDATE media SET chosen=0, ai_pick=NULL WHERE norm_key=? AND "
+                    "kind=? AND provider IS ? AND ref=?", (nk, kind, prov, ref))
+        n += 1
+    return n
 
 
 def _provider_page_url(provider, provider_id, slug=None):
@@ -10768,7 +10869,8 @@ def art_pick(norm_key: str, kind: str = Query("cover")):
     for r in rows:
         t = _thumb_bytes(r)
         if t:
-            cands.append({"id": r["id"], "provider": r["provider"], "thumb": t})
+            cands.append({"id": r["id"], "provider": r["provider"],
+                          "ref": r["ref"], "thumb": t})
         if len(cands) >= 6:
             break
     listed = [{"id": c["id"], "provider": c["provider"]} for c in cands]
@@ -10792,11 +10894,27 @@ def art_pick(norm_key: str, kind: str = Query("cover")):
                           notes=notes,
                           provider=ai.provider_for_area("art"),
                           model=ai.model_for_area("art"),
-                          language=config.get("media_language") or None)
+                          language=_pref_language())
     except Exception as e:
         raise HTTPException(502, "AI error: %s" % e)
+    # Rejections are acted on here too, not just reported: the endpoint is the wand's
+    # "pick best" half, and a user who runs it expects the wrong-game art to stop being
+    # served — not to be told about it and left in place.
+    wcon = sqlite3.connect(INDEX_DB)
+    try:
+        _apply_art_rejects(wcon, norm_key, kind,
+                           [{"id": c["id"], "provider": c.get("provider"),
+                             "ref": c.get("ref")} for c in cands],
+                           res.get("rejects"))
+        wcon.commit()
+    finally:
+        wcon.close()
     return {"kind": kind, "candidates": listed,
-            "recommended_id": cands[res["index"]]["id"], "reason": res["reason"]}
+            "recommended_id": (cands[res["index"]]["id"]
+                               if res["index"] is not None else None),
+            "rejected_ids": [cands[r["index"]]["id"] for r in res.get("rejects") or []
+                             if 0 <= r["index"] < len(cands)],
+            "reason": res["reason"]}
 
 
 @app.post("/api/ai/art-apply")

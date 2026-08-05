@@ -704,8 +704,18 @@ DEFAULT_PROMPTS = {
         "whose visible title reads '<<title>>' (or is text-free) MUST be preferred over "
         "art showing a different regional name, EVEN IF the other image is sharper, "
         "larger or better composed. Only fall back to another region's art when there is "
-        "no acceptable image bearing the owned name.<<aliases>> A placeholder, blank or "
-        "different-game image is rejected outright.\n"
+        "no acceptable image bearing the owned name.<<aliases>>\n"
+        "1b. WRONG GAME — reject it. A different regional NAME for the same game is "
+        "fine to keep (rule 1); art for a DIFFERENT GAME is not this game's art at all. "
+        "The dangerous case is a SERIES ENTRY: a sequel's box art shares the wordmark, "
+        "artist, palette and layout with its siblings and differs only by a number or "
+        "subtitle. Read them. 'Police Quest II: The Vengeance' art is NOT valid for "
+        "'Police Quest: In Pursuit of the Death Angel'; 'Ys II' art is NOT valid for "
+        "'Ys I'. A compilation or collection cover is also not a single entry's cover. "
+        "List every such image, plus any placeholder or blank, in \"rejects\" with how "
+        "sure you are. If NO candidate is this game, return index null and reject them "
+        "all — returning no acceptable pick is a valid, useful answer, and far better "
+        "than promoting art for the wrong game.\n"
         "2. RIGHT SHAPE for a '<<kind>>': a cover/box is UPRIGHT (portrait ~3:4); a "
         "hero/background is WIDE (landscape ~16:9); a logo is a transparent wordmark; "
         "a screenshot is in-game. Reject an image whose orientation is wrong for the "
@@ -714,7 +724,9 @@ DEFAULT_PROMPTS = {
         "4. OFFICIAL first: prefer official store / publisher key art; only choose "
         "fan-made or 'cool' custom art when nothing official is decent.\n"
         "Respond ONLY with JSON: "
-        '{"index": <1-based number>, "reason": "<short>"}.'
+        '{"index": <1-based number, or null if none is acceptable>, '
+        '"reason": "<short>", '
+        '"rejects": [{"index": <1-based>, "confidence": <0-1>, "why": "<short>"}]}.'
     ),
     "dedupe_media": (
         "You are shown pairs of candidate images for one video game. For each numbered "
@@ -1635,11 +1647,54 @@ def pick_art(title, kind, images, provider=None, model=None, language=None, note
                   "of the image):\n"
                   + "\n".join("Image %d: %s" % (i + 1, n) for i, n in enumerate(notes)))
     text = _complete_vision(provider, key, model, system, instr, images)
-    obj = _json(text) or {}
+    return _parse_art_verdict(_json(text) or {}, len(images))
+
+
+def _parse_art_verdict(obj, n):
+    """Normalise the art model's answer to {"index", "reason", "rejects"}.
+
+    Split out from `pick_art` so the parsing rules are testable without a model call,
+    and so every caller reads the verdict the same way.
+
+    `index` is 0-based, or **None** meaning "no acceptable candidate" — a real answer,
+    not an error. It used to be clamped into range unconditionally, which meant a model
+    that had correctly recognised every candidate as the wrong game still had one of
+    them promoted. `rejects` are candidates the model says are not this game at all,
+    each with a confidence; an unparseable confidence becomes 0.0, because "it did not
+    say" must never be read as "it was certain" when the consequence is deleting art.
+    """
     raw = obj.get("index")
-    idx = (int(raw) - 1) if raw not in (None, "") else 0   # tolerate a null/missing index
-    idx = max(0, min(idx, len(images) - 1))
-    return {"index": idx, "reason": obj.get("reason", "")}
+    idx = None
+    if raw not in (None, ""):
+        try:
+            idx = max(0, min(int(raw) - 1, n - 1))
+        except (TypeError, ValueError):
+            idx = None
+
+    rejects = []
+    for r in (obj.get("rejects") or []):
+        if not isinstance(r, dict):
+            continue
+        try:
+            i = int(r.get("index")) - 1
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= i < n:
+            continue                       # names a candidate that does not exist
+        try:
+            conf = float(r.get("confidence"))
+        except (TypeError, ValueError):
+            conf = 0.0
+        rejects.append({"index": i, "confidence": conf,
+                        "why": str(r.get("why") or "")})
+
+    # A model that picks a candidate it also rejected has contradicted itself; the
+    # rejection is the safer half to believe, so the pick is dropped rather than trusted.
+    if idx is not None and any(r["index"] == idx for r in rejects):
+        idx = None
+    if idx is None and not rejects and n:
+        idx = 0                            # no verdict at all -> the old default
+    return {"index": idx, "reason": obj.get("reason", ""), "rejects": rejects}
 
 
 # --------------------------------------------------------------- add-by-image (vision)
