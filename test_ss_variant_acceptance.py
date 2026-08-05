@@ -85,6 +85,36 @@ def main():
     check("an empty owned title never matches", ok([""], "Doom")[0] is False)
     check("no owned titles never matches", ok([], "Doom")[0] is False)
 
+    # --- a distinguishing word is not optional -----------------------------------
+    # 0.8 coverage tolerates one dropped token, which is right for a long title losing
+    # an article and wrong when the dropped token is the ONLY thing telling two products
+    # apart. Live leftovers after the first pass, all of which passed at exactly 0.8:
+    check("an X in the series name is distinguishing",
+          ok(["Mega Man X Legacy Collection"], "Mega Man Legacy Collection")[0] is False)
+    check("a sequel number is distinguishing",
+          ok(["Warhammer 40,000: Boltgun 2"], "Warhammer 40,000: Boltgun")[0] is False)
+    check("an expansion name is distinguishing",
+          ok(["Sid Meier's Civilization IV: Warlords"],
+             "Sid Meier's Civilization IV")[0] is False)
+    check("a VR edition is a different product",
+          ok(["Arcade Paradise VR"], "Arcade Paradise")[0] is False)
+    check("a DLC pack is not the base game",
+          ok(["Cult of the Lamb: Heretic Pack"], "Cult of the Lamb")[0] is False)
+    check("a differently-named sibling is not the same game",
+          ok(["Ninja Gaiden II Black"], "Ninja Gaiden Sigma 2")[0] is False)
+    check("Heroes of X is not X",
+          ok(["Heroes of Hammerwatch II"], "Hammerwatch II")[0] is False)
+
+    # ...while the words that carry no identity still must not block a match
+    check("our own disambiguating year suffix is not a distinguishing word",
+          ok(["Mass Effect 2 (2021)"], "Mass Effect 2")[0] is True)
+    check("an edition word the provider omits is tolerated",
+          ok(["DOOM Eternal: Deluxe Edition"], "DOOM Eternal")[0] is True)
+    check("a trailing remaster word is tolerated",
+          ok(["Shadow of the Colossus Remastered"], "Shadow of the Colossus")[0] is True)
+    check("articles are not distinguishing",
+          ok(["The Last of Us"], "Last of Us")[0] is True)
+
     # --- ONE gate, every provider ------------------------------------------------
     # Each provider got this wrong differently: ScreenScraper judged against the variant
     # it searched, SteamGridDB did not judge at all (`return items[0].get("id")`).

@@ -30,9 +30,32 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import titlenorm      # noqa: E402
 
-# How much of the owned title a candidate must account for. 0.8 tolerates one dropped
-# article or edition word in a long title while still refusing a missing subtitle.
-COVER_MIN = 0.8
+# Words that carry no identity: a candidate may omit them freely, and they must never be
+# the reason a title is refused. Everything NOT in here is treated as distinguishing.
+#
+# 0.8 fractional coverage was the first attempt and is subtly wrong in both directions.
+# It let "Mega Man Legacy Collection" stand in for "Mega Man X Legacy Collection" — the
+# single token "x" is 20% of a five-word title, so it landed exactly on the threshold —
+# while refusing "Mass Effect 2" for our own disambiguated "Mass Effect 2 (2021)",
+# because the year we added counted as a real word. Whether a missing word matters is
+# not a question of how long the title is.
+NOISE = {
+    # editions and packaging
+    "edition", "editions", "deluxe", "premium", "ultimate", "complete", "definitive",
+    "collectors", "collector", "goty", "anniversary", "enhanced", "remaster",
+    "remastered", "remake", "redux", "hd", "sd", "4k", "uhd", "classic", "original",
+    "standard", "special", "gold", "platinum", "digital", "bundle", "pack",
+    # platform / distribution noise
+    "pc", "steam", "windows", "version", "release", "the", "a", "an", "of", "and",
+}
+# A bare 4-digit year is ours, not the title's: entries are disambiguated as
+# "Mass Effect 2 (2021)" / "(2023)" when a store lists the same game twice.
+YEAR = __import__("re").compile(r"^(19|20)\d{2}$")
+
+
+def _significant(tokens):
+    """The tokens that actually identify a game."""
+    return {t for t in tokens if t not in NOISE and not YEAR.match(t)}
 
 
 def score(owned, cand_name, year=None, cand_year=None):
@@ -63,13 +86,21 @@ def score(owned, cand_name, year=None, cand_year=None):
         inter = len(qtok & ntok)
         qc = inter / len(qtok)
         nc = inter / len(ntok)
+        # The gate is not fractional: EVERY distinguishing word of the owned title has
+        # to appear in the candidate. "Boltgun" is not "Boltgun 2", "Cult of the Lamb"
+        # is not its Heretic Pack, and "Hammerwatch II" is not "Heroes of Hammerwatch
+        # II" — in each case exactly one word tells them apart, and that word is the
+        # whole point. Noise words and our own year suffixes are exempt.
+        sig = _significant(qtok)
+        covered = bool(sig) and sig <= ntok
         # Token sets cannot see that "Megaman X4" and "Mega Man X4" are the same game:
         # they share ONE token and score 0.50. Squashing the spaces out makes an equal
         # string an exact match whatever the word breaks.
         if qn.replace(" ", "") == cn.replace(" ", ""):
             qc = nc = 1.0
+            covered = True
         score = qc + nc + (0.4 if year and cand_year == str(year) else 0)
-        if qc >= COVER_MIN and score > best[1]:
+        if covered and score > best[1]:
             best = (True, score)
         elif not best[0] and score > best[1]:
             best = (False, score)
