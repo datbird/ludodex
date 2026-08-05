@@ -122,6 +122,10 @@ def main():
 
     # IGDB is build_library's own (it applies bundle refusal and rename-on-match), so
     # sync must never OVERWRITE it — otherwise the two fight over the same rows.
+    cc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY KEY, "
+               "igdb_id INTEGER, slug TEXT, matched_by TEXT)")
+    cc.execute("INSERT OR REPLACE INTO igdb_resolution VALUES('arcadia',7,NULL,'exact')")
+    cc.commit()
     lib.execute("INSERT INTO metadata_links VALUES(1,'igdb','7',NULL,'u')")
     provider_links.sync(lib, cache, blocked_gids={4})
     lib.commit()
@@ -133,8 +137,6 @@ def main():
     # rebuilt with no link at all. Live, that silently cost 31 titles (the whole SSI
     # gold-box run: Pool of Radiance, Champions of Krynn, Eye of the Beholder 2/3...),
     # which is the "why no IGDB link on collection members?" report.
-    cc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY KEY, "
-               "igdb_id INTEGER, slug TEXT, matched_by TEXT)")
     cc.execute("INSERT OR REPLACE INTO igdb_resolution VALUES('orphan',8732,NULL,"
                "'member_exact')")
     cc.execute("INSERT OR REPLACE INTO igdb_resolution VALUES('nomatch',0,NULL,'none')")
@@ -160,14 +162,17 @@ def main():
     check("the filled igdb link has a usable url",
           (u or "").endswith("igdb.com/games/8732"))
 
-    # an igdb link must not outlive the identity it asserts
-    lib.execute("UPDATE games SET game_key='title:orphan' WHERE id=2")
-    lib.execute("INSERT INTO metadata_links VALUES(2,'igdb','21032',NULL,'u')")
+    # an igdb link must not outlive the identity it asserts: `nomatch` has no
+    # igdb_resolution row at all, so a link on it is a claim nothing backs.
+    lib.execute("INSERT INTO metadata_links VALUES(3,'igdb','21032',NULL,'u')")
     provider_links.sync(lib, cache, blocked_gids={4})
     lib.commit()
-    check("an igdb link on an UNidentified entry is removed",
-          not any(g == 2 and p == "igdb" for g, p, _ in links()))
-    check("an igdb link on an identified entry survives", (1, "igdb", "7") in links())
+    check("an igdb link with no resolution behind it is removed",
+          not any(g == 3 and p == "igdb" for g, p, _ in links()))
+    check("an igdb link that IS backed by a resolution survives",
+          (2, "igdb", "8732") in links())
+    check("build_library's own igdb link is still not disturbed",
+          (1, "igdb", "7") in links())
 
     check("every provider_ids provider is covered by sync",
           set(provider_links.PAGE_URL) >= set(provider_ids.PROVIDERS))

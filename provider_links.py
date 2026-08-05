@@ -129,34 +129,35 @@ def sync(lib_con, cache_path, blocked_gids=(), only=None):
                             "WHERE COALESCE(igdb_id,0)>0").fetchall()
         except sqlite3.OperationalError:
             ig = []
-        # An entry whose game_key is `title:<nk>` has NO adopted IGDB identity — that is
-        # what the key means (unidentified, detached, or an era collision), and the
-        # detach path deletes the link for exactly that reason. But fill-only meant a
-        # link written under some earlier state was never removed again, so a wrong one
-        # was permanent: `Ys I` and `Ys II` both still carried IGDB 21032 long after both
-        # had become unidentified. A link must not outlive the identity it asserts.
+        # A link must not outlive the identity it asserts. Fill-only meant one written
+        # under some earlier state was never removed, so a wrong link was permanent:
+        # `Ys I` and `Ys II` both still carried IGDB 21032 with no `igdb_resolution` row
+        # behind either of them.
+        #
+        # The test is the RESOLUTION, not the game_key. An entry build_library left on a
+        # `title:` key — a bundle, an era collision — has had the identity refused for
+        # ART and metadata, but IGDB genuinely has a page for that bundle and the link is
+        # still true and useful. Keying removal off game_key dropped 104 of those.
+        keep = {nk for nk, _i, _s in ig}
+        # per-ENTRY overrides are an identity too, and build_library links from them —
+        # forgetting that here would delete exactly the hand-made decisions that matter
+        # most (`entry_resolution` is how a same-title split is pinned).
         try:
-            lib_con.execute(
-                "DELETE FROM metadata_links WHERE provider='igdb' AND game_id IN "
-                "(SELECT id FROM games WHERE COALESCE(game_key,'') NOT LIKE 'igdb:%')")
+            keep |= {r[0] for r in cc.execute(
+                "SELECT norm_key FROM entry_resolution WHERE COALESCE(igdb_id,0)>0")}
         except sqlite3.OperationalError:
-            pass                               # no game_key column (old schema)
+            pass
+        drop = [gid for nk, gl in gids.items() if nk not in keep for gid in gl]
+        for i in range(0, len(drop), 400):
+            chunk = drop[i:i + 400]
+            lib_con.execute("DELETE FROM metadata_links WHERE provider='igdb' AND "
+                            "game_id IN (%s)" % ",".join("?" * len(chunk)), chunk)
         have = {r[0] for r in lib_con.execute(
             "SELECT DISTINCT game_id FROM metadata_links WHERE provider='igdb'")}
-        # …and the same rule governs FILLING, not just removal: an entry build_library
-        # left on a `title:` key has had its IGDB identity refused (bundle, era
-        # collision, detach), so a resolution row is not licence to link it.
-        try:
-            ident = {r[0] for r in lib_con.execute(
-                "SELECT id FROM games WHERE COALESCE(game_key,'') LIKE 'igdb:%'")}
-        except sqlite3.OperationalError:
-            ident = None                       # old schema: no game_key to consult
         n = 0
         for nk, iid, slug in ig:
             for gid in gids.get(nk, ()):
                 if gid in blocked or gid in have:
-                    continue
-                if ident is not None and gid not in ident:
                     continue
                 lib_con.execute(
                     "INSERT INTO metadata_links(game_id,provider,provider_id,slug,url) "
