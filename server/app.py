@@ -6621,6 +6621,16 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
                 plats = [x[0] for x in lc.execute(
                     "SELECT DISTINCT platform FROM games WHERE norm_key=? "
                     "AND platform IS NOT NULL AND platform!=''", (nk,))]
+                # The release year, so the gate can tell a remake from its original.
+                # This call site passed no year at all while the other two did, which
+                # is how Resident Evil 4 (2023) came to hold ScreenScraper 4750 — the
+                # 2005 GameCube game — and display its box. Identical titles; the year
+                # is the only thing that separates them.
+                _yr = lc.execute(
+                    "SELECT ga.value FROM game_attributes ga JOIN games g "
+                    "ON g.id=ga.game_id WHERE g.norm_key=? AND ga.kind='release_year' "
+                    "LIMIT 1", (nk,)).fetchone()
+                year = _yr[0] if _yr and str(_yr[0] or "").isdigit() else None
             finally:
                 lc.close()
             if not title:
@@ -6679,7 +6689,8 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
                 _before = provider_ids.cached(mc, "screenscraper", nk)
                 pid = provider_ids.resolve(
                     mc, "screenscraper", nk, title, plats,
-                    lambda t, s: _search_with_aliases(lambda q: _ss_match([q], s)),
+                    lambda t, s: _search_with_aliases(
+                        lambda q: _ss_match([q], s, year)),
                     force=force)
                 searched = searched or _before is None or force
                 if pid:

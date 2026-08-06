@@ -52,6 +52,16 @@ NOISE = {
 # "Mass Effect 2 (2021)" / "(2023)" when a store lists the same game twice.
 YEAR = __import__("re").compile(r"^(19|20)\d{2}$")
 
+# How far two release years may differ and still be the same release. Regional launches
+# straddle a new year routinely; an original and its remake do not.
+YEAR_TOLERANCE = 1
+
+
+def _year(v):
+    """`v` as a 4-digit year, or None if it is absent or not one."""
+    t = str(v or "").strip()
+    return int(t) if t.isdigit() and len(t) == 4 else None
+
 
 def _significant(tokens):
     """The tokens that actually identify a game."""
@@ -99,7 +109,19 @@ def score(owned, cand_name, year=None, cand_year=None):
         if qn.replace(" ", "") == cn.replace(" ", ""):
             qc = nc = 1.0
             covered = True
-        score = qc + nc + (0.4 if year and cand_year == str(year) else 0)
+        # A year DISAGREEMENT is disqualifying, not merely unrewarded. The NOISE rule
+        # above strips a 4-digit year so our own "Mass Effect 2 (2021)" matches the
+        # provider's "Mass Effect 2" — correct for a duplicate store listing, and
+        # exactly backwards for a remake, whose title is identical to its original and
+        # whose year is the only thing separating them. Live, Resident Evil 4 (2023)
+        # took ScreenScraper 4750, the 2005 GameCube game, and wore its box art.
+        #
+        # Only ever applied when BOTH years are known and numeric: an absent year is not
+        # evidence of anything, and must never turn into a refusal.
+        y1, y2 = _year(year), _year(cand_year)
+        if y1 and y2 and abs(y1 - y2) > YEAR_TOLERANCE:
+            continue
+        score = qc + nc + (0.4 if y1 and y1 == y2 else 0)
         if covered and score > best[1]:
             best = (True, score)
         elif not best[0] and score > best[1]:

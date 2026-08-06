@@ -115,6 +115,40 @@ def main():
     check("articles are not distinguishing",
           ok(["The Last of Us"], "Last of Us")[0] is True)
 
+    # --- an era is distinguishing when both sides know their year --------------
+    # The NOISE rule strips a 4-digit year so our own disambiguated "Mass Effect 2
+    # (2021)" matches the provider's "Mass Effect 2". For an original and its remake
+    # that is exactly backwards: the title is IDENTICAL and the year is the only thing
+    # that separates them. Live, Resident Evil 4 (2023) was bound to ScreenScraper 4750
+    # — the 2005 GameCube original — and then wore its GameCube box.
+    check("a remake does not take its original's record",
+          ok(["Resident Evil 4"], "Resident Evil 4", year=2023,
+             cand_year="2005")[0] is False)
+    check("...nor the original its remake's",
+          ok(["Resident Evil 4"], "Resident Evil 4", year=2005,
+             cand_year="2023")[0] is False)
+    check("the same game in the same year still matches",
+          ok(["Resident Evil 4"], "Resident Evil 4", year=2023,
+             cand_year="2023")[0] is True)
+    check("a one-year regional release difference is tolerated",
+          ok(["Chrono Trigger"], "Chrono Trigger", year=1995,
+             cand_year="1996")[0] is True)
+    check("an unknown candidate year cannot refuse a match",
+          ok(["Resident Evil 4"], "Resident Evil 4", year=2023)[0] is True)
+    check("an unknown owned year cannot refuse a match",
+          ok(["Resident Evil 4"], "Resident Evil 4", cand_year="2005")[0] is True)
+    check("a non-numeric year is treated as unknown, never as a mismatch",
+          ok(["Resident Evil 4"], "Resident Evil 4", year=2023,
+             cand_year="n/a")[0] is True)
+
+    # ...and the identity matcher has to actually PASS the year it knows
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "server", "app.py")).read()
+    mp = src[src.index("def _match_providers"):]
+    mp = mp[:mp.index("\ndef ", 10)]
+    check("_match_providers gives ScreenScraper the release year",
+          "_ss_match([q], s, year)" in mp)
+
     # --- ONE gate, every provider ------------------------------------------------
     # Each provider got this wrong differently: ScreenScraper judged against the variant
     # it searched, SteamGridDB did not judge at all (`return items[0].get("id")`).
