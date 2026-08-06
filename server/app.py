@@ -5336,6 +5336,32 @@ def _provider_match_state(nk):
                 out["missed"].append(prov)
     finally:
         mc.close()
+
+    # STEAM is a provider too. It is unusual in being both a SOURCE and an enrichment
+    # provider — it supplies the appid, the store attributes and the CDN art — so a list
+    # of "who identified this" that omits it describes the game as less known than it is.
+    # EVGA Precision X1 is identified by Steam more directly than by anything else: the
+    # appid IS its identity there.
+    #
+    # It identifies by appid, never by name search, so there is no such thing as a Steam
+    # "miss" — a game we do not own on Steam was never asked, which is `unattempted`.
+    try:
+        lc = ro(LIBRARY_DB)
+        try:
+            r = lc.execute(
+                "SELECT s.source_id FROM games g JOIN sources s ON s.game_id=g.id "
+                "WHERE g.norm_key=? AND s.source='steam' AND s.source_id IS NOT NULL "
+                "AND s.source_id!='' LIMIT 1", (nk,)).fetchone()
+        finally:
+            lc.close()
+        if r and str(r[0]).isdigit():
+            out["matched"].append({"provider": "steam", "id": str(r[0])})
+        else:
+            out["unattempted"].append("steam")
+    except Exception:                              # noqa: BLE001 — a chip is not worth a 500
+        pass
+    out["matched"].sort(key=lambda m: m["provider"])
+    out["unattempted"].sort()
     return out
 
 

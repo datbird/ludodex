@@ -59,17 +59,46 @@ def main():
           st["matched"][0]["id"] == "3580")
     check("providers that were asked and found nothing are listed apart",
           sorted(st["missed"]) == ["igdb", "screenscraper"])
-    check("nothing is claimed unattempted when all three were asked",
-          st["unattempted"] == [])
+    check("no game DATABASE is claimed unattempted when all three were asked",
+          [p for p in st["unattempted"] if p != "steam"] == [])
 
     st = srv._provider_match_state("fresh")
     check("a provider with NO row is unattempted, not a miss",
-          sorted(st["unattempted"]) == ["igdb", "steamgriddb"]
+          sorted(st["unattempted"]) == ["igdb", "steam", "steamgriddb"]
           and st["missed"] == ["screenscraper"])
+
+    # STEAM is a provider as well as a source — it supplies the appid, the store
+    # attributes and the CDN art, so omitting it describes a game as less known than it
+    # is. It identifies by appid, never by name search, so there is no Steam "miss".
+    lib = sqlite3.connect(os.path.join(d, "game-library.sqlite"))
+    lib.executescript("""
+    CREATE TABLE IF NOT EXISTS games(id INTEGER PRIMARY KEY, norm_key TEXT);
+    CREATE TABLE IF NOT EXISTS sources(game_id INT, source TEXT, source_id TEXT);
+    """)
+    # named columns: the real schema may already exist here (the server initialises it
+    # on first open), and positional inserts break the moment it gains a column.
+    lib.execute("INSERT INTO games(id,norm_key) VALUES(1,'evga')")
+    lib.execute("INSERT INTO sources(game_id,source,source_id) VALUES(1,'steam','1043180')")
+    lib.execute("INSERT INTO games(id,norm_key) VALUES(2,'romonly')")
+    lib.execute("INSERT INTO sources(game_id,source,source_id) VALUES(2,'emulation','x.md')")
+    lib.commit(); lib.close()
+
+    st = srv._provider_match_state("evga")
+    check("Steam is listed as an identifying provider",
+          "steam" in [m["provider"] for m in st["matched"]])
+    check("and it is identified BY THE APPID",
+          [m["id"] for m in st["matched"] if m["provider"] == "steam"] == ["1043180"])
+    check("providers are listed in a stable order",
+          [m["provider"] for m in st["matched"]] == sorted(
+              m["provider"] for m in st["matched"]))
+
+    st = srv._provider_match_state("romonly")
+    check("a game not owned on Steam is UNATTEMPTED there, never a miss",
+          "steam" in st["unattempted"] and "steam" not in st["missed"])
 
     st = srv._provider_match_state("never-heard-of-it")
     check("an unknown game is unattempted everywhere, never 'no match'",
-          len(st["unattempted"]) == 3 and not st["matched"] and not st["missed"])
+          len(st["unattempted"]) == 4 and not st["matched"] and not st["missed"])
 
     # the UI must actually render both, and must not have kept the old blanket wording
     ui = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
