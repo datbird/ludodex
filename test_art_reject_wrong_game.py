@@ -115,9 +115,12 @@ def main():
              {"id": 3, "provider": "igdb", "ref": "igdb://co4xgs"}]
 
     import mediaflags
-    n = srv._apply_art_rejects(con, "pq1", "cover", cands,
-                               [{"index": 0, "confidence": 0.95, "why": "PQ2 art"},
-                                {"index": 1, "confidence": 0.4, "why": "maybe"}])
+    n = srv._apply_art_rejects(
+        con, "pq1", "cover", cands,
+        [{"index": 0, "confidence": 0.95, "why": "PQ2 art",
+          "depicts": "Police Quest II: The Vengeance"},
+         {"index": 1, "confidence": 0.4, "why": "maybe", "depicts": "Some Other Game"}],
+        title="Police Quest: In Pursuit of the Death Angel")
     con.commit()
     banned = mediaflags.banned_set()
 
@@ -134,7 +137,43 @@ def main():
     check("it reports how many it banned", n == 1)
 
     check("no rejects is a no-op",
-          srv._apply_art_rejects(con, "pq1", "cover", cands, []) == 0)
+          srv._apply_art_rejects(con, "pq1", "cover", cands, [], title="X") == 0)
+
+    # ---- the 624-cover lesson ----------------------------------------------------
+    # A model asked for "rejects" lists the candidates it did NOT pick, not the ones
+    # that are wrong. Run live, that banned 624 correct covers in a single pass — Aces &
+    # Adventures, Across the Obelisk, Actraiser Renaissance, Age of Empires II DE, all
+    # deleted as "wrong game". So a reject must carry a CHECKABLE claim: name the game
+    # the image is really for, and let the deterministic gate confirm it is a different
+    # one. A verdict nothing can check is not evidence.
+    con.execute("UPDATE media SET chosen=0")
+    con.execute("INSERT INTO media(id,norm_key,kind,provider,ref,chosen) "
+                "VALUES(50,'aoe2','cover','igdb','igdb://coar0y',1)")
+    con.commit()
+    c2 = [{"id": 50, "provider": "igdb", "ref": "igdb://coar0y"}]
+    t2 = "Age of Empires II: Definitive Edition"
+
+    check("a confident reject with NO named game bans nothing",
+          srv._apply_art_rejects(con, "aoe2", "cover", c2,
+                                 [{"index": 0, "confidence": 0.99, "why": "worse"}],
+                                 title=t2) == 0)
+    check("a reject naming THIS game is a preference, not a fault",
+          srv._apply_art_rejects(con, "aoe2", "cover", c2,
+                                 [{"index": 0, "confidence": 0.99,
+                                   "depicts": "Age of Empires II Definitive Edition"}],
+                                 title=t2) == 0)
+    check("...and naming a genuinely different game still bans",
+          srv._apply_art_rejects(con, "aoe2", "cover", c2,
+                                 [{"index": 0, "confidence": 0.99,
+                                   "depicts": "Age of Empires IV"}],
+                                 title=t2) == 1)
+    check("with no title to check against, nothing is banned",
+          srv._apply_art_rejects(con, "aoe2", "cover", c2,
+                                 [{"index": 0, "confidence": 0.99,
+                                   "depicts": "Anything At All"}]) == 0)
+    check("the prompt demands the image be identified, not just disliked",
+          "depicts" in ai.area_prompt("art", kind="cover", title="x", count=2,
+                                      aliases="").lower())
 
     # ---- 4. a lone candidate is still questioned --------------------------------
     # Ranking needs two candidates; "is this even this game?" does not. A single asset

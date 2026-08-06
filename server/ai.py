@@ -712,8 +712,11 @@ DEFAULT_PROMPTS = {
         "subtitle. Read them. 'Police Quest II: The Vengeance' art is NOT valid for "
         "'Police Quest: In Pursuit of the Death Angel'; 'Ys II' art is NOT valid for "
         "'Ys I'. A compilation or collection cover is also not a single entry's cover. "
-        "List every such image, plus any placeholder or blank, in \"rejects\" with how "
-        "sure you are. If NO candidate is this game, return index null and reject them "
+        "List every such image, plus any placeholder or blank, in \"rejects\", and for "
+        "each one NAME the game you believe it actually depicts in \"depicts\". Only "
+        "list an image here if you can say what it IS — \"rejects\" means \"this is a "
+        "different game\", never \"this is not my favourite\". An image that is merely "
+        "worse is not a reject; just do not pick it. If NO candidate is this game, return index null and reject them "
         "all — returning no acceptable pick is a valid, useful answer, and far better "
         "than promoting art for the wrong game.\n"
         "2. RIGHT SHAPE for a '<<kind>>': a cover/box is UPRIGHT (portrait ~3:4); a "
@@ -726,7 +729,7 @@ DEFAULT_PROMPTS = {
         "Respond ONLY with JSON: "
         '{"index": <1-based number, or null if none is acceptable>, '
         '"reason": "<short>", '
-        '"rejects": [{"index": <1-based>, "confidence": <0-1>, "why": "<short>"}]}.'
+        '"rejects": [{"index": <1-based>, "depicts": "<the game this image is really for>", "confidence": <0-1>, "why": "<short>"}]}.'
     ),
     "dedupe_media": (
         "You are shown pairs of candidate images for one video game. For each numbered "
@@ -1686,6 +1689,7 @@ def _parse_art_verdict(obj, n):
         except (TypeError, ValueError):
             conf = 0.0
         rejects.append({"index": i, "confidence": conf,
+                        "depicts": str(r.get("depicts") or "").strip(),
                         "why": str(r.get("why") or "")})
 
     # A model that picks a candidate it also rejected has contradicted itself; the

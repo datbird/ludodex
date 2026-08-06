@@ -5632,7 +5632,7 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                             # a confident reject is banned, so it cannot come back on the
                             # next sync and cannot be the fallback if the pick is dropped.
                             _apply_art_rejects(w, nk, kind, crows,
-                                               res.get("rejects"))
+                                               res.get("rejects"), title=title)
                             if res["index"] is None:
                                 # every candidate is the wrong game: leave the kind with
                                 # no primary rather than promote art that isn't this game
@@ -7284,7 +7284,8 @@ def _pref_language():
 ART_REJECT_BAN_AT = 0.8
 
 
-def _apply_art_rejects(con, nk, kind, cands, rejects, ban_at=ART_REJECT_BAN_AT):
+def _apply_art_rejects(con, nk, kind, cands, rejects, ban_at=ART_REJECT_BAN_AT,
+                       title=None):
     """Act on vision's "this is not this game" verdicts. Returns the number banned.
 
     Every path that asks a model to pick art goes through here, so the consequence of a
@@ -7306,6 +7307,18 @@ def _apply_art_rejects(con, nk, kind, cands, rejects, ban_at=ART_REJECT_BAN_AT):
             continue
         if float(r.get("confidence") or 0) < ban_at:
             continue
+        # The model must NAME the game it thinks the image is for, and that name has to
+        # actually be a different game by the same rule the matchers use. Without this
+        # the ban fired on 624 correct covers in one pass — Aces & Adventures, Across the
+        # Obelisk, Actraiser Renaissance, Age of Empires II DE all deleted as "wrong
+        # game" — because a model asked for "rejects" lists the candidates it did not
+        # pick, not the ones that are wrong. A verdict we cannot check is not evidence,
+        # and art is not something to delete on an unchecked one.
+        depicts = (r.get("depicts") or "").strip()
+        if not depicts or not title:
+            continue
+        if matchgate.score([title], depicts)[0]:
+            continue                       # it named THIS game — a preference, not a fault
         c = cands[i]
         prov = c.get("provider") if isinstance(c, dict) else None
         ref = c.get("ref") if isinstance(c, dict) else None
@@ -10876,7 +10889,7 @@ def art_pick(norm_key: str, kind: str = Query("cover")):
         _apply_art_rejects(wcon, norm_key, kind,
                            [{"id": c["id"], "provider": c.get("provider"),
                              "ref": c.get("ref")} for c in cands],
-                           res.get("rejects"))
+                           res.get("rejects"), title=title)
         wcon.commit()
     finally:
         wcon.close()
