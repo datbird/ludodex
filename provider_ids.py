@@ -54,6 +54,14 @@ def ensure_tables(con):
         con.execute(
             "CREATE TABLE IF NOT EXISTS %s(norm_key TEXT PRIMARY KEY, %s INTEGER, "
             "name TEXT, matched_by TEXT, resolved_at INTEGER)" % (table, idcol))
+        # The matched record's YEAR. Without it a wrong-era match is undetectable after
+        # the fact: Resident Evil 4 (2023) held ScreenScraper 4750, the 2005 game, and
+        # the only way to find others like it was a norm_key heuristic that needed the
+        # catalog to hold BOTH releases. What a provider told us is worth writing down,
+        # or every audit of it means asking the provider again.
+        have = {r[1] for r in con.execute("PRAGMA table_info(%s)" % table)}
+        if "year" not in have:
+            con.execute("ALTER TABLE %s ADD COLUMN year INTEGER" % table)
     con.commit()
 
 
@@ -92,7 +100,8 @@ def holder(con, provider, provider_id, norm_key=None):
     return r[0] if r else None
 
 
-def record(con, provider, norm_key, provider_id, name=None, matched_by="search"):
+def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
+           year=None):
     """Write an identity (or a miss, with a falsy provider_id). Idempotent.
 
     A SEARCHED id that another game already holds is refused. One provider id is one
@@ -127,12 +136,18 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search")
             # about. As a miss it carries MISS_TTL, so it is re-asked once the provider
             # has had time to add a record of its own.
             pid, matched_by = 0, "collision"
+    try:
+        yr = int(year) if str(year or "").strip().isdigit() else None
+    except (TypeError, ValueError):
+        yr = None
     con.execute(
-        "INSERT INTO %s(norm_key,%s,name,matched_by,resolved_at) VALUES(?,?,?,?,?) "
+        "INSERT INTO %s(norm_key,%s,name,year,matched_by,resolved_at) "
+        "VALUES(?,?,?,?,?,?) "
         "ON CONFLICT(norm_key) DO UPDATE SET %s=excluded.%s, name=excluded.name, "
-        "matched_by=excluded.matched_by, resolved_at=excluded.resolved_at"
+        "year=excluded.year, matched_by=excluded.matched_by, "
+        "resolved_at=excluded.resolved_at"
         % (table, idcol, idcol, idcol),
-        (norm_key, pid, name,
+        (norm_key, pid, name, yr,
          matched_by if pid else ("collision" if matched_by == "collision" else "none"),
          int(time.time())))
     con.commit()
@@ -165,7 +180,8 @@ def resolve(con, provider, norm_key, title, systems, search, force=False):
     if not hit:
         return record(con, provider, norm_key, 0, None, "none")
     pid = hit.get(idcol) or hit.get("id") or 0
-    return record(con, provider, norm_key, pid, hit.get("name"), "search")
+    return record(con, provider, norm_key, pid, hit.get("name"), "search",
+                  year=hit.get("year"))
 
 
 def unlinked(con, provider, norm_keys):

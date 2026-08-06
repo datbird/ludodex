@@ -23,6 +23,7 @@ IDX = os.path.join(DATA, "media-index.sqlite")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, "/app")
 import media                                            # noqa: E402
+import matchgate                                        # noqa: E402
 import media_choose                                     # noqa: E402
 
 VIOLATIONS = []
@@ -254,6 +255,39 @@ def main():
         bad.append("%s %s claimed by %d titles: %s" % (prov, pid, n, (names or "")[:90]))
     report("I9 a provider id identifies exactly one game", bad,
            "the loser silently inherits the winner's art and metadata")
+
+    # ------------------------------------------------- I10: the match is the right ERA
+    # A remake shares its original's title exactly, so nothing in the NAME separates
+    # them — only the year does. Resident Evil 4 (2023) held ScreenScraper 4750, the
+    # 2005 GameCube game, and displayed its box, and the only reason it was ever noticed
+    # is that a person looked at a cover. Now that the matched year is recorded, the
+    # class is checkable. Rows with no recorded year predate that and are skipped rather
+    # than guessed at.
+    bad = []
+    try:
+        cat = {nk: int(v) for nk, v in g.execute(
+            "SELECT gg.norm_key, ga.value FROM game_attributes ga "
+            "JOIN games gg ON gg.id=ga.game_id WHERE ga.kind='release_year' "
+            "AND ga.value GLOB '[0-9][0-9][0-9][0-9]'")}
+    except sqlite3.OperationalError:
+        cat = {}
+    import provider_ids as _pi
+    _mc = sqlite3.connect("file:%s?mode=ro"
+                          % os.path.join(DATA, "metadata-cache.sqlite"), uri=True)
+    for prov, (table, idcol) in sorted(_pi.PROVIDERS.items()):
+        try:
+            rows = _mc.execute("SELECT norm_key, year FROM %s WHERE COALESCE(%s,0)>0 "
+                               "AND year IS NOT NULL" % (table, idcol)).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        for nk, yr in rows:
+            own = cat.get(nk)
+            if own and yr and abs(int(yr) - own) > matchgate.YEAR_TOLERANCE:
+                bad.append("%s %s — we own the %d release, the match is %s"
+                           % (prov, nk[:38], own, yr))
+    _mc.close()
+    report("I10 a provider match is the same ERA as the release we own", bad,
+           "a remake silently wears its original's art")
 
     m.close()
     g.close()

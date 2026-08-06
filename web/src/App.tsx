@@ -429,10 +429,27 @@ export default function App() {
     onLogout={async () => { try { await api.authLogout() } finally { refreshAuth() } }} />
 }
 
+// Offered at first setup. Ordered lists, because owning a US release usually means
+// wanting EU/World art as the next-best rather than Japanese.
+const SETUP_REGIONS = [
+  { code: 'us,uk,gb,eu,wor,ss', label: 'North America' },
+  { code: 'eu,uk,gb,us,wor,ss', label: 'Europe' },
+  { code: 'jp,asi,wor,ss', label: 'Japan' },
+  { code: 'au,eu,uk,us,wor,ss', label: 'Australia / NZ' },
+  { code: 'br,pt,eu,us,wor,ss', label: 'Brazil' },
+  { code: 'wor,us,eu,ss', label: 'World / no preference' },
+]
+
 function AuthScreen({ needsSetup, onAuthed }: { needsSetup: boolean; onAuthed: () => void }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
+  // Asked at first setup, not buried in Settings. Language and region decide which
+  // release's art and text the whole library is built around, and the cost of getting
+  // them wrong is a library that has to be re-enriched — so they are worth one screen
+  // at the only moment the user is definitely paying attention.
+  const [lang, setLang] = useState('English')
+  const [region, setRegion] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const submit = async (e: FormEvent) => {
@@ -441,8 +458,13 @@ function AuthScreen({ needsSetup, onAuthed }: { needsSetup: boolean; onAuthed: (
     if (needsSetup && password !== confirm) { setErr('Passwords do not match'); return }
     setBusy(true)
     try {
-      if (needsSetup) await api.authSetup(username.trim(), password)
-      else await api.authLogin(username.trim(), password)
+      if (needsSetup) {
+        await api.authSetup(username.trim(), password)
+        // Blank region deliberately means "follow the language" rather than "no
+        // preference" — one wish, stated once.
+        try { await api.setPrefs({ media_languages: [lang], media_regions: region }) }
+        catch { /* a preference is not worth failing setup over; Settings still has it */ }
+      } else await api.authLogin(username.trim(), password)
       onAuthed()
     } catch (e) { setErr((e as Error).message); setBusy(false) }
   }
@@ -472,6 +494,27 @@ function AuthScreen({ needsSetup, onAuthed }: { needsSetup: boolean; onAuthed: (
             <input type="password" autoComplete="new-password" value={confirm}
               onChange={(e) => setConfirm(e.target.value)} />
           </label>
+        )}
+        {needsSetup && (
+          <>
+            <label className="auth-field">
+              <span>Preferred language</span>
+              <select className="pref-select" value={lang}
+                onChange={(e) => setLang(e.target.value)}>
+                {MEDIA_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+              </select>
+            </label>
+            <label className="auth-field">
+              <span>Preferred region</span>
+              <select className="pref-select" value={region}
+                onChange={(e) => setRegion(e.target.value)}>
+                <option value="">Match my language</option>
+                {SETUP_REGIONS.map((r) => (
+                  <option key={r.code} value={r.code}>{r.label}</option>
+                ))}
+              </select>
+            </label>
+          </>
         )}
         {err && <div className="auth-err">{err}</div>}
         <button className="go primary auth-submit" type="submit"
