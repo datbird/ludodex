@@ -5565,7 +5565,7 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                 # set; a nk+kind-wide reset would strip those consoles' chosen covers
                 # without replacing them.
                 q = ("SELECT kind FROM media WHERE norm_key=? "
-                     "AND COALESCE(system,'')='' AND COALESCE(hidden,0)=0 ")
+                     "AND COALESCE(hidden,0)=0 ")
                 args = [nk]
                 if only_kinds:
                     q += "AND kind IN (%s) " % ",".join("?" * len(only_kinds))
@@ -5573,12 +5573,19 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                 q += "GROUP BY kind HAVING COUNT(DISTINCT provider) >= 2"
                 kinds = [r["kind"] for r in rc.execute(q, args)]
                 for kind in kinds:
-                    groups = {}                # game_key -> candidate rows (§11.9 split)
+                    # Grouped by (system, game_key) — the SAME tuple `chosen` is keyed
+                    # by. It used to filter to the neutral bucket alone, which meant
+                    # vision never saw console art at all: a Genesis entry serves its
+                    # `system='genesis'` cover (DESIGN §11.4 siloing), so the model was
+                    # judging art the page would never display. Live that was 1,608
+                    # chosen assets with zero AI verdicts between them, and it is why
+                    # Beyond Oasis still wore "The Story of Thor" after a full pass.
+                    groups = {}                # (system, game_key) -> candidate rows
                     for r in rc.execute(
                             "SELECT id, ref_type, ref, ext, sha1, width, height, filler, "
-                            "provider, matched, game_key "
+                            "provider, matched, game_key, system "
                             "FROM media WHERE norm_key=? AND kind=? "
-                            "AND COALESCE(system,'')='' AND COALESCE(hidden,0)=0",
+                            "AND COALESCE(hidden,0)=0",
                             (nk, kind)).fetchall():
                         # Don't pay a vision call to weigh candidates Algo has already
                         # disqualified — a confirmed filler or a provably wrong shape.
@@ -5589,9 +5596,10 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                             _w, _h = media.derived_dims(r["ref"])
                         if not media.shape_ok(kind, _w, _h):
                             continue
-                        groups.setdefault(r["game_key"] or "", []).append(r)
+                        groups.setdefault((r["system"] or "",
+                                           r["game_key"] or ""), []).append(r)
                     prank = {p: i for i, p in enumerate(media.priority(kind))}
-                    for gk, grows in groups.items():
+                    for (gsys, gk), grows in groups.items():
                         # Judge the best-RANKED candidates, not the oldest rows: order
                         # by the deterministic key so a newly-fetched IGDB cover is in
                         # the judged set even on a candidate-rich game.
@@ -5644,8 +5652,9 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                             # judgment would be erased by the next sync and re-billed.
                             w.execute("UPDATE media SET chosen=0, ai_pick=NULL "
                                       "WHERE norm_key=? AND kind=? "
-                                      "AND COALESCE(system,'')='' "
-                                      "AND COALESCE(game_key,'')=?", (nk, kind, gk))
+                                      "AND COALESCE(system,'')=? "
+                                      "AND COALESCE(game_key,'')=?",
+                                      (nk, kind, gsys, gk))
                             w.execute("UPDATE media SET chosen=1, ai_pick=1 WHERE id=?",
                                       (best,))
                             w.commit()

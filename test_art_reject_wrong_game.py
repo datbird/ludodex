@@ -183,6 +183,22 @@ def main():
     check("no vision path skips a game for having only one candidate",
           "len(cands) < 2" not in src)
 
+    # ---- vision must judge the art the page actually SHOWS ----------------------
+    # The pass filtered candidates to the system-neutral bucket, but a console entry
+    # serves its system-siloed art (DESIGN §11.4), so the model spent every call judging
+    # images the page would never display. Live: 1,608 chosen assets system-siloed, zero
+    # AI verdicts among them, and Beyond Oasis still wearing "The Story of Thor" after a
+    # complete Lite pass. Candidates must be grouped by the SAME tuple `chosen` is keyed
+    # by — (system, game_key) — not filtered down to one value of it.
+    adj = src[src.index("def _ai_adjudicate_game"):]
+    adj = adj[:adj.index("\ndef ", 10)]
+    check("the vision pass no longer judges only the neutral bucket",
+          "COALESCE(system,'')=''" not in adj)
+    check("candidates are grouped per (system, game_key)",
+          'r["system"] or ""' in adj and 'r["game_key"] or ""' in adj)
+    check("the chosen reset is scoped to the same silo it judged",
+          "COALESCE(system,'')=?" in adj)
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 
