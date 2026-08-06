@@ -1415,7 +1415,20 @@ def _json(text):
         pass
     # tolerate a truncated/unclosed object or array (some models drop the final
     # brace, or the completion is cut off): close any open strings/brackets.
-    return json.loads(_repair_json(frag))
+    #
+    # TWO candidates, because the greedy fragment above is not always the better one. A
+    # reply cut off mid-sentence whose text happens to contain a bracket — "the 2023
+    # remake [Resident Evil" — makes that regex end the fragment INSIDE the string, and
+    # no amount of closing braces fixes a value chopped at a bracket. Repairing from the
+    # first brace instead recovers it. Live, this cost a correct verdict: the model had
+    # answered `"index": 2` and the answer was discarded over a truncated `reason`.
+    whole = text[text.find("{"):] if "{" in text else text
+    for cand in (frag, whole):
+        try:
+            return json.loads(_repair_json(cand))
+        except json.JSONDecodeError:
+            continue
+    raise RuntimeError("could not parse a JSON object from the model reply")
 
 
 def _repair_json(s):
@@ -1665,7 +1678,18 @@ def pick_art(title, kind, images, provider=None, model=None, language=None, note
                   "of the image):\n"
                   + "\n".join("Image %d: %s" % (i + 1, n) for i, n in enumerate(notes)))
     text = _complete_vision(provider, key, model, system, instr, images)
-    return _parse_art_verdict(_json(text) or {}, len(images))
+    try:
+        obj = _json(text) or {}
+    except Exception:                          # noqa: BLE001
+        # A malformed answer is NO OPINION, not a failure. This used to propagate, and
+        # `_ai_adjudicate_game` catches everything so the import "never aborts" — which
+        # meant a model that replied with broken JSON silently produced no verdict and
+        # no trace of having been asked. Falling through to the deterministic ranking is
+        # both the safe answer and the honest one: nothing was decided.
+        print("art pick: unparseable response, falling back to ranking (%s)"
+              % text[:90].replace("\n", " "), file=sys.stderr)
+        obj = {}
+    return _parse_art_verdict(obj, len(images))
 
 
 def _parse_art_verdict(obj, n):
