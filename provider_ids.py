@@ -29,9 +29,16 @@ import time
 # provider -> (table, id column). Adding one here is all a new provider needs from this
 # layer; anything not listed is refused rather than silently dropped on the floor.
 PROVIDERS = {
+    "igdb": ("igdb_resolution", "igdb_id"),
     "screenscraper": ("ss_resolution", "ss_id"),
     "steamgriddb": ("sgdb_resolution", "sgdb_id"),
 }
+
+# Columns a specific provider needs that the shared layer does not. This is the uniform
+# -provider rule in miniature: everything common lives above, and a provider declares
+# only what is genuinely its own. IGDB's page URL is built from a slug, so it carries one;
+# nothing else does, and nothing else should be given one to make the tables look alike.
+EXTRA_COLUMNS = {"igdb": [("slug", "TEXT")]}
 
 # How long a recorded miss suppresses a re-search. Long enough that a library sweep is
 # cheap on repeat, short enough that a provider adding the game is picked up.
@@ -50,7 +57,7 @@ def _spec(provider):
 
 def ensure_tables(con):
     """Create the identity caches. Safe to call on every open."""
-    for table, idcol in PROVIDERS.values():
+    for prov, (table, idcol) in PROVIDERS.items():
         con.execute(
             "CREATE TABLE IF NOT EXISTS %s(norm_key TEXT PRIMARY KEY, %s INTEGER, "
             "name TEXT, matched_by TEXT, resolved_at INTEGER)" % (table, idcol))
@@ -59,9 +66,17 @@ def ensure_tables(con):
         # the only way to find others like it was a norm_key heuristic that needed the
         # catalog to hold BOTH releases. What a provider told us is worth writing down,
         # or every audit of it means asking the provider again.
+        # IGDB predates this module and its table was created elsewhere, with its own
+        # columns. Adding the shared ones rather than demanding a matching schema is what
+        # lets an existing provider join the common layer without a migration — and
+        # joining it is the point: until now IGDB had no uniqueness guard, no recorded
+        # year and no era invariant, because all three live here.
         have = {r[1] for r in con.execute("PRAGMA table_info(%s)" % table)}
-        if "year" not in have:
-            con.execute("ALTER TABLE %s ADD COLUMN year INTEGER" % table)
+        for col, decl in ([("name", "TEXT"), ("matched_by", "TEXT"),
+                           ("resolved_at", "INTEGER"), ("year", "INTEGER")]
+                          + EXTRA_COLUMNS.get(prov, [])):
+            if col not in have:
+                con.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, col, decl))
     con.commit()
 
 

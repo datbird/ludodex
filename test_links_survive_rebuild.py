@@ -124,7 +124,7 @@ def main():
     # sync must never OVERWRITE it — otherwise the two fight over the same rows.
     cc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY KEY, "
                "igdb_id INTEGER, slug TEXT, matched_by TEXT)")
-    cc.execute("INSERT OR REPLACE INTO igdb_resolution VALUES('arcadia',7,NULL,'exact')")
+    cc.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,slug,matched_by) VALUES('arcadia',7,NULL,'exact')")
     cc.commit()
     lib.execute("INSERT INTO metadata_links VALUES(1,'igdb','7',NULL,'u')")
     provider_links.sync(lib, cache, blocked_gids={4})
@@ -137,10 +137,10 @@ def main():
     # rebuilt with no link at all. Live, that silently cost 31 titles (the whole SSI
     # gold-box run: Pool of Radiance, Champions of Krynn, Eye of the Beholder 2/3...),
     # which is the "why no IGDB link on collection members?" report.
-    cc.execute("INSERT OR REPLACE INTO igdb_resolution VALUES('orphan',8732,NULL,"
+    cc.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,slug,matched_by) VALUES('orphan',8732,NULL,"
                "'member_exact')")
-    cc.execute("INSERT OR REPLACE INTO igdb_resolution VALUES('nomatch',0,NULL,'none')")
-    cc.execute("INSERT OR REPLACE INTO igdb_resolution VALUES('blocked',111,NULL,"
+    cc.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,slug,matched_by) VALUES('nomatch',0,NULL,'none')")
+    cc.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,slug,matched_by) VALUES('blocked',111,NULL,"
                "'member_exact')")
     cc.commit()
     provider_links.sync(lib, cache, blocked_gids={4})
@@ -174,8 +174,16 @@ def main():
     check("build_library's own igdb link is still not disturbed",
           (1, "igdb", "7") in links())
 
-    check("every provider_ids provider is covered by sync",
-          set(provider_links.PAGE_URL) >= set(provider_ids.PROVIDERS))
+    # Every recorded identity must be able to BECOME a link. IGDB satisfies that through
+    # sync's dedicated fill path rather than a PAGE_URL template, because its url needs
+    # the slug — so the guard is about coverage, not about which mechanism.
+    uncovered = [p for p in provider_ids.PROVIDERS
+                 if p not in provider_links.PAGE_URL and p != "igdb"]
+    check("every provider_ids provider is covered by sync (%r)" % uncovered,
+          not uncovered)
+    check("...and igdb is covered by the fill path rather than forgotten",
+          "igdb_resolution" in open(os.path.join(
+              os.path.dirname(os.path.abspath(__file__)), "provider_links.py")).read())
 
     # An identity that BECOMES a miss must take its link with it. sync() only visited
     # games that still had an identity, so a corrected match that resolved to nothing
