@@ -5339,6 +5339,12 @@ def _provider_match_state(nk):
     return out
 
 
+# How many DISTINCT games may have their factual context assembled for one review
+# response. Generous because the work is cached local reads; bounded because a review of
+# thousands of findings should still return.
+CONTEXT_GAME_CAP = 400
+
+
 def _finding_context(ctx):
     """The factual, non-AI things we KNOW about a game — shown on the review page so a
     reviewer can sanity-check the AI against the actual ROM: platform(s), file name(s),
@@ -5447,14 +5453,24 @@ def aimeta_findings(status: str = Query(None), kind: str = Query(None),
                     run_id: int = Query(None)):
     findings = aimeta.findings_list(status, kind, run_id=run_id)
     # attach live factual context per game so the review page ALWAYS shows filename /
-    # platform / folder / tags — even for findings created before this existed. Bounded
-    # so a huge changeset can't stall; the ROM index is cached after first use.
+    # platform / folder / tags — even for findings created before this existed.
+    #
+    # This used to bail out entirely at `len(findings) <= 60`, which is the worst
+    # possible shape for a limit: a 68-finding batch — the size the first reset actually
+    # produced — silently lost EVERY fact on EVERY card, exactly when a reviewer needs
+    # them most, because a big changeset is harder to judge than a small one, not easier.
+    #
+    # The real cost is per DISTINCT game and it is local SQLite reads, cached below, so
+    # the honest bound is on games rather than findings. And if the bound is ever hit,
+    # the response SAYS so — a cap the caller cannot see is indistinguishable from a bug,
+    # which is precisely how this one survived.
     ctx_cache, me_cache = {}, {}
+    truncated = False
     for f in findings:
         nk = f.get("norm_key")
         if not nk:
             continue
-        if len(findings) <= 60:
+        if nk in ctx_cache or len(ctx_cache) < CONTEXT_GAME_CAP:
             if nk not in ctx_cache:
                 try:
                     c = aimeta.game_context(nk)
@@ -5465,6 +5481,8 @@ def aimeta_findings(status: str = Query(None), kind: str = Query(None),
                 except Exception:
                     ctx_cache[nk] = None
             f["context"] = ctx_cache.get(nk)
+        else:
+            truncated = True
         # Flag proposed changes that would OVERWRITE a manual edit — the review UI warns
         # and requires an extra confirm before undoing what the user set by hand.
         if nk not in me_cache:
@@ -5475,7 +5493,10 @@ def aimeta_findings(status: str = Query(None), kind: str = Query(None),
         id_conf = me["identity"] and f.get("kind") in ("match", "identify")
         if id_conf or attr_conf:
             f["manual_conflicts"] = {"identity": bool(id_conf), "attrs": attr_conf}
-    return {"findings": findings, "counts": aimeta.findings_counts()}
+    return {"findings": findings, "counts": aimeta.findings_counts(),
+            # named so the page can say "context omitted for N games" rather than
+            # silently showing cards with no facts on them
+            "context_truncated": truncated, "context_cap": CONTEXT_GAME_CAP}
 
 
 @app.get("/api/aimeta/scans")

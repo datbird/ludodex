@@ -80,6 +80,25 @@ def main():
     check("the matched chip carries the provider ids in its tooltip",
           "providerLabel(m.provider)}" in ui and "m.id" in ui)
 
+    # --- the cap that hid all of this ------------------------------------------
+    # The review response used to attach context only when `len(findings) <= 60`. The
+    # first reset produced 68, so every card lost every fact — filename, platform,
+    # folder, provenance, current match — at the exact moment a reviewer needed them,
+    # because a large batch is harder to judge than a small one, not easier.
+    srv_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "server", "app.py")).read()
+    # the STATEMENT, not the substring — the fix's own comment quotes the old line, and
+    # this is the third time that has tripped a guard here. Check for executable code.
+    check("context is no longer withheld from batches over 60 findings",
+          not any(l.strip().startswith("if len(findings) <=")
+                  for l in srv_src.splitlines()))
+    check("the bound is on distinct GAMES, which is where the cost actually is",
+          "len(ctx_cache) < CONTEXT_GAME_CAP" in srv_src)
+    check("the cap is generous enough for a real reset batch",
+          srv.CONTEXT_GAME_CAP >= 200)
+    check("and hitting it is REPORTED, not silent",
+          '"context_truncated"' in srv_src)
+
     print("\n%d/%d passed" % (sum(PASS), len(PASS)))
 
 
