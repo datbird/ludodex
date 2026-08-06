@@ -9583,6 +9583,20 @@ function FindingContextStrip({ ctx }: { ctx?: FindingContext | null }) {
   if (ctx.tags?.length) bits.push(<span key="t" className="fc-chip">🏷 {ctx.tags.join(' · ')}</span>)
   if (ctx.sources?.length) bits.push(<span key="s" className="fc-chip fc-dim">via {ctx.sources.join(', ')}</span>)
   if (ctx.current_match) bits.push(<span key="m" className="fc-chip fc-dim">now: {ctx.current_match}</span>)
+  // What each provider actually said. "Could not find a match" collapses three different
+  // facts into one sentence: EVGA Precision X1 HAS a SteamGridDB id and it is only IGDB
+  // and ScreenScraper that have nothing — correctly, since neither catalogues a GPU
+  // utility. Saying "no match" there invites a reviewer to fix what is already right.
+  if (ctx.providers?.matched?.length) bits.push(
+    <span key="pm" className="fc-chip fc-prov"
+      title={ctx.providers.matched.map((m) => `${providerLabel(m.provider)} #${m.id}`).join(' · ')}>
+      ✓ Already matched: {ctx.providers.matched.map((m) => providerLabel(m.provider)).join(', ')}
+    </span>)
+  if (ctx.providers?.missed?.length) bits.push(
+    <span key="pn" className="fc-chip fc-dim"
+      title="These were searched and returned nothing — a recorded miss, retried later, not a failure">
+      Could not match against: {ctx.providers.missed.map(providerLabel).join(', ')}
+    </span>)
   if (ctx.provenance) {
     const pv = PROVENANCE_LABEL[ctx.provenance] || { icon: '🔎', label: ctx.provenance }
     bits.push(<span key="pv" className="fc-chip fc-prov" title="How this game is identified">{pv.icon} {pv.label}</span>)

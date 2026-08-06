@@ -5299,6 +5299,46 @@ def _current_year(ctx):
     return None
 
 
+def _provider_match_state(nk):
+    """Per-provider identity state for the review page: what matched, what was asked and
+    came back empty, and what was never asked.
+
+    "Could not find a match" collapses three different facts into one sentence, and the
+    difference matters to whoever is reviewing. EVGA Precision X1 HAS a SteamGridDB id;
+    it is only IGDB and ScreenScraper that have nothing, and correctly so — neither
+    catalogues a GPU utility. Telling a reviewer "no match" there invites them to fix
+    something that is already right.
+
+    Three buckets, because a recorded MISS ("we looked, it is not there") and an absent
+    row ("we never looked") are not the same claim — the distinction the negative-cache
+    work was all about.
+    """
+    import provider_ids
+    out = {"matched": [], "missed": [], "unattempted": []}
+    try:
+        mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+    except Exception:                              # noqa: BLE001
+        return out
+    try:
+        specs = dict(provider_ids.PROVIDERS)
+        specs["igdb"] = ("igdb_resolution", "igdb_id")
+        for prov, (table, idcol) in sorted(specs.items()):
+            try:
+                r = mc.execute("SELECT %s FROM %s WHERE norm_key=?" % (idcol, table),
+                               (nk,)).fetchone()
+            except sqlite3.OperationalError:
+                r = None
+            if r is None:
+                out["unattempted"].append(prov)
+            elif (r[0] or 0) > 0:
+                out["matched"].append({"provider": prov, "id": str(r[0])})
+            else:
+                out["missed"].append(prov)
+    finally:
+        mc.close()
+    return out
+
+
 def _finding_context(ctx):
     """The factual, non-AI things we KNOW about a game — shown on the review page so a
     reviewer can sanity-check the AI against the actual ROM: platform(s), file name(s),
@@ -5315,7 +5355,10 @@ def _finding_context(ctx):
             # The values a proposed change would REPLACE. Without these the review page
             # can only show what a value is becoming, never what it is now — so a
             # reviewer is asked to approve a change they cannot actually see.
-            "current_attrs": ctx.get("have") or {}}
+            "current_attrs": ctx.get("have") or {},
+            # what each provider actually said, so the page can say "already matched X"
+            # instead of implying nothing was found anywhere
+            "providers": _provider_match_state(ctx.get("norm_key") or "")}
 
 
 def _manual_edits(nk):
