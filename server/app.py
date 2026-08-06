@@ -1546,13 +1546,7 @@ def _match_worker(force):
         # a whole library takes days. SS publishes its own concurrency budget at runtime
         # (`ssuserInfos.maxthreads`, 6 for a donor account) — stay inside it rather than
         # inventing a number, and never exceed it just because more would be faster.
-        try:
-            import screenscraper as _ss
-            _info = _ss.user_info(config.screenscraper_creds()) or {}
-            _maxt = int(((_info.get("ssuser") or {}).get("maxthreads")) or 0)
-        except Exception:                       # noqa: BLE001 — pacing must never fail a run
-            _maxt = 0
-        workers = max(1, min(4, _maxt or 2))
+        workers = _ss_workers()
         j["workers"] = workers
         lock = threading.Lock()
         from concurrent.futures import ThreadPoolExecutor
@@ -5689,7 +5683,12 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
     return picked
 
 
-def _ai_art_pass(keys, heavy=False, should_stop=lambda: False):
+# How many vision calls to keep in flight. Bounded deliberately: the spend cap can
+# only be honoured to within this many calls once they are concurrent.
+AI_ART_WORKERS = 4
+
+
+def _ai_art_pass(keys, heavy=False, should_stop=lambda: False, progress=None):
     """Vision art pass for a store import. Returns the number of games whose art the
     model actually adjudicated (made at least one pick for).
 
@@ -5728,26 +5727,52 @@ def _ai_art_pass(keys, heavy=False, should_stop=lambda: False):
         pass
     finally:
         lc.close()
-    n = 0
-    for k in keys:
-        if should_stop():
-            break
-        if _art_adjudicated(k, scope):
-            continue
+    # CONCURRENT. Each game is one independent vision call and this loop was strictly
+    # serial: measured, 2,257 games took 4h22m at about 7 seconds each, nearly all of it
+    # waiting on the model rather than doing anything. The work per game is unchanged —
+    # same call, same verdict, same marker — only the waiting overlaps.
+    #
+    # The cap is small on purpose. The budget check has to still be able to STOP the
+    # pass, and with N in flight a cap can only be honoured to within N calls; keeping N
+    # small keeps that overshoot small, which matters when the guardrail is the project's
+    # first rule.
+    n = [0]
+    stop = threading.Event()
+    lock = threading.Lock()
+    todo = [k for k in keys if not _art_adjudicated(k, scope)]
+
+    def _one(k):
+        if stop.is_set() or should_stop():
+            return
         try:
             ai.check_limit(provider, model)     # budget cap reached -> stop, don't raise
         except Exception:
-            print("art pass: budget cap reached after %d game(s)" % n, file=sys.stderr)
-            break
+            with lock:
+                if not stop.is_set():
+                    print("art pass: budget cap reached after %d game(s)" % n[0],
+                          file=sys.stderr)
+            stop.set()
+            return
         try:
-            if _ai_adjudicate_game(k, titles.get(k, k), only_kinds=kinds, attrs=False):
-                n += 1
+            got = _ai_adjudicate_game(k, titles.get(k, k), only_kinds=kinds, attrs=False)
             # marked on attempt (matching the wand path) so a game with nothing left
             # to judge is never re-examined on the next sync
             _mark_art_adjudicated(k, now, scope)
+            with lock:
+                if got:
+                    n[0] += 1
+                if progress:
+                    try:
+                        progress(n[0], len(todo))
+                    except Exception:           # noqa: BLE001 — never fail on reporting
+                        pass
         except Exception as e:                  # noqa: BLE001  never abort the import
             print("art pass %s: %s" % (k, str(e)[:120]), file=sys.stderr)
-    return n
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=AI_ART_WORKERS) as pool:
+        list(pool.map(_one, todo))
+    return n[0]
 
 
 def _aimeta_apply(should_stop, only_ids=None):
@@ -6573,6 +6598,72 @@ def _title_aliases(nk, title, platforms, allow_ai=False):
         return out
     finally:
         con.close()
+
+
+def _ss_workers(default=2, cap=6):
+    """How many provider searches to run at once, from ScreenScraper's OWN advertised
+    `maxthreads` for this account. Asking the provider what it will tolerate beats
+    guessing, and it is the only provider here with a per-account thread budget."""
+    try:
+        import screenscraper as _ss
+        _info = _ss.user_info(config.screenscraper_creds()) or {}
+        # `user_info` returns the ssuser block already UNWRAPPED. Reading it as if it
+        # were still nested silently yielded None, so this fell back to 2 workers while
+        # ScreenScraper was advertising 6 — the concurrency was there for the asking and
+        # a third of it went unused for months. Accept both shapes rather than depend on
+        # which one a helper happens to return.
+        n = int(_info.get("maxthreads")
+                or (_info.get("ssuser") or {}).get("maxthreads") or 0)
+    except Exception:                           # noqa: BLE001 — pacing must never fail
+        n = 0
+    # SS publishes 6 for a donor account and the old cap of 4 left a third of the
+    # allowance unused. Never EXCEED what it advertises, just stop under-using it.
+    return max(1, min(cap, n or default))
+
+
+def _parallel_match(keys, should_stop=lambda: False, force=False, ai_rescue=False,
+                    progress=None, batch=5):
+    """`_match_providers` over `keys`, concurrently. Returns {provider: matched}.
+
+    The standalone match job has run matching on a thread pool for a long time; the
+    IMPORT called `_match_providers(all_keys)` in one sequential pass. Same work, same
+    order per game, and four to six times the wall clock — measured, a 209-title
+    re-match took 40 minutes at four workers, so a 2,257-game library would have spent
+    about seven hours single-threaded on the one phase everything downstream waits for.
+
+    Extracted so both callers share it: two copies of a concurrency policy is how one of
+    them ends up sequential without anyone noticing.
+
+    `progress(done, total, matched)` is called after each batch, on the pool's threads,
+    guarded by a lock — it is what turns a silent seven-hour phase into a counter.
+    """
+    keys = list(keys)
+    if not keys:
+        return {}
+    workers = _ss_workers()
+    lock = threading.Lock()
+    tot = {}
+    done = [0]
+
+    def _one(chunk):
+        if should_stop():
+            return
+        got = _match_providers(chunk, should_stop, force=force, ai_rescue=ai_rescue)
+        with lock:
+            for p, n in got.items():
+                tot[p] = tot.get(p, 0) + n
+            done[0] += len(chunk)
+            if progress:
+                try:
+                    progress(done[0], len(keys), dict(tot))
+                except Exception:               # noqa: BLE001 — never fail on reporting
+                    pass
+
+    from concurrent.futures import ThreadPoolExecutor
+    chunks = [keys[i:i + batch] for i in range(0, len(keys), batch)]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(_one, chunks))
+    return tot
 
 
 def _match_providers(keys, should_stop=lambda: False, force=False,
@@ -10325,7 +10416,12 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 _rescue = any(import_mode_for(sid) in ("lite", "heavy")
                               for sid in services
                               if job["services"].get(sid, {}).get("state") == "ok")
-                _got = _match_providers(_keys, _stopped, ai_rescue=_rescue)
+                def _mprog(d, t, m):
+                    job["step"] = ("Matching providers %d/%d · %s" % (
+                        d, t, ", ".join("%s %d" % kv for kv in sorted(m.items()))
+                        or "no matches yet"))
+                _got = _parallel_match(_keys, _stopped, ai_rescue=_rescue,
+                                       progress=_mprog)
                 _phase("provmatch", "ok",
                        ", ".join("%s %d" % (p, n) for p, n in sorted(_got.items())))
                 # NB the import deliberately runs the MATCH here and leaves fetching to
@@ -10557,12 +10653,16 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 done = 0
                 hv = [s for s in ai_srcs if tiers.get(s) == "heavy"]
                 lt = [s for s in ai_srcs if tiers.get(s) == "lite"]
+                def _aprog(d, t, _tier=""):
+                    job["step"] = "AI art%s — judged %d/%d game(s)" % (_tier, d, t)
                 if hv:
                     done += _ai_art_pass(aimeta.targets("all", 5000, sources=hv),
-                                         heavy=True, should_stop=_stopped)
+                                         heavy=True, should_stop=_stopped,
+                                         progress=lambda d, t: _aprog(d, t, " (heavy)"))
                 if lt and not _stopped():
                     done += _ai_art_pass(aimeta.targets("all", 5000, sources=lt),
-                                         heavy=False, should_stop=_stopped)
+                                         heavy=False, should_stop=_stopped,
+                                         progress=lambda d, t: _aprog(d, t, " (lite)"))
                 _phase("artpick", "ok", "%d game(s) art-picked" % done)
             except Exception as e:              # noqa: BLE001  never fail the import
                 _phase("artpick", "skipped", str(e)[:120])

@@ -120,9 +120,20 @@ def main():
     i = src.index("def _sync_worker(")
     j = src.index("\ndef ", i + 10)
     worker = src[i:j]
-    check("_sync_worker matches providers", "_match_providers(" in worker)
+    # `_parallel_match` IS the matcher — it fans `_match_providers` across a pool.
+    # The guard is about the import matching providers at all, not about which spelling.
+    def _match_at(text):
+        """Where the import matches providers, by either spelling — `_parallel_match`
+        fans `_match_providers` across a pool and is the same step."""
+        for name in ("_parallel_match(", "_match_providers("):
+            if name in text:
+                return text.index(name)
+        raise AssertionError("the import does not match providers at all")
+
+    check("_sync_worker matches providers",
+          "_match_providers(" in worker or "_parallel_match(" in worker)
     check("it does so BEFORE the media passes, so the fetchers have an identity to use",
-          worker.index("_match_providers(") < worker.index("for sid in media_targets:"))
+          _match_at(worker) < worker.index("for sid in media_targets:"))
     check("and it is a declared phase, visible in the job monitor",
           '"id": "provmatch"' in src)
 

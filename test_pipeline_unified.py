@@ -126,7 +126,10 @@ def main():
 
     print("4. the import shares the tail even though it fetches differently")
     sw = body_of("_sync_worker") or ""
-    check("_sync_worker matches providers", "_match_providers(" in sw)
+    # `_parallel_match` fans `_match_providers` across a pool — same matcher, one
+    # concurrency policy shared with the standalone job.
+    check("_sync_worker matches providers",
+          "_match_providers(" in sw or "_parallel_match(" in sw)
     check("_sync_worker runs the shared tail", "_media_finish(" in sw)
 
     print("5. every exemption is deliberate, not accidental")
