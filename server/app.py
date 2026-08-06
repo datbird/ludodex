@@ -5640,7 +5640,8 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                             # a confident reject is banned, so it cannot come back on the
                             # next sync and cannot be the fallback if the pick is dropped.
                             _apply_art_rejects(w, nk, kind, crows,
-                                               res.get("rejects"), title=title)
+                                               res.get("rejects"), title=title,
+                                               aliases=_al)
                             if res["index"] is None:
                                 # every candidate is the wrong game: leave the kind with
                                 # no primary rather than promote art that isn't this game
@@ -7294,7 +7295,7 @@ ART_REJECT_BAN_AT = 0.8
 
 
 def _apply_art_rejects(con, nk, kind, cands, rejects, ban_at=ART_REJECT_BAN_AT,
-                       title=None):
+                       title=None, aliases=None):
     """Act on vision's "this is not this game" verdicts. Returns the number banned.
 
     Every path that asks a model to pick art goes through here, so the consequence of a
@@ -7326,7 +7327,13 @@ def _apply_art_rejects(con, nk, kind, cands, rejects, ban_at=ART_REJECT_BAN_AT,
         depicts = (r.get("depicts") or "").strip()
         if not depicts or not title:
             continue
-        if matchgate.score([title], depicts)[0]:
+        # Check against the owned title AND its known other-region names. Without the
+        # aliases this banned art for the SAME game under a different regional title:
+        # "Super Probotector: Alien Rebels" is Contra III, "Space Quest Chapter I" is
+        # Space Quest I, and the model naming the other one is right, not a fault. The
+        # prompt already receives these names precisely so a regional variant is kept
+        # and merely not featured — the ban has to honour the same distinction.
+        if matchgate.score([title] + list(aliases or []), depicts)[0]:
             continue                       # it named THIS game — a preference, not a fault
         c = cands[i]
         prov = c.get("provider") if isinstance(c, dict) else None
@@ -10898,7 +10905,8 @@ def art_pick(norm_key: str, kind: str = Query("cover")):
         _apply_art_rejects(wcon, norm_key, kind,
                            [{"id": c["id"], "provider": c.get("provider"),
                              "ref": c.get("ref")} for c in cands],
-                           res.get("rejects"), title=title)
+                           res.get("rejects"), title=title,
+                           aliases=_title_aliases(norm_key, title, [], allow_ai=False))
         wcon.commit()
     finally:
         wcon.close()

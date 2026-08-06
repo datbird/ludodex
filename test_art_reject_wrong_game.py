@@ -171,6 +171,19 @@ def main():
           srv._apply_art_rejects(con, "aoe2", "cover", c2,
                                  [{"index": 0, "confidence": 0.99,
                                    "depicts": "Anything At All"}]) == 0)
+    check("a reject naming a known REGIONAL name of this game is not a fault",
+          srv._apply_art_rejects(con, "aoe2", "cover", c2,
+                                 [{"index": 0, "confidence": 0.99,
+                                   "depicts": "Contra III: The Alien Wars"}],
+                                 title="Super Probotector: Alien Rebels",
+                                 aliases=["Contra III: The Alien Wars"]) == 0)
+    check("...but an unrelated game is still banned even with aliases present",
+          srv._apply_art_rejects(con, "aoe2", "cover", c2,
+                                 [{"index": 0, "confidence": 0.99,
+                                   "depicts": "Super Mario World"}],
+                                 title="Super Probotector: Alien Rebels",
+                                 aliases=["Contra III: The Alien Wars"]) == 1)
+
     check("the prompt demands the image be identified, not just disliked",
           "depicts" in ai.area_prompt("art", kind="cover", title="x", count=2,
                                       aliases="").lower())
