@@ -77,6 +77,23 @@ def main():
     check("the card shows what already matched", "Already matched:" in ui)
     check("the card names what was searched without success",
           "Could not match against:" in ui)
+    # the "could not identify" panel is a SECOND place that states this, and it stated
+    # it wrongly: EVGA sits in that list holding a SteamGridDB id.
+    check("the stuck panel no longer asserts a blanket 'no match, no attributes'",
+          "— no match, no attributes." not in ui)
+    # scoped to the panel: the phrase legitimately appears in unrelated help text, and
+    # a check that cannot tell one screen from another is not a check.
+    panel = ui[ui.index("const stuckPanel ="):]
+    panel = panel[:panel.index("const allIds")]
+    check("nor calls an identified game one the AI 'could not identify'",
+          "could not identify" not in panel)
+    check("it leads with what IS known, not with a failure",
+          "Already identified." in ui and "Identified by" in ui)
+    check("identified and unidentified games are separated, not lumped",
+          "stuckIdent" in ui and "stuckBare" in ui)
+    check("the stuck panel shows each game's provider state instead",
+          "g.f.context?.providers" in ui)
+
     check("the matched chip carries the provider ids in its tooltip",
           "providerLabel(m.provider)}" in ui and "m.id" in ui)
 

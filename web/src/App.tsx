@@ -9828,21 +9828,61 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
       load()
     } catch (e) { setNote((e as Error).message) } finally { setBusy(false) }
   }
+  // A game here proposed no CHANGE. That is not the same as being unidentified, and the
+  // panel used to say it was — "games the AI could not identify", about EVGA Precision
+  // X1, which holds a SteamGridDB id and is matched correctly, because IGDB and
+  // ScreenScraper do not catalogue a GPU utility. Leading with a failure sends a
+  // reviewer hunting for a fault that isn't there. So split on the actual question:
+  // is it identified by anyone?
+  const stuckIdent = stuck.filter((g) => g.f.context?.providers?.matched?.length)
+  const stuckBare = stuck.filter((g) => !g.f.context?.providers?.matched?.length)
+  const provLine = (g: typeof stuck[number]) => {
+    const pv = g.f.context?.providers
+    return (
+      <li key={g.f.id}>
+        {g.f.title || g.f.norm_key}
+        {pv?.matched?.length ? (
+          <span className="fc-chip fc-prov" style={{ marginLeft: 8 }}>
+            ✓ Identified by {pv.matched.map((m) => `${providerLabel(m.provider)} #${m.id}`).join(', ')}
+          </span>
+        ) : null}
+        {pv?.missed?.length ? (
+          <span className="fc-chip fc-dim" style={{ marginLeft: 6 }}
+            title="Searched and returned nothing — a recorded miss, retried later, not a failure">
+            No entry on {pv.missed.map(providerLabel).join(', ')}
+          </span>
+        ) : null}
+      </li>
+    )
+  }
   const stuckPanel = stuck.length > 0 && (
     <div className="chg-stuck">
       <div className="chg-stuck-h">
-        {stuck.length} game{stuck.length === 1 ? '' : 's'} the AI could not identify
+        {stuck.length} game{stuck.length === 1 ? '' : 's'} with nothing further to propose
         <button className="apply-btn" disabled={busy} onClick={dismissStuck}>
           Dismiss {stuck.length === 1 ? 'it' : 'all'}</button>
       </div>
-      <div className="chg-stuck-note dim">Nothing was proposed for
-        {stuck.length === 1 ? ' this one' : ' these'} — no match, no attributes. There is
-        nothing to accept; dismissing clears {stuck.length === 1 ? 'it' : 'them'} from review.</div>
-      <ul className="chg-stuck-list">
-        {stuck.map((g) => (
-          <li key={g.f.id}>{g.f.title || g.f.norm_key}</li>
-        ))}
-      </ul>
+      {stuckIdent.length > 0 && (
+        <>
+          <div className="chg-stuck-note dim">
+            <b>Already identified.</b> {stuckIdent.length === 1 ? 'This one is' : 'These are'} matched
+            — the AI just had nothing to add. Providers with no entry are shown too; a game
+            database legitimately not carrying a utility or a niche title is a correct
+            answer, not a gap to fix.
+          </div>
+          <ul className="chg-stuck-list">{stuckIdent.map(provLine)}</ul>
+        </>
+      )}
+      {stuckBare.length > 0 && (
+        <>
+          <div className="chg-stuck-note dim">
+            <b>Not identified by any provider.</b> Nothing was proposed and nothing matched,
+            so there is nothing to accept; dismissing clears
+            {stuckBare.length === 1 ? ' it' : ' them'} from review.
+          </div>
+          <ul className="chg-stuck-list">{stuckBare.map(provLine)}</ul>
+        </>
+      )}
     </div>
   )
   const allIds = groups.flatMap((g) => g.changes.map((c) => c.id))
