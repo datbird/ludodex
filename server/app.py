@@ -5577,6 +5577,25 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
     asset the grid actually shows); None means every kind with a real choice to make.
     `attrs=False` skips the attribute adjudication, for callers that only want art."""
     picked = 0
+    # The entry's platform and release year — what the artwork itself advertises, and
+    # what the model was never given. A Genesis game shown NES boxes has no way to know
+    # they are NES boxes from the title alone.
+    _plat = _year = None
+    try:
+        _lc = ro(LIBRARY_DB)
+        try:
+            _r = _lc.execute("SELECT platform FROM games WHERE norm_key=? AND "
+                             "platform IS NOT NULL AND platform!='' LIMIT 1",
+                             (nk,)).fetchone()
+            _plat = (_r[0] if _r else None) or None
+            _r = _lc.execute("SELECT ga.value FROM game_attributes ga JOIN games g "
+                             "ON g.id=ga.game_id WHERE g.norm_key=? AND "
+                             "ga.kind='release_year' LIMIT 1", (nk,)).fetchone()
+            _year = _r[0] if _r and str(_r[0] or "").isdigit() else None
+        finally:
+            _lc.close()
+    except Exception:                                  # noqa: BLE001 — context is a bonus
+        pass
     if ai.area_available("art"):                       # media — vision pick per kind
         try:
             rc = ro(INDEX_DB)
@@ -5656,7 +5675,7 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                                           provider=ai.provider_for_area("art"),
                                           model=ai.model_for_area("art"),
                                           language=_pref_language(),
-                                          aliases=_al)
+                                          aliases=_al, year=_year, platform=_plat)
                         w = sqlite3.connect(INDEX_DB)
                         try:
                             # act on "that is not this game" BEFORE promoting anything —

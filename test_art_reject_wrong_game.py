@@ -53,6 +53,19 @@ def main():
     check("prompt asks for a machine-readable reject list", '"reject' in low)
     check("prompt allows returning no pick when everything is wrong",
           "null" in low or "no acceptable" in low)
+    # the model must be told what the artwork itself advertises
+    ctx = ai.area_prompt("art", kind="cover", title="Contra: Hard Corps", count=6,
+                         aliases="", context=" It is the genesis release, from 1994.")
+    check("the prompt carries the platform and year when known",
+          "genesis" in ctx and "1994" in ctx)
+    check("prompt names platform/era mismatch as disqualifying",
+          "platform and year" in ctx.lower() or "cannot be art for" in ctx.lower())
+    check("prompt says a whole wrong-game candidate SET is possible",
+          "every candidate" in ctx.lower())
+    check("prompt still works with no context at all",
+          "<<context>>" not in ai.area_prompt("art", kind="cover", title="x", count=2,
+                                              aliases="", context=""))
+
     check("prompt still carries the regional-title rule (#26 must not regress)",
           "story of thor" in low and "regional" in low)
     check("prompt separates 'wrong region, keep it' from 'wrong game, drop it'",

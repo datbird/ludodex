@@ -694,8 +694,8 @@ DEFAULT_PROMPTS = {
         "Omit any key you are not constraining. Use EXACT source/platform values."
     ),
     "art": (
-        "You help pick the best <<kind>> image for the video game '<<title>>'. You "
-        "will see <<count>> candidate images labeled 'Image N'. Judge on, in order:\n"
+        "You help pick the best <<kind>> image for the video game '<<title>>'.<<context>> "
+        "You will see <<count>> candidate images labeled 'Image N'. Judge on, in order:\n"
         "1. CORRECT game, and the RIGHT REGIONAL TITLE. Read the title text ON the "
         "artwork. Many games ship under different names by region — Beyond Oasis is 'The "
         "Story of Thor' in Europe and Japan, Contra is 'Probotector', Gradius is "
@@ -712,6 +712,11 @@ DEFAULT_PROMPTS = {
         "subtitle. Read them. 'Police Quest II: The Vengeance' art is NOT valid for "
         "'Police Quest: In Pursuit of the Death Angel'; 'Ys II' art is NOT valid for "
         "'Ys I'. A compilation or collection cover is also not a single entry's cover. "
+        "USE THE PLATFORM AND YEAR above: box art advertises its own console and era, so "
+        "a Nintendo/NES box cannot be art for a Genesis game, and a 1988 box cannot be "
+        "art for a 1994 release. A provider that matched the wrong game hands you a "
+        "whole set of images for that other game — if EVERY candidate belongs to a "
+        "different title, say so rather than choosing the least wrong one. "
         "List every such image, plus any placeholder or blank, in \"rejects\", and for "
         "each one NAME the game you believe it actually depicts in \"depicts\". Only "
         "list an image here if you can say what it IS — \"rejects\" means \"this is a "
@@ -964,7 +969,7 @@ DEFAULT_PROMPTS = {
 # <<token>> placeholders each area's prompt fills in (surfaced in the editor).
 PROMPT_VARS = {
     "search": ["sources", "platforms"],
-    "art": ["kind", "title", "count"],
+    "art": ["kind", "title", "count", "context"],
     "identify": [], "dedupe": [], "split": ["title"],
     "fileprofile": ["variables", "systems", "current"],
     "filecmd": ["profiles", "variables", "systems", "current"],
@@ -1605,7 +1610,7 @@ def nl_to_query(question, sources, platforms, provider=None, model=None):
 
 # ----------------------------------------------------------------- art pick (vision)
 def pick_art(title, kind, images, provider=None, model=None, language=None, notes=None,
-             aliases=None):
+             aliases=None, year=None, platform=None):
     """Pick the best of N candidate images. `images`=[(mime,bytes)].
     Returns {"index": <0-based>, "reason": str}. Raises on error. When `language`
     is set, ties break toward media in that language (logos/titles/box art).
@@ -1622,8 +1627,18 @@ def pick_art(title, kind, images, provider=None, model=None, language=None, note
         alias_txt = (" This game is also released as: %s — those are the SAME game, so "
                      "such art is valid to keep but must NOT be the primary pick."
                      % ", ".join("'%s'" % a for a in aliases[:8]))
+    # The PLATFORM and YEAR, because box art advertises both and the model had neither.
+    # Live, "Contra: Hard Corps" (Genesis, 1994) was shown six covers for "Contra Force"
+    # (NES, 1992) — the provider had matched the wrong game — and picked the best of
+    # them. Nothing in "pick the best cover for Contra: Hard Corps" says an NES box is
+    # disqualifying; "Genesis, released 1994" does.
+    ctx = ""
+    if platform or year:
+        bits = [b for b in (platform, str(year) if year else None) if b]
+        ctx = " It is the %s release." % " ".join(bits) if len(bits) == 1 else \
+            " It is the %s release, from %s." % (platform, year)
     system = area_prompt("art", kind=kind, title=title, count=len(images),
-                         aliases=alias_txt)
+                         aliases=alias_txt, context=ctx)
     instr = "Pick the best image."
     if language:
         instr += (" Prefer an image whose visible text, logo, or box-art language "
