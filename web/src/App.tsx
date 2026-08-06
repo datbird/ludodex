@@ -9852,6 +9852,12 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
             No entry on {pv.missed.map(providerLabel).join(', ')}
           </span>
         ) : null}
+        {pv?.ineligible?.length ? (
+          <span className="fc-chip fc-dim" style={{ marginLeft: 6 }}
+            title="Not asked because it does not apply — not a gap, and not work outstanding">
+            {pv.ineligible.map((x) => `${providerLabel(x.provider)}: ${x.why}`).join(' · ')}
+          </span>
+        ) : null}
       </li>
     )
   }

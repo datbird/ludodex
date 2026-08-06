@@ -64,7 +64,7 @@ def main():
 
     st = srv._provider_match_state("fresh")
     check("a provider with NO row is unattempted, not a miss",
-          sorted(st["unattempted"]) == ["igdb", "steam", "steamgriddb"]
+          sorted(st["unattempted"]) == ["igdb", "steamgriddb"]
           and st["missed"] == ["screenscraper"])
 
     # STEAM is a provider as well as a source — it supplies the appid, the store
@@ -93,12 +93,24 @@ def main():
               m["provider"] for m in st["matched"]))
 
     st = srv._provider_match_state("romonly")
-    check("a game not owned on Steam is UNATTEMPTED there, never a miss",
-          "steam" in st["unattempted"] and "steam" not in st["missed"])
+    check("a game not owned on Steam is never a MISS there",
+          "steam" not in st["missed"])
+    check("nor UNATTEMPTED — that would promise a lookup ludodex will not make",
+          "steam" not in st["unattempted"])
+    check("it is INELIGIBLE, with the reason attached",
+          [x["provider"] for x in st["ineligible"]] == ["steam"]
+          and "not owned" in st["ineligible"][0]["why"])
 
     st = srv._provider_match_state("never-heard-of-it")
     check("an unknown game is unattempted everywhere, never 'no match'",
-          len(st["unattempted"]) == 4 and not st["matched"] and not st["missed"])
+          sorted(st["unattempted"]) == ["igdb", "screenscraper", "steamgriddb"]
+          and not st["matched"] and not st["missed"])
+    check("...and Steam is ineligible for it rather than pending",
+          [x["provider"] for x in st["ineligible"]] == ["steam"])
+
+    ui2 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "web", "src", "App.tsx")).read()
+    check("the card renders the ineligible reason", "pv?.ineligible?.length" in ui2)
 
     # the UI must actually render both, and must not have kept the old blanket wording
     ui = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),

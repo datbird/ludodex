@@ -168,6 +168,7 @@ export interface FindingContext {
     matched: { provider: string; id: string }[]
     missed: string[]
     unattempted: string[]
+    ineligible?: { provider: string; why: string }[]
   }
   // The values a proposed change would REPLACE, keyed by attribute kind. Lets the review
   // page state "release year: 2007 → 2024" instead of only naming the new value.

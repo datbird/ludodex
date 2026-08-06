@@ -5314,7 +5314,11 @@ def _provider_match_state(nk):
     work was all about.
     """
     import provider_ids
-    out = {"matched": [], "missed": [], "unattempted": []}
+    # Four states, not three. `unattempted` says "we could ask and have not", which is a
+    # promise; for a game not owned on Steam that promise is false, because ludodex only
+    # ever asks Steam about titles you own there. That is INELIGIBLE — a different fact,
+    # and one a reviewer should not read as work outstanding.
+    out = {"matched": [], "missed": [], "unattempted": [], "ineligible": []}
     try:
         mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
     except Exception:                              # noqa: BLE001
@@ -5357,10 +5361,18 @@ def _provider_match_state(nk):
         if r and str(r[0]).isdigit():
             out["matched"].append({"provider": "steam", "id": str(r[0])})
         else:
-            out["unattempted"].append("steam")
+            # NB Steam is searchable by name — `store/api/storesearch` resolves
+            # "Contra Anniversary Collection" to appid 1018020 — so this is a scoping
+            # decision, not a limitation: ludodex asks Steam only about titles you own
+            # there, because that is what makes an appid trustworthy as an identity.
+            # Recording it as ineligible keeps the door open to changing that without
+            # having lied about it in the meantime.
+            out["ineligible"].append({"provider": "steam",
+                                      "why": "not owned on Steam"})
     except Exception:                              # noqa: BLE001 — a chip is not worth a 500
         pass
     out["matched"].sort(key=lambda m: m["provider"])
+    out["ineligible"].sort(key=lambda m: m["provider"])
     out["unattempted"].sort()
     return out
 
