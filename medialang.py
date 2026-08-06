@@ -184,3 +184,88 @@ def main(argv):
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))
+
+# --------------------------------------------------------------------- region
+# Region is a DETERMINISTIC signal and was going unused. ScreenScraper stamps every
+# asset with its region in `media.meta` ({"type":"box-2D","region":"jp"}), and until now
+# that tag was consulted only as a proxy for LANGUAGE, to hide or ban off-language art.
+# Nothing used it to CHOOSE. So Contra: Hard Corps served its Japanese box while the US
+# box sat beside it at identical size and type, decided by a model reading the artwork
+# when the answer was already written down.
+#
+# Regions that mean "the release the user owns" for a given language, most-preferred
+# first. Only used as a DEFAULT — an explicit `media_regions` always wins.
+_LANG_REGIONS = {
+    "English": ("us", "uk", "gb", "eu", "au", "ca", "wor", "ss"),
+    "Japanese": ("jp", "asi", "wor", "ss"),
+    "French": ("fr", "eu", "wor", "ss"),
+    "German": ("de", "eu", "wor", "ss"),
+    "Spanish": ("sp", "es", "eu", "wor", "ss"),
+    "Italian": ("it", "eu", "wor", "ss"),
+    "Portuguese": ("br", "pt", "eu", "wor", "ss"),
+    "Korean": ("kr", "asi", "wor", "ss"),
+    "Chinese": ("cn", "tw", "asi", "wor", "ss"),
+    "Russian": ("ru", "eu", "wor", "ss"),
+}
+# With no preference expressed at all, prefer the release most catalogues are built
+# around rather than picking arbitrarily.
+_DEFAULT_REGIONS = ("us", "uk", "gb", "eu", "wor", "ss")
+
+
+def preferred_regions():
+    """Ordered region codes to prefer when choosing art.
+
+    An explicit `media_regions` wins. Otherwise it follows the LANGUAGE preference,
+    because "I want English art" and "I want the US/EU release" are the same wish
+    expressed twice, and making the user say it twice is how the two drift apart.
+    """
+    raw = config.get("media_regions")
+    if raw:
+        out = []
+        for part in str(raw).split(","):
+            code = part.strip().lower()
+            if code and code not in out:
+                out.append(code)
+        if out:
+            return out
+    langs = preferred()
+    return list(_LANG_REGIONS.get(langs[0], _DEFAULT_REGIONS)) if langs \
+        else list(_DEFAULT_REGIONS)
+
+
+def region_of(meta):
+    """The asset's region code from its `media.meta`, or "" when it has none.
+
+    Store art (Steam, IGDB, SteamGridDB) carries no region and returns "" — which must
+    rank as UNKNOWN, never as wrong, or a preference would strip every store cover.
+    """
+    if not meta:
+        return ""
+    if isinstance(meta, str):
+        if not meta.startswith("{"):
+            return ""
+        try:
+            meta = json.loads(meta)
+        except ValueError:
+            return ""
+    if not isinstance(meta, dict):
+        return ""
+    return str(meta.get("region") or "").split(",")[0].strip().lower()
+
+
+def region_rank(meta, prefs=None):
+    """Sort rank for an asset's region: 0 = most preferred, higher = less.
+
+    An asset with NO region sits immediately after the preferred list and ahead of a
+    known-but-unwanted one. That ordering is the whole point: a neutral store cover is a
+    fine answer, and a Japanese box for an owner of the US release is not — but neither
+    is ever excluded, only ordered.
+    """
+    prefs = prefs if prefs is not None else preferred_regions()
+    code = region_of(meta)
+    if not code:
+        return len(prefs)                      # unknown/neutral — acceptable, not ideal
+    try:
+        return prefs.index(code)
+    except ValueError:
+        return len(prefs) + 1                  # a region the user did not ask for

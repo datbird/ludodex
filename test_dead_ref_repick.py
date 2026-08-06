@@ -29,7 +29,7 @@ def check(label, cond):
 SCHEMA = """CREATE TABLE IF NOT EXISTS media(
     id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, game_key TEXT, kind TEXT,
     provider TEXT, ref TEXT, ref_type TEXT, ext TEXT, matched INT, sha1 TEXT,
-    width INT, height INT, filler INT, ai_pick INT, chosen INT DEFAULT 0,
+    width INT, height INT, filler INT, ai_pick INT, meta TEXT, chosen INT DEFAULT 0,
     hidden INT DEFAULT 0)"""
 
 

@@ -424,6 +424,7 @@ export interface Prefs {
   screenshot_limit?: number    // max screenshots kept per game (0 = no limit)
   media_language: string       // '' = any; else the preferred media language (legacy single)
   media_languages: string[]    // ordered 1st,2nd,3rd preferred media languages
+  media_regions?: string       // comma-ordered region codes; blank = follow language
   media_lang_mode: MediaLangMode
   fileops_apply_mode: FileopsApplyMode
   manifests_enabled: boolean

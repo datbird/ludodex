@@ -2371,6 +2371,16 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
             </select>
           ))}
         </div>
+        <span className="pref-hint" style={{ marginTop: 10 }}>Preferred region for box art, most
+          preferred first (e.g. <code>us,eu,jp</code>). Leave blank to follow your language above.
+          Art tagged with a region you didn&rsquo;t ask for is ranked last, never discarded.</span>
+        <input className="pref-input" type="text" placeholder="follow language"
+          defaultValue={prefs.media_regions || ''}
+          onBlur={async (e) => {
+            const v = e.target.value.trim()
+            setPrefs({ ...prefs, media_regions: v })
+            try { await api.setPrefs({ media_regions: v }) } catch { load() }
+          }} />
         <span className="pref-hint" style={{ marginTop: 10 }}>When a media asset is in a language that
           is <em>none</em> of the above:</span>
         <select className="pref-select" value={prefs.media_lang_mode || 'off'}

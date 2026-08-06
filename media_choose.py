@@ -26,6 +26,7 @@ DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
 import config
 import media
+import medialang
 
 INDEX = os.path.join(DATA, "media-index.sqlite")
 
@@ -113,6 +114,9 @@ def select(con, kinds=None, only=None):
     # media overlay) wins over provider priority, so the served art follows the user's
     # choice on every re-select. Keyed by (norm_key, kind, provider, ref) -> pin rank.
     pin_rank = _load_pins()
+    # Resolved once: a per-row config read would turn selection into thousands of
+    # SQLite opens, and the preference cannot change mid-pass anyway.
+    _regions = medialang.preferred_regions()
     # `only` scopes the re-rank to specific norm_keys. Needed because measurement is
     # LAZY: dimensions and the filler verdict are stamped when an asset is first served,
     # which is AFTER the selection that ranked it. Without a cheap way to re-rank one
@@ -120,7 +124,7 @@ def select(con, kinds=None, only=None):
     # screenshot keeps the cover slot while eight measured 484x680 covers sit unused,
     # because at ranking time nothing knew their shapes.
     _q = ("SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key, "
-          "width, height, filler, ai_pick "
+          "width, height, filler, ai_pick, meta "
           "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
           % ",".join("'%s'" % k for k in scalar))
     _args = []
@@ -182,7 +186,13 @@ def select(con, kinds=None, only=None):
         # than raw pixels so an unmeasured asset lands in the middle instead of last;
         # `px` still breaks ties INSIDE a band.
         band = media.res_band(mw, mh)
-        sk = (pin, bad_shape, filler, 0 if r["ai_pick"] else 1, band, pr, px,
+        # REGION sits above the AI verdict for the same reason shape and filler do: it
+        # is measured evidence, and measured evidence can prove a paid pick wrong.
+        # Contra: Hard Corps had its Japanese box vision-picked while the US box sat
+        # beside it, same size, same type, region tagged `us` in the row we already had.
+        # A model reading artwork is the fallback for this question, not the answer.
+        rrank = medialang.region_rank(r["meta"], _regions)
+        sk = (pin, bad_shape, filler, rrank, 0 if r["ai_pick"] else 1, band, pr, px,
               0 if r["matched"] else 1,
               0 if r["ref_type"] == "file" else 1, r["id"])
         _sys = r["system"] or ""

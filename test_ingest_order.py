@@ -60,7 +60,7 @@ def main():
     m.execute("CREATE TABLE media(id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, "
               "game_key TEXT, kind TEXT, provider TEXT, ref TEXT, ref_type TEXT, "
               "ext TEXT, matched INT DEFAULT 1, sha1 TEXT, width INT, height INT, "
-              "filler INT, ai_pick INT, chosen INT DEFAULT 0, hidden INT DEFAULT 0)")
+              "filler INT, ai_pick INT, meta TEXT, chosen INT DEFAULT 0, hidden INT DEFAULT 0)")
     # a fetch that happened while the game was still unidentified: neutral, title-keyed
     m.execute("INSERT INTO media(norm_key,system,game_key,kind,provider,ref,ref_type,"
               "width,height) VALUES('late','','title:late','cover','igdb',"

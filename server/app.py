@@ -1780,6 +1780,7 @@ def get_prefs():
         "screenshot_limit": int(config.get("screenshot_limit") or 0),
         "media_language": config.get("media_language") or "",
         "media_languages": medialang.preferred(),
+        "media_regions": ",".join(medialang.preferred_regions()),
         "media_lang_mode": medialang.mode(),
         "fileops_apply_mode": config.get("fileops_apply_mode") or "preview",
         "manifests_enabled": config.get_bool("manifests_enabled", True),
@@ -1826,6 +1827,8 @@ def set_prefs(body: dict = Body(...)):
             pass
     if "media_language" in body:                # "" = no preference (any language)
         config.set_("media_language", str(body["media_language"] or "")[:40])
+    if "media_regions" in body:                 # "" = follow the language preference
+        config.set_("media_regions", str(body["media_regions"] or "")[:120])
     if "media_languages" in body:               # ordered 1st,2nd,3rd preference
         langs = body["media_languages"] or []
         if isinstance(langs, str):
