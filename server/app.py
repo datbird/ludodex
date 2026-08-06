@@ -60,6 +60,7 @@ import splits          # noqa: E402  durable "peel apart" (split a merged entry 
 import ingesthints     # noqa: E402  AI ingest hints (lite/heavy import path rewrites)
 import reset           # noqa: E402  scoped reset (library / curation / factory)
 import provider_links  # noqa: E402  metadata_links derived from the identity cache
+import estimate        # noqa: E402  pre-run ingest time estimate
 import matchgate       # noqa: E402  shared provider candidate-acceptance gate
 import devicesync      # noqa: E402  outbound push (ROM+media+gamelist) to RetroDECK/ES-DE
 import auth            # noqa: E402  local username/password accounts + sessions
@@ -1610,6 +1611,31 @@ PROVIDER_COST = {
                      "(name search; no `pc` system id, so PC titles take the slow "
                      "cross-system path)",
 }
+
+
+@app.get("/api/ingest/estimate")
+def ingest_estimate(tier: str = Query("lite"), fresh: bool = Query(False)):
+    """How long the next ingest will take, before committing to it.
+
+    Computed from THIS instance's caches, not from the game count: a recorded identity
+    is not re-searched and a judged game is not re-billed, so a resync of a settled
+    library and a post-reset first run are wildly different numbers. `fresh=true` is the
+    reset case, where nothing can be skipped.
+
+    Worker counts come from the same functions the ingest itself uses, so the estimate
+    tracks the real concurrency instead of a constant that drifts away from it.
+    """
+    t = tier if tier in ("algo", "lite", "heavy") else "lite"
+    p = estimate.plan(t, workers={"match": _ss_workers(), "sgdb": _ss_workers(),
+                                  "vision": AI_ART_WORKERS}, fresh=bool(fresh))
+    p["summary"] = estimate.summary(p)
+    p["phase_labels"] = {
+        "match": "Matching providers", "sgdb": "SteamGridDB ids",
+        "steam_attrs": "Steam attributes", "media": "Media fetch & measure",
+        "vision": "AI art picking", "build": "Catalog rebuild"}
+    for ph in p["phases"]:
+        ph["human"] = estimate.summary({"low": ph["low"], "high": ph["high"]})
+    return p
 
 
 @app.get("/api/providers/scope")

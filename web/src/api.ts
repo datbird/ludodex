@@ -755,6 +755,11 @@ export type CfAccessState = {
 }
 
 export const api = {
+  // How long the next ingest will take. `fresh` asks the RESET question — nothing
+  // cached, every game pays full price — a very different number from a resync.
+  ingestEstimate: (fresh = false, tier = 'lite') =>
+    get<IngestEstimate>(
+      `/api/ingest/estimate?tier=${tier}&fresh=${fresh ? 'true' : 'false'}`),
   authStatus: () => get<AuthStatus>('/api/auth/status'),
   authSetup: (username: string, password: string) =>
     postJson<{ ok: boolean; user: AuthUser }>('/api/auth/setup', { username, password }),
@@ -1719,4 +1724,11 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<{ disabled_identity: string[] }>
   },
+}
+
+export type IngestEstimate = {
+  tier: string; games: number; fresh: boolean; low: number; high: number
+  summary: string
+  phases: { phase: string; games: number; low: number; high: number; human: string }[]
+  phase_labels: Record<string, string>
 }

@@ -4508,6 +4508,10 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
   const [romExpanded, setRomExpanded] = useState<Set<number>>(new Set())
   const [hasCap, setHasCap] = useState<boolean | null>(null)        // any AI budget cap?
   const [tiers, setTiers] = useState<Record<string, ImportMode>>({})  // local echo
+  // What the next run will COST, before committing to it. Computed server-side from
+  // this instance's caches, so it shrinks as work gets done rather than quoting the
+  // game count forever.
+  const [eta, setEta] = useState<{ gaps: string; full: string } | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -4517,6 +4521,11 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
     catch { /* offline */ }
     try { const r = await api.romsStatus(); setRomLocs(r.locations); setRomJob(r.job) }
     catch { /* offline */ }
+    try {
+      const [gaps, full] = await Promise.all([
+        api.ingestEstimate(false), api.ingestEstimate(true)])
+      setEta({ gaps: gaps.summary, full: full.summary })
+    } catch { /* an estimate is never worth blocking the menu */ }
   }, [])
   useEffect(() => { if (open) load() }, [open, load])
   const running = !!job?.running
@@ -4631,13 +4640,15 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
               onClick={() => runAll(false)}
               title="Fast — pull new games and fill in anything still missing a match, attributes or art (retries earlier misses). Won't re-check what's already complete.">
               <span className="sync-choice-name">{running ? 'Syncing…' : 'New games'}</span>
-              <span className="sync-choice-sub">fast · fills gaps</span>
+              <span className="sync-choice-sub">
+                {eta ? `about ${eta.gaps}` : 'fast · fills gaps'}</span>
             </button>
             <button className="sync-choice-opt" disabled={anyRunning || !anyReady}
               onClick={() => runAll(true)}
               title="Re-check EVERY game — re-match and refresh existing ratings, descriptions, tags, attributes & art. Slower.">
               <span className="sync-choice-name">Full refresh</span>
-              <span className="sync-choice-sub">slower · re-checks all</span>
+              <span className="sync-choice-sub">
+                {eta ? `about ${eta.full}` : 'slower · re-checks all'}</span>
             </button>
           </div>
           {anyReady && (
