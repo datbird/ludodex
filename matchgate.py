@@ -127,3 +127,65 @@ def score(owned, cand_name, year=None, cand_year=None):
         elif not best[0] and score > best[1]:
             best = (False, score)
     return best
+
+
+def game_era(lib_con, cache_con, norm_key):
+    """The year THE GAME came out — which is not the year a STORE listed it.
+
+    `release_year` names two different facts. For a ROM it is the game's release. For a
+    store entry it is when that STOREFRONT listing appeared, so Arcanum reads 2016 (its
+    re-release), Caesar 3 reads 2016 (1998), Dungeon Keeper Gold reads 2024 (1997). Feed
+    that into an era test with a +/-1 tolerance and every re-released PC game looks like
+    a remake wearing its original's art.
+
+    Live, all 123 of invariant I10's era disagreements were exactly this: correct
+    ScreenScraper matches, flagged because a storefront date was standing in for a
+    release year. They were recorded before this call site passed any year at all — so
+    the same confusion was also about to make the GATE refuse all 123 on the next
+    re-match, which is the more expensive half. One fact, one definition, both callers.
+
+    Order:
+      1. IGDB's `first_release_date` for the identified game — a provider's own statement
+         about the GAME, which is the thing being compared.
+      2. the catalog's release_year, but ONLY for an entry with no store source, where it
+         is a release year rather than a listing date.
+      3. None — no statement. An absent year is not evidence and must never refuse
+         anything (see the disagreement rule above).
+
+    It deliberately does NOT weaken the case it was built for: Resident Evil 4 (2023) is
+    a different IGDB record from the 2005 game, so IGDB says 2023, ScreenScraper says
+    2005, and the match is still refused.
+    """
+    import json
+    try:
+        row = cache_con.execute(
+            "SELECT igdb_id FROM igdb_resolution WHERE norm_key=? AND "
+            "COALESCE(igdb_id,0)>0 LIMIT 1", (norm_key,)).fetchone()
+    except Exception:                              # noqa: BLE001 — cache may be absent
+        row = None
+    if row:
+        try:
+            p = cache_con.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=? "
+                                  "LIMIT 1", (row[0],)).fetchone()
+            ts = json.loads(p[0]).get("first_release_date") if p else None
+            if ts:
+                import datetime
+                return datetime.datetime.fromtimestamp(
+                    int(ts), datetime.timezone.utc).year
+        except Exception:                          # noqa: BLE001 — a bad payload is a miss
+            pass
+    try:
+        store = lib_con.execute(
+            "SELECT 1 FROM games g JOIN sources s ON s.game_id=g.id WHERE g.norm_key=? "
+            "AND s.source NOT IN ('emulation','archive') LIMIT 1", (norm_key,)).fetchone()
+        if store:
+            return None                            # a listing date is not a release year
+        r = lib_con.execute(
+            "SELECT ga.value FROM game_attributes ga JOIN games g ON g.id=ga.game_id "
+            "WHERE g.norm_key=? AND ga.kind='release_year' LIMIT 1",
+            (norm_key,)).fetchone()
+        if r and str(r[0] or "").isdigit():
+            return int(r[0])
+    except Exception:                              # noqa: BLE001
+        pass
+    return None

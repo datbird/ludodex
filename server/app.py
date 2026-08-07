@@ -6867,11 +6867,12 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
                 # is how Resident Evil 4 (2023) came to hold ScreenScraper 4750 — the
                 # 2005 GameCube game — and display its box. Identical titles; the year
                 # is the only thing that separates them.
-                _yr = lc.execute(
-                    "SELECT ga.value FROM game_attributes ga JOIN games g "
-                    "ON g.id=ga.game_id WHERE g.norm_key=? AND ga.kind='release_year' "
-                    "LIMIT 1", (nk,)).fetchone()
-                year = _yr[0] if _yr and str(_yr[0] or "").isdigit() else None
+                # The GAME's era, not the storefront listing date. `release_year` on a
+                # store entry is when Steam/GOG listed it, so Arcanum reads 2016 against
+                # a 2001 game — and this gate refuses a year disagreement outright, so
+                # feeding it a listing date refuses the CORRECT match for every
+                # re-released PC game. matchgate.game_era owns the distinction.
+                year = matchgate.game_era(lc, mc, nk)
             finally:
                 lc.close()
             if not title:

@@ -246,13 +246,39 @@ def main():
     #
     # Same-title-different-platform is legitimate (one game, several entries), so the
     # comparison is on norm_key, not on entry.
+    #
+    # A REFUSED identity is excluded, because for those the link is not a claim of
+    # identity. `provider_links.sync` keeps it on purpose: an entry build_library left on
+    # a `title:` key has had the identity refused for art and metadata, but IGDB really
+    # does have a page for that bundle and the link is still true and useful — keying
+    # removal off game_key once dropped 104 of them. So the shared id there is a recorded
+    # decision, not a collision, and the harm this invariant names cannot occur: art
+    # follows game_key, which correctly reads `title:<nk>`. Reporting it anyway sent a
+    # reviewer to "fix" Fallout 76 + its Public Test Server and Ys I + Ys II, all four of
+    # which the catalog had already handled exactly right.
+    #
+    # Matched per (provider, id) rather than per norm_key: a game whose IGDB identity was
+    # refused can still collide on ScreenScraper, and that collision is real.
+    try:
+        refused = {}                     # norm_key -> [detail, ...]
+        for _nk, _d in g.execute("SELECT norm_key, detail FROM identity_review"):
+            refused.setdefault(_nk, []).append(_d or "")
+    except sqlite3.OperationalError:
+        refused = {}                     # catalog predates identity_review
+    claims = {}                          # (provider, id) -> {norm_key: title}
+    for prov, pid, nk, title in g.execute(
+            "SELECT m.provider, m.provider_id, gg.norm_key, gg.canonical_title "
+            "FROM metadata_links m JOIN games gg ON gg.id=m.game_id"):
+        tag = "%s:%s" % (prov, pid)      # the refusal detail names the id it refused
+        if any(tag in d for d in refused.get(nk, ())):
+            continue
+        claims.setdefault((prov, pid), {})[nk] = title
     bad = []
-    for prov, pid, n, names in g.execute(
-            "SELECT m.provider, m.provider_id, COUNT(DISTINCT gg.norm_key) c, "
-            "GROUP_CONCAT(DISTINCT gg.canonical_title) "
-            "FROM metadata_links m JOIN games gg ON gg.id=m.game_id "
-            "GROUP BY m.provider, m.provider_id HAVING c>1 ORDER BY c DESC"):
-        bad.append("%s %s claimed by %d titles: %s" % (prov, pid, n, (names or "")[:90]))
+    for (prov, pid), per_nk in sorted(claims.items(), key=lambda kv: -len(kv[1])):
+        if len(per_nk) > 1:
+            bad.append("%s %s claimed by %d titles: %s"
+                       % (prov, pid, len(per_nk),
+                          ",".join(sorted(v or "" for v in per_nk.values()))[:90]))
     report("I9 a provider id identifies exactly one game", bad,
            "the loser silently inherits the winner's art and metadata")
 
@@ -263,14 +289,15 @@ def main():
     # is that a person looked at a cover. Now that the matched year is recorded, the
     # class is checkable. Rows with no recorded year predate that and are skipped rather
     # than guessed at.
+    # Compared against the GAME's era, never the storefront listing date — see
+    # matchgate.game_era. `release_year` on a store entry is when that store listed it,
+    # so Arcanum reads 2016 against a 2001 game; comparing THAT to a provider's record
+    # reported 123 correct ScreenScraper matches as era disagreements, every one of them
+    # a re-released PC game. An entry with no statement of its era is skipped, because
+    # "we do not know" is not a violation.
     bad = []
-    try:
-        cat = {nk: int(v) for nk, v in g.execute(
-            "SELECT gg.norm_key, ga.value FROM game_attributes ga "
-            "JOIN games gg ON gg.id=ga.game_id WHERE ga.kind='release_year' "
-            "AND ga.value GLOB '[0-9][0-9][0-9][0-9]'")}
-    except sqlite3.OperationalError:
-        cat = {}
+    cat = {}                             # norm_key -> the GAME's era (lazily resolved)
+    import matchgate as _mg
     import provider_ids as _pi
     _mc = sqlite3.connect("file:%s?mode=ro"
                           % os.path.join(DATA, "metadata-cache.sqlite"), uri=True)
@@ -281,12 +308,14 @@ def main():
         except sqlite3.OperationalError:
             continue
         for nk, yr in rows:
-            own = cat.get(nk)
+            if nk not in cat:
+                cat[nk] = _mg.game_era(g, _mc, nk)
+            own = cat[nk]
             if own and yr and abs(int(yr) - own) > matchgate.YEAR_TOLERANCE:
-                bad.append("%s %s — we own the %d release, the match is %s"
+                bad.append("%s %s — the game is from %d, the match is %s"
                            % (prov, nk[:38], own, yr))
     _mc.close()
-    report("I10 a provider match is the same ERA as the release we own", bad,
+    report("I10 a provider match is the same ERA as the game", bad,
            "a remake silently wears its original's art")
 
     m.close()
