@@ -487,5 +487,82 @@ Shipped in `d2fabbd` (era + the I9 refusal exclusion) and `6dd59eb`
 member pass). Guards: `test_ingest_order` 12, `test_materialize_members` 23,
 `test_member_title_collapse` 21. Suite 38/0.
 
-**Live after a rebuild: 2258 → 2253 entries, 9 of 10 invariants clear** (I7 pending its
-retry). The 5 removed entries are the collapsed phantoms.
+**Live: 2258 → 2253 entries, ALL 10 INVARIANTS HOLD.** The 5 removed entries are the
+collapsed phantoms. I7's entry was re-matched through `_match_providers` (the product's
+own pass) and ScreenScraper found it correctly — the failure was transient, as diagnosed.
+
+### The scrub, and why it was NOT run
+
+`provider_ids.rescore()` + `python3 provider_ids.py --scrub [--apply]` re-decides recorded
+identities under today's gate. Built, tested (`test_identity_rescore.py`, 15) and
+deployed, because a gate that gets stricter otherwise leaves everything it would now
+refuse sitting in the cache, unreachable by every later pass.
+
+It was NOT applied, because measuring with it found something bigger — see below. Judged
+against the owned title alone it reports **93 ScreenScraper identities**; judged the way
+the matcher actually decides (with aliases) it reports **3**. Neither number is "the"
+divergence, and the gap between them IS the defect.
+
+## Open — an alias widens ACCEPTANCE, not just the search (2026-08-07)
+
+Found while measuring how far the library sits from a fresh Lite ingest. It is the
+highest-value matching defect currently known, and it is LIVE.
+
+`_search_with_aliases` retries a missed search with each alias, calling
+`_ss_match([q], …)` — so the alias becomes the **acceptance key**. The candidate is then
+judged against the alias instead of against the game we own. `record()`'s own docstring
+describes this exact failure ("an AI-proposed alias drops a distinguishing word … the
+acceptance gate judges against the alias rather than the game we own") but only guards
+the COLLISION half of it.
+
+Proven on live data:
+
+```
+Deathmatch Classic  <- "DmC : Devil May Cry - Definitive Edition"
+    owned title 'Deathmatch Classic'          accepts? False
+    alias 'Half-Life: Deathmatch Classic'     accepts? False
+    alias 'Death Match Classic'               accepts? False
+    alias 'DMC'                               accepts? True   <-- sole reason it stuck
+
+Beyond Citadel      <- "The Citadel"
+    owned title                               accepts? False
+    alias 'Citadel'                           accepts? True
+```
+
+**Consequence for the reset plan:** these binds are NOT stale pre-gate records. A fresh
+Lite ingest reproduces them, because the alias path is what accepts them — so the library
+already matches what a fresh ingest produces here, and scrubbing them without fixing this
+would simply re-create them on the next `provmatch`.
+
+**Scale:** 93 of 1,662 ScreenScraper identities are accepted only via an alias and not by
+the owned title. Some of those are legitimate (a regional name genuinely matches nothing
+else — "Probotector" for "Contra"), which is exactly why the fix is not "stop using
+aliases".
+
+**The shape of a fix** — an alias may WIDEN THE SEARCH without widening acceptance. A
+candidate found via an alias still has to be defensible for the game we own. The obvious
+deterministic rule is to refuse an alias that is LESS SPECIFIC than the owned title
+('DMC' vs 'Deathmatch Classic', 'Citadel' vs 'Beyond Citadel', 'Castlevania' vs
+'Castlevania: Circle of the Moon') while keeping one that is equally or more specific
+('Probotector' vs 'Contra', 'Akumajō Dracula: Circle of the Moon').
+
+**Do not land it in isolation.** A token-count rule also refuses 'Crash Bandicoot:
+Warped' for 'Crash Bandicoot 3: Warped', which the metadata prompt names as a case that
+SHOULD resolve — so this is entangled with the over-refusal item below and the two want
+deciding together.
+
+## Open — the gate may over-refuse numbering / subtitle variants (2026-08-07)
+
+Four IGDB name-matched identities are refused by today's gate and look correct:
+
+| owned | provider record |
+|---|---|
+| Sid Meier's Pirates! Gold | Pirates! Gold |
+| Police Quest IV: Open Season | Police Quest: Open Season |
+| Quest for Glory IV: Shadows of Darkness | Quest for Glory: Shadows of Darkness |
+| Shovel Knight: Shovel of Hope | Shovel Knight |
+
+A fresh ingest would LOSE these. The question is whether a series number is distinguishing
+when the subtitle matches exactly — `_significant()` currently says yes. Evidence is small
+(4 cases) but it is the mirror image of the alias defect: one lets too much in, the other
+keeps too much out, and both live in the same rule.

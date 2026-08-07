@@ -24,6 +24,7 @@ stale, so a later and better-informed pass tries again. A miss must never become
 permanent by being written down.
 """
 import sqlite3
+import sys
 import time
 
 # provider -> (table, id column). Adding one here is all a new provider needs from this
@@ -211,3 +212,155 @@ def unlinked(con, provider, norm_keys):
         elif row[0] <= 0 and row[1] != "manual" and (now - row[2]) >= MISS_TTL:
             out.append(nk)
     return out
+
+
+# How an identity was ESTABLISHED decides whether the name gate governs it. A name search
+# is a judgement about two strings and can be re-judged; an exact id lookup is not.
+# Mirrors record()'s exemptions deliberately — if these two lists ever disagree, the
+# scrub deletes the very matches record() went out of its way to protect.
+NAME_DERIVED = ("search", "name")
+
+
+def _candidate_name(con, provider, provider_id, stored):
+    """The provider record's own name, for re-judging a recorded match.
+
+    Every provider stores it on the identity row except IGDB, whose resolutions predate
+    the shared column and carry NULL; its name lives in the cached payload. Explicit
+    special case rather than a backfill, because the payload is already the authority.
+    """
+    if stored:
+        return stored
+    if provider != "igdb":
+        return None
+    try:
+        import json
+        r = con.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=? LIMIT 1",
+                        (provider_id,)).fetchone()
+        return (json.loads(r[0]).get("name") or "").strip() if r else None
+    except Exception:                            # noqa: BLE001 — a bad payload is a miss
+        return None
+
+
+def rescore(cache_con, lib_con, aliases_for=None, apply=False):
+    """Re-decide recorded identities under TODAY's acceptance gate.
+
+    An acceptance rule that gets stricter leaves everything it would now refuse sitting
+    in the cache, indistinguishable from a match it would make. Those identities are
+    invisible: nothing re-judges a decision already written down, so the library keeps
+    binds no fresh ingest would ever produce. Live, that was 93 ScreenScraper identities
+    — `Deathmatch Classic` holding DmC: Devil May Cry, `Beyond Citadel` holding The
+    Citadel — recorded before the gate existed and unreachable by every later pass.
+
+    Scoped by HOW the identity was established, not by how old it is:
+
+      * `search` / `name`  — a judgement about two strings. Re-judgeable, so in scope.
+      * `steam_appid`      — ownership. An appid IS the identity; a DLC or re-titled
+                             store SKU legitimately resolves to its parent record, and
+                             judging that on names would delete correct matches (GTA V
+                             Legacy, DOOM + DOOM II). Never touched.
+      * `manual`           — a person decided. Never touched, per #25.
+      * a recorded MISS    — already the absence of a decision. Nothing to re-judge.
+
+    Aliases are included in the re-score because the matcher rescues through them: a
+    regional title that only matches as "Probotector" must not be refused here for
+    failing to match as "Contra". `aliases_for(norm_key, title) -> [str]` is injected so
+    this module stays standalone — it does not know how to search, and it does not know
+    how to alias.
+
+    Refusals are DELETED, not marked. A cleared identity is the absence of a decision,
+    so the next match pass re-searches and records whatever today's rule actually
+    concludes — a better match, or an honest miss. Writing a tombstone instead would
+    make "we refused this once" permanent, which is the mistake #25 was about.
+
+    Read-only unless `apply=True`. Returns
+    {'checked': n, 'refused': [(provider, norm_key, title, name)], 'cleared': n}.
+    """
+    import matchgate
+    titles = {nk: t for nk, t in lib_con.execute(
+        "SELECT norm_key, canonical_title FROM games")}
+    out = {"checked": 0, "refused": [], "cleared": 0}
+    for provider, (table, idcol) in sorted(PROVIDERS.items()):
+        try:
+            cols = {r[1] for r in cache_con.execute("PRAGMA table_info(%s)" % table)}
+        except sqlite3.OperationalError:
+            continue                             # provider never ran on this install
+        if not {"matched_by", "name"} <= cols:
+            continue                             # table predates the shared columns
+        rows = cache_con.execute(
+            "SELECT norm_key, %s, matched_by, name, year FROM %s "
+            "WHERE COALESCE(%s,0)>0" % (idcol, table, idcol)).fetchall()
+        for nk, pid, how, nm, yr in rows:
+            if how not in NAME_DERIVED:
+                continue
+            title = titles.get(nk)
+            cand = _candidate_name(cache_con, provider, pid, nm)
+            if not title or not cand:
+                continue                         # nothing to re-judge it against
+            out["checked"] += 1
+            queries = [title]
+            if aliases_for:
+                try:
+                    queries += [a for a in (aliases_for(nk, title) or []) if a]
+                except Exception:                # noqa: BLE001 — aliases are a bonus
+                    pass
+            era = matchgate.game_era(lib_con, cache_con, nk)
+            ok, _score = matchgate.score(queries, cand, era, yr)
+            if ok:
+                continue
+            out["refused"].append((provider, nk, title, cand))
+            if apply:
+                cache_con.execute("DELETE FROM %s WHERE norm_key=?" % table, (nk,))
+                out["cleared"] += 1
+        if apply:
+            cache_con.commit()
+    return out
+
+
+def _main(argv):
+    """`python3 provider_ids.py --scrub [--apply] [--no-aliases]`
+
+    Re-decide recorded identities under today's gate. Dry-run by default: it prints what
+    it WOULD clear and changes nothing, because the destructive direction of this tool is
+    deleting correct matches.
+
+    `--no-aliases` judges against the owned title alone. Use it deliberately: aliases are
+    what the matcher rescues through, so excluding them reports matches the product would
+    legitimately make — but INCLUDING them re-judges a match against the alias rather
+    than the game we own, which is the very thing that produced the worst binds in this
+    library (`Deathmatch Classic` accepted DmC: Devil May Cry because 'DMC' is one of its
+    aliases). Neither answer is "the" answer until that is settled; the flag exists so
+    the two are not silently conflated.
+    """
+    import os
+    if "--scrub" not in argv:
+        print(_main.__doc__.strip())
+        return 2
+    data = os.environ.get("LUDODEX_DATA") or os.path.dirname(os.path.abspath(__file__))
+    lib = sqlite3.connect("file:%s?mode=ro" % os.path.join(data, "game-library.sqlite"),
+                          uri=True)
+    apply_it = "--apply" in argv
+    cache = sqlite3.connect(os.path.join(data, "metadata-cache.sqlite"))
+    aliases_for = None
+    if "--no-aliases" not in argv:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from server import app as _app
+            aliases_for = (lambda nk, t:
+                           _app._title_aliases(nk, t, [], allow_ai=False))
+        except Exception as e:                   # noqa: BLE001 — aliases are optional
+            print("aliases unavailable (%s); judging on the owned title alone"
+                  % str(e)[:80])
+    res = rescore(cache, lib, aliases_for=aliases_for, apply=apply_it)
+    print("checked %d name-derived identit(y/ies); %d refused by today's gate"
+          % (res["checked"], len(res["refused"])))
+    for prov, nk, title, cand in res["refused"]:
+        print("  %-13s %-34s <- %s" % (prov, (title or "")[:34], (cand or "")[:44]))
+    print("cleared: %d%s" % (res["cleared"], "" if apply_it else "  (dry run — pass --apply)"))
+    cache.close()
+    lib.close()
+    return 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(_main(_sys.argv[1:]))
