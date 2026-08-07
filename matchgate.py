@@ -47,6 +47,11 @@ NOISE = {
     "standard", "special", "gold", "platinum", "digital", "bundle", "pack",
     # platform / distribution noise
     "pc", "steam", "windows", "version", "release", "the", "a", "an", "of", "and",
+    # A lone "s" is what titlenorm leaves of a possessive — "Marvel's Spider-Man"
+    # normalises to "marvel s spider man", and a provider filing it as "Marvel
+    # Spider-Man" was refused for a missing apostrophe. "plus" joins the edition markers
+    # beside it ("Disgaea 4 Complete+" vs "Disgaea 4 Complete").
+    "s", "plus",
 }
 # A bare 4-digit year is ours, not the title's: entries are disambiguated as
 # "Mass Effect 2 (2021)" / "(2023)" when a store lists the same game twice.
@@ -66,6 +71,156 @@ def _year(v):
 def _significant(tokens):
     """The tokens that actually identify a game."""
     return {t for t in tokens if t not in NOISE and not YEAR.match(t)}
+
+
+# A SERIES NUMBER. Arabic, or a roman numeral — but never a bare "x", which is a
+# character name at least as often as it is ten: "Mega Man X Legacy Collection" is not
+# "Mega Man Legacy Collection", and that pair is already the cautionary tale in NOISE's
+# comment above. Ambiguity here costs a wrong merge, so the ambiguous token stays
+# distinguishing.
+ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7, "viii": 8,
+         "ix": 9, "xi": 11, "xii": 12, "xiii": 13}
+_NUM = __import__("re").compile(r"^\d{1,2}$")
+
+
+def _is_numeral(tok):
+    return bool(_NUM.match(tok)) or tok in ROMAN
+
+
+def _numeral_value(tok):
+    """A numeral token's VALUE, so "1" and "I" can be recognised as the same number.
+
+    Databases disagree about the notation, not the number: ScreenScraper files "Quake
+    Mission Pack 1: Scourge of Armagon" as "Quake Mission Pack No. I : Scourge of
+    Armagon". Comparing the notation refused a correct match over a typographic choice.
+    Comparing the VALUE keeps "Ys I" and "Ys II" apart, which is the only thing that
+    matters here — 1 is still not 2.
+    """
+    if _NUM.match(tok):
+        return int(tok)
+    return ROMAN.get(tok)
+
+
+def _covers(sig, ntok):
+    """Every distinguishing word of the owned title appears in the candidate — with a
+    numeral satisfied by an equivalent numeral in either notation."""
+    if not sig:
+        return False
+    nvals = {_numeral_value(t) for t in ntok if _is_numeral(t)}
+    for t in sig:
+        if t in ntok:
+            continue
+        v = _numeral_value(t) if _is_numeral(t) else None
+        if v is not None and v in nvals:
+            continue
+        return False
+    return True
+
+
+def _subtitle(name):
+    """The part after the first subtitle separator, normalised to significant tokens.
+
+    A series number is only forgivable when something ELSE identifies the entry, and that
+    something is the subtitle. "Police Quest IV: Open Season" and "Police Quest: Open
+    Season" are one game named two ways; "Ys I" and "Ys II" are two games, and the only
+    reason we can tell is that neither carries a subtitle to agree on.
+    """
+    for sep in (":", " - ", " – "):
+        if sep in name:
+            return _significant(titlenorm.norm(name.split(sep, 1)[1]).split())
+    return set()
+
+
+def numbering_variant(owned, cand_name):
+    """True when two titles differ ONLY by a series number and share a real subtitle.
+
+    The gate refuses a missing distinguishing word, and a series number is normally
+    exactly that. But storefronts and databases disagree about whether the number belongs
+    in the title at all — IGDB files "Crash Bandicoot 3: Warped" as "Crash Bandicoot:
+    Warped", "Police Quest IV: Open Season" as "Police Quest: Open Season" — and refusing
+    those loses correct matches for no gain.
+
+    Both guards are load-bearing:
+      * the ONLY difference may be numeral tokens (anything else is a different game);
+      * the number must be missing from ONE side, never DIFFERENT on the two. This is
+        the guard that matters: a provider omitting a number it does not file ("Police
+        Quest: Open Season") is one game named two ways, but two numbers that disagree
+        are two games, and forgiving that would merge "Ys I: Ancient Ys Vanished" into
+        "Ys II: Ancient Ys Vanished" — a same-subtitle sibling pair, which is exactly
+        the shape this project has already been burned by;
+      * the subtitle must be non-empty and EQUAL on both sides, so a bare "Ys I" and
+        "Ys II" can never reach this rule at all.
+    """
+    o = _significant(titlenorm.norm(owned).split())
+    c = _significant(titlenorm.norm(cand_name).split())
+    o_only, c_only = o - c, c - o
+    diff = o_only | c_only
+    if not diff or any(not _is_numeral(t) for t in diff):
+        return False
+    if o_only and c_only:
+        return False                              # both numbered, and they disagree
+    osub, csub = _subtitle(owned), _subtitle(cand_name)
+    return bool(osub) and osub == csub
+
+
+def safe_aliases(owned, aliases):
+    """The aliases that may widen ACCEPTANCE, not merely the search.
+
+    An alias is a search key: it exists to FIND rows a provider spells differently, and
+    it may be as loose as it likes for that. It became an acceptance key by accident —
+    `_search_with_aliases` passes it to the matcher as the owned title, so the candidate
+    gets judged against the alias instead of against the game we own. Live, that is the
+    single worst class of bind in this library: `Deathmatch Classic` holds "DmC : Devil
+    May Cry - Definitive Edition" because 'DMC' is one of its aliases and 'DMC' matches
+    that perfectly; `Beyond Citadel` holds "The Citadel" through the alias 'Citadel'.
+    Its own title refuses both, and so does every other alias it has.
+
+    What separates those from a real alternate name is that they are DEGRADATIONS —
+    an abbreviation or a truncation of the title we already hold, which can only lose the
+    words that distinguish it. A genuine regional name is a different name, not a smaller
+    one: "Probotector" for "Contra", "Akumajou Dracula" for "Castlevania".
+
+    ONE signal, deliberately. Two broader rules were written first and measured against
+    the live library, and the measurement refused them:
+
+      * "materially shorter" refused 69 identities and killed correct ones —
+        ScreenScraper genuinely files Wolfenstein 3D as "Wolf3d", and an alias is how
+        that record is reached at all.
+      * TRUNCATION (the alias's tokens a proper subset of the owned title's) is not
+        decidable. `Beyond Citadel` <- "The Citadel" is a DIFFERENT game and must be
+        refused; `Fallout 76 Public Test Server` <- "Fallout 76" is the SAME game and
+        should be kept — and they are the identical shape, reached by the identical kind
+        of alias. Blocking the shape fixed ~25 bad binds and broke ~40 good ones. A rule
+        that cannot tell those apart should not pretend to; that class needs adjudication,
+        not arithmetic (see docs/TASKS.md).
+
+    What is left is the case with no such ambiguity:
+
+      * INITIALISM — a lone token of four characters or less against a title with much
+        more to say. An acronym is inherently collision-prone ('DMC' matching "DmC :
+        Devil May Cry"), it expresses no base-game relationship the way a truncation
+        does, and no provider needs one to find a game whose real name is also being
+        searched with.
+
+    Everything else — a respelling, a romanisation, a regional rename, a provider's own
+    contraction — is kept. Aliases stay available for SEARCHING either way; this only
+    governs what is allowed to say "yes, that is the game".
+    """
+    keep = []
+    on = titlenorm.norm(owned or "")
+    for a in aliases or []:
+        an = titlenorm.norm(a or "")
+        if not an:
+            continue
+        asig = _significant(an.split())
+        # Measured against the RAW normalised length, not the significant token count:
+        # 'classic' is a NOISE word, so "Deathmatch Classic" reduces to a single
+        # significant token and a token-count guard never fired on its worst alias.
+        _a, _o = an.replace(" ", ""), on.replace(" ", "")
+        if len(asig) == 1 and len(_a) <= 4 and len(_o) >= 2 * len(_a):
+            continue                              # initialism: 'DMC' for 'Deathmatch Classic'
+        keep.append(a)
+    return keep
 
 
 def score(owned, cand_name, year=None, cand_year=None):
@@ -102,7 +257,12 @@ def score(owned, cand_name, year=None, cand_year=None):
         # II" — in each case exactly one word tells them apart, and that word is the
         # whole point. Noise words and our own year suffixes are exempt.
         sig = _significant(qtok)
-        covered = bool(sig) and sig <= ntok
+        covered = _covers(sig, ntok)
+        # A series number is a distinguishing word, except when the subtitle already
+        # does the distinguishing — see numbering_variant. Applied here rather than by
+        # loosening NOISE, because "iv" must stay distinguishing everywhere else.
+        if not covered and numbering_variant(t, cand_name):
+            covered = True
         # Token sets cannot see that "Megaman X4" and "Mega Man X4" are the same game:
         # they share ONE token and score 0.50. Squashing the spaces out makes an equal
         # string an exact match whatever the word breaks.

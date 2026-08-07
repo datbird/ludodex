@@ -6726,7 +6726,8 @@ def _title_aliases(nk, title, platforms, allow_ai=False):
                           (nk,)).fetchone()
         if row:
             try:
-                return [a for a in json.loads(row[0] or "[]") if a]
+                return matchgate.safe_aliases(
+                    title, [a for a in json.loads(row[0] or "[]") if a])
             except ValueError:
                 return []
         if not allow_ai or not ai.area_available("metadata"):
@@ -6742,7 +6743,13 @@ def _title_aliases(nk, title, platforms, allow_ai=False):
                     "resolved_at) VALUES(?,?,?)",
                     (nk, json.dumps(out, ensure_ascii=False), int(time.time())))
         con.commit()
-        return out
+        # Cache what the model SAID; return what may be acted on. An alias is a search
+        # key, and this function's callers hand it straight to a provider matcher, where
+        # it becomes the ACCEPTANCE key — so a degraded alias ('DMC' for 'Deathmatch
+        # Classic') accepts a different game outright. Filtering here rather than at each
+        # call site keeps it one home, and keeps the raw model output intact in the cache
+        # so tightening the rule later re-filters the SAME aliases instead of re-billing.
+        return matchgate.safe_aliases(title, out)
     finally:
         con.close()
 

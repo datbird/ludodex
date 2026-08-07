@@ -503,19 +503,16 @@ against the owned title alone it reports **93 ScreenScraper identities**; judged
 the matcher actually decides (with aliases) it reports **3**. Neither number is "the"
 divergence, and the gap between them IS the defect.
 
-## Open — an alias widens ACCEPTANCE, not just the search (2026-08-07)
+## Both acceptance-rule defects — RESOLVED (2026-08-07)
 
-Found while measuring how far the library sits from a fresh Lite ingest. It is the
-highest-value matching defect currently known, and it is LIVE.
+The rule was failing in both directions at once, and the two fixes were designed against
+each other: a strict alias rule would refuse 'Crash Bandicoot: Warped' for 'Crash
+Bandicoot 3: Warped', and only the numbering rule makes that unnecessary.
 
-`_search_with_aliases` retries a missed search with each alias, calling
-`_ss_match([q], …)` — so the alias becomes the **acceptance key**. The candidate is then
-judged against the alias instead of against the game we own. `record()`'s own docstring
-describes this exact failure ("an AI-proposed alias drops a distinguishing word … the
-acceptance gate judges against the alias rather than the game we own") but only guards
-the COLLISION half of it.
-
-Proven on live data:
+**TOO MUCH IN — an alias became the ACCEPTANCE key.** `_search_with_aliases` passed the
+alias to the matcher as if it were the owned title, so the candidate was judged against
+the alias. Proven live: `Deathmatch Classic` held "DmC : Devil May Cry" because 'DMC' is
+one of its aliases and nothing else it has accepts that record.
 
 ```
 Deathmatch Classic  <- "DmC : Devil May Cry - Definitive Edition"
@@ -523,46 +520,51 @@ Deathmatch Classic  <- "DmC : Devil May Cry - Definitive Edition"
     alias 'Half-Life: Deathmatch Classic'     accepts? False
     alias 'Death Match Classic'               accepts? False
     alias 'DMC'                               accepts? True   <-- sole reason it stuck
-
-Beyond Citadel      <- "The Citadel"
-    owned title                               accepts? False
-    alias 'Citadel'                           accepts? True
 ```
 
-**Consequence for the reset plan:** these binds are NOT stale pre-gate records. A fresh
-Lite ingest reproduces them, because the alias path is what accepts them — so the library
-already matches what a fresh ingest produces here, and scrubbing them without fixing this
-would simply re-create them on the next `provmatch`.
+`matchgate.safe_aliases()` now governs which aliases may widen ACCEPTANCE (they all still
+widen the SEARCH), and it is applied in `_title_aliases` — one home, every provider. The
+raw model output stays in the cache, so tightening the rule later re-filters the same
+aliases instead of re-billing for them.
 
-**Scale:** 93 of 1,662 ScreenScraper identities are accepted only via an alias and not by
-the owned title. Some of those are legitimate (a regional name genuinely matches nothing
-else — "Probotector" for "Contra"), which is exactly why the fix is not "stop using
-aliases".
+**Two broader versions were written first and REFUSED BY MEASUREMENT**, which is the part
+worth keeping:
 
-**The shape of a fix** — an alias may WIDEN THE SEARCH without widening acceptance. A
-candidate found via an alias still has to be defensible for the game we own. The obvious
-deterministic rule is to refuse an alias that is LESS SPECIFIC than the owned title
-('DMC' vs 'Deathmatch Classic', 'Citadel' vs 'Beyond Citadel', 'Castlevania' vs
-'Castlevania: Circle of the Moon') while keeping one that is equally or more specific
-('Probotector' vs 'Contra', 'Akumajō Dracula: Circle of the Moon').
+| rule tried | refused | verdict |
+|---|---|---|
+| materially shorter than the owned title | 69 | killed correct matches — ScreenScraper genuinely files Wolfenstein 3D as "Wolf3d" |
+| + truncation (alias tokens a subset of the title) | 65 | **not decidable.** `Beyond Citadel` <- "The Citadel" is a different game; `Fallout 76 Public Test Server` <- "Fallout 76" is the same game. Identical shape, opposite truth. Fixed ~25 bad binds, broke ~40 good ones |
+| initialism only (lone token <=4 chars) | **2** | landed — both genuine bad binds, zero collateral |
 
-**Do not land it in isolation.** A token-count rule also refuses 'Crash Bandicoot:
-Warped' for 'Crash Bandicoot 3: Warped', which the metadata prompt names as a case that
-SHOULD resolve — so this is entangled with the over-refusal item below and the two want
-deciding together.
+The truncation class is left to adjudication rather than arithmetic, deliberately: a rule
+that cannot tell those two apart should not pretend to.
 
-## Open — the gate may over-refuse numbering / subtitle variants (2026-08-07)
+**TOO MUCH OUT — a series number was always distinguishing.** `matchgate.numbering_variant`
+accepts a candidate that differs ONLY by a series number when a real subtitle matches
+exactly ("Police Quest IV: Open Season" = "Police Quest: Open Season"). Three guards keep
+it safe: the difference must be numeral-only, the number must be missing from ONE side
+rather than DIFFERENT on the two, and the subtitle must be non-empty and equal — so
+"Ys I" and "Ys II" can never reach the rule, and "Ys I: Ancient Ys Vanished" vs "Ys II:
+Ancient Ys Vanished" is refused on the second guard. A bare "x" is never a numeral
+("Mega Man X Legacy Collection" is not "Mega Man Legacy Collection").
 
-Four IGDB name-matched identities are refused by today's gate and look correct:
+Also folded in, from the same measurement: numerals compare by VALUE not notation
+("Quake Mission Pack 1" = "Quake Mission Pack No. I"), and `s`/`plus` joined NOISE (a
+possessive remnant, and "Disgaea 4 Complete+").
 
-| owned | provider record |
-|---|---|
-| Sid Meier's Pirates! Gold | Pirates! Gold |
-| Police Quest IV: Open Season | Police Quest: Open Season |
-| Quest for Glory IV: Shadows of Darkness | Quest for Glory: Shadows of Darkness |
-| Shovel Knight: Shovel of Hope | Shovel Knight |
+**Applied live.** The scrub cleared the 2 refusals and `_match_providers` re-decided them:
+`ADOM: Ancient Domains of Mystery` re-matched to the CORRECT record (SS 273774, via a
+legitimate alias), and `Deathmatch Classic` recorded an honest miss — ScreenScraper does
+not carry the Half-Life mod, so no art beats Devil May Cry's art. Guard:
+`test_alias_and_numbering.py` (22), which pins every disaster case in this project's
+history.
 
-A fresh ingest would LOSE these. The question is whether a series number is distinguishing
-when the subtitle matches exactly — `_significant()` currently says yes. Evidence is small
-(4 cases) but it is the mirror image of the alias defect: one lets too much in, the other
-keeps too much out, and both live in the same rule.
+## Gate over-refusal — RESOLVED by the numbering rule above (2026-08-07)
+
+Two of the four cases are fixed at the gate: `Police Quest IV: Open Season` and
+`Quest for Glory IV: Shadows of Darkness` now accept their un-numbered provider records.
+
+The other two are NOT numbering variants and remain refused, correctly or near enough:
+`Sid Meier's Pirates! Gold` <- "Pirates! Gold" (a publisher prefix, not a number) and
+`Shovel Knight: Shovel of Hope` <- "Shovel Knight" (the campaign vs the base game). Both
+are the undecidable truncation shape above; neither is worth a rule of its own.
