@@ -462,3 +462,30 @@ depending on which door you came through.
 `_pin_live` is now **`_apply_identity`**, the single chain, called by `_member_identity`,
 `aimeta_pin` and `resolve_per_entry_identity`. `test_pipeline_unified.py` (39) fails the
 build if an onramp hand-writes `game_key` or a `metadata_links` row instead of calling it.
+
+## Invariant sweep — every violation resolved (2026-08-07)
+
+`check_invariants.py` reported 6 of 10 violated on the live instance. Root-caused
+individually; they were four defects, not six, and two of the "violations" were the
+invariant measuring the wrong thing.
+
+| was | count | what it actually was |
+|---|---|---|
+| I1 / I6 | 2 + 1 | Fallout 76 + its PTS: `many_to_one` refusal honoured by `games.game_key` but not by the media stamp. **No path reconciles media after a BUILD** — the event that decides refusals. |
+| I4 | 3 | Three lone candidates fetched 44 min after the run's last selection. Nothing re-elects at the end of a run. |
+| I9 | 5 | **2 false positives** (a refused identity keeps its link on purpose, `0380e4f`) + **3 real**: collection members materialized beside the copy already owned, because `resolve_member_key`'s gates are title-shaped. |
+| I10 | 123 | **All 123 false positives.** `release_year` on a store entry is the STORE LISTING date; comparing it to a provider's record makes every re-released PC game look like a remake. |
+| I7 | 1 | A transient ScreenScraper failure. Correctly leaves no row (a failed search must never be recorded as a miss); the entry is eligible, so the next sync's `provmatch` retries it. No code change. |
+
+**The one that mattered most was not a report.** `_match_providers` fed that same
+storefront date into `matchgate`, where a year disagreement is disqualifying — so the
+next re-match would have REFUSED all 123 correct identities. `matchgate.game_era` now
+owns "when did the GAME come out" for both the gate and the invariant.
+
+Shipped in `d2fabbd` (era + the I9 refusal exclusion) and `6dd59eb`
+(`reconcile_after_build`, the member identity route, patched==rebuilt for the inline
+member pass). Guards: `test_ingest_order` 12, `test_materialize_members` 23,
+`test_member_title_collapse` 21. Suite 38/0.
+
+**Live after a rebuild: 2258 → 2253 entries, 9 of 10 invariants clear** (I7 pending its
+retry). The 5 removed entries are the collapsed phantoms.
