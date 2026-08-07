@@ -1062,6 +1062,16 @@ _owned_bases = {r[0] for r in cur.execute(
     "WHERE s.state='have'")}
 _lib_plats = [r[0] for r in cur.execute(
     "SELECT DISTINCT platform FROM games WHERE platform IS NOT NULL AND platform!=''")]
+# An OWNED game's identity — the evidence that a member IS a game already owned under a
+# different title. Only ids held by exactly ONE owned base_key; ambiguity credits nothing.
+# `_ids` is already bundle-refused, so a compilation's own identity can never be the
+# thing two members are matched on. Mirrors catalog_patch.materialize_members.
+_owned_by_id = {}
+for _bk in _owned_bases:
+    _oid = _ids.get(_bk)
+    if _oid:
+        _owned_by_id.setdefault(_oid, []).append(_bk)
+_owned_by_id = {_i: _b[0] for _i, _b in _owned_by_id.items() if len(_b) == 1}
 _coll_made = _coll_sat = 0
 for _c in compilations.all_collections(DATA):
     if _c["coll_key"] not in _owned_bases:
@@ -1078,9 +1088,17 @@ for _c in compilations.all_collections(DATA):
         "AND s2.state='have') ORDER BY g.id LIMIT 1",
         (_c["coll_key"],)).fetchone()
     _cplat, _csrc = (_crow[0] or "pc", _crow[1] or "") if _crow else ("pc", "")
+    # The base_key this membership should CREDIT, resolved exactly as the surgical path
+    # resolves it — patched==rebuilt, the same contract member_platform_label is shared
+    # under. This pass used the stored member_key raw, so a rebuild re-created every
+    # phantom `materialize_members` had just collapsed: 'The Ultimate DOOM' beside the
+    # owned 'DOOM + DOOM II', both on IGDB 10192 (invariant I9).
+    _sibs = catalog_patch.purchase_siblings(cur, DATA, _c["coll_key"])
     for _m in _full.get("members") or []:
-        _mk = _m["member_key"]
-        if not _mk:
+        _mk = catalog_patch.resolve_member_key(
+            cur, _m.get("member_title"), _m["member_key"], _sibs,
+            _ids.get(_m["member_key"]), _owned_by_id)
+        if not _mk or _mk == _c["coll_key"]:
             continue
         # Canonicalise: member_platform is an AI-supplied DISPLAY string ("PC",
         # "Game Boy Advance") while the catalog stores canonical labels ("pc", "gba").
@@ -1608,3 +1626,18 @@ con.close()
 # atomic swap: readers see the OLD catalog until this instant, then the NEW one —
 # no lock window, no half-built reads (see the TMP note above).
 os.replace(TMP, OUT)
+
+# The identities this build just decided are now authoritative — including the ones it
+# REFUSED (compilation_identity, many_to_one). Media is stamped at fetch time from
+# `igdb_resolution`, which knows nothing of a refusal, so any row whose entry moved is
+# now keyed to an identity the catalog no longer gives it and its neutral art cannot
+# serve (DESIGN §11.9). Reconcile here, after the swap: run before it and the repair
+# would faithfully re-key media to the identities this build is replacing.
+try:
+    import media_fetch as _mf
+    _n = _mf.reconcile_after_build()
+    if _n:
+        print("# media identity: re-keyed %d row(s) to the rebuilt catalog" % _n,
+              file=sys.stderr)
+except Exception as e:                  # never undo a successful build over media
+    print("# media identity reconcile skipped: %s" % str(e)[:120], file=sys.stderr)

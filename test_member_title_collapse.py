@@ -224,6 +224,21 @@ def main():
     catalog_patch.materialize_members(con, d, created_out=created2)
     check("a second run creates nothing, so reports nothing", created2 == [])
 
+    print("patched == rebuilt: the BUILD resolves member keys the same way")
+    # Source-level, like the rest of the parity guards: the failure mode is one of the
+    # two paths never learning about the resolver. build_library's inline pass used the
+    # stored member_key RAW, so a rebuild re-created every phantom the surgical path had
+    # just collapsed — and nothing failed, because each path was self-consistent.
+    import os as _os
+    bl = open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                            "build_library.py"), encoding="utf-8").read()
+    check("build_library calls catalog_patch.resolve_member_key",
+          "catalog_patch.resolve_member_key(" in bl)
+    check("and does not use the stored member_key raw for the credited base",
+          '_mk = _m["member_key"]' not in bl)
+    check("and passes the identity map, not just the title gates",
+          "_owned_by_id" in bl)
+
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 
 

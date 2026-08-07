@@ -304,9 +304,11 @@ def purchase_siblings(con, data_dir, coll_key):
     return {bk for bk, ks in owned_products.items() if ks & mine}
 
 
-def resolve_member_key(con, member_title, member_key, siblings):
-    """The base_key a membership should credit — the member's own key, or a SIBLING APP
-    of the same purchase that the catalog already holds under a shorter title.
+def resolve_member_key(con, member_title, member_key, siblings,
+                       member_id=None, owned_by_id=None):
+    """The base_key a membership should credit — the member's own key, a game you already
+    own under a DIFFERENT title (proved by identity), or a SIBLING APP of the same
+    purchase that the catalog already holds under a shorter title.
 
     The AI enumerates a compilation's members under their full original titles ("Ys II:
     Ancient Ys Vanished - The Final Chapter") while the store granted you the short one
@@ -322,7 +324,29 @@ def resolve_member_key(con, member_title, member_key, siblings):
 
     Matching is on the title's subtitle HEAD, never a prefix: 'Sonic the Hedgehog 2'
     starts with 'Sonic the Hedgehog', and a sequel carries no subtitle separator, so it
-    cannot be reached from here even within one purchase."""
+    cannot be reached from here even within one purchase.
+
+    IDENTITY is the third route, and the strongest: two keys resolving to one IGDB record
+    ARE one game, which is a fact rather than a reading of two title strings. The title
+    gates cannot reach the cases it covers — 'The Ultimate DOOM' has no subtitle separator
+    at all, and 'Serious Sam: The First Encounter' has a head ('Serious Sam') that names
+    no app of the purchase — so both were materialized beside the copy already owned:
+    IGDB 10192 and 857/858 each claimed by two entries, the phantom silently inheriting
+    the owned entry's art and metadata. No sibling gate applies here, because identity is
+    not evidence ABOUT a purchase: the owned DOOM is a separate purchase from the BFG
+    Edition that bundles it, and it is still the same game.
+
+    Safe against the collapse the title gates exist to prevent: 'Tomb Raider: Chronicles'
+    resolves to its own IGDB record, not 1996's, so it is untouched. Bundle ids are
+    already stripped from these resolutions (`_load_resolutions`), so a compilation's own
+    identity can never be the thing two members are matched on — which is exactly how Ys I
+    and Ys II would otherwise collapse into each other.
+    """
+    # Identity first: a fact outranks a reading of two title strings.
+    if member_id and owned_by_id:
+        bk = owned_by_id.get(member_id)
+        if bk and bk != member_key:
+            return bk
     from titlenorm import norm
     if not siblings:
         return member_key
@@ -401,12 +425,25 @@ def materialize_members(con, data_dir, created_out=None):
     # credit may be the shorter one you already own (see resolve_member_key). Resolved
     # once here and used by BOTH passes — pass 1 validates on the entry's base_key, so
     # if the two ever disagreed it would delete a row pass 3 immediately recreates.
+    # An OWNED game's identity, so a member that IS one can be recognised without
+    # guessing at titles (see resolve_member_key). Only ids held by exactly ONE owned
+    # base_key: two owned entries on one id is the collision I9 reports, and picking
+    # either would credit the membership to an arbitrary half of it — ambiguous means
+    # leave it, as everywhere else in this file.
+    _by_id = {}
+    for _bk in owned:
+        _iid = title_ids.get(_bk)
+        if _iid:
+            _by_id.setdefault(_iid, []).append(_bk)
+    owned_by_id = {i: bks[0] for i, bks in _by_id.items() if len(bks) == 1}
+
     mkeys = {}                          # (coll_key, stored member_key) -> credited base_key
     for ck, full in full_by_key.items():
         sibs = purchase_siblings(con, data_dir, ck)
         for m in full.get("members") or []:
             mkeys[(ck, m["member_key"])] = resolve_member_key(
-                con, m.get("member_title"), m["member_key"], sibs)
+                con, m.get("member_title"), m["member_key"], sibs,
+                title_ids.get(m["member_key"]), owned_by_id)
     valid = {}
     for ck, full in full_by_key.items():
         if ck not in owned:

@@ -135,7 +135,85 @@ def main():
     check("delete-then-run is idempotent",
           catalog_patch.materialize_members(con, data) == 0)
 
+    identity_route()
+
     print("\nALL PASS (%d checks)" % len(PASS))
+
+
+def seed_resolutions(data, mapping):
+    """metadata-cache with nk -> igdb_id. No igdb_meta: absent is the normal shape on an
+    install that has resolutions but no cached payloads, and _load_resolutions tolerates
+    it — so this also pins that the bundle filter degrades to 'no bundles known'."""
+    c = sqlite3.connect(os.path.join(data, "metadata-cache.sqlite"))
+    c.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY KEY, "
+              "igdb_id INT, slug TEXT, matched_by TEXT, resolved_at INT, name TEXT, "
+              "year INT)")
+    for nk, iid in mapping.items():
+        c.execute("INSERT OR REPLACE INTO igdb_resolution(norm_key,igdb_id,matched_by) "
+                  "VALUES(?,?,'name')", (nk, iid))
+    c.commit()
+    c.close()
+
+
+def identity_route():
+    """A member you ALREADY OWN under a different title must not become a second entry.
+
+    The title gates cannot see these: 'The Ultimate DOOM' carries no subtitle separator,
+    so there is no head to match, and the owned copy is a different purchase from the
+    bundle. Live, that produced IGDB 10192 claimed by two entries — the phantom
+    inheriting the owned entry's art and metadata (invariant I9).
+    """
+    print("identity: a member owned under a DIFFERENT title is not doubled")
+    data = tempfile.mkdtemp(prefix="ludodex-mm-id-")
+    con = fresh_catalog()
+    add_entry(con, "DOOM 3: BFG Edition", "doom 3 bfg")            # the owned bundle
+    add_entry(con, "DOOM + DOOM II", "doom plus doom 2")           # owned, other title
+    add_entry(con, "Tomb Raider", "tomb raider")                   # owned, NOT the member
+    seed_resolutions(data, {"doom plus doom 2": 10192,             # one game, two keys
+                            "ultimate doom": 10192,
+                            "tomb raider": 5000,                   # different records
+                            "tomb raider chronicles": 5001})
+    compilations.set_collection(data, "doom 3 bfg", "DOOM 3: BFG Edition", [
+        {"title": "The Ultimate DOOM", "platform": "PC"},
+        {"title": "Tomb Raider: Chronicles", "platform": "PC"},
+    ], origin="ai")
+
+    catalog_patch.materialize_members(con, data)
+    check("member already owned under another title is NOT materialized",
+          q1(con, "SELECT COUNT(*) FROM games WHERE base_key='ultimate doom'") == 0)
+    check("and the entry that owns it is not doubled either",
+          q1(con, "SELECT COUNT(*) FROM games WHERE base_key='doom plus doom 2'") == 1)
+    check("no via row is attached to a standalone-owned entry (read-time credit)",
+          q1(con, "SELECT COUNT(*) FROM sources s JOIN games g ON g.id=s.game_id "
+                  "WHERE g.base_key='doom plus doom 2' "
+                  "AND s.via_collection IS NOT NULL") == 0)
+    # The collapse the title gates exist to prevent must still not happen. A different
+    # record is a different game, however similar the titles read.
+    check("a member resolving to a DIFFERENT record still gets its own entry",
+          q1(con, "SELECT COUNT(*) FROM games WHERE base_key='tomb raider chronicles'") == 1)
+    check("and the similarly-named owned game is untouched",
+          q1(con, "SELECT COUNT(*) FROM games WHERE base_key='tomb raider'") == 1)
+    check("identity route is idempotent",
+          catalog_patch.materialize_members(con, data) == 0)
+
+    print("identity: an AMBIGUOUS id credits nothing")
+    # Two owned entries on one id is the collision I9 reports. Crediting the membership
+    # to an arbitrary half of it would be a guess, so the member keeps its own key.
+    data2 = tempfile.mkdtemp(prefix="ludodex-mm-amb-")
+    con2 = fresh_catalog()
+    add_entry(con2, "Mega Pack", "mega pack")
+    add_entry(con2, "Twin A", "twin a")
+    add_entry(con2, "Twin B", "twin b")
+    seed_resolutions(data2, {"twin a": 777, "twin b": 777, "twin member": 777})
+    compilations.set_collection(data2, "mega pack", "Mega Pack", [
+        {"title": "Twin Member", "platform": "PC"}], origin="ai")
+    catalog_patch.materialize_members(con2, data2)
+    check("ambiguous identity does not pick a winner — member keeps its own entry",
+          q1(con2, "SELECT COUNT(*) FROM games WHERE base_key='twin member'") == 1)
+    check("neither owned twin gained a credit",
+          q1(con2, "SELECT COUNT(*) FROM sources WHERE via_collection IS NOT NULL "
+                   "AND game_id IN (SELECT id FROM games WHERE base_key IN "
+                   "('twin a','twin b'))") == 0)
 
 
 if __name__ == "__main__":

@@ -103,8 +103,50 @@ def main():
     media_choose.select(m)
     check("art follows the entry back", _serve_resolves(m, "late", "pc", "title:late",
                                                         "cover") == 1)
+    print("3b. a catalog BUILD reconciles media identity with no manual step")
+    # Sections 1-3 call the repair by hand, which proves it works but not that anything
+    # RUNS it. The event that moves an identity library-wide is the catalog build:
+    # build_library computes the bundle and many-to-one refusals, so the instant it swaps
+    # the new catalog in, every media row stamped from `igdb_resolution` may disagree
+    # with the entry it belongs to. The repair was wired only to MEDIA events (fetch,
+    # finish, hydrate), so for a game nobody re-fetches afterwards the stamp stayed stale
+    # forever. Live, that was Fallout 76 + its Public Test Server: two owned Steam apps
+    # on IGDB 103020, refused as many_to_one, 10 media rows left on `igdb:103020` while
+    # both entries read `title:<nk>` — the PTS holding a cover it could not show.
+    lib.execute("UPDATE games SET game_key='igdb:9001' WHERE base_key='late'")
+    lib.commit()
+    m.execute("UPDATE media SET game_key='igdb:8888' WHERE norm_key='late'")
+    m.commit()
+    # a candidate that landed AFTER the run's last selection — nothing has elected it
+    m.execute("INSERT INTO media(norm_key,system,game_key,kind,provider,ref,ref_type,"
+              "chosen) VALUES('late','','title:late','logo','steam','http://x/l.png',"
+              "'url',0)")
+    m.commit()
+    m.close()                                   # the build reconciles on its OWN handle
+    media_fetch.reconcile_after_build()         # <- no repair or select call by hand
+    m = sqlite3.connect(os.path.join(D, "media-index.sqlite"))
+    check("after a build moves identity, media follows without anyone calling the repair",
+          _serve_resolves(m, "late", "pc", "igdb:9001", "cover") == 1)
+    check("and no row is left on the identity the build revoked",
+          m.execute("SELECT COUNT(*) FROM media WHERE norm_key='late' AND "
+                    "game_key='igdb:8888'").fetchone()[0] == 0)
+    check("a lone candidate that arrived after the last selection is elected",
+          m.execute("SELECT chosen FROM media WHERE norm_key='late' AND "
+                    "kind='logo'").fetchone()[0] == 1)
+
     lib.close()
     m.close()
+
+    print("3c. and a build with no media index yet is a no-op, not a crash")
+    # First run: the catalog exists before anything has ever fetched art.
+    _idx = os.path.join(D, "media-index.sqlite")
+    _stash = _idx + ".stashed"
+    os.rename(_idx, _stash)
+    try:
+        media_fetch.reconcile_after_build()
+        check("fresh install: reconcile with no media index does nothing quietly", True)
+    finally:
+        os.rename(_stash, _idx)
 
     print("4. every media path repairs identity BEFORE it chooses")
     # The behaviour above only holds because the repair runs first. Nothing enforces
@@ -129,6 +171,18 @@ def main():
         offenders.append("server/app.py:%d  %s" % (i + 1, line.strip()[:70]))
     check("no fetch path selects without repairing identity first: %s"
           % (offenders or "none"), not offenders)
+
+    print("5. the catalog build reconciles media AFTER the swap")
+    # Source-level for the same reason section 4 is: the failure mode is a code path that
+    # never learned about a function. It has to come after `os.replace(TMP, OUT)` — before
+    # the swap the repair would read the OLD catalog and faithfully re-key media to the
+    # identities the build is in the middle of replacing.
+    bl = open(os.path.join(DIR, "build_library.py"), encoding="utf-8").read()
+    swap = bl.find("os.replace(TMP, OUT)")
+    rec = bl.find("reconcile_after_build")
+    check("build_library calls reconcile_after_build", rec != -1)
+    check("and calls it AFTER the atomic swap, not before",
+          swap != -1 and rec > swap)
 
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 

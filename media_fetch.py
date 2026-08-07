@@ -256,6 +256,68 @@ def _backfill_game_key(con):
               file=sys.stderr)
 
 
+def reconcile_after_build():
+    """Re-key media identity to the catalog and re-elect, immediately after a build.
+
+    `_backfill_game_key` was wired only to MEDIA events — a fetch, `_media_finish`, the
+    hydrate job. But the event that moves an identity LIBRARY-WIDE is the catalog build:
+    `build_library` is where the bundle and many-to-one refusals are computed, so the
+    instant it swaps the new catalog in, every media row stamped from `igdb_resolution`
+    may now disagree with the entry it belongs to. `game_key()` derives from the
+    resolution cache, which does not know a refusal happened, and the catalog is the
+    authority (see the entry-derived repair above).
+
+    Nothing ran between those two facts. For a game that gets re-fetched afterwards the
+    next `_media_finish` healed it; for a game nobody touches again, the stamp stayed
+    wrong permanently and its neutral art was invisible the whole time. Live, that was
+    Fallout 76 and its Public Test Server — two owned Steam apps resolving to IGDB
+    103020, correctly refused as `many_to_one`, leaving 10 rows on `igdb:103020` while
+    both entries read `title:<nk>`. The PTS held a cover it could not show.
+
+    Then SELECT, in that order — the same `stamp -> select` the media chain runs, for the
+    same reason: a pick made under the old identity was made in the wrong bucket.
+
+    Selecting here also closes the run's last ordering gap. A build is the final
+    structural act of a sync, after every fetch phase; the run's own `_media_finish` is
+    not, so anything landing after it stayed unelected until something else happened to
+    re-rank. Live that was three lone candidates — Lossless Scaling and OVR Toolkit's
+    heroes, SKYBOX VR's logo — fetched 44 minutes after the last selection and shown by
+    nothing (invariant I4). Re-electing at the end makes the END STATE the thing that is
+    guaranteed, rather than the order the phases happened to run in. No fetch, no
+    measurement, no model call: this is free, local, and idempotent, and paid AI picks
+    survive it because `ai_pick` outranks provider priority by design.
+
+    Never fails a build: the catalog is the product of the run that just succeeded, and
+    a media index that is missing (first run), locked, or damaged must not undo it. Both
+    steps are idempotent, so the next media path retries anyway. Returns the number of
+    rows changed, for the build's summary.
+    """
+    if not os.path.exists(INDEX):
+        return 0                       # first run: the catalog precedes any fetched art
+    con = None
+    try:
+        import media_choose
+        con = sqlite3.connect(INDEX)
+        con.execute("PRAGMA busy_timeout=30000")   # the live server may be mid-serve
+        before = con.total_changes
+        _backfill_game_key(con)
+        # Counted BEFORE the selection: select() rewrites `chosen` across the whole
+        # index every pass, so folding it in reports tens of thousands of "re-keyed"
+        # rows for a build that moved none — a number that would read as alarming and
+        # mean nothing. The re-election is a guarantee, not a measurement.
+        rekeyed = con.total_changes - before
+        media_choose.select(con)
+        con.commit()
+        return rekeyed
+    except sqlite3.Error as e:
+        print("build: media identity reconcile deferred: %s" % str(e)[:120],
+              file=sys.stderr)
+        return 0
+    finally:
+        if con is not None:
+            con.close()
+
+
 def con_index():
     con = sqlite3.connect(INDEX)
     con.execute("PRAGMA busy_timeout=30000")   # wait out the live server's locks
