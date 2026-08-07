@@ -15,6 +15,7 @@ import glob
 import json
 import os
 import sqlite3
+import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +24,10 @@ DB = os.path.join(DATA, "ai-metadata.sqlite")
 LIBRARY_DB = os.path.join(DATA, "game-library.sqlite")
 CACHE_DB = os.path.join(DATA, "metadata-cache.sqlite")
 MEDIA_INDEX = os.path.join(DATA, "media-index.sqlite")
+
+sys.path.insert(0, DIR)
+import compilations                              # noqa: E402  durable collection store
+import nongame                                   # noqa: E402  shared "not a game" rule
 
 # Factual attributes the model can reasonably supply; scores/subjective kinds are
 # deliberately excluded. Holes in these drive the "missing" list + "missing" target.
@@ -183,6 +188,8 @@ def _con():
 def _lib():
     con = sqlite3.connect("file:%s?mode=ro" % LIBRARY_DB, uri=True)
     con.row_factory = sqlite3.Row
+    # `ov` + `sco` so the shared non-game rule can be applied to target selection
+    nongame.attach(con, DATA)
     return con
 
 
@@ -280,6 +287,49 @@ def game_context(norm_key, lib=None):
             own.close()
 
 
+def _target_where(target, sources=None):
+    """The WHERE clause (+args) selecting a target set — shared by `targets()` and
+    `target_count()` so the two can never disagree. Always ends with the non-game
+    exclusion."""
+    if target == "unmatched":
+        q = ("NOT EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)")
+        args = []
+    elif target == "unidentified":
+        # No IGDB IDENTITY, whatever else matched. 'unmatched' means "no provider
+        # link at all", so a game that matched ScreenScraper and SteamGridDB but
+        # whose IGDB title differs from yours is invisible to it — and IGDB identity
+        # is what carries genres, developer, release and the game_key that binds its
+        # art. Live: Crash Bandicoot 3: Warped, which IGDB calls "Crash Bandicoot:
+        # Warped" (alt names have the 3 but drop the Warped), so exact-title matching
+        # correctly refuses it and nothing ever looked again.
+        #
+        # This is the LAST RESORT set: everything here has already failed the free
+        # deterministic pass, which is exactly when a model is worth paying for.
+        q = ("NOT EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id "
+             "AND ml.provider='igdb')")
+        args = []
+    elif target == "matched":
+        q = "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)"
+        args = []
+    elif target == "missing":
+        ph = ",".join("?" * len(SUPPLEMENT_KINDS))
+        q = ("(SELECT COUNT(DISTINCT kind) FROM game_attributes ga "
+             "WHERE ga.game_id=g.id AND ga.kind IN (%s)) < ?" % ph)
+        args = SUPPLEMENT_KINDS + [len(SUPPLEMENT_KINDS)]
+    else:                                       # all
+        q, args = "1", []
+    if sources:
+        sp = ",".join("?" * len(sources))
+        q += (" AND EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
+              "AND s.source IN (%s))" % sp)
+        args = list(args) + list(sources)
+    # Never spend the model on something the library itself hides. This is the same
+    # rule the listing, facets and Spotlight apply — it just never reached the one
+    # caller where being wrong costs money.
+    ng, ngargs = nongame.hidden_sql()
+    return q + " AND NOT (%s)" % ng, list(args) + list(ngargs)
+
+
 def targets(target="unmatched", limit=200, sources=None):
     """norm_keys to scan for a target set: 'unmatched' (no provider link),
     'unidentified' (no IGDB identity, whatever else matched), 'matched' (verify existing
@@ -290,44 +340,9 @@ def targets(target="unmatched", limit=200, sources=None):
     actually brought in, not the whole catalog."""
     lib = _lib()
     try:
-        if target == "unmatched":
-            q = ("SELECT g.norm_key FROM games g WHERE NOT EXISTS("
-                 "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)")
-            args = []
-        elif target == "unidentified":
-            # No IGDB IDENTITY, whatever else matched. 'unmatched' means "no provider
-            # link at all", so a game that matched ScreenScraper and SteamGridDB but
-            # whose IGDB title differs from yours is invisible to it — and IGDB identity
-            # is what carries genres, developer, release and the game_key that binds its
-            # art. Live: Crash Bandicoot 3: Warped, which IGDB calls "Crash Bandicoot:
-            # Warped" (alt names have the 3 but drop the Warped), so exact-title matching
-            # correctly refuses it and nothing ever looked again.
-            #
-            # This is the LAST RESORT set: everything here has already failed the free
-            # deterministic pass, which is exactly when a model is worth paying for.
-            q = ("SELECT g.norm_key FROM games g WHERE NOT EXISTS("
-                 "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id "
-                 "AND ml.provider='igdb')")
-            args = []
-        elif target == "matched":
-            q = ("SELECT g.norm_key FROM games g WHERE EXISTS("
-                 "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)")
-            args = []
-        elif target == "missing":
-            ph = ",".join("?" * len(SUPPLEMENT_KINDS))
-            q = ("SELECT g.norm_key FROM games g WHERE (SELECT COUNT(DISTINCT kind) "
-                 "FROM game_attributes ga WHERE ga.game_id=g.id AND ga.kind IN (%s)) "
-                 "< ?" % ph)
-            args = SUPPLEMENT_KINDS + [len(SUPPLEMENT_KINDS)]
-        else:                                   # all
-            q, args = "SELECT g.norm_key FROM games g", []
-        if sources:
-            sp = ",".join("?" * len(sources))
-            q += (" AND " if " WHERE " in q else " WHERE ") + (
-                "EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
-                "AND s.source IN (%s))" % sp)
-            args = list(args) + list(sources)
-        rows = lib.execute(q + " ORDER BY g.norm_key LIMIT ?", args + [limit]).fetchall()
+        where, args = _target_where(target, sources)
+        rows = lib.execute("SELECT g.norm_key FROM games g WHERE " + where +
+                           " ORDER BY g.norm_key LIMIT ?", args + [limit]).fetchall()
         return [r[0] for r in rows]
     finally:
         lib.close()
@@ -361,6 +376,11 @@ def review_targets(limit=2000, sources=None):
             q += (" WHERE EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
                   "AND s.source IN (%s))" % sp)
             args = list(sources)
+        # A non-game refused an identity is still a non-game — the same exclusion
+        # targets() applies, on the other way in.
+        ng, ngargs = nongame.hidden_sql()
+        q += (" AND " if " WHERE " in q else " WHERE ") + "NOT (%s)" % ng
+        args = list(args) + list(ngargs)
         out, seen = [], set()
         for nk, det in lib.execute(q, args):
             # A refusal Light/Heavy already examined (mark_reviewed) is done — without
@@ -410,25 +430,13 @@ def mark_reviewed(nk, lib=None):
 
 
 def target_count(target="unmatched"):
+    """How many games `targets()` would return. Built from the same clause, because a
+    count that disagrees with the selection reads as a scan that stalled."""
     lib = _lib()
     try:
-        if target == "unmatched":
-            n = lib.execute("SELECT COUNT(*) FROM games g WHERE NOT EXISTS("
-                            "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)"
-                            ).fetchone()[0]
-        elif target == "matched":
-            n = lib.execute("SELECT COUNT(*) FROM games g WHERE EXISTS("
-                            "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)"
-                            ).fetchone()[0]
-        elif target == "missing":
-            ph = ",".join("?" * len(SUPPLEMENT_KINDS))
-            n = lib.execute("SELECT COUNT(*) FROM games g WHERE (SELECT COUNT(DISTINCT "
-                            "kind) FROM game_attributes ga WHERE ga.game_id=g.id AND "
-                            "ga.kind IN (%s)) < ?" % ph,
-                            SUPPLEMENT_KINDS + [len(SUPPLEMENT_KINDS)]).fetchone()[0]
-        else:
-            n = lib.execute("SELECT COUNT(*) FROM games").fetchone()[0]
-        return n
+        where, args = _target_where(target)
+        return lib.execute("SELECT COUNT(*) FROM games g WHERE " + where,
+                           args).fetchone()[0]
     finally:
         lib.close()
 
@@ -443,6 +451,14 @@ def store_finding(run_id, ctx, result, model=""):
     status_m = (match.get("status") or "").lower()
     coll = result.get("collection") or {}
     is_coll = bool(coll.get("is_collection")) and bool(coll.get("members"))
+    # A RECORDED collection is already a decision. `collection_rejected` makes the
+    # negative verdict durable for exactly this reason; the positive one had no
+    # equivalent here, so the metadata area re-proposed every collection the user
+    # already had, every run. `_collection_candidates` skips `known` keys — this is
+    # the same rule on the other onramp. The model is not deterministic, so a
+    # re-proposal is not a no-op: it is a chance to lose members that were right.
+    if is_coll and compilations.get_collection(DATA, ctx["norm_key"]):
+        is_coll = False
     actionable = bool(attrs) or status_m in ("wrong", "unmatched", "unsure") or is_coll
     if not actionable:
         return None

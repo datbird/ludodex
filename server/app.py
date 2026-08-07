@@ -62,6 +62,7 @@ import reset           # noqa: E402  scoped reset (library / curation / factory)
 import provider_links  # noqa: E402  metadata_links derived from the identity cache
 import estimate        # noqa: E402  pre-run ingest time estimate
 import matchgate       # noqa: E402  shared provider candidate-acceptance gate
+import nongame         # noqa: E402  shared "this is not a game" rule (reads + AI scan)
 import devicesync      # noqa: E402  outbound push (ROM+media+gamelist) to RetroDECK/ES-DE
 import auth            # noqa: E402  local username/password accounts + sessions
 import cf_access       # noqa: E402  Cloudflare Access SSO (verify the Access JWT)
@@ -433,39 +434,14 @@ def _sync_steam_type():
     return len(rows)
 
 
-# Steam appdetails `type`s that aren't games — hidden when hide_non_games is on.
-NON_GAME_TYPES = ("application", "tool", "music", "video", "hardware", "series", "mod")
-
-# Steam GENRES that only ever belong to software, never to a game. A second, independent
-# signal for the same question — needed because `steam_type` is populated only by
-# scores_fetch and was EMPTY for the whole library (0 of 2208 rows), which left the
-# type-based rule testing membership in an empty table and therefore hiding nothing, ever.
-# Genres are already on the entry, cost nothing to consult, and catch the case the type
-# signal cannot even in principle: Steam SELLS fpsVR and Wallpaper Engine as `game`, so
-# their type is right by Steam's lights and wrong by ours — but their genre says Utilities.
-# A manual content_type override still wins over this, so a real game tagged Utilities is
-# one click from being rescued.
-NON_GAME_GENRES = ("utilities", "software", "software training", "audio production",
-                   "video production", "photo editing", "animation & modeling",
-                   "design & illustration", "web publishing", "game development",
-                   "accounting")
-
-# The same genres by Steam's OWN id — the only form of this rule that survives a
-# localised catalog. Steam returns `{"id": "57", "description": "Utilities"}`, and the id
-# is language-independent while the description is not: 3DMark is 57 as "Utilities",
-# "Utilitários" and "Werkzeuge" alike (verified live 2026-08-04). Matching the NAME meant
-# a Portuguese-localised ingest quietly hid nothing at all.
-#
-# Keyed BY the English name so the two lists cannot drift apart unnoticed — a genre with
-# no Steam id (our own "software" catch-all, and anything IGDB-sourced) simply has no
-# entry and is still caught by the name branch. `test_genre_language.py` asserts every
-# key here names a real NON_GAME_GENRES entry.
-STEAM_GENRE_IDS = {"accounting": "50", "animation & modeling": "51",
-                   "audio production": "52", "design & illustration": "53",
-                   "photo editing": "55", "software training": "56",
-                   "utilities": "57", "video production": "58",
-                   "web publishing": "59", "game development": "60"}
-NON_GAME_GENRE_IDS = tuple(sorted(set(STEAM_GENRE_IDS.values()), key=int))
+# What is NOT a game now lives in `nongame.py`, because the AI scan needs the same
+# answer this module's read sites need and was not getting it (see that module). These
+# names stay bound here so every existing reader — and the tests that pin the rule —
+# keep working unchanged.
+NON_GAME_TYPES = nongame.NON_GAME_TYPES
+NON_GAME_GENRES = nongame.NON_GAME_GENRES
+STEAM_GENRE_IDS = nongame.STEAM_GENRE_IDS
+NON_GAME_GENRE_IDS = nongame.NON_GAME_GENRE_IDS
 
 # Attribute kinds that exist for CODE, not for people. They live in game_attributes
 # because that is where per-game facts go, but they are machine keys or free text, so
@@ -477,30 +453,10 @@ INTERNAL_ATTR_KINDS = ("description", "genre_ids", "match_confidence", "match_re
 
 
 def _non_game_hidden_sql():
-    """SQL boolean (+args) that is TRUE for an entry to hide as a NON-game. The manual
-    `content_type` override (attr-overrides, aliased `ov`) wins over Steam's detected
-    type: a value other than 'Game' hides an item Steam mis-tagged as a game (Wallpaper
-    Engine, fpsVR — Steam calls them games), and 'Game' rescues a real game Steam
-    mis-tagged as a tool. With no manual override, fall back to the Steam type. Requires
-    a connection with `ov` + `sco` attached (i.e. lib())."""
-    ph = ",".join("?" * len(NON_GAME_TYPES))
-    gph = ",".join("?" * len(NON_GAME_GENRES))
-    iph = ",".join("?" * len(NON_GAME_GENRE_IDS))
-    expr = ("CASE WHEN EXISTS(SELECT 1 FROM ov.overrides o WHERE o.norm_key=g.norm_key "
-            "AND o.kind='content_type') "
-            "THEN EXISTS(SELECT 1 FROM ov.overrides o WHERE o.norm_key=g.norm_key AND "
-            "o.kind='content_type' AND lower(o.value)<>'game') "
-            "ELSE (g.norm_key IN (SELECT norm_key FROM sco.steam_type WHERE type IN (%s)) "
-            "      OR EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
-            "                AND ga.kind='genre_ids' AND ga.value IN (%s)) "
-            "      OR EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
-            "                AND ga.kind='genres' AND lower(ga.value) IN (%s))) "
-            "END" % (ph, iph, gph))
-    # id branch FIRST because it is the language-proof one; the name branch stays so
-    # rows written before genre_ids existed — and non-Steam genres, which have no id —
-    # keep being caught without waiting for a re-fetch.
-    return expr, (list(NON_GAME_TYPES) + list(NON_GAME_GENRE_IDS)
-                  + list(NON_GAME_GENRES))
+    """SQL boolean (+args) that is TRUE for an entry to hide as a NON-game. Requires a
+    connection with `ov` + `sco` attached (i.e. lib()). Defined in `nongame`."""
+    return nongame.hidden_sql()
+
 
 # Storefront labels are Sources, not Systems — PC-store games get platform=source,
 # so exclude these (and the generic psn/xbox fallbacks) from the Systems facet.
