@@ -568,3 +568,50 @@ The other two are NOT numbering variants and remain refused, correctly or near e
 `Sid Meier's Pirates! Gold` <- "Pirates! Gold" (a publisher prefix, not a number) and
 `Shovel Knight: Shovel of Hope` <- "Shovel Knight" (the campaign vs the base game). Both
 are the undecidable truncation shape above; neither is worth a rule of its own.
+
+## Two rules that reached only one of their two onramps — FIXED (2026-08-07)
+
+Found by triaging the 68-finding Lite-import review queue. Both defects have the same
+shape: a rule that exists and is correct, applied at one caller, while the caller where
+being wrong costs money never consulted it. Commit `cf466b5`.
+
+**A recorded collection is a decision, not a question to re-ask.** `collection_rejected`
+made the NEGATIVE verdict durable; the positive one had no equivalent on this onramp.
+`_collection_candidates` skips `known` keys, but the `metadata` area answers a COLLECTION
+question for every game it analyzes and `store_finding` knew nothing about what was
+already recorded. Live: **33 of 34** collection findings re-proposed a collection already
+in `collections.sqlite` — and because the model is not deterministic, **11 came back
+different**, several worse than what they would have replaced (a Heretic + Hexen missing
+Hexen II and Portal of Praevus; a DOOM 3 BFG missing Resurrection of Evil; a Police Quest
+II carrying a subtitle that does not exist). A re-proposal that can only be accepted or
+rejected is a standing chance to lose data that was already right. The collection claim is
+settled; attribute gaps and a wrong match on the same entry still surface.
+
+**The AI is not spent on what the library hides.** `_non_game_hidden_sql()` guarded three
+read sites in `server/app.py` and nothing else, so `aimeta.targets()` handed the scan every
+hidden row anyway. Live: 3DMark and The Jackbox Megapicker — both Steam genre `Utilities`,
+both already hidden — were analyzed by the paid metadata area, which wrote 3DMark a release
+year and a description as though it were a game. The model's own judgment was inconsistent
+about it (it refused EVGA Precision X1, same genre, same run), which is why the
+deterministic filter has to run first rather than be left to the model.
+
+The rule moved to **`nongame.py`** and both sides import it — same shape as
+`matchgate.game_era`. `server/app.py` keeps its names bound to it, so every existing reader
+and the two tests pinning the rule are unchanged. Applied to `targets()`, `review_targets()`
+(a non-game refused an identity is still a non-game) and `target_count()`, which now shares
+one clause builder with `targets()` — a count that disagrees with the selection reads as a
+scan that stalled.
+
+**Measured live after deploy:** 36 of 36 recorded collections now suppressed; **27 of 2,253
+entries** excluded from every scan (Wallpaper Engine, fpsVR, RPG Maker XP/VX Ace/MV, five VR
+video players, DisplayFusion, Lossless Scaling, Steam Deck Docking Station, …). `3dSen`
+stays IN — Steam gives that emulator ordinary game genres, so no deterministic signal
+catches it; a manual `content_type` override is the intended answer if it should go.
+
+Guards: `test_collection_settled.py` (5), `test_scan_skips_non_games.py` (10).
+Suite 42 passed / 0 failed / 4 skipped.
+
+**Watch on the next ingest:** `NON_GAME_TYPES` includes `mod`, which is why
+`Killing Floor Mod: Defence Alliance 2` is in the excluded 27. That is the pre-existing
+rule, not new behaviour — but it is now the difference between scanned and not, so it is
+worth a look if a real mod should be enriched.
