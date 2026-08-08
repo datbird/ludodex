@@ -17,6 +17,11 @@ the ORIGINAL first-release year, so a 1998 game re-released on PS3 would look
 "impossible" for the PS3 era if we gated the low side. Gating only the high side keeps
 those legitimate re-releases while still catching genuinely newer same-named games.
 """
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import platmap                    # canonical platform tokens
 
 # platform label -> (first commercial year, last mainstream year). 9999 = still
 # current / open-ended (never bound the upper edge — arcade, modern consoles).
@@ -74,8 +79,29 @@ def is_handheld(platform):
     return p in HANDHELD_RETRO or p in HANDHELD_MODERN
 
 
+# The same table keyed by CANONICAL platform token, because the catalog does not speak
+# this table's dialect: `sources.platform` for emulation says 'sega genesis', but
+# `games.platform` — which is what a store-owned console entry carries — says 'genesis',
+# and ERAS.get('genesis') was None. A gate that silently answers "no era known" refuses
+# nothing, so every such entry went unguarded; live, that is how a genesis entry took a
+# 1995 Game Gear record's identity. Derived from ERAS so the two cannot drift, and only
+# where the canon is UNAMBIGUOUS — platmap.canon folds several home computers into 'pc',
+# and one canon covering several eras cannot name one.
+_CANON_ERAS = {}
+for _c in {platmap.canon(_l) for _l in ERAS}:
+    _vals = {v for k, v in ERAS.items() if platmap.canon(k) == _c}
+    if len(_vals) == 1:
+        _CANON_ERAS[_c] = next(iter(_vals))
+
+
 def era(platform):
-    return ERAS.get((platform or "").strip().lower())
+    """(first, last) production years for a platform label, or None if unknown.
+
+    None means "no era known", which the gate reads as "refuse nothing" — so a label
+    this table cannot resolve is not a safe default, it is a hole. Accepts both this
+    table's labels and the catalog's canonical ones."""
+    p = (platform or "").strip().lower()
+    return ERAS.get(p) or _CANON_ERAS.get(platmap.canon(p))
 
 
 def _year(v):

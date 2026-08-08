@@ -771,7 +771,10 @@ def main(argv):
         try:
             hits = igdb.query(
                 "games",
-                'search "%s"; fields id,name,slug,first_release_date,alternative_names.name; limit 8;'
+                # platforms.name is what makes the platform fit judgeable — without it
+                # every candidate looks silent about its platforms and the gate no-ops
+                'search "%s"; fields id,name,slug,first_release_date,platforms.name,'
+                'alternative_names.name; limit 8;'
                 % title, cid, tok)
         except Exception as e:          # one bad title shouldn't abort the run
             # ...but it must not be recorded as an ANSWER either. This used to set

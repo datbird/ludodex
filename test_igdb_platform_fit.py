@@ -85,6 +85,15 @@ def main():
     check("a console entry with no fitting record stays unmatched", iid == 0)
 
     # 4. a console platform must count as a console for the era gate, whoever sold it
+    # the era table had the SAME label-vs-canon hole, and a gate that answers "no era
+    # known" refuses nothing — so every console entry the catalog labels canonically
+    # went unguarded
+    import console_eras
+    check("the era table resolves the catalog's own label",
+          console_eras.era("genesis") == console_eras.era("sega genesis"))
+    check("...and for ps1/psx", console_eras.era("ps1") == console_eras.era("psx"))
+    check("a canon several eras share stays unknown", console_eras.era("pc") is None)
+
     check("'genesis' is real hardware", ie.is_console_platform("genesis") is True)
     check("'snes' is real hardware", ie.is_console_platform("snes") is True)
     check("'pc' is not", ie.is_console_platform("pc") is False)
