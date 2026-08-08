@@ -33,7 +33,7 @@ def main():
     con.executescript("""
     CREATE TABLE media(id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, kind TEXT,
       provider TEXT, ref TEXT, matched INT, ref_type TEXT, game_key TEXT,
-      width INT, height INT, filler INT, ai_pick INT, meta TEXT, chosen INT DEFAULT 0,
+      width INT, height INT, filler INT, detail REAL, ai_pick INT, meta TEXT, chosen INT DEFAULT 0,
       sha1 TEXT, ext TEXT, hidden INT DEFAULT 0);
     """)
     def add(nk, prov, w, h, sysm="genesis"):
@@ -89,7 +89,7 @@ def main():
     con2.executescript("""
     CREATE TABLE media(id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, kind TEXT,
       provider TEXT, ref TEXT, matched INT, ref_type TEXT, game_key TEXT,
-      width INT, height INT, filler INT, ai_pick INT, meta TEXT, chosen INT DEFAULT 0,
+      width INT, height INT, filler INT, detail REAL, ai_pick INT, meta TEXT, chosen INT DEFAULT 0,
       sha1 TEXT, ext TEXT, hidden INT DEFAULT 0);
     """)
     # the ONLY candidate for this cover is a measured landscape
@@ -120,7 +120,7 @@ def main():
     plain.executescript("""
     CREATE TABLE media(id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, kind TEXT,
       provider TEXT, ref TEXT, matched INT, ref_type TEXT, game_key TEXT,
-      width INT, height INT, filler INT, ai_pick INT, meta TEXT, chosen INT DEFAULT 0,
+      width INT, height INT, filler INT, detail REAL, ai_pick INT, meta TEXT, chosen INT DEFAULT 0,
       sha1 TEXT, ext TEXT, hidden INT DEFAULT 0);
     """)
     plain.execute("INSERT INTO media(norm_key,system,kind,provider,ref,matched,ref_type,"

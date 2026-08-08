@@ -254,6 +254,9 @@ export interface Stats {
   unmatched: number
   low_confidence?: number
   no_media: number
+  // covers where every candidate is flagged as a letterboxed paste, so the
+  // deterministic rules ranked nothing and a tiebreak chose
+  cover_undecided?: number
   by_source: Record<string, number>
   media: { games_with_art: number; by_kind: Record<string, number> }
   pending_meta?: number

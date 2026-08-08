@@ -49,9 +49,16 @@ def con_index():
     # aborts the whole pass at commit time. Wait for the lock instead of failing.
     con.execute("PRAGMA busy_timeout=30000")
     con.execute("PRAGMA journal_mode=WAL")   # concurrent-safe with background media jobs
-    if "hidden" not in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
-        con.execute("ALTER TABLE media ADD COLUMN hidden INTEGER DEFAULT 0")
-        con.commit()
+    # Heal the columns select() READS, not just the ones this module writes: the
+    # canonical schema lives in media_index.index_con(), but the CLI opens the index
+    # here, so an index built before a column existed would fail the ranking query
+    # rather than simply ranking without it.
+    _cols = {r[1] for r in con.execute("PRAGMA table_info(media)")}
+    for _c, _decl in (("hidden", "INTEGER DEFAULT 0"), ("filler", "INTEGER"),
+                      ("ai_pick", "INTEGER"), ("detail", "REAL")):
+        if _c not in _cols:
+            con.execute("ALTER TABLE media ADD COLUMN %s %s" % (_c, _decl))
+    con.commit()
     return con
 
 
@@ -124,7 +131,7 @@ def select(con, kinds=None, only=None):
     # screenshot keeps the cover slot while eight measured 484x680 covers sit unused,
     # because at ranking time nothing knew their shapes.
     _q = ("SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key, "
-          "width, height, filler, ai_pick, meta "
+          "width, height, filler, detail, ai_pick, meta "
           "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
           % ",".join("'%s'" % k for k in scalar))
     _args = []
@@ -142,7 +149,7 @@ def select(con, kinds=None, only=None):
     # further split by game_key so a same-title split (DESIGN §11.9 — the 1986 Portal vs
     # Valve's) chooses one cover PER identity; console art is already siloed by system, so
     # game_key only sub-divides the neutral bucket (non-split games have one key → no-op).
-    best = {}                       # (norm_key, system, game_key?, kind) -> (sortkey, id)
+    best = {}       # (norm_key, system, game_key?, kind) -> [candidate tuples]
     for r in rows:
         pr = rank[r["kind"]].get(r["provider"], 99)
         pin = pin_rank.get((r["norm_key"], r["kind"], r["provider"], r["ref"]), 1 << 30)
@@ -192,15 +199,40 @@ def select(con, kinds=None, only=None):
         # beside it, same size, same type, region tagged `us` in the row we already had.
         # A model reading artwork is the fallback for this question, not the answer.
         rrank = medialang.region_rank(r["meta"], _regions)
-        sk = (pin, bad_shape, filler, rrank, 0 if r["ai_pick"] else 1, band, pr, px,
-              0 if r["matched"] else 1,
-              0 if r["ref_type"] == "file" else 1, r["id"])
         _sys = r["system"] or ""
         _gk = (r["game_key"] or "") if not _sys else ""
         key = (r["norm_key"], _sys, _gk, r["kind"])
-        if key not in best or sk < best[key][0]:
-            best[key] = (sk, r["id"])
-    ids = [i for _, i in best.values()]
+        # Held per bucket rather than reduced on the spot: whether `filler` DISCRIMINATES
+        # is a property of the whole candidate set, and cannot be known one row at a time.
+        best.setdefault(key, []).append(
+            (r, pin, bad_shape, filler, rrank, band, pr, px))
+
+    picked = {}
+    for key, cands in best.items():
+        # A ranking term that is the same for every candidate has decided nothing, and a
+        # term that decides nothing must not silently hand the choice to an unrelated one.
+        # When EVERY candidate is a confirmed paste, `filler` is constant — and ranking
+        # used to fall through to the resolution band, so Steam's 600x900 auto-portrait
+        # beat a 300x450 authored cover on size alone (Insurgency, Arx Fatalis).
+        #
+        # Two distinct causes produced the same constant: a bright wordmark inflating a
+        # peak-relative threshold, and art that is genuinely hazy and low-contrast. No
+        # third threshold separates the second case from a real paste, so the fix is not
+        # another heuristic — it is to stop pretending a constant term ranked anything.
+        # DETAIL DENSITY (median band energy) breaks the tie instead: high for art that
+        # carries detail throughout, low for a blurred paste, and unmoved by one bright
+        # band. Ranked above the resolution band, below everything that is real evidence.
+        _blind = len(cands) > 1 and all(c[3] == 1 for c in cands)
+        for (r, pin, bad_shape, filler, rrank, band, pr, px) in cands:
+            # -detail so more detail sorts first; unmeasured (NULL) must not win by being
+            # unknown, so it sorts last within the blind bucket rather than neutral.
+            dt = -(r["detail"] or 0.0) if _blind else 0
+            sk = (pin, bad_shape, filler, rrank, 0 if r["ai_pick"] else 1, dt, band,
+                  pr, px, 0 if r["matched"] else 1,
+                  0 if r["ref_type"] == "file" else 1, r["id"])
+            if key not in picked or sk < picked[key][0]:
+                picked[key] = (sk, r["id"])
+    ids = [i for _, i in picked.values()]
     con.executemany("UPDATE media SET chosen=1 WHERE id=?", [(i,) for i in ids])
     con.commit()
     return len(ids)
@@ -268,12 +300,17 @@ def stamp_measured(con, r, sha, repo=None):
     ext = (r["ext"] or "jpg").split("?")[0]
     path = os.path.join(repo, "%s.%s" % (sha, ext))
     w, h = _measure(path)
-    fill = None
+    fill = dens = None
     if w is not None and media.KIND_ORIENT.get(r["kind"]) == "portrait":
         fill = 1 if media.looks_padded(path) else 0
+        # written with the filler verdict, never apart from it: the two are read
+        # together by select() and a row carrying one without the other would let a
+        # blind bucket rank on a value nothing measured
+        dens = media.detail_density(path)
     con.execute("UPDATE media SET sha1=?, width=COALESCE(?,width), "
-                "height=COALESCE(?,height), filler=COALESCE(?,filler) "
-                "WHERE id=?", (sha, w, h, fill, r["id"]))
+                "height=COALESCE(?,height), filler=COALESCE(?,filler), "
+                "detail=COALESCE(?,detail) WHERE id=?",
+                (sha, w, h, fill, dens, r["id"]))
 
 
 def remeasure(con, kinds=None, progress=False):
@@ -308,8 +345,8 @@ def remeasure(con, kinds=None, progress=False):
         if w is None:
             continue                    # unreadable stays as it was, never "clean"
         fill = 1 if media.looks_padded(path) else 0
-        con.execute("UPDATE media SET width=?, height=?, filler=? WHERE id=?",
-                    (w, h, fill, r["id"]))
+        con.execute("UPDATE media SET width=?, height=?, filler=?, detail=? "
+                    "WHERE id=?", (w, h, fill, media.detail_density(path), r["id"]))
         n += 1
         if progress and n % 500 == 0:
             print("media_choose: re-measured %d" % n, file=sys.stderr)

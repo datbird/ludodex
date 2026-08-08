@@ -72,6 +72,7 @@ def main():
     CREATE TABLE media(id INTEGER PRIMARY KEY, norm_key TEXT, kind TEXT, provider TEXT,
       ref TEXT, ref_type TEXT DEFAULT 'url', system TEXT, game_key TEXT, chosen INT
       DEFAULT 0, ai_pick INT, hidden INT DEFAULT 0, width INT, height INT, filler INT,
+      detail REAL,
       matched INT DEFAULT 1, meta TEXT, sha1 TEXT, ext TEXT DEFAULT 'jpg');
     """)
 

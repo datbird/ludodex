@@ -571,6 +571,11 @@ def stats():
             "SELECT COUNT(*) FROM games g WHERE EXISTS(SELECT 1 FROM game_attributes ga "
             "WHERE ga.game_id=g.id AND ga.kind='match_confidence' "
             "AND CAST(ga.value AS INT) < ?)" + and_w, (_thr,)).fetchone()[0]
+        # covers the deterministic rules could not settle — every candidate flagged,
+        # so the term ranked nothing and the winner came from a tiebreak
+        cover_undecided = con.execute(
+            "SELECT COUNT(*) FROM games g WHERE " + FLAG_SQL["cover_undecided"]
+            + and_w).fetchone()[0]
         by_source = {}
         for s in COLUMN_SOURCES:
             by_source[s] = con.execute(
@@ -601,6 +606,7 @@ def stats():
             "unmatched": unmatched,
             "low_confidence": low_conf,
             "no_media": no_media,
+            "cover_undecided": cover_undecided,
             "by_source": by_source,
             "media": {"games_with_art": total_with, "by_kind": coverage},
             "pending_meta": aimeta.pending_count(),   # accepted-not-applied findings
@@ -658,6 +664,18 @@ FLAG_SQL = {
     "has_media": "(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key) "
                  "OR EXISTS(SELECT 1 FROM u.user_media um WHERE um.norm_key=g.norm_key))",
     "cross_source": "g.n_sources>1",
+    # Every cover candidate flagged as a letterboxed paste — so the flag is CONSTANT and
+    # ranked nothing. select() breaks that tie on detail density rather than raw size,
+    # which is better than guessing by pixel count but is still a guess; this is how the
+    # pipeline says so instead of guessing silently. Needs >1 candidate: a lone flagged
+    # asset is not undecided, there is simply nothing to choose between (and it must
+    # still be servable — an image that is all a game has is better than none).
+    "cover_undecided":
+        "((SELECT COUNT(*) FROM m.media md WHERE md.norm_key=g.norm_key "
+        "  AND md.kind='cover' AND COALESCE(md.hidden,0)=0) > 1 "
+        " AND NOT EXISTS(SELECT 1 FROM m.media md2 WHERE md2.norm_key=g.norm_key "
+        "  AND md2.kind='cover' AND COALESCE(md2.hidden,0)=0 "
+        "  AND COALESCE(md2.filler,0)<>1))",
 }
 
 

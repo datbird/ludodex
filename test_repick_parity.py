@@ -38,7 +38,7 @@ def main():
     con.execute("""CREATE TABLE media(
         id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, game_key TEXT, kind TEXT,
         provider TEXT, ref TEXT, ref_type TEXT, matched INT, sha1 TEXT,
-        width INT, height INT, filler INT, ai_pick INT, meta TEXT, chosen INT DEFAULT 0,
+        width INT, height INT, filler INT, detail REAL, ai_pick INT, meta TEXT, chosen INT DEFAULT 0,
         hidden INT DEFAULT 0)""")
 
     def add(nk, provider, w, h, kind="cover", chosen=0, ref=None):
@@ -116,7 +116,7 @@ def main():
     plain.executescript("".join(l for l in [
         "CREATE TABLE media(id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, "
         "game_key TEXT, kind TEXT, provider TEXT, ref TEXT, ref_type TEXT, matched INT, "
-        "sha1 TEXT, width INT, height INT, filler INT, ai_pick INT, meta TEXT, chosen INT DEFAULT 0, "
+        "sha1 TEXT, width INT, height INT, filler INT, detail REAL, ai_pick INT, meta TEXT, chosen INT DEFAULT 0, "
         "hidden INT DEFAULT 0);",
         "INSERT INTO media(norm_key,system,game_key,kind,provider,ref,ref_type,matched,"
         "width,height,chosen) VALUES('game g','','title:x','cover','steamgriddb',"

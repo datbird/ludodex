@@ -97,6 +97,14 @@ def index_con():
     # provider priority.
     if "ai_pick" not in _cols:
         con.execute("ALTER TABLE media ADD COLUMN ai_pick INTEGER")
+    # detail: MEDIAN band edge energy — how much detail the image carries throughout.
+    # High for authored art, low for a blurred paste. Only consulted when `filler` is
+    # constant across a bucket and has therefore decided nothing; see select(). Median
+    # rather than mean so a single bright wordmark cannot move it, which is exactly the
+    # mistake the peak-relative filler threshold made. NULL = never measured, and an
+    # unmeasured value must never win by being unknown.
+    if "detail" not in _cols:
+        con.execute("ALTER TABLE media ADD COLUMN detail REAL")
     return con
 
 

@@ -7663,6 +7663,18 @@ function DashStats({ stats, onBrowse, onFilter }: {
           <div className="dc-num">{stats.no_media.toLocaleString()}</div>
           <div className="dc-label">No media · {pct(stats.no_media)}% <span className="dc-go">view →</span></div>
         </button>
+        {/* The one class the deterministic rules cannot settle: every cover candidate
+            flagged, so the flag is constant and whatever won did so on a tiebreak, not
+            on evidence. Surfacing it turns a silent guess into a decision — and a pin
+            outranks everything in the sort key, so the decision then sticks. */}
+        {!!stats.cover_undecided && (
+          <button className="dash-card attn warn"
+            onClick={() => onFilter({ cover_undecided: 'include' })}
+            title="Every cover we have for these looks like a letterboxed paste, so nothing could rank them — pick one and it sticks">
+            <div className="dc-num">{stats.cover_undecided.toLocaleString()}</div>
+            <div className="dc-label">Cover undecided <span className="dc-go">decide →</span></div>
+          </button>
+        )}
         {stats.low_confidence != null && (
           <button className={'dash-card attn' + (stats.low_confidence ? ' warn' : ' good')}
             onClick={() => onFilter({ low_confidence: 'include' })}

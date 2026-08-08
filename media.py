@@ -121,6 +121,53 @@ def derived_dims(ref):
 DEAD_BAND_ENERGY = 5.0
 
 
+def band_energy(path, bands=9):
+    """Mean edge energy per horizontal band, top to bottom — or None if unreadable.
+
+    The single measurement both `looks_padded` (is there a dead RUN?) and
+    `detail_density` (how much detail overall?) are derived from, so the two can never
+    disagree about what they looked at."""
+    try:
+        from PIL import Image, ImageFilter
+    except Exception:                       # noqa: BLE001  Pillow absent
+        return None
+    try:
+        with Image.open(path) as im:
+            im = im.convert("L")
+            w, h = im.size
+            if h <= w or h < bands * 4:     # only meaningful for portrait canvases
+                return None
+            edges = im.filter(ImageFilter.FIND_EDGES)
+            step = h // bands
+            out = []
+            for i in range(bands):
+                box = (0, i * step, w, (i + 1) * step if i < bands - 1 else h)
+                px = list(edges.crop(box).getdata())
+                out.append(sum(px) / max(1, len(px)))
+        return out or None
+    except Exception:                       # noqa: BLE001  unreadable / not an image
+        return None
+
+
+def detail_density(path):
+    """How much detail an image carries THROUGHOUT — the median band energy — or None.
+
+    Used only to break a tie the `filler` flag could not: when every candidate in a
+    bucket is flagged, that term is constant and has decided nothing, and falling
+    through to raw pixel count is what let a 600x900 blurred paste beat a 300x450
+    authored cover. Median, not mean, so one high-contrast band (a title wordmark)
+    cannot carry it — the mistake the peak-relative filler threshold made.
+
+    Live separation: Insurgency paste 2.6 vs authored 4.5/3.0; Arx Fatalis paste 1.6 vs
+    authored 6.8/7.1."""
+    e = band_energy(path)
+    if not e:
+        return None
+    s = sorted(e)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
 def looks_padded(path, bands=9):
     """True when an image is a LETTERBOXED PASTE — real content in a central band,
     blurred/flat padding above and below.
