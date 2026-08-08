@@ -3673,6 +3673,15 @@ def _ss_match(queries, systems, year=None):
                 if jid in seen:
                     continue
                 seen.add(jid)
+                # ScreenScraper keeps one record PER SYSTEM, so a record for a system
+                # the game is not on is a different RELEASE — the 2008 PSN port of a
+                # 1998 PS1 game, the 2008 Wii VC edition of a 1993 Genesis one — and it
+                # brings that release's art, dates and metadata with it. The
+                # cross-system pass (sid=None) returns every system's records, and
+                # nothing here rejected them. Refuses only when both sides state a
+                # system and they disagree, so PC keeps matching as before.
+                if not ss.system_fits(systems[0] if systems else None, j):
+                    continue
                 yr = ss.jeu_year(j)
                 # Scored against the OWNED titles, never against `q`. `q` may be a
                 # subtitle-stripped variant, and judging by it is how "Half-Life:
@@ -3694,9 +3703,15 @@ def _ss_match(queries, systems, year=None):
                 % (queries, "no search succeeded" if not any_ok else "budget exhausted"))
         return None                              # searched, genuinely not there
     _, j, nm, yr = best
+    # `system` is what the MATCHED RECORD is, not what we asked for. It used to report
+    # `systems[0]` — the question, echoed back as though it were the answer — so a
+    # ps1 entry matched to a PlayStation 3 record recorded itself as 'ps1' and the
+    # mismatch was unauditable. A match must describe what it found.
+    _cs = ss.jeu_system_id(j)
     return {"provider": "screenscraper", "ss_id": j.get("id"), "name": nm,
             "year": int(yr) if yr and str(yr).isdigit() else None,
-            "system": systems[0] if systems else None}
+            "system": (ss.system_label(_cs) if _cs else None)
+                      or (systems[0] if systems else None)}
 
 
 def _ss_candidate_score(owned, cand_name, year=None, cand_year=None):

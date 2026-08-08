@@ -26,6 +26,7 @@ import urllib.request
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config
+import platmap                    # canonical platform tokens (system-fit checks)
 
 API = "https://www.screenscraper.fr/api2/"
 
@@ -86,8 +87,69 @@ MEDIA_KIND = {
 _SEEN_UNKNOWN = set()
 
 
+# The same table keyed by CANONICAL platform token. The catalog stores canonical
+# labels ('ps1', 'genesis', 'gb'); SYSTEM_ID above is keyed on ScreenScraper-ish names
+# ('psx', 'sega genesis', 'gameboy'), so a raw lookup missed 27 of the 56 non-PC games
+# live — and a game whose system cannot be identified skips the per-system search
+# entirely, leaving only the cross-system pass, which happily returns another system's
+# record. Derived from SYSTEM_ID rather than hand-written, so the two cannot drift.
+# Only where the canon is UNAMBIGUOUS. platmap.canon is a display/grouping token, not a
+# system identity: it folds 'atari st', 'amiga', 'zx spectrum' and 'apple2' all into
+# 'pc'. A canon several systems share cannot identify one, so it maps to nothing and is
+# read as "no evidence" — the alternative is systeme_id('pc') answering 42 (Atari ST)
+# and every PC game being matched, and refused, as an Atari ST release.
+# ('mame'/'arcade' and 'tubo duo'/'turbo duo' share a canon but agree on the id, so they
+# stay: the rule is one ID per canon, not one label.)
+_CANON_SYSTEM_ID = {}
+for _canon in {platmap.canon(_l) for _l in SYSTEM_ID}:
+    _ids = {v for k, v in SYSTEM_ID.items() if platmap.canon(k) == _canon}
+    if len(_ids) == 1:
+        _CANON_SYSTEM_ID[_canon] = next(iter(_ids))
+
+
 def systeme_id(platform):
-    return SYSTEM_ID.get((platform or "").strip().lower())
+    """ScreenScraper systemeid for one of our platform labels, or None.
+
+    None means "ScreenScraper has no system for this", which is true for PC and must
+    stay true — it is read as "no evidence", never as "refuse"."""
+    p = (platform or "").strip().lower()
+    return SYSTEM_ID.get(p) or _CANON_SYSTEM_ID.get(platmap.canon(p))
+
+
+def jeu_system_id(jeu):
+    """The systemeid a candidate declares for ITSELF, or None if it doesn't say."""
+    s = (jeu or {}).get("systeme") or {}
+    try:
+        return int(s.get("id")) if s.get("id") not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def system_label(systemeid):
+    """Our platform label for a ScreenScraper systemeid, or None. The reverse of
+    `systeme_id`, so a match can report the system it actually landed on."""
+    if not systemeid:
+        return None
+    for label, sid in SYSTEM_ID.items():
+        if sid == systemeid:
+            return label
+    return None
+
+
+def system_fits(platform, jeu):
+    """False only when BOTH sides state a system and they disagree.
+
+    ScreenScraper keeps one record per system, so a record for another system is a
+    different RELEASE of the game — the 2008 PSN port of a 1998 PS1 title, the 2008 Wii
+    Virtual Console edition of a 1993 Genesis one — carrying that release's art, dates
+    and metadata. Refusing it is the discipline `game_era` already follows: an absent
+    statement is not evidence and must never refuse anything, so a PC entry (no system)
+    and a candidate that does not declare its system both pass."""
+    want = systeme_id(platform)
+    got = jeu_system_id(jeu)
+    if not want or not got:
+        return True
+    return want == got
 
 
 def _auth(creds):
