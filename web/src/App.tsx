@@ -6519,7 +6519,18 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                           <td>{s.collection
                             ? <span className="own-pill coll" title={`Owned as part of “${s.collection}”`}>📦 Yes</span>
                             : <span className="dim">—</span>}</td>
-                          <td className="dim">{s.detail || '—'}</td>
+                          {/* A member row's Detail IS its parent compilation, and that
+                              parent is a catalog entry of its own — so it navigates,
+                              like the "also owned on" chips. Reading "owned via X" with
+                              no way to reach X was the gap. `via_collection` carries a
+                              base key for a materialized member and an entry_key for a
+                              synthetic credit row; _resolve_entry accepts either. */}
+                          <td className="dim">{s.via_collection
+                            ? <button type="button" className="coll-parent-link"
+                                title={`View “${s.collection || s.detail}”`}
+                                onClick={() => onNavigate?.(s.via_collection!)}>
+                                📦 {s.detail || s.collection}</button>
+                            : (s.detail || '—')}</td>
                         </tr>
                       ))}
                     </tbody>
