@@ -3707,11 +3707,14 @@ def _ss_match(queries, systems, year=None):
     # `systems[0]` — the question, echoed back as though it were the answer — so a
     # ps1 entry matched to a PlayStation 3 record recorded itself as 'ps1' and the
     # mismatch was unauditable. A match must describe what it found.
+    # ScreenScraper's OWN system id, not one of our labels: a record can be for a
+    # system we have no label for ("PC Windows"), and mapping it back through our table
+    # would turn that into None — i.e. into "it did not say", which is the same fiction
+    # this line exists to remove. The provider's identifier is what it actually told us.
     _cs = ss.jeu_system_id(j)
     return {"provider": "screenscraper", "ss_id": j.get("id"), "name": nm,
             "year": int(yr) if yr and str(yr).isdigit() else None,
-            "system": (ss.system_label(_cs) if _cs else None)
-                      or (systems[0] if systems else None)}
+            "system": str(_cs) if _cs else (systems[0] if systems else None)}
 
 
 def _ss_candidate_score(owned, cand_name, year=None, cand_year=None):

@@ -318,6 +318,49 @@ def main():
     report("I10 a provider match is the same ERA as the game", bad,
            "a remake silently wears its original's art")
 
+    # --------------------------------------------- I11: the match is the right SYSTEM
+    # ScreenScraper keeps one record PER SYSTEM, so the system is part of the identity.
+    # A record for another system is a different RELEASE — the 2008 PSN port of a 1998
+    # PS1 game, the PC Windows build of a 1993 Genesis one — carrying that release's
+    # art, dates and metadata.
+    #
+    # I10 cannot cover this. A re-release usually has a later date, which is how Crash
+    # Bandicoot 3 and Phantasy Star IV were caught — but Shinobi III held a PC Windows
+    # record with NO dates at all, and Soul Reaver held a PC Windows record dated 1999,
+    # the same year as the PS1 release. Both sat under a green era invariant. When the
+    # years agree, only the system disagrees.
+    #
+    # Same discipline as I10: judged only where BOTH sides state a system. An entry
+    # whose platform ScreenScraper has no system for (PC, by design) and a row recorded
+    # before the system was written down are unjudged, not violations.
+    import screenscraper as _ss
+    bad = []
+    _mc = sqlite3.connect("file:%s?mode=ro"
+                          % os.path.join(DATA, "metadata-cache.sqlite"), uri=True)
+    try:
+        rows = _mc.execute(
+            "SELECT norm_key, ss_id, system FROM ss_resolution "
+            "WHERE COALESCE(ss_id,0)>0 AND system IS NOT NULL AND system<>''"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    for nk, sid, sysname in rows:
+        row = g.execute("SELECT platform, canonical_title FROM games WHERE norm_key=?",
+                        (nk,)).fetchone()
+        if not row or not row["platform"]:
+            continue
+        # `system` holds ScreenScraper's own numeric id for rows written since this
+        # was recorded, and one of our labels for anything older or hand-set.
+        want = _ss.systeme_id(row["platform"])
+        got = (int(sysname) if str(sysname).strip().isdigit()
+               else _ss.systeme_id(sysname))
+        if want and got and want != got:
+            bad.append("screenscraper %s — the game is %s, the match is a %s record"
+                       % (nk[:38], row["platform"], sysname))
+    _mc.close()
+    report("I11 a provider match is for the same SYSTEM as the game", bad,
+           "another system's release wears its own art and dates")
+
     m.close()
     g.close()
     print()

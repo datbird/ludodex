@@ -73,8 +73,16 @@ def ensure_tables(con):
         # joining it is the point: until now IGDB had no uniqueness guard, no recorded
         # year and no era invariant, because all three live here.
         have = {r[1] for r in con.execute("PRAGMA table_info(%s)" % table)}
+        # The matched record's SYSTEM, for the same reason as its year and with sharper
+        # teeth. ScreenScraper keeps one record PER SYSTEM, so the system is part of the
+        # identity: a record for another system is a different RELEASE, carrying that
+        # release's art and dates. An ERA test cannot catch it when the years agree —
+        # live, a genesis game held a PC Windows record with no dates at all, and a ps1
+        # game held a PC Windows record dated 1999, the same year as the PS1 release.
+        # Both sat under a green era invariant. Recorded here so the audit is offline.
         for col, decl in ([("name", "TEXT"), ("matched_by", "TEXT"),
-                           ("resolved_at", "INTEGER"), ("year", "INTEGER")]
+                           ("resolved_at", "INTEGER"), ("year", "INTEGER"),
+                           ("system", "TEXT")]
                           + EXTRA_COLUMNS.get(prov, [])):
             if col not in have:
                 con.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, col, decl))
@@ -117,7 +125,7 @@ def holder(con, provider, provider_id, norm_key=None):
 
 
 def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
-           year=None):
+           year=None, system=None):
     """Write an identity (or a miss, with a falsy provider_id). Idempotent.
 
     A SEARCHED id that another game already holds is refused. One provider id is one
@@ -157,13 +165,13 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
     except (TypeError, ValueError):
         yr = None
     con.execute(
-        "INSERT INTO %s(norm_key,%s,name,year,matched_by,resolved_at) "
-        "VALUES(?,?,?,?,?,?) "
+        "INSERT INTO %s(norm_key,%s,name,year,system,matched_by,resolved_at) "
+        "VALUES(?,?,?,?,?,?,?) "
         "ON CONFLICT(norm_key) DO UPDATE SET %s=excluded.%s, name=excluded.name, "
-        "year=excluded.year, matched_by=excluded.matched_by, "
+        "year=excluded.year, system=excluded.system, matched_by=excluded.matched_by, "
         "resolved_at=excluded.resolved_at"
         % (table, idcol, idcol, idcol),
-        (norm_key, pid, name, yr,
+        (norm_key, pid, name, yr, (system or None),
          matched_by if pid else ("collision" if matched_by == "collision" else "none"),
          int(time.time())))
     con.commit()
@@ -197,7 +205,7 @@ def resolve(con, provider, norm_key, title, systems, search, force=False):
         return record(con, provider, norm_key, 0, None, "none")
     pid = hit.get(idcol) or hit.get("id") or 0
     return record(con, provider, norm_key, pid, hit.get("name"), "search",
-                  year=hit.get("year"))
+                  year=hit.get("year"), system=hit.get("system"))
 
 
 def unlinked(con, provider, norm_keys):
