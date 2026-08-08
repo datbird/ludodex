@@ -250,7 +250,22 @@ def _name_anchor_class(nk, names):
     return best
 
 
-def _pick_era_aware(hits, nk, consoles, require_unique=False):
+def is_console_platform(platform):
+    """True when `platform` names real hardware rather than a storefront.
+
+    The era gate used to take its consoles from `source='emulation'` rows only, for a
+    good reason — a store 'xbox'/'pc' ownership row spans every generation and must not
+    year-restrict anything. But `games.platform` can be real hardware with a STORE
+    source: a Sega Genesis Classics or Mega Man Legacy member is bought on Steam and
+    sits at platform 'genesis'. Those are exactly the entries that got a port's identity,
+    because nothing considered them consoles. Hardware is decided by having a
+    GENERATION, so storefront labels and the generation-spanning 'xbox'/'pc' are
+    excluded by the same test that admits 'genesis'."""
+    c = platmap.canon(platform or "")
+    return bool(c) and c in platmap.GEN
+
+
+def _pick_era_aware(hits, nk, consoles, require_unique=False, platform=None):
     """From IGDB `search` hits, pick the best EXACT normalized-title match that is
     era-plausible for `consoles`. Returns (igdb_id, slug) or (0, None).
 
@@ -279,6 +294,24 @@ def _pick_era_aware(hits, nk, consoles, require_unique=False):
     ok = [h for h in exact if _era_ok(consoles, _year_of(h))]
     if not ok:
         return 0, None
+    # PLATFORM FIT. IGDB keeps a record per RELEASE and a port carries the identical
+    # title, so the name cannot separate them — but IGDB is authoritative about which
+    # platforms a game released on, which `entry_fits` already states. The title-level
+    # matcher never asked, so a genesis entry took a 1995 PC port's record and a snes
+    # entry took a 2011 one; `game_era` then read those dates as the GAME's era and made
+    # a wrong-SYSTEM ScreenScraper record look consistent underneath.
+    #
+    # Only where there is evidence on both sides: real hardware on ours (a store label
+    # spans generations and states nothing), and a platform list on theirs.
+    if is_console_platform(platform):
+        stated = [h for h in ok if _cand_platform_canons(h)]
+        fits = [h for h in stated if entry_fits(h, platform)]
+        if fits:
+            ok = fits
+        elif stated and len(stated) == len(ok):
+            # every candidate says which platforms it is for, and none is ours: this is
+            # a different release, and staying unmatched beats adopting it
+            return 0, None
     if require_unique and len(ok) > 1:
         return 0, None
     if consoles and any(console_eras.era(c) for c in consoles):
@@ -483,7 +516,7 @@ def era_reheal(argv):
         try:
             hits = igdb.query(
                 "games",
-                'search "%s"; fields id,name,slug,first_release_date,alternative_names.name; limit 8;'
+                'search "%s"; fields id,name,slug,first_release_date,platforms.name,alternative_names.name; limit 8;'
                 % title, cid, tok)
         except Exception:
             hits = []
@@ -611,9 +644,10 @@ def main(argv):
 
     # ---- worklist: each game's norm_key, title, and a Steam appid if present ----
     lib = sqlite3.connect(LIB)
-    games = {nk: {"title": title, "appid": None, "consoles": set()}
-             for nk, title in lib.execute(
-                 "SELECT norm_key, canonical_title FROM games")}
+    games = {nk: {"title": title, "appid": None, "consoles": set(),
+                  "platform": plat}
+             for nk, title, plat in lib.execute(
+                 "SELECT norm_key, canonical_title, platform FROM games")}
     # Every EMULATION console a norm_key has a ROM on — the era-aware matcher rejects
     # candidates whose release year is impossible for ALL of them (an Apple II ROM
     # can't be a 2010 game). ONLY emulation sources feed this: console_eras is keyed by
@@ -625,6 +659,14 @@ def main(argv):
             "ON s.game_id=g.id WHERE s.source='emulation'"):
         if nk in games and plat:
             games[nk]["consoles"].add(plat)
+    # ...and the ENTRY's own platform when that is real hardware, whoever sold it. A
+    # Sega Genesis Classics member is bought on Steam and sits at platform 'genesis':
+    # real hardware, storefront source, and until now no console at all — which is why
+    # nothing gated it and it took a 1995 PC port's identity. Storefront labels and the
+    # generation-spanning 'xbox'/'pc' are still excluded (is_console_platform).
+    for nk, g in games.items():
+        if is_console_platform(g.get("platform")):
+            g["consoles"].add(g["platform"])
     for nk, sid in lib.execute(
             "SELECT g.norm_key, s.source_id FROM games g JOIN sources s "
             "ON s.game_id=g.id WHERE s.source='steam'"):
@@ -750,7 +792,8 @@ def main(argv):
         # Wonderland' vs. the 2010 film game). A genuine miss stays unmatched (keeps its
         # filename title) rather than adopting a wrong game. (User decisions 2026-07-15/16.)
         iid, slug = _pick_era_aware(hits, nk, games[nk]["consoles"],
-                                    require_unique=bool(games[nk]["appid"]))
+                                    require_unique=bool(games[nk]["appid"]),
+                                    platform=games[nk].get("platform"))
         con.execute("INSERT OR REPLACE INTO igdb_resolution"
                     "(norm_key,igdb_id,slug,matched_by,resolved_at) "
                     "VALUES(?,?,?,?,?)",
