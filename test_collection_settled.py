@@ -93,6 +93,18 @@ def main():
     check("the settled collection is stripped from the payload",
           rows and '"collection": null' in rows[0][2].replace(" ", " "))
 
+    # A manual VETO is the other half: the entry is deliberately NOT recorded, so
+    # `get_collection` is None and the suppression above cannot see it. Without this
+    # the user's removal is undone by the next scan proposing the bundle again.
+    compilations.set_collection(D, "retro game crunch", "Retro Game Crunch",
+                                [{"title": "BrainShatter"}], origin="ai")
+    compilations.clear_collection(D, "retro game crunch", origin="manual")
+    ctx4 = {"norm_key": "retro game crunch", "title": "Retro Game Crunch",
+            "match": None, "missing": []}
+    kind4 = aimeta.store_finding(1, ctx4, coll_result(
+        "Retro Game Crunch", ["BrainShatter", "Gauntlet of Fools"]))
+    check("a manually vetoed collection is not proposed either", kind4 is None)
+
     print("\n  %d/%d passed" % (sum(1 for _, c in PASS if c), len(PASS)))
 
 

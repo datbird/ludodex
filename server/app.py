@@ -2354,7 +2354,11 @@ def collection_set(coll_key: str, body: dict = Body(...)):
 
 @app.delete("/api/collections/{coll_key:path}")
 def collection_delete(coll_key: str):
-    compilations.clear_collection(DATA, _split_entry_key(coll_key)[0])
+    # origin='manual': this endpoint IS the user saying so, and the removal has to
+    # outlive the next scan — otherwise auto-detection re-nominates the same bundle.
+    compilations.clear_collection(DATA, _split_entry_key(coll_key)[0],
+                                  reason="removed in the library",
+                                  origin="manual")
     # deleting must also remove the members it materialized — otherwise phantom
     # `state='have'` entries linger, counted as owned, until a full rebuild
     _materialize_collection_members()

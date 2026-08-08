@@ -457,7 +457,12 @@ def store_finding(run_id, ctx, result, model=""):
     # already had, every run. `_collection_candidates` skips `known` keys — this is
     # the same rule on the other onramp. The model is not deterministic, so a
     # re-proposal is not a no-op: it is a chance to lose members that were right.
-    if is_coll and compilations.get_collection(DATA, ctx["norm_key"]):
+    # A manual VETO is the same decision with the opposite sign, and it needs saying
+    # separately: a vetoed entry is deliberately NOT recorded, so `get_collection` is
+    # None and the check above cannot see it. Without this the user's removal survives
+    # exactly until the next scan re-proposes the bundle.
+    if is_coll and (compilations.get_collection(DATA, ctx["norm_key"])
+                    or compilations.vetoed(DATA, ctx["norm_key"])):
         is_coll = False
     actionable = bool(attrs) or status_m in ("wrong", "unmatched", "unsure") or is_coll
     if not actionable:

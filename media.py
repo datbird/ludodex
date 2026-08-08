@@ -116,7 +116,12 @@ def derived_dims(ref):
     return (None, None)
 
 
-def looks_padded(path, bands=9, edge_ratio=6.0):
+# Mean edge energy below which a band counts as DEAD (blurred padding, no detail).
+# Absolute on purpose — see the reasoning in `looks_padded`.
+DEAD_BAND_ENERGY = 5.0
+
+
+def looks_padded(path, bands=9):
     """True when an image is a LETTERBOXED PASTE — real content in a central band,
     blurred/flat padding above and below.
 
@@ -159,8 +164,25 @@ def looks_padded(path, bands=9, edge_ratio=6.0):
         # A CONTIGUOUS RUN of dead bands is the tell, not low energy on its own.
         # Authored art can have one quiet edge (a plain border, a dark sky); measured
         # samples show a real cover bottoming out for at most ~3 of 9 bands, while a
-        # padded paste goes flat for 4+ consecutive bands at roughly a quarter of peak.
-        dead = max(4.0, peak * 0.25)
+        # padded paste goes flat for 4+ consecutive bands.
+        #
+        # The line is ABSOLUTE, not a fraction of `peak`. It used to be
+        # `max(4.0, peak * 0.25)`, and `peak` is an outlier: one band holding a
+        # high-contrast title wordmark drags the line above the rest of the artwork, so
+        # dark box art reads as padding end to end. Live 2026-08-07, Arx Fatalis
+        # returned filler=1 for ALL THREE candidates — the real paste and both authored
+        # covers — which makes the term constant, so ranking fell through to resolution
+        # and Steam's 600x900 letterboxed paste beat a 300x450 authored cover on size.
+        # The paste was caught only by accident, being blurred enough to hit the floor.
+        #
+        # Padding is BLURRED, so its absolute high-frequency energy is near zero. That
+        # is a property of the padding, not of how contrasty the rest of the image is,
+        # so the line must not move when the artwork gets brighter. Measured over all
+        # 5,245 live cover files, every value in 4.5..7.0 keeps all known pastes and
+        # clears all known authored covers; 5.0 sits mid-plateau rather than on an edge.
+        # Below ~4.5 the lighter-blurred pastes (Shadowrun Dragonfall, Super Lucky's
+        # Tale — padding at 2.2..4.1) start being missed.
+        dead = DEAD_BAND_ENERGY
         run = best = 0
         for e in energy:
             run = run + 1 if e < dead else 0
