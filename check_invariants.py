@@ -355,8 +355,11 @@ def main():
         got = (int(sysname) if str(sysname).strip().isdigit()
                else _ss.systeme_id(sysname))
         if want and got and want != got:
+            # name the system rather than print its id — "a 21 record" tells nobody
+            # that a Genesis entry is wearing Game Gear art
+            label = _ss.system_label(got) or ("system %s" % got)
             bad.append("screenscraper %s — the game is %s, the match is a %s record"
-                       % (nk[:38], row["platform"], sysname))
+                       % (nk[:38], row["platform"], label))
     _mc.close()
     report("I11 a provider match is for the same SYSTEM as the game", bad,
            "another system's release wears its own art and dates")
