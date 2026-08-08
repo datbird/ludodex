@@ -7865,7 +7865,8 @@ def game_detail(norm_key: str):
             "ownership": ownership.list_for(DATA, base),  # manual physical/want facts
             "framing": framing.get_all(DATA, base),       # per-kind image position+zoom
             "hero_pref": framing.get_hero(DATA, base),     # hero override (marquee|<kind>|None)
-            "collection": compilations.get_collection(DATA, base),  # if THIS entry is a compilation
+            # if THIS entry is a compilation — members carry the entry each one opens
+            "collection": _collection_with_links(con, base),
         }
     finally:
         con.close()
@@ -8948,6 +8949,35 @@ def ops_restore(body: dict = Body(...)):
 # Split on the LAST '@' — a base norm_key never contains '@', a platform never does.
 # A bare key (no '@') is treated as a base norm_key with no platform preference, so
 # old callers / exporters keep working.
+def _collection_with_links(con, base):
+    """The collection rooted at `base`, with each member resolved to the catalog entry
+    it opens — `entry_key`, or None when nothing in the library matches.
+
+    A member list is the AI's account of what a bundle CONTAINS, which is not the same
+    as what the user HAS: a bundle can name a game that was never materialized (not
+    owned, or outside the library entirely). Those members have no entry to open, so
+    the panel must be able to tell them apart rather than offering a link that 404s.
+
+    Members join the catalog on the normalized title — `base_key`, the same key
+    `materialize_members` stamps — so a per-platform split resolves to one of its
+    entries instead of nothing."""
+    coll = compilations.get_collection(DATA, base)
+    if not coll or not coll.get("members"):
+        return coll
+    keys = [m.get("member_key") for m in coll["members"] if m.get("member_key")]
+    found = {}
+    if keys:
+        col = "base_key" if _has_col(con, "games", "base_key") else "norm_key"
+        ekc = "entry_key" if _has_col(con, "games", "entry_key") else "norm_key"
+        ph = ",".join("?" * len(keys))
+        for r in con.execute("SELECT %s k, %s e FROM games WHERE %s IN (%s)"
+                             % (col, ekc, col, ph), keys):
+            found.setdefault(r["k"], r["e"])       # first entry wins for a split title
+    for m in coll["members"]:
+        m["entry_key"] = found.get(m.get("member_key"))
+    return coll
+
+
 def _split_entry_key(key):
     if "@" in key:
         b, p = key.rsplit("@", 1)

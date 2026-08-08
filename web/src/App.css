@@ -4379,3 +4379,13 @@ img.ms-icon { display: block; object-fit: contain; flex: 0 0 auto; }
 }
 .coll-parent-link:hover { text-decoration: underline; text-underline-offset: 2px; }
 .coll-parent-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Collection members that exist in the library open their own entry; the ones that
+   don't stay plain text, so the row itself says whether there is anywhere to go. */
+.coll-m-open {
+  background: none; border: none; padding: 0; font: inherit; cursor: pointer;
+  color: var(--text-h); text-align: left;
+}
+.coll-m-open:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.coll-m-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.coll-members li.coll-m-link:hover { border-color: var(--accent); }

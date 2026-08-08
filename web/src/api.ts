@@ -99,7 +99,9 @@ export interface Collection {
   coll_key: string
   name: string
   origin: string
-  members: { member_key: string; member_title: string; member_platform: string; member_year: number | null; origin: string }[]
+  // entry_key: the catalog entry this member opens, or null when the library has no
+  // matching entry (a bundle can name a game that was never materialized)
+  members: { member_key: string; member_title: string; member_platform: string; member_year: number | null; origin: string; entry_key?: string | null }[]
 }
 
 export interface OwnershipFact {

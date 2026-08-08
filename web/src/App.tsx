@@ -6561,9 +6561,19 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                         }}>Remove collection</button>
                     </h3>
                     <ul className="coll-members">
+                      {/* A member that exists in the library is an entry of its own, so
+                          it navigates — the same round trip the member's own Detail cell
+                          now makes back to here. Only the ones the server resolved to an
+                          entry_key: a bundle can name a game that was never materialized,
+                          and a link to that would 404. */}
                       {d.collection.members.map((m) => (
-                        <li key={m.member_key}>
-                          <span className="coll-m-title">{m.member_title}</span>
+                        <li key={m.member_key} className={m.entry_key ? 'coll-m-link' : ''}>
+                          {m.entry_key
+                            ? <button type="button" className="coll-m-title coll-m-open"
+                                title={`View ${m.member_title}`}
+                                onClick={() => onNavigate?.(m.entry_key!)}>{m.member_title}</button>
+                            : <span className="coll-m-title" title="not in your library">
+                                {m.member_title}</span>}
                           {m.member_platform && <span className="dim">{m.member_platform}</span>}
                           {m.member_year != null && <span className="dim">({m.member_year})</span>}
                         </li>
