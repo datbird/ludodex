@@ -276,6 +276,47 @@ def stamp_measured(con, r, sha, repo=None):
                 "WHERE id=?", (sha, w, h, fill, r["id"]))
 
 
+def remeasure(con, kinds=None, progress=False):
+    """Re-derive width/height/filler from bytes ALREADY in the repo. Returns the number
+    of rows re-derived.
+
+    `materialize()` only revisits rows whose sha1 is NULL — deliberately, so a re-run
+    costs no network. The consequence is that a row measured once keeps its verdict
+    forever, which is right while the rule is right and wrong the moment it is fixed:
+    correcting `looks_padded` changed nothing for the 5,245 covers already stamped,
+    because no path ever looked at them again.
+
+    The bytes on disk are the source of truth, so this re-derives from them. No network
+    and no deletions: a row whose file is absent keeps whatever it has. Callers should
+    `select()` afterwards — the verdict is an input to ranking."""
+    scalar = [k for k in media.SCALAR_KINDS
+              if (not kinds or k in kinds) and media.KIND_ORIENT.get(k) == "portrait"]
+    if not scalar:
+        return 0
+    con.row_factory = sqlite3.Row
+    repo = repo_dir()
+    rows = con.execute(
+        "SELECT id, kind, ext, sha1 FROM media WHERE sha1 IS NOT NULL AND kind IN (%s)"
+        % ",".join("'%s'" % k for k in scalar)).fetchall()
+    n = 0
+    for r in rows:
+        ext = (r["ext"] or "jpg").split("?")[0]
+        path = os.path.join(repo, "%s.%s" % (r["sha1"], ext))
+        if not os.path.exists(path):
+            continue                    # nothing local to re-derive from
+        w, h = _measure(path)
+        if w is None:
+            continue                    # unreadable stays as it was, never "clean"
+        fill = 1 if media.looks_padded(path) else 0
+        con.execute("UPDATE media SET width=?, height=?, filler=? WHERE id=?",
+                    (w, h, fill, r["id"]))
+        n += 1
+        if progress and n % 500 == 0:
+            print("media_choose: re-measured %d" % n, file=sys.stderr)
+    con.commit()
+    return n
+
+
 def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
     """Download/copy assets lacking sha1 into the repo; demote dead refs and
     re-pick. Default = only the chosen asset per (game, kind); all_refs=True
@@ -392,6 +433,12 @@ def main(argv):
     kinds = (argv[argv.index("--kinds") + 1].split(",")
              if "--kinds" in argv else None)
     con = con_index()
+    # --remeasure re-derives dimensions and the filler verdict from bytes already in
+    # the repo, BEFORE selecting — for when the rule that produced them has changed.
+    if "--remeasure" in argv:
+        rm = remeasure(con, kinds=kinds, progress="--progress" in argv)
+        print("media_choose: re-measured %d assets from local bytes" % rm,
+              file=sys.stderr)
     n = select(con, kinds=kinds)
     print("media_choose: selected %d chosen assets" % n, file=sys.stderr)
     if "--materialize" in argv:
