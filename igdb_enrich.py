@@ -17,6 +17,7 @@ Self-healing: --all ignores the caches and redoes everything.
 """
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -252,6 +253,27 @@ def _name_anchor_class(nk, names):
         if order[cls] > order[best]:
             best = cls
     return best
+
+
+_STORE_YEAR = re.compile(r"^(.*?)\s*\((19[5-9]\d|20[0-4]\d)\)\s*$")
+
+
+def split_store_year(title):
+    """('Mass Effect 2 (2021)') -> ('Mass Effect 2', 2021). No suffix -> (title, None).
+
+    Stores name remakes to tell them apart, and that parenthetical is the STORE's
+    disambiguator, not part of the game's name — IGDB has no record called "Mass Effect
+    2 (2021)", so searching with it returned zero candidates and a game IGDB knows well
+    resolved to nothing. `norm()` already strips it, which is why only the query string
+    was affected and the failure showed up nowhere but a from-scratch resolve.
+
+    The year is returned rather than discarded: it states WHICH release the store means,
+    which is the one fact that separates a remake from its original.
+
+    Bounded to plausible release years so "Football Manager 2024" (a year in the NAME,
+    not a suffix) and "Doom (Classic)" are left alone."""
+    m = _STORE_YEAR.match(title or "")
+    return (m.group(1), int(m.group(2))) if m else (title or "", None)
 
 
 def is_console_platform(platform):
@@ -777,7 +799,10 @@ def main(argv):
     if limit is not None:
         remaining = remaining[:limit]
     for n, nk in enumerate(remaining, 1):
-        title = games[nk]["title"].replace('"', " ").strip()
+        # The store's disambiguating year is not part of the game's NAME — IGDB has no
+        # record called "Mass Effect 2 (2021)" and answered that search with nothing.
+        title, _store_year = split_store_year(games[nk]["title"])
+        title = title.replace('"', " ").strip()
         iid, slug = 0, None
         try:
             hits = igdb.query(
