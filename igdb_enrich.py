@@ -66,11 +66,15 @@ def _commit(con, tries=6):
             time.sleep(1.5 * (i + 1))
 
 
-def token(con, cid, csec):
+def token(con, cid, csec, force=False):
+    """The cached OAuth token, minting a new one when it is missing, expired, or
+    `force`d. `force` is what a 401 uses: the cache trusts an expiry Twitch can
+    invalidate early, so a rejected token must be replaceable before its clock runs
+    out — otherwise every IGDB call fails until an expiry up to 60 days away."""
     now = int(time.time())
     row = con.execute("SELECT token,expires_at FROM igdb_token WHERE client_id=?",
                       (cid,)).fetchone()
-    if row and row[1] - 60 > now:
+    if row and row[1] - 60 > now and not force:
         return row[0]
     tok, ttl = igdb.get_token(cid, csec)
     con.execute("INSERT INTO igdb_token(client_id,token,expires_at) VALUES(?,?,?) "
@@ -639,6 +643,12 @@ def main(argv):
 
     con = cache_con()
     tok = token(con, cid, csec)
+
+    # A cached token can be rejected long before it expires; without a way to replace it
+    # every call below fails until an expiry up to 60 days out. See igdb.query.
+    def _reauth(_cid):
+        return token(con, _cid, csec, force=True)
+
     ttl = int(config.get("igdb_meta_ttl_days") or 30) * 86400
     now = int(time.time())
 
@@ -747,7 +757,8 @@ def main(argv):
         uids = ",".join('"%s"' % a for a in batch)
         body = ("fields game,uid; where external_game_source = %d "
                 "& uid = (%s); limit 500;" % (igdb.STEAM_SOURCE, uids))
-        for row in igdb.query("external_games", body, cid, tok):
+        for row in igdb.query("external_games", body, cid, tok,
+                              reauth=_reauth):
             nk, gid = appid_map.get(str(row.get("uid"))), row.get("game")
             if nk and gid:
                 con.execute(
@@ -775,7 +786,7 @@ def main(argv):
                 # every candidate looks silent about its platforms and the gate no-ops
                 'search "%s"; fields id,name,slug,first_release_date,platforms.name,'
                 'alternative_names.name; limit 8;'
-                % title, cid, tok)
+                % title, cid, tok, reauth=_reauth)
         except Exception as e:          # one bad title shouldn't abort the run
             # ...but it must not be recorded as an ANSWER either. This used to set
             # hits=[] and fall through to the write below, stamping matched_by='none' —
@@ -822,7 +833,7 @@ def main(argv):
         batch = need[i:i + 200]
         body = ("fields %s; where id = (%s); limit 500;"
                 % (igdb.GAME_FIELDS, ",".join(str(x) for x in batch)))
-        for g in igdb.query("games", body, cid, tok):
+        for g in igdb.query("games", body, cid, tok, reauth=_reauth):
             con.execute("INSERT OR REPLACE INTO igdb_meta"
                         "(igdb_id,payload_json,fetched_at) VALUES(?,?,?)",
                         (g["id"], json.dumps(g, ensure_ascii=False), now))

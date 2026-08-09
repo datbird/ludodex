@@ -121,20 +121,38 @@ def get_token(client_id, client_secret):
     return j["access_token"], int(j.get("expires_in", 3600))
 
 
-def query(endpoint, body, client_id, token, retries=4):
-    """POST an APICalypse query; return the parsed JSON list. Retries 429/5xx."""
+def query(endpoint, body, client_id, token, retries=4, reauth=None):
+    """POST an APICalypse query; return the parsed JSON list. Retries 429/5xx.
+
+    `reauth(client_id) -> new_token` is called ONCE on a 401. The OAuth token is cached
+    against the TTL Twitch reported and reused until that clock runs out — 60 days —
+    and nothing ever asked whether it still WORKS. A token invalidated server-side
+    before it expires then fails every call until an expiry it has not reached: live
+    2026-08-09, a full re-resolve died on its first request while the cached row still
+    had 5,187,755 seconds on it and a fresh mint succeeded immediately. Expiry is a
+    hint; the 401 is the authority.
+
+    Once, deliberately. A second 401 carrying a brand-new token is a real credentials
+    problem and must surface rather than spin."""
     url = "%s/%s" % (API, endpoint)
-    headers = {"Client-ID": client_id, "Authorization": "Bearer " + token,
-               "Accept": "application/json"}
     delay = 1.0
+    reauthed = False
     for attempt in range(retries + 1):
         _throttle()
+        headers = {"Client-ID": client_id, "Authorization": "Bearer " + token,
+                   "Accept": "application/json"}
         req = urllib.request.Request(url, data=body.encode(), headers=headers,
                                      method="POST")
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
+            if e.code == 401 and reauth and not reauthed:
+                fresh = reauth(client_id)
+                if fresh:
+                    token, reauthed = fresh, True
+                    continue
+                raise
             if e.code in (429, 500, 502, 503, 504) and attempt < retries:
                 time.sleep(delay)
                 delay *= 2
