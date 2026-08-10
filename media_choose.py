@@ -81,6 +81,44 @@ def _load_pins():
     return out
 
 
+def _offlang_yield(picked, prefs):
+    """Ids the CONSOLE bucket should stand down on, in favour of the neutral bucket.
+
+    Ranking orders the candidates inside one bucket; it cannot reach across buckets, and
+    the serve resolver takes own-console art before neutral art unconditionally
+    (DESIGN §11.4). So a game whose only shape-valid own-console cover is the Japanese
+    box serves that box, while the English store cover it already holds sits unused —
+    and no ordering term can say otherwise, because the two never meet in one bucket.
+    Live: Castlevania Dracula X served ScreenScraper's 478x864 Japanese SFC box with a
+    600x900 English SteamGridDB cover chosen and idle beside it. `region_rank` was doing
+    its job — it rated that asset WORST of the six — but the US and EU boxes are full
+    box scans including the spine, so they are landscape and `shape_ok` had already
+    disqualified them. Ranking only orders survivors.
+
+    Standing down means electing NOTHING for that console bucket, so the existing
+    COALESCE falls through to neutral. Deliberately not `hidden`: the asset stays
+    visible in the media panel and pinnable, exactly like a demoted pack member.
+
+    Only ever fires when a REPLACEMENT exists, so nothing is emptied — a box_back that
+    exists solely as a Japanese scan keeps serving it. And never over a user PIN, which
+    is the top term in the sort for a reason."""
+    if not prefs:
+        return set()
+    covered = set()          # (norm_key, kind) whose NEUTRAL winner is on-language
+    for (nk, sysv, _gk, kind), (_sk, _id, r, _pin) in picked.items():
+        if not sysv and not medialang.is_off_language(r["meta"], r["provider"], prefs):
+            covered.add((nk, kind))
+    out = set()
+    for (nk, sysv, _gk, kind), (_sk, rid, r, pin) in picked.items():
+        if not sysv or (nk, kind) not in covered:
+            continue
+        if pin != (1 << 30):                     # an explicit user pin outranks this
+            continue
+        if medialang.is_off_language(r["meta"], r["provider"], prefs):
+            out.add(rid)
+    return out
+
+
 def select(con, kinds=None, only=None):
     """Set chosen=1 on the best asset per (norm_key, scalar kind); 0 elsewhere.
     `kinds` restricts the pass to a subset of scalar kinds (non-destructive — other
@@ -132,6 +170,9 @@ def select(con, kinds=None, only=None):
     # Resolved once: a per-row config read would turn selection into thousands of
     # SQLite opens, and the preference cannot change mid-pass anyway.
     _regions = medialang.preferred_regions()
+    # Resolved once, same reasoning: a per-row config read would turn selection into
+    # thousands of SQLite opens, and the preference cannot change mid-pass.
+    _lang_prefs = medialang.preferred_languages()
     # `only` scopes the re-rank to specific norm_keys. Needed because measurement is
     # LAZY: dimensions and the filler verdict are stamped when an asset is first served,
     # which is AFTER the selection that ranked it. Without a cheap way to re-rank one
@@ -273,8 +314,9 @@ def select(con, kinds=None, only=None):
                   dt, band, pr, px, 0 if r["matched"] else 1,
                   0 if r["ref_type"] == "file" else 1, r["id"])
             if key not in picked or sk < picked[key][0]:
-                picked[key] = (sk, r["id"])
-    ids = [i for _, i in picked.values()]
+                picked[key] = (sk, r["id"], r, pin)
+    yielded = _offlang_yield(picked, _lang_prefs)
+    ids = [i for _sk, i, _r, _p in picked.values() if i not in yielded]
     con.executemany("UPDATE media SET chosen=1 WHERE id=?", [(i,) for i in ids])
     con.commit()
     return len(ids)

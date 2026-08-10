@@ -109,6 +109,40 @@ def preferred():
     return out
 
 
+def preferred_languages():
+    """Ordered canonical languages to prefer when CHOOSING art.
+
+    The mirror of `preferred_regions()`, and the direction that was missing. That
+    function already falls back to the language preference on the grounds that "I want
+    English art" and "I want the US/EU release" are one wish said twice — but only one
+    way round: regions had a default and languages had none, so an install that never
+    opened the picker held no language opinion at all, and the ordering term that
+    depends on one silently did nothing.
+
+    Distinct from `preferred()`, which stays empty when unset because the hide/ban
+    FILTER must never act on a preference the user did not express. Choosing between
+    two assets is not the same act as deleting one."""
+    langs = preferred()
+    if langs:
+        return langs
+    out = []
+    for code in preferred_regions():
+        lang = _REGION_LANG.get(code)
+        if lang and lang not in out:
+            out.append(lang)
+    return out
+
+
+def is_off_language(meta, provider=None, prefs=None):
+    """True only when an asset can be pinned to a single language the user did not ask
+    for. Unpinnable art (store art, multi-region, no data) is never off-language."""
+    prefs = preferred_languages() if prefs is None else prefs
+    if not prefs:
+        return False
+    lang = asset_language(meta, provider)
+    return lang is not None and lang not in prefs
+
+
 def mode():
     m = (config.get("media_lang_mode") or "off").lower()
     return m if m in ("off", "hide", "ban") else "off"
