@@ -19,7 +19,8 @@ import type {
   GameRelease, SystemEntry,
 } from './api'
 import { providerColor, providerLabel, providerMark } from './providers'
-import { providerIconPath, providerIconViewBox, providerIconWide, providerIconImage } from './provider-icons'
+import { providerIconPath, providerIconViewBox, providerIconWide, providerIconImage,
+         providerIconRasterWidth, RASTER_ICON_HEIGHT } from './provider-icons'
 import { useReveal, byKey } from './reveal'
 import { sparkleFrom } from './sparkle'
 import { honorReducedMotion, setHonorReducedMotion } from './motion'
@@ -6826,7 +6827,7 @@ function MediaFetchMenu({ nk, kinds, label, onDone }: {
             {provs?.map((p) => {
               const img = providerIconImage(p.provider)
               const icon = img ? null : providerIconPath(p.provider)
-              const wide = icon ? providerIconWide(p.provider) : false
+              const wide = providerIconWide(p.provider)
               const held = Object.entries(p.holds)
               return (
                 <button key={p.provider} className="prov-menu-row mw-row" role="menuitem"
@@ -6837,7 +6838,8 @@ function MediaFetchMenu({ nk, kinds, label, onDone }: {
                     + (wide ? ' wide' : '') + (img ? ' raster' : '')}
                     style={img ? undefined : { background: providerColor(p.provider) }}>
                     {img
-                      ? <img src={img} width="20" height="20" alt="" aria-hidden="true" />
+                      ? <img src={img} width={providerIconRasterWidth(p.provider)}
+                          height={RASTER_ICON_HEIGHT} alt="" aria-hidden="true" />
                       : icon
                         ? <svg viewBox={providerIconViewBox(p.provider)} width={wide ? 36 : 16}
                             height="16" fill="currentColor" aria-hidden="true"><path d={icon} /></svg>
@@ -7011,7 +7013,7 @@ function ProviderLinksMenu({ links }: { links: { provider: string; url: string }
               // logo's identity is its own colour, so it also drops the brand-colour chip.
               const img = providerIconImage(l.provider)
               const icon = img ? null : providerIconPath(l.provider)
-              const wide = icon ? providerIconWide(l.provider) : false
+              const wide = providerIconWide(l.provider)
               return (
                 <a key={l.provider + ':' + l.url} className="prov-menu-row" role="menuitem"
                   href={l.url} target="_blank" rel="noopener noreferrer"
@@ -7020,7 +7022,8 @@ function ProviderLinksMenu({ links }: { links: { provider: string; url: string }
                     + (wide ? ' wide' : '') + (img ? ' raster' : '')}
                     style={img ? undefined : { background: providerColor(l.provider) }}>
                     {img
-                      ? <img src={img} width="20" height="20" alt="" aria-hidden="true" />
+                      ? <img src={img} width={providerIconRasterWidth(l.provider)}
+                          height={RASTER_ICON_HEIGHT} alt="" aria-hidden="true" />
                       : icon
                         ? <svg viewBox={providerIconViewBox(l.provider)} width={wide ? 36 : 16}
                             height="16" fill="currentColor" aria-hidden="true"><path d={icon} /></svg>

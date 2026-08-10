@@ -3781,7 +3781,7 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
   box-shadow: 0 1px 3px rgba(0,0,0,0.35); transition: transform 0.1s ease, filter 0.1s ease; }
 .prov-fav:hover { transform: translateY(-1px); filter: brightness(1.14); }
 .prov-fav:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
-.prov-fav.wide { min-width: 48px; padding: 0 9px; }   /* wide wordmark logos (IGDB) */
+.prov-fav.wide { min-width: 48px; padding: 0 9px; }   /* wide marks (IGDB, SteamGridDB) */
 /* Raster marks carry their own colour, so they get no brand chip — just a faint
    surface so the badge still reads as a button on either theme, and the shadow
    dropped because a glow on a shadowed plate looks smudged. */

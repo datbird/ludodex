@@ -25,18 +25,32 @@ export function providerIconPath(id: string): string | null {
 // as mud. Served from web/public, so nothing is fetched off-site.
 export const PROVIDER_ICON_IMAGE: Record<string, string> = {
   screenscraper: "/providers/screenscraper.png",
+  steamgriddb: "/providers/steamgriddb.png",
 }
 
 export function providerIconImage(id: string): string | null {
   return PROVIDER_ICON_IMAGE[(id || "").toLowerCase()] ?? null
 }
-// Some brand marks are WIDE wordmarks (short full-width bands) that read as mush in
-// a square badge. Crop the viewBox to the glyph's real bounds and render them in a
-// wider badge so the wordmark is legible — a zoom/crop rather than a tiny shrink.
+
+// A raster mark is not necessarily square — SteamGridDB's is a wide stack of grid
+// cards. Its own aspect ratio lives beside the asset so the badge can size it at a
+// fixed height without squashing it into the 20x20 the square marks assume.
+const RASTER_ASPECT: Record<string, number> = {
+  steamgriddb: 500 / 240,
+}
+export const RASTER_ICON_HEIGHT = 20
+export function providerIconRasterWidth(id: string): number {
+  return Math.round(RASTER_ICON_HEIGHT * (RASTER_ASPECT[(id || "").toLowerCase()] ?? 1))
+}
+// Some brand marks are WIDE (short full-width bands) that read as mush in a square
+// badge. They get a wider badge so the mark stays legible — a zoom/crop rather than a
+// tiny shrink. For a GLYPH that also means cropping the viewBox to its real bounds
+// (below); a RASTER mark is already cropped, so it only needs the roomier badge and
+// its own aspect from RASTER_ASPECT.
 export const PROVIDER_ICON_VIEWBOX: Record<string, string> = {
   igdb: '0 6.228 24 11.543',   // the IGDB logo is only this middle band
 }
-const WIDE = new Set(['igdb'])
+const WIDE = new Set(['igdb', 'steamgriddb'])
 export function providerIconViewBox(id: string): string {
   return PROVIDER_ICON_VIEWBOX[(id || '').toLowerCase()] ?? '0 0 24 24'
 }
