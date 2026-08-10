@@ -217,7 +217,13 @@ def select(con, kinds=None, only=None):
         # cover more than five times its area purely on provider order. Banded rather
         # than raw pixels so an unmeasured asset lands in the middle instead of last;
         # `px` still breaks ties INSIDE a band.
-        band = media.res_band(mw, mh)
+        #
+        # The line is PER KIND. With one global line the band was constant for 8 of 13
+        # scalar kinds, and a constant term decides nothing — so `background`, with no
+        # filler verdict either (band_energy is undefined for a landscape canvas), had
+        # NOTHING above provider order: 1,808 of its slots were settled with a larger
+        # candidate sitting unused and no evidence against it.
+        band = media.res_band(mw, mh, r["kind"])
         # REGION sits above the AI verdict for the same reason shape and filler do: it
         # is measured evidence, and measured evidence can prove a paid pick wrong.
         # Contra: Hard Corps had its Japanese box vision-picked while the US box sat

@@ -323,13 +323,59 @@ TEMPLATE_MIN_GAMES = 3
 RES_LARGE, RES_UNKNOWN, RES_SMALL = 0, 1, 2
 _RES_MIN_PX = 250_000          # ~500x500; a 264x352 thumbnail is not a cover
 
+# The surface each kind is DISPLAYED on. "Big enough" is meaningless in the abstract:
+# 460x215 is a perfectly good header and a hopeless full-screen background, and one
+# global line cannot say both. Measured across the live library, that single line was
+# CONSTANT for 8 of 13 scalar kinds — 100% LARGE for background/hero/bezel/mix/box_back,
+# 100% SMALL for header, 97% SMALL for logo — and a term that is constant across every
+# candidate has decided nothing, so the choice fell through to provider order. That is
+# the same defect already fixed once for `filler`; it was still live here.
+#
+# Only kinds with a DEFENSIBLE canonical size are listed. The rest keep the global
+# default rather than have a number invented for them — a wrong line is worse than a
+# blunt one, because it would silently disqualify good art. Steam's header and
+# library_hero sizes are the documented ones already relied on in _DERIVED_DIMS above.
+KIND_TARGET_PX = {
+    "cover":       600 * 900,      # Steam library capsule / SGDB grid standard
+    "header":      460 * 215,      # Steam header.jpg (documented)
+    "hero":       1920 * 620,      # Steam library_hero.jpg (documented)
+    "logo":        640 * 360,      # Steam logo.png (documented)
+    "background": 1920 * 1080,     # fills a screen
+    "bezel":      1920 * 1080,     # overlays a screen
+}
+# `icon` is deliberately ABSENT. It has a canonical size (256x256) and a per-kind line
+# would be easy to write — but a resolution band only means "better" once shape is
+# constrained, and `icon` has no shape rule: KIND_ORIENT cannot express "square", so
+# square is merely tolerated everywhere and never required. Dry-run on the live library,
+# giving icons their own line promoted a 600x300 STRIP into an icon slot on size alone.
+# Bigger is not better for a kind that has not first been told what it should look like.
+# Revisit together with a square constraint, not before.
+# LARGE means "can fill at least half the pixels of the surface it lands on" — below
+# that the asset is being upscaled by more than ~1.4x in each axis.
+#
+# The fraction is the only number here that was chosen rather than looked up, and it is
+# checkable: half of a 600x900 cover is 270,000, within 8% of the 250,000 line that was
+# hand-picked for covers and is known to work. The formula reproduces the one case with
+# a track record instead of re-fitting it, which is the reason to trust it elsewhere.
+_RES_TARGET_FRACTION = 0.5
 
-def res_band(w, h):
-    """LARGE / UNKNOWN / SMALL for the ranking sort. Unknown is never penalised."""
+
+def res_min_px(kind=None):
+    """The LARGE/SMALL line for a kind — its own, or the global default."""
+    target = KIND_TARGET_PX.get(kind or "")
+    return int(target * _RES_TARGET_FRACTION) if target else _RES_MIN_PX
+
+
+def res_band(w, h, kind=None):
+    """LARGE / UNKNOWN / SMALL for the ranking sort. Unknown is never penalised.
+
+    `kind` is optional so an existing caller keeps the global line rather than silently
+    changing meaning; selection passes it, because that is where the comparison is
+    between candidates for one slot with one surface to fill."""
     if not w or not h:
         return RES_UNKNOWN
     try:
-        return RES_LARGE if int(w) * int(h) >= _RES_MIN_PX else RES_SMALL
+        return RES_LARGE if int(w) * int(h) >= res_min_px(kind) else RES_SMALL
     except (TypeError, ValueError):
         return RES_UNKNOWN
 
