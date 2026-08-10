@@ -656,3 +656,55 @@ re-derive, which left `logo` with no way to be backfilled at all.
 **Still open:** the gray zone the hash cannot reach — a themed asset that is a pack of ONE
 in this library. That is the `dedupe_media` pattern (deterministic pass first, AI adjudicates
 only the remainder, verdict durable so a resync re-pays nothing) and it is NOT built.
+
+## Per-kind resolution bands — SHIPPED (2026-08-10)
+
+Audit of what actually DECIDES each contested slot, per kind. `cover` is healthy —
+filler 50%, ai_pick 25%, detail 23%. `background` was decided by **provider order in 90%
+of 2,031 contested slots**, because every image term was inert for it:
+
+| term | why it was silent for `background` |
+|---|---|
+| `shape_ok` | passes anything landscape |
+| `filler` / `detail` | `band_energy` is undefined for `h <= w` — **NULL on all 8,410 chosen landscape assets** |
+| `res_band` | **100% LARGE** — one global 250k line for all 23 kinds |
+
+Attributed every "a larger candidate sits unused" case: `background` returned **1,808
+with NO EVIDENCE, provider order alone**. The same audit showed cover's apparent 1,062
+equivalents were all `filler` correctly demoting Steam's blurred auto-portrait — the
+difference between a kind with evidence and a kind with none.
+
+`res_band` now takes the kind and bands against the surface the asset is displayed on, at
+half its pixels. Only kinds with a defensible canonical size are listed (`cover`, `header`,
+`hero`, `logo`, `background`, `bezel`); the rest keep the global default rather than have a
+number invented for them. The 0.5 fraction is the only chosen value and it is checkable —
+half of a 600x900 cover is 270,000, within 8% of the 250,000 hand-picked for covers, so the
+formula reproduces the one line with a track record. Confirmed: **zero cover picks moved**.
+
+Live: **16 buckets changed, all `background`, all steam -> igdb**, every one promoting a
+full 1920x1080 over a cropped store strip. All 11 invariants hold; suite 55 passed / 0
+failed / 4 skipped. Guard: `test_kind_res_band.py` (20).
+
+**`icon` is deliberately excluded** although it has a canonical size (256x256). A
+resolution band only means "better" once shape is constrained, and `KIND_ORIENT` cannot
+express "square" — square is merely tolerated everywhere, never required. Dry-run, an icon
+line promoted a 600x300 STRIP into an icon slot on size alone.
+
+### Still open, from the same audit
+
+1. **`icon` has no shape rule.** 14 chosen icons are not square (mostly ScreenScraper
+   32x64, plus `operation c` at 600x140). Needs a "square" orientation in the shape
+   vocabulary. None of the 14 has a square alternative, so it changes nothing today and
+   only prevents future drift — and it gates the icon resolution band above.
+2. **`hero` and `header` are still decided by row id** (16 and 19 contested). Their bands
+   are constant because every asset is exactly 1920x620 / 460x215; harmless today, but
+   nothing would catch a genuinely bad one.
+3. **Landscape kinds can never get a `filler` verdict.** `band_energy` bails on `h <= w`.
+   **The obvious mirror does NOT work** — a vertical-band dead-run test flags 395 assets of
+   which **294 are Steam 1920x620 heroes whose dark left/right edges are authored design**
+   (deliberate space for UI overlay text), not padding. Tested and rejected. The *median*
+   half (`detail_density`) would be safe, since a median is robust to authored dark edges
+   and only the dead-RUN structure misfires — but `detail` is consulted only in blind
+   buckets today, so it needs a defined rank for kinds that can never have a filler verdict.
+4. **Nothing checks that a background/screenshot/title_screen IS what it claims.** A
+   screenshot filed as a background is invisible to every current test.
