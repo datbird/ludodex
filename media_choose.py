@@ -55,7 +55,7 @@ def con_index():
     # rather than simply ranking without it.
     _cols = {r[1] for r in con.execute("PRAGMA table_info(media)")}
     for _c, _decl in (("hidden", "INTEGER DEFAULT 0"), ("filler", "INTEGER"),
-                      ("ai_pick", "INTEGER"), ("detail", "REAL")):
+                      ("ai_pick", "INTEGER"), ("detail", "REAL"), ("frame", "TEXT")):
         if _c not in _cols:
             con.execute("ALTER TABLE media ADD COLUMN %s %s" % (_c, _decl))
     con.commit()
@@ -94,6 +94,14 @@ def select(con, kinds=None, only=None):
     # what the serve-time re-rank did: every image viewed wiped that game's picks.
     # Own the requirement here rather than trusting five call sites to remember it.
     con.row_factory = sqlite3.Row
+    # Same reasoning as the row_factory line above, for the same reason: own the
+    # requirement here rather than in every caller. `frame` is younger than most of the
+    # connections that reach this function — con_index() and index_con() heal it, but a
+    # plain sqlite3 handle (five test fixtures, and anything built before the column
+    # existed) does not, and the ranking query below would abort the whole pass AFTER
+    # the chosen=0 reset had already run, leaving those games with no art at all.
+    if "frame" not in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
+        con.execute("ALTER TABLE media ADD COLUMN frame TEXT")
     # The reset must be scoped exactly like the re-rank below, or a scoped run would
     # clear `chosen` for the whole library and only restore it for `only`.
     _where, _wargs = [], []
@@ -130,8 +138,19 @@ def select(con, kinds=None, only=None):
     # game, the pick made while the asset was unmeasured stands forever — a 460x215
     # screenshot keeps the cover slot while eight measured 484x680 covers sit unused,
     # because at ranking time nothing knew their shapes.
+    # TEMPLATE frames, resolved once per pass. Whether a frame is a template is a
+    # property of the WHOLE corpus, so this query is deliberately unscoped: it ignores
+    # `kinds` and `only` and asks the entire index. Scoping it to the rows being ranked
+    # would be the fail-open shape — a re-rank of one game sees its frame exactly once,
+    # concludes "shared by 1 game, not a template", and hands the pack back the slot it
+    # just lost. `chosen` is likewise irrelevant: a pack's members count whether or not
+    # they currently hold a slot.
+    _templates = {row[0] for row in con.execute(
+        "SELECT frame FROM media WHERE frame IS NOT NULL AND COALESCE(hidden,0)=0 "
+        "GROUP BY frame HAVING COUNT(DISTINCT norm_key) >= ?",
+        (media.TEMPLATE_MIN_GAMES,))}
     _q = ("SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key, "
-          "width, height, filler, detail, ai_pick, meta "
+          "width, height, filler, detail, ai_pick, meta, frame "
           "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
           % ",".join("'%s'" % k for k in scalar))
     _args = []
@@ -180,6 +199,12 @@ def select(con, kinds=None, only=None):
         # yield, because the asset isn't Steam's art, it's Steam's placeholder. Only a
         # CONFIRMED filler (measured) is demoted; NULL means unmeasured, never assumed.
         filler = 1 if r["filler"] == 1 else 0
+        # A frame shared with two or more OTHER games is a themed pack's plate, not this
+        # game's art — the same class of evidence as `filler` (measured, about the image
+        # itself), so it sits beside it, above provider priority. DEMOTION, never
+        # exclusion: `continue` here would leave a game whose only asset is a pack member
+        # with no art at all, and the pack art is still the user's to pin, pull and view.
+        template = 1 if (r["frame"] and r["frame"] in _templates) else 0
         px = -(mw * mh) if (mw and mh) else 0        # bigger wins; unknown stays neutral
         # pin first (user authority), then shape, then authored-vs-placeholder, then
         # the durable AI verdict (a paid vision pick must survive re-selects — but it
@@ -205,7 +230,7 @@ def select(con, kinds=None, only=None):
         # Held per bucket rather than reduced on the spot: whether `filler` DISCRIMINATES
         # is a property of the whole candidate set, and cannot be known one row at a time.
         best.setdefault(key, []).append(
-            (r, pin, bad_shape, filler, rrank, band, pr, px))
+            (r, pin, bad_shape, filler, template, rrank, band, pr, px))
 
     picked = {}
     for key, cands in best.items():
@@ -223,12 +248,12 @@ def select(con, kinds=None, only=None):
         # carries detail throughout, low for a blurred paste, and unmoved by one bright
         # band. Ranked above the resolution band, below everything that is real evidence.
         _blind = len(cands) > 1 and all(c[3] == 1 for c in cands)
-        for (r, pin, bad_shape, filler, rrank, band, pr, px) in cands:
+        for (r, pin, bad_shape, filler, template, rrank, band, pr, px) in cands:
             # -detail so more detail sorts first; unmeasured (NULL) must not win by being
             # unknown, so it sorts last within the blind bucket rather than neutral.
             dt = -(r["detail"] or 0.0) if _blind else 0
-            sk = (pin, bad_shape, filler, rrank, 0 if r["ai_pick"] else 1, dt, band,
-                  pr, px, 0 if r["matched"] else 1,
+            sk = (pin, bad_shape, filler, template, rrank, 0 if r["ai_pick"] else 1,
+                  dt, band, pr, px, 0 if r["matched"] else 1,
                   0 if r["ref_type"] == "file" else 1, r["id"])
             if key not in picked or sk < picked[key][0]:
                 picked[key] = (sk, r["id"])
@@ -307,10 +332,14 @@ def stamp_measured(con, r, sha, repo=None):
         # together by select() and a row carrying one without the other would let a
         # blind bucket rank on a value nothing measured
         dens = media.detail_density(path)
+    # The frame signature is stamped for EVERY kind, not just the portrait ones: a
+    # themed pack ships logos, icons, marquees and bezels together, and gating this on
+    # orientation is what left `logo` with no image-fitness evidence of any sort.
+    frame = media.frame_sig(path) if w is not None else None
     con.execute("UPDATE media SET sha1=?, width=COALESCE(?,width), "
                 "height=COALESCE(?,height), filler=COALESCE(?,filler), "
-                "detail=COALESCE(?,detail) WHERE id=?",
-                (sha, w, h, fill, dens, r["id"]))
+                "detail=COALESCE(?,detail), frame=COALESCE(?,frame) WHERE id=?",
+                (sha, w, h, fill, dens, frame, r["id"]))
 
 
 def remeasure(con, kinds=None, progress=False):
@@ -325,9 +354,13 @@ def remeasure(con, kinds=None, progress=False):
 
     The bytes on disk are the source of truth, so this re-derives from them. No network
     and no deletions: a row whose file is absent keeps whatever it has. Callers should
-    `select()` afterwards — the verdict is an input to ranking."""
-    scalar = [k for k in media.SCALAR_KINDS
-              if (not kinds or k in kinds) and media.KIND_ORIENT.get(k) == "portrait"]
+    `select()` afterwards — the verdict is an input to ranking.
+
+    Covers EVERY scalar kind, not only the portrait ones. It was portrait-only while
+    `filler` was the only verdict it could re-derive; the frame signature applies to
+    all of them, and a landscape-only kind like `logo` would otherwise have no way to
+    ever be backfilled."""
+    scalar = [k for k in media.SCALAR_KINDS if not kinds or k in kinds]
     if not scalar:
         return 0
     con.row_factory = sqlite3.Row
@@ -344,9 +377,16 @@ def remeasure(con, kinds=None, progress=False):
         w, h = _measure(path)
         if w is None:
             continue                    # unreadable stays as it was, never "clean"
-        fill = 1 if media.looks_padded(path) else 0
-        con.execute("UPDATE media SET width=?, height=?, filler=?, detail=? "
-                    "WHERE id=?", (w, h, fill, media.detail_density(path), r["id"]))
+        # filler/detail stay portrait-only: `band_energy` is undefined for a landscape
+        # canvas and would stamp a NULL over a real verdict.
+        if media.KIND_ORIENT.get(r["kind"]) == "portrait":
+            con.execute("UPDATE media SET width=?, height=?, filler=?, detail=?, frame=? "
+                        "WHERE id=?", (w, h, 1 if media.looks_padded(path) else 0,
+                                       media.detail_density(path),
+                                       media.frame_sig(path), r["id"]))
+        else:
+            con.execute("UPDATE media SET width=?, height=?, frame=? WHERE id=?",
+                        (w, h, media.frame_sig(path), r["id"]))
         n += 1
         if progress and n % 500 == 0:
             print("media_choose: re-measured %d" % n, file=sys.stderr)

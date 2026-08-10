@@ -105,6 +105,17 @@ def index_con():
     # unmeasured value must never win by being unknown.
     if "detail" not in _cols:
         con.execute("ALTER TABLE media ADD COLUMN detail REAL")
+    # frame: a hash of the image's decorated border band (media.frame_sig). Its only
+    # use is COMPARISON — one frame shared by TEMPLATE_MIN_GAMES or more distinct
+    # norm_keys is a themed community pack's plate, and a plate is not any one of those
+    # games' art, however correct its kind and shape. NULL = no measurable frame (not
+    # yet materialized, unreadable, or a border with no design in it), and NULL never
+    # participates: only a real shared signature can demote anything.
+    if "frame" not in _cols:
+        con.execute("ALTER TABLE media ADD COLUMN frame TEXT")
+    # Outside the guard: media_choose.con_index() heals the same column, so an index
+    # created only on the branch that ADDS it would never exist on the commoner path.
+    con.execute("CREATE INDEX IF NOT EXISTS ix_media_frame ON media(frame)")
     return con
 
 

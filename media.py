@@ -17,6 +17,7 @@ EmuDeck (native install, ES-DE its default frontend). Same structure, different
 root — so one path-configurable provider covers both; register each root as a
 media mount (config.py media-mount add <path> esde).
 """
+import hashlib
 import re
 
 # --------------------------------------------------------------------------- #
@@ -237,6 +238,77 @@ def looks_padded(path, bands=9):
         return best >= (bands // 2)
     except Exception:                       # noqa: BLE001  unreadable / not an image
         return False
+
+
+# --------------------------------------------------------------------------- #
+#  THEMED-PACK ("template") detection.
+#
+#  Community art packs ship one decorated frame and drop each game's name inside it:
+#  a bezel, a neon grid, a shared gradient. Every member is a real image of the right
+#  shape and the right kind, so every geometric test passes — and it is not that
+#  game's art. Live: 43 games shared ONE plate, spanning Civilization, Halo, Contra,
+#  Metro 2033 and Comix Zone.
+#
+#  This is not a judgement about taste and carries no threshold about "how decorated"
+#  an image may be. It is a statement of fact about the corpus: art that is pixel-wise
+#  identical across many DIFFERENT games is not any one of their art. Nothing here
+#  names a provider, a colour or a kind, so the next pack is caught the same way.
+#
+#  WHY THE FRAME'S PIXELS AND NOT ITS SILHOUETTE: the first cut hashed the alpha
+#  channel, which is cheaper and finds the pack — and convicts whole kinds with it.
+#  Every `box_3d` render shares a box outline and every `bezel` shares a bezel
+#  outline, so shape alone flagged 64 perfectly good 3D boxes as a template. A themed
+#  pack shares the frame's COLOURS; a 3D box carries its own art out to the edge.
+#  Hashing what the frame looks like separates them: the box_3d clusters vanish and
+#  the packs stay.
+# --------------------------------------------------------------------------- #
+FRAME_GRID = 32          # signature resolution
+FRAME_INSET = 5          # cells from each edge that make up the frame band
+_FRAME_MIN_CELLS = 4     # distinct quantised colours below which a frame is "flat"
+
+
+def frame_sig(path):
+    """A stable hash of an image's FRAME BAND, or None when it hasn't got one.
+
+    Returns None — never a sentinel string — for anything that must not participate:
+    Pillow absent, unreadable file, or a frame so flat it carries no design (a plain
+    transparent margin, one solid colour). Those would collide with each other by the
+    thousand and manufacture enormous fake "packs", so the absence of a frame has to
+    be the absence of a signature, not a signature meaning absence.
+
+    Composited onto black so transparent corners hash deterministically, and quantised
+    to 3 bits per channel so re-encoding or a resize can't split a pack."""
+    try:
+        from PIL import Image
+    except Exception:                       # noqa: BLE001  Pillow absent
+        return None
+    try:
+        with Image.open(path) as im:
+            rgba = im.convert("RGBA").resize((FRAME_GRID, FRAME_GRID), Image.BILINEAR)
+        flat = Image.new("RGB", (FRAME_GRID, FRAME_GRID), (0, 0, 0))
+        flat.paste(rgba, mask=rgba.split()[-1])
+        px = list(flat.getdata())
+        cells = []
+        for y in range(FRAME_GRID):
+            for x in range(FRAME_GRID):
+                if (FRAME_INSET <= x < FRAME_GRID - FRAME_INSET
+                        and FRAME_INSET <= y < FRAME_GRID - FRAME_INSET):
+                    continue                # the middle is the game's own name/art
+                r, g, b = px[y * FRAME_GRID + x]
+                cells.append((r >> 5, g >> 5, b >> 5))
+        if len(set(cells)) < _FRAME_MIN_CELLS:
+            return None                     # no design in the border: not a frame
+        return hashlib.sha1(str(cells).encode()).hexdigest()[:16]
+    except Exception:                       # noqa: BLE001  unreadable / not an image
+        return None
+
+
+# How many DISTINCT games must share one frame before it is called a template. Two is
+# routinely legitimate — a game and its director's cut, Quake II's two mission packs —
+# so the floor is three. Measured on the live library: at 3 the rule fires on themed
+# logo/icon/marquee packs and on a publisher's shared background (four unrelated
+# 11 bit studios games), and on nothing else.
+TEMPLATE_MIN_GAMES = 3
 
 
 # Measured-resolution BAND. Deliberately a band, not raw pixels, and deliberately
