@@ -765,3 +765,58 @@ this library has MORE materialized art (20,228 assets) than a fresh `chosen`-mod
 would pull, so its template detection has strictly more evidence, not less. Identity was
 deliberately NOT re-resolved — `--all` still drops AI-accepted matches (open item above),
 and no identity rule changed in this work.
+
+## Off-language art: the cross-bucket gap — FIXED (2026-08-10)
+
+Reported live: Castlevania Dracula X (SNES) served ScreenScraper's 478x864 **Japanese**
+SFC box while a 600x900 English SteamGridDB cover sat chosen and idle beside it.
+
+**Both existing mechanisms were working correctly and neither could reach it.**
+
+- `region_rank` rated that Japanese asset **worst of the six** candidates. But
+  ScreenScraper's US and EU boxes for this game are full box scans **including the
+  spine**, so they are landscape and `shape_ok` had already disqualified them from a
+  portrait cover slot. **Ranking only orders survivors** — it cannot rescue a
+  disqualified candidate, so the Japanese front box won its bucket by default.
+- The serve resolver takes own-console art before neutral art unconditionally
+  (DESIGN §11.4). The two assets live in different buckets, so no ordering term inside a
+  bucket can compare them at all.
+- The `media_lang_mode` hide/ban filter would have caught it, but it is `off` and
+  `media_languages` is empty — never configured on this instance.
+
+**Not a regression.** The same pick appears in all four snapshots taken across the frame
+rule, the per-kind bands, and the retroactive pass.
+
+Fix is a **cross-bucket** step, not another ranking term: the console bucket STANDS DOWN
+(elects nothing) when its winner is off-language and the neutral bucket's winner is not,
+and the existing COALESCE falls through by itself. Expressed as `chosen`, which all 14
+own-vs-neutral SQL sites in `server/app.py` already filter on — so they inherit the rule
+instead of each growing a copy of it. I4 counts `chosen` across all buckets for a
+norm_key, so it still passes; I5 only flags >1 per bucket, so it does too.
+
+Live: **6 covers stood down** (Dracula X, Contra III, Mega Man 7 / X / X2 / X3), all now
+serving the English SteamGridDB 600x900. **19 off-language picks KEPT their slot** —
+box_back 7, box_spine 6, marquee 6, all Japanese-only scans with no replacement. Those 19
+are exactly what a plain `media_lang_mode=hide` would have blanked, and the reason this is
+not simply that setting. Chosen 10,966 -> 10,960. All 11 invariants hold; suite 58 passed /
+0 failed / 4 skipped. Guard: `test_offlang_fallback.py` (13).
+
+Added `medialang.preferred_languages()` — the missing mirror of `preferred_regions()`.
+That function already falls back to the language preference on the grounds that "I want
+English art" and "I want the US/EU release" are one wish said twice, but only one way
+round: regions had a default and languages had none, so an install that never opened the
+picker held no language opinion at all. Deliberately distinct from `preferred()`, which
+stays empty when unset because the hide/ban FILTER must not act on a preference the user
+never expressed — choosing between two assets is not the same act as deleting one.
+
+**A dry run predicted 7 and 6 happened, and the code was right.** `ristar`'s logo is
+USER-PINNED to ScreenScraper's `wheel(jp)`, and pins are the top ranking term, so the
+stand-down correctly declined to override it. The dry-run script did not model pins; the
+selector did.
+
+### Found while debugging — worth a look
+
+Media `ref` URLs for ScreenScraper embed the account's **devid, devpassword, ssid and
+sspassword in plaintext**, and those refs are stored in `media.ref`, in `pins.sqlite`, and
+are rendered into the media panel. Anything that exports or shares a pin or an asset
+reference leaks the ScreenScraper credentials with it. Not touched here.
