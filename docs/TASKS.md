@@ -708,3 +708,60 @@ line promoted a 600x300 STRIP into an icon slot on size alone.
    buckets today, so it needs a defined rank for kinds that can never have a filler verdict.
 4. **Nothing checks that a background/screenshot/title_screen IS what it claims.** A
    screenshot filed as a background is invisible to every current test.
+
+## Fitness audit closed out + retroactive pass (2026-08-10)
+
+All four findings from the per-kind audit taken to a decision. Two shipped, one is
+proven impossible with the current metrics, one stays deferred behind the spend rule.
+
+**1. `icon` must be square — SHIPPED.** `KIND_ORIENT` had two values and `shape_ok` merely
+TOLERATED square everywhere, so a kind whose shape genuinely is square had no test at all.
+14 games were serving eleven 32x64 Genesis cartridge END-LABELS, Treasure's PUBLISHER
+wordmark at 600x259, and a 600x140 strip. Looked at by eye before deciding. Per shape_ok's
+existing contract a measured wrong shape is disqualifying, so those 14 lose their icon —
+none had a square alternative. Icons chosen 91 -> 77, non-square among them **0**.
+
+**2. `icon` resolution band — SHIPPED**, unblocked by (1). A size line only means "better"
+once shape is settled. The new test pins that dependency for every entry in
+`KIND_TARGET_PX`, and immediately caught that **`logo` has a size line and no shape rule** —
+a genuine exemption (a wordmark is wide for "SUPER METROID", near-square for an emblem, so
+there is no shape to violate) that was an accident and is now a recorded decision.
+
+**3. Landscape kinds getting a `detail` term — NOT POSSIBLE. Do not retry.**
+The reasoning is seductive: landscape kinds can never have a filler verdict, so
+`background` is constant at all-NULL, and widening `_blind` from "every candidate is a
+paste" to "the term is constant" is just this codebase's own rule applied consistently.
+
+It is wrong. **`detail_density` is edge energy PER PIXEL, so downscaling concentrates it.**
+Resampled to half and quarter size, **8 of 8 live covers scored HIGHER the smaller they
+got, monotonically** (1.88 -> 2.23 -> 3.12). Between two CLEAN candidates the term prefers
+the thumbnail. Dry-run, the widening moved **244 cover picks, every one from a 300x450 to a
+264x352 IGDB thumbnail** — reintroducing precisely the defect `res_band` was added to stop.
+The all-pastes restriction is load-bearing. Guard: `test_detail_scale.py` fails if anyone
+widens it again. (Kept from the attempt: `looks_padded` now actually calls `band_energy`
+instead of recomputing the bands inline — its docstring already claimed they could never
+disagree, and they were two copies.)
+
+**4. "Is this asset what it claims to be" — still open, deliberately.** Needs vision, and
+vision over the whole media corpus is exactly the automatic spend the #1 guardrail exists
+to prevent. The capability already exists as the manual `categorize` area. Same for the
+themed-pack gray zone (a pack of ONE in this library, which the frame hash cannot cluster).
+
+### Retroactive pass
+
+`media_choose.py --remeasure` re-derived every verdict from the bytes on disk — 20,209
+assets — then re-selected. **Result: 14 icon slots removed, 0 new slots, 0 picks changed
+within a slot.** Exactly what the dry runs predicted, and the earlier per-kind band and
+frame passes had already landed their 16 and 48.
+
+State after: chosen 10,966. **0 chosen assets with a known-wrong shape** (of 10,956
+measured), **0 chosen template members**, 0 non-square icons. All 11 invariants hold;
+suite 57 passed / 0 failed / 4 skipped. Backup: `ludodex-retro-backup-20260810`.
+
+**Where the library can still differ from a fresh ingest:** only 3 chosen assets have no
+bytes and 10 are unmeasured — no rule can have judged those. Everything else has been
+re-derived from bytes, so the media selection IS what a fresh ingest would produce. Note
+this library has MORE materialized art (20,228 assets) than a fresh `chosen`-mode ingest
+would pull, so its template detection has strictly more evidence, not less. Identity was
+deliberately NOT re-resolved — `--all` still drops AI-accepted matches (open item above),
+and no identity rule changed in this work.
