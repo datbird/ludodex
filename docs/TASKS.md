@@ -615,3 +615,44 @@ Suite 42 passed / 0 failed / 4 skipped.
 `Killing Floor Mod: Defence Alliance 2` is in the excluded 27. That is the pre-existing
 rule, not new behaviour — but it is now the difference between scanned and not, so it is
 worth a look if a real mod should be enriched.
+
+## Themed art packs — RESOLVED (2026-08-10)
+
+A community pack ships one decorated plate and drops each game's name inside it. Live,
+one plate was serving **43 games at once** (Civilization, Halo, Contra 3, Metro 2033,
+Comix Zone, Beyond Oasis) and it won every time on **provider order alone**.
+
+**Why nothing caught it:** `logo` had no image-fitness evidence of ANY kind. `KIND_ORIENT`
+omits it deliberately (orientation genuinely varies) so `shape_ok` never applied, and
+`band_energy` is undefined for a landscape canvas so `filler` and `detail` were **NULL on
+all 2,251 logo rows**. Every tier-1 term was inert; ranking fell straight through to
+`PRIORITY`, where screenscraper sits above steam. The plate was never chosen — it was
+defaulted to.
+
+`media.frame_sig` hashes the border band; `select()` demotes any frame shared by
+`TEMPLATE_MIN_GAMES` (3) or more distinct games, ranked beside `filler`. A statement about
+the corpus, not a judgement about decoration — no provider, colour or kind is named, so the
+next pack is caught the same way. Two games is left alone (a game and its director's cut
+legitimately share art).
+
+**The silhouette version was wrong.** Hashing the alpha channel finds the pack and convicts
+whole kinds with it: every `box_3d` shares a box outline, every `bezel` a bezel outline, so
+shape alone flagged 64 good 3D boxes. A pack shares the frame's COLOURS; a 3D box carries
+its own art to the edge. Frame-pixel hashing drops the box_3d clusters and keeps the packs.
+
+Live result: **147 games' assets flagged, 48 chosen picks changed** (22 logo, 15 background,
+11 marquee), **0 games left without art** — it demotes, never excludes, and pack art stays
+indexed, pullable, viewable and pinnable. Independently caught a publisher template
+background shared by four unrelated 11 bit studios games. All 11 invariants hold; suite
+54 passed / 0 failed / 4 skipped. Guard: `test_template_frames.py` (12).
+
+**Backfill is not automatic.** `frame` populates at materialize time, so an existing index
+needs `media_choose.py --remeasure` once — and it MUST be run with `-e LUDODEX_MEDIA=/media`
+or `repo_dir()` resolves to `/data/media` and two-thirds of the repo is silently skipped
+(6,660 of 20,381 stamped on the first attempt). `remeasure()` now covers every scalar kind,
+not only portrait ones — it was portrait-only while `filler` was the only verdict it could
+re-derive, which left `logo` with no way to be backfilled at all.
+
+**Still open:** the gray zone the hash cannot reach — a themed asset that is a pack of ONE
+in this library. That is the `dedupe_media` pattern (deterministic pass first, AI adjudicates
+only the remainder, verdict durable so a resync re-pays nothing) and it is NOT built.
