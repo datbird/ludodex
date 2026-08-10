@@ -253,6 +253,17 @@ def select(con, kinds=None, only=None):
         # DETAIL DENSITY (median band energy) breaks the tie instead: high for art that
         # carries detail throughout, low for a blurred paste, and unmoved by one bright
         # band. Ranked above the resolution band, below everything that is real evidence.
+        #
+        # ALL PASTES, not merely "constant" — and that restriction is load-bearing, not
+        # an oversight. Widening it to "the term fails to discriminate" reads like the
+        # same principle applied consistently, and it is wrong: `detail_density` is edge
+        # energy PER PIXEL, so a downscaled copy of one image scores HIGHER than the
+        # original (measured: 8 of 8 covers, monotonically, halving size ~+40%). Between
+        # two CLEAN candidates it therefore prefers the thumbnail. Dry-run on the live
+        # library, that widening moved 244 cover picks, every one from a 300x450 to a
+        # 264x352 IGDB thumbnail — reintroducing precisely the defect `res_band` was
+        # added to stop. Detail is only meaningful where the difference it reads dwarfs
+        # the scaling bias, which is the all-pastes case and nothing else.
         _blind = len(cands) > 1 and all(c[3] == 1 for c in cands)
         for (r, pin, bad_shape, filler, template, rrank, band, pr, px) in cands:
             # -detail so more detail sorts first; unmeasured (NULL) must not win by being
@@ -336,7 +347,8 @@ def stamp_measured(con, r, sha, repo=None):
         fill = 1 if media.looks_padded(path) else 0
         # written with the filler verdict, never apart from it: the two are read
         # together by select() and a row carrying one without the other would let a
-        # blind bucket rank on a value nothing measured
+        # blind bucket rank on a value nothing measured. Both stay portrait-only —
+        # `detail_density` is not scale-invariant and cannot be a general tiebreak.
         dens = media.detail_density(path)
     # The frame signature is stamped for EVERY kind, not just the portrait ones: a
     # themed pack ships logos, icons, marquees and bezels together, and gating this on
@@ -383,16 +395,18 @@ def remeasure(con, kinds=None, progress=False):
         w, h = _measure(path)
         if w is None:
             continue                    # unreadable stays as it was, never "clean"
-        # filler/detail stay portrait-only: `band_energy` is undefined for a landscape
-        # canvas and would stamp a NULL over a real verdict.
-        if media.KIND_ORIENT.get(r["kind"]) == "portrait":
-            con.execute("UPDATE media SET width=?, height=?, filler=?, detail=?, frame=? "
-                        "WHERE id=?", (w, h, 1 if media.looks_padded(path) else 0,
-                                       media.detail_density(path),
-                                       media.frame_sig(path), r["id"]))
-        else:
-            con.execute("UPDATE media SET width=?, height=?, frame=? WHERE id=?",
-                        (w, h, media.frame_sig(path), r["id"]))
+        # filler and detail stay portrait-only (band_energy is undefined for a landscape
+        # canvas, and detail is not scale-invariant anyway); `frame` is measured for
+        # every kind, which is why this pass had to widen beyond portrait at all.
+        # COALESCE so a landscape row's NULL never overwrites a real verdict.
+        portrait = media.KIND_ORIENT.get(r["kind"]) == "portrait"
+        fill = dens = None
+        if portrait:
+            fill = 1 if media.looks_padded(path) else 0
+            dens = media.detail_density(path)
+        con.execute("UPDATE media SET width=?, height=?, frame=?, "
+                    "filler=COALESCE(?,filler), detail=COALESCE(?,detail) WHERE id=?",
+                    (w, h, media.frame_sig(path), fill, dens, r["id"]))
         n += 1
         if progress and n % 500 == 0:
             print("media_choose: re-measured %d" % n, file=sys.stderr)

@@ -70,14 +70,27 @@ def main():
           and media.res_band(264, 352) == media.RES_SMALL)
 
     print()
-    print("4. icon is deliberately NOT listed")
-    # A resolution band only means "better" once shape is constrained, and KIND_ORIENT
-    # cannot express "square". Dry-run live, an icon line promoted a 600x300 STRIP into
-    # an icon slot on size alone.
-    check("icon has no per-kind line while it has no shape rule",
-          "icon" not in media.KIND_TARGET_PX)
-    check("...so a 600x300 strip is not LARGE for an icon",
-          media.res_band(600, 300, "icon") == media.RES_SMALL)
+    print("4. a size line is only safe for a kind whose SHAPE is settled")
+    # "Bigger is better" is only true once you know what the thing should look like.
+    # `icon` was held out of this table until KIND_ORIENT could require square: dry-run
+    # without that rule, an icon line promoted a 600x300 STRIP into an icon slot on size
+    # alone. A kind may be exempt only by having NO canonical shape to violate, which
+    # has to be a decision someone made rather than a gap nobody noticed — so new
+    # entries fail here until they are classified.
+    SHAPE_FREE = {
+        # A clear-logo is a wordmark: wide for "SUPER METROID", near-square for an
+        # emblem. There is no shape to enforce, so there is none to violate, and
+        # nothing wrong-shaped can be promoted by preferring the larger one.
+        "logo",
+    }
+    for k in media.KIND_TARGET_PX:
+        check("%s: shape rule, or a recorded reason it needs none" % k,
+              k in media.KIND_ORIENT or k in SHAPE_FREE)
+    for k in SHAPE_FREE:
+        check("%s really is absent from KIND_ORIENT (the exemption is real)" % k,
+              k not in media.KIND_ORIENT)
+    check("a 600x300 strip is disqualified as an icon before size is ever consulted",
+          not media.shape_ok("icon", 600, 300))
 
     print()
     print("5. UNKNOWN still sits in the middle, for every kind")

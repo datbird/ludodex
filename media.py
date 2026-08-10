@@ -79,7 +79,16 @@ KIND_ORIENT = {
     "background": "landscape", "hero": "landscape", "header": "landscape",
     "marquee": "landscape", "bezel": "landscape", "arcade_controls": "landscape",
     "title_screen": "landscape", "screenshot": "landscape",
+    # `icon` is the one kind whose shape is a SQUARE, and saying so needs a third value
+    # — before this, square was only ever TOLERATED (see shape_ok) and never required,
+    # so an icon had no shape test at all. Live, that let 14 games serve a non-square
+    # asset as their icon: eleven 32x64 Genesis cartridge end-labels, Treasure's
+    # PUBLISHER wordmark at 600x259, and a 600x140 strip.
+    "icon": "square",
 }
+# How far from 1:1 still counts as square. 0.8..1.25 separates every real icon in the
+# library (256x256, 128x128, …) from every offender (0.50, 2.00, 2.32, 4.29).
+SQUARE_TOLERANCE = 1.25
 
 # Fixed provider sizes we can know WITHOUT fetching. Deriving beats measuring: it costs
 # no network, so shape is testable on the first pass rather than the pass after.
@@ -127,7 +136,10 @@ def band_energy(path, bands=9):
 
     The single measurement both `looks_padded` (is there a dead RUN?) and
     `detail_density` (how much detail overall?) are derived from, so the two can never
-    disagree about what they looked at."""
+    disagree about what they looked at.
+
+    PORTRAIT ONLY, and both of its consumers are limited by that on purpose — see the
+    warnings in their docstrings. Returning None here is what enforces it."""
     try:
         from PIL import Image, ImageFilter
     except Exception:                       # noqa: BLE001  Pillow absent
@@ -160,7 +172,17 @@ def detail_density(path):
     cannot carry it — the mistake the peak-relative filler threshold made.
 
     Live separation: Insurgency paste 2.6 vs authored 4.5/3.0; Arx Fatalis paste 1.6 vs
-    authored 6.8/7.1."""
+    authored 6.8/7.1.
+
+    NOT SCALE-INVARIANT, so it is NOT a general tiebreak. This is edge energy PER PIXEL,
+    and downscaling concentrates it: resampled to half and quarter size, 8 of 8 live
+    covers scored HIGHER the smaller they got, monotonically (e.g. 1.88 -> 2.23 -> 3.12).
+    Used between two clean candidates it therefore prefers the thumbnail — the exact
+    defect `res_band` exists to prevent. Dry-run, widening select()'s `_blind` condition
+    from "every candidate is a paste" to "the term is constant" moved 244 cover picks,
+    every one of them from a 300x450 to a 264x352 IGDB thumbnail on this number alone.
+    It is only safe where the gap it is reading (blurred paste vs authored art) dwarfs
+    the scaling bias, which is why its caller requires ALL candidates to be pastes."""
     e = band_energy(path)
     if not e:
         return None
@@ -185,27 +207,18 @@ def looks_padded(path, bands=9):
 
     Conservative by construction — it only reports True when the contrast is stark, and
     callers must treat it as a DEMOTION signal, never a deletion: an image that is all a
-    game has must still be servable."""
-    try:
-        from PIL import Image, ImageFilter
-    except Exception:                       # noqa: BLE001  Pillow absent
+    game has must still be servable.
+
+    PORTRAIT ONLY, and deliberately so — `band_energy` returns None for a landscape
+    canvas and that is what enforces it. The obvious mirror (vertical bands, to catch a
+    pillarboxed landscape asset) was built and measured, and it does not work: it flags
+    395 live assets of which 294 are Steam's 1920x620 library heroes, whose dark left and
+    right edges are AUTHORED — deliberate space for the UI's overlay text — not padding.
+    A contiguous dead RUN is exactly what that design produces."""
+    energy = band_energy(path, bands)
+    if not energy:
         return False
     try:
-        with Image.open(path) as im:
-            im = im.convert("L")
-            w, h = im.size
-            if h <= w or h < bands * 4:     # only meaningful for portrait canvases
-                return False
-            edges = im.filter(ImageFilter.FIND_EDGES)
-            step = h // bands
-            energy = []
-            for i in range(bands):
-                box = (0, i * step, w, (i + 1) * step if i < bands - 1 else h)
-                band = edges.crop(box)
-                px = list(band.getdata())
-                energy.append(sum(px) / max(1, len(px)))
-        if not energy:
-            return False
         peak = max(energy)
         if peak < 8.0:                      # no real content anywhere — not our case
             return False
@@ -342,14 +355,12 @@ KIND_TARGET_PX = {
     "logo":        640 * 360,      # Steam logo.png (documented)
     "background": 1920 * 1080,     # fills a screen
     "bezel":      1920 * 1080,     # overlays a screen
+    # `icon` was held back until it had a SHAPE rule. A resolution band only means
+    # "better" once shape is constrained: dry-run without one, an icon line promoted a
+    # 600x300 strip into an icon slot on size alone. KIND_ORIENT now requires square,
+    # so bigger is finally a safe thing to prefer here.
+    "icon":        256 * 256,      # common app-icon maximum
 }
-# `icon` is deliberately ABSENT. It has a canonical size (256x256) and a per-kind line
-# would be easy to write — but a resolution band only means "better" once shape is
-# constrained, and `icon` has no shape rule: KIND_ORIENT cannot express "square", so
-# square is merely tolerated everywhere and never required. Dry-run on the live library,
-# giving icons their own line promoted a 600x300 STRIP into an icon slot on size alone.
-# Bigger is not better for a kind that has not first been told what it should look like.
-# Revisit together with a square constraint, not before.
 # LARGE means "can fill at least half the pixels of the surface it lands on" — below
 # that the asset is being upscaled by more than ~1.4x in each axis.
 #
@@ -385,11 +396,20 @@ def shape_ok(kind, w, h):
 
     Unknown dimensions are never penalised — an unmeasured asset must not lose to a
     measured one on that basis alone, or selection would silently prefer whichever
-    provider happened to be measurable. Square is tolerated everywhere (icons, logos
-    and some box art are legitimately square)."""
+    provider happened to be measurable. Square is tolerated everywhere (logos and some
+    box art are legitimately square) — but a kind whose shape IS square must actually
+    be square, which is a requirement the portrait/landscape pair could not express."""
     want = KIND_ORIENT.get(kind)
     if not want:
         return True
+    if want == "square":
+        if not w or not h:
+            return True                     # unmeasured is never penalised
+        try:
+            r = int(w) / int(h)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return True
+        return 1.0 / SQUARE_TOLERANCE <= r <= SQUARE_TOLERANCE
     got = orient_of(w, h)
     if got is None or got == "square":
         return True
