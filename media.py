@@ -316,6 +316,51 @@ def frame_sig(path):
         return None
 
 
+#  THE SECOND SIGNATURE, and why one was not enough.
+#
+#  `frame_sig` hashes the border's PIXELS, which is what stopped it convicting every
+#  box_3d render. It therefore only clusters plates whose border is identical. This pack
+#  ships per-game gradients on its "world" variants: Comix Zone's `wheel-carbon (wor)`
+#  hashed to a frame shared by exactly ONE game and kept the slot, while its own `(jp)`
+#  siblings hashed into clusters of 11 and 12 and were correctly demoted. Same plate, same
+#  oval, different colours, invisible to a colour hash.
+#
+#  The SILHOUETTE catches those — it was the first thing tried and was abandoned because
+#  a shared outline convicts a whole kind (every 3D box is box-shaped). That is only true
+#  for kinds whose shape belongs to the KIND. A clear-logo's shape belongs to the GAME:
+#  it is the wordmark cut out of transparency, so two different games sharing one exactly
+#  means neither is a wordmark. So the rejected signal is correct after all, on exactly
+#  the kinds where the objection does not apply.
+#
+#  Measured live at 32/48/64px: the plate clusters hold at 59 games identically at every
+#  resolution, so this is not a downsampling artefact.
+SILHOUETTE_KINDS = ("logo",)
+SILHOUETTE_GRID = 64
+
+
+def silhouette_sig(path):
+    """Hash of an image's binarised ALPHA outline, or None when it hasn't got one.
+
+    None for a degenerate silhouette — a plain opaque rectangle or a near-empty one —
+    because those collide by the thousand and would manufacture enormous fake packs.
+    Only meaningful for SILHOUETTE_KINDS; see the reasoning above."""
+    try:
+        from PIL import Image
+    except Exception:                       # noqa: BLE001  Pillow absent
+        return None
+    try:
+        with Image.open(path) as im:
+            a = im.convert("RGBA").split()[-1].resize(
+                (SILHOUETTE_GRID, SILHOUETTE_GRID), Image.BILINEAR)
+        bits = "".join("1" if v > 128 else "0" for v in a.getdata())
+        cov = bits.count("1") / float(SILHOUETTE_GRID * SILHOUETTE_GRID)
+        if not (0.05 < cov < 0.95):
+            return None                     # no outline to speak of
+        return hashlib.sha1(bits.encode()).hexdigest()[:16]
+    except Exception:                       # noqa: BLE001  unreadable / not an image
+        return None
+
+
 # How many DISTINCT games must share one frame before it is called a template. Two is
 # routinely legitimate — a game and its director's cut, Quake II's two mission packs —
 # so the floor is three. Measured on the live library: at 3 the rule fires on themed

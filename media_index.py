@@ -113,9 +113,17 @@ def index_con():
     # participates: only a real shared signature can demote anything.
     if "frame" not in _cols:
         con.execute("ALTER TABLE media ADD COLUMN frame TEXT")
+    # sil: a hash of the binarised ALPHA OUTLINE, stamped only for the kinds whose
+    # shape belongs to the GAME rather than to the kind (media.SILHOUETTE_KINDS).
+    # `frame` hashes border COLOURS and so misses a pack that varies its gradient per
+    # game; the outline catches those. NULL where the outline is degenerate (a plain
+    # rectangle, a near-empty canvas) — those would collide by the thousand.
+    if "sil" not in _cols:
+        con.execute("ALTER TABLE media ADD COLUMN sil TEXT")
     # Outside the guard: media_choose.con_index() heals the same column, so an index
     # created only on the branch that ADDS it would never exist on the commoner path.
     con.execute("CREATE INDEX IF NOT EXISTS ix_media_frame ON media(frame)")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_media_sil ON media(sil)")
     return con
 
 

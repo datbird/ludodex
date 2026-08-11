@@ -55,7 +55,8 @@ def con_index():
     # rather than simply ranking without it.
     _cols = {r[1] for r in con.execute("PRAGMA table_info(media)")}
     for _c, _decl in (("hidden", "INTEGER DEFAULT 0"), ("filler", "INTEGER"),
-                      ("ai_pick", "INTEGER"), ("detail", "REAL"), ("frame", "TEXT")):
+                      ("ai_pick", "INTEGER"), ("detail", "REAL"), ("frame", "TEXT"),
+                      ("sil", "TEXT")):
         if _c not in _cols:
             con.execute("ALTER TABLE media ADD COLUMN %s %s" % (_c, _decl))
     con.commit()
@@ -179,8 +180,11 @@ def select(con, kinds=None, only=None):
     # plain sqlite3 handle (five test fixtures, and anything built before the column
     # existed) does not, and the ranking query below would abort the whole pass AFTER
     # the chosen=0 reset had already run, leaving those games with no art at all.
-    if "frame" not in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
+    _have = {r[1] for r in con.execute("PRAGMA table_info(media)")}
+    if "frame" not in _have:
         con.execute("ALTER TABLE media ADD COLUMN frame TEXT")
+    if "sil" not in _have:
+        con.execute("ALTER TABLE media ADD COLUMN sil TEXT")
     # The reset must be scoped exactly like the re-rank below, or a scoped run would
     # clear `chosen` for the whole library and only restore it for `only`.
     _where, _wargs = [], []
@@ -231,8 +235,15 @@ def select(con, kinds=None, only=None):
         "SELECT frame FROM media WHERE frame IS NOT NULL AND COALESCE(hidden,0)=0 "
         "GROUP BY frame HAVING COUNT(DISTINCT norm_key) >= ?",
         (media.TEMPLATE_MIN_GAMES,))}
+    # The SECOND proof of pack membership, for the plates whose border colours vary
+    # per game and so never share a frame hash. Same unscoped-count reasoning.
+    _sils = {row[0] for row in con.execute(
+        "SELECT sil FROM media WHERE sil IS NOT NULL AND COALESCE(hidden,0)=0 "
+        "AND kind IN (%s) GROUP BY sil HAVING COUNT(DISTINCT norm_key) >= ?"
+        % ",".join("'%s'" % k for k in media.SILHOUETTE_KINDS),
+        (media.TEMPLATE_MIN_GAMES,))}
     _q = ("SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key, "
-          "width, height, filler, detail, ai_pick, meta, frame "
+          "width, height, filler, detail, ai_pick, meta, frame, sil "
           "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
           % ",".join("'%s'" % k for k in scalar))
     _args = []
@@ -286,7 +297,8 @@ def select(con, kinds=None, only=None):
         # itself), so it sits beside it, above provider priority. DEMOTION, never
         # exclusion: `continue` here would leave a game whose only asset is a pack member
         # with no art at all, and the pack art is still the user's to pin, pull and view.
-        template = 1 if (r["frame"] and r["frame"] in _templates) else 0
+        template = 1 if ((r["frame"] and r["frame"] in _templates)
+                         or (r["sil"] and r["sil"] in _sils)) else 0
         px = -(mw * mh) if (mw and mh) else 0        # bigger wins; unknown stays neutral
         # pin first (user authority), then shape, then authored-vs-placeholder, then
         # the durable AI verdict (a paid vision pick must survive re-selects — but it
@@ -437,10 +449,14 @@ def stamp_measured(con, r, sha, repo=None):
     # themed pack ships logos, icons, marquees and bezels together, and gating this on
     # orientation is what left `logo` with no image-fitness evidence of any sort.
     frame = media.frame_sig(path) if w is not None else None
+    # the outline is only consulted for SILHOUETTE_KINDS, so only pay for it there
+    sil = (media.silhouette_sig(path)
+           if w is not None and r["kind"] in media.SILHOUETTE_KINDS else None)
     con.execute("UPDATE media SET sha1=?, width=COALESCE(?,width), "
                 "height=COALESCE(?,height), filler=COALESCE(?,filler), "
-                "detail=COALESCE(?,detail), frame=COALESCE(?,frame) WHERE id=?",
-                (sha, w, h, fill, dens, frame, r["id"]))
+                "detail=COALESCE(?,detail), frame=COALESCE(?,frame), "
+                "sil=COALESCE(?,sil) WHERE id=?",
+                (sha, w, h, fill, dens, frame, sil, r["id"]))
 
 
 def remeasure(con, kinds=None, progress=False):
@@ -487,9 +503,11 @@ def remeasure(con, kinds=None, progress=False):
         if portrait:
             fill = 1 if media.looks_padded(path) else 0
             dens = media.detail_density(path)
-        con.execute("UPDATE media SET width=?, height=?, frame=?, "
+        sil = (media.silhouette_sig(path)
+               if r["kind"] in media.SILHOUETTE_KINDS else None)
+        con.execute("UPDATE media SET width=?, height=?, frame=?, sil=COALESCE(?,sil), "
                     "filler=COALESCE(?,filler), detail=COALESCE(?,detail) WHERE id=?",
-                    (w, h, media.frame_sig(path), fill, dens, r["id"]))
+                    (w, h, media.frame_sig(path), sil, fill, dens, r["id"]))
         n += 1
         if progress and n % 500 == 0:
             print("media_choose: re-measured %d" % n, file=sys.stderr)

@@ -155,6 +155,35 @@ def main():
           chosen("pair a") == "screenscraper" and chosen("pair b") == "screenscraper")
 
     print()
+    print("6b. a pack that varies its border COLOUR per game is caught by its OUTLINE")
+    # Comix Zone kept its plate because the pack ships per-game gradients on its
+    # "world" variants: that asset's frame hash was shared by exactly ONE game while
+    # its own Japanese siblings clustered at 11 and 12. The plates are all the same
+    # oval, so the SILHOUETTE clusters them even when the colours do not. Restricted
+    # to kinds whose shape belongs to the GAME (a logo is a wordmark cut out of
+    # transparency); a box_3d is box-shaped by definition, which is why the outline
+    # cannot be used everywhere.
+    con.execute("DELETE FROM media")
+    for g in ("comix zone", "golden axe 2", "gunstar heroes"):
+        con.execute(
+            "INSERT INTO media(norm_key,system,game_key,kind,provider,ref,ref_type,"
+            "matched,width,height,frame,sil) VALUES(?,'genesis','',?,?,?,'url',1,?,?,?,?)",
+            (g, "logo", "screenscraper", "http://x/%s-plate.png" % g, 600, 300,
+             "own-colour-" + g, "SAME-OVAL"))
+        con.execute(
+            "INSERT INTO media(norm_key,system,game_key,kind,provider,ref,ref_type,"
+            "matched,width,height,frame,sil) VALUES(?,'genesis','',?,?,?,'url',1,?,?,?,?)",
+            (g, "logo", "steam", "http://x/%s-word.png" % g, 640, 360,
+             "own-word-" + g, "wordmark-" + g))
+    media_choose.select(con)
+    check("the per-game-coloured plate loses to the real wordmark",
+          chosen("comix zone") == "steam")
+    check("...for every member of the pack",
+          chosen("golden axe 2") == "steam" and chosen("gunstar heroes") == "steam")
+    check("the outline rule is scoped to kinds whose shape is the GAME's",
+          media.SILHOUETTE_KINDS == ("logo",))
+
+    print()
     print("7. the template set is GLOBAL, not scoped to the rows being ranked")
     con.execute("DELETE FROM media")
     for g in ("s a", "s b", "s c"):
