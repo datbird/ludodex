@@ -303,22 +303,51 @@ function NoArt({ title, compact, unmatched }: {
 // keyed to `src` so a src swap re-shows the spinner; the ref-check catches an
 // already-cached image (whose onLoad can fire before React attaches the
 // handler, which would otherwise strand the spinner spinning forever).
-function SpinImg({ src, className, alt = '', lazy, spin = true, onError }: {
+// `box` wraps the pair in its own positioned span. Most images in this app are styled
+// as the <img> ITSELF (.chg-cover, .aim-pm-cover, .hero-logo …) with no positioned
+// wrapper to hang an overlay on, so without this each one would need its own CSS rule
+// and the spinner would otherwise escape to whatever distant ancestor happens to be
+// positioned. `small` picks the 14px spinner: .img-spin is 24px, which is LARGER than
+// a 22x30 .chg-cover, and a spinner bigger than its image reads as breakage.
+function SpinImg({ src, className, alt = '', lazy, spin = true, box, small, onError }: {
   src: string; className?: string; alt?: string; lazy?: boolean; spin?: boolean
-  onError?: () => void
+  box?: boolean; small?: boolean; onError?: () => void
 }) {
   const [loadedSrc, setLoadedSrc] = useState<string | null>(null)
   const done = loadedSrc === src
-  return (
+  const inner = (
     <>
       <img key={src} src={src} className={className} alt={alt}
         loading={lazy ? 'lazy' : undefined}
         ref={(el) => { if (el && el.complete && el.naturalWidth > 0) setLoadedSrc(src) }}
         onLoad={() => setLoadedSrc(src)}
         onError={() => { setLoadedSrc(src); onError?.() }} />
-      {spin && !done && <span className="img-spin" aria-hidden="true" />}
+      {spin && !done && <span className={'img-spin' + (small ? ' sm' : '')} aria-hidden="true" />}
     </>
   )
+  return box ? <span className="spin-box">{inner}</span> : inner
+}
+
+// A <video> has the same problem and none of the same events: it shows a black box
+// while it fetches metadata. Spinner clears on loadedmetadata (the first frame is
+// decodable by then) rather than on full load, which for a preview clip would be far
+// too late to be useful.
+function SpinVideo({ src, className, box, ...rest }: {
+  src: string; className?: string; box?: boolean
+  muted?: boolean; controls?: boolean; autoPlay?: boolean; playsInline?: boolean
+  preload?: string
+}) {
+  const [ready, setReady] = useState(false)
+  const inner = (
+    <>
+      <video key={src} src={src} className={className}
+        ref={(el) => { if (el && el.readyState >= 1) setReady(true) }}
+        onLoadedMetadata={() => setReady(true)}
+        onError={() => setReady(true)} {...rest} />
+      {!ready && <span className="img-spin" aria-hidden="true" />}
+    </>
+  )
+  return box ? <span className="spin-box">{inner}</span> : inner
 }
 
 // Cover image with graceful fallback: if the game has no cover, OR the cover
@@ -2692,7 +2721,7 @@ function AddManual({ sources, systems, onAdded }: {
             <button key={c.igdb_id ?? c.name} type="button"
               className={'add-cand' + (name.trim() === c.name ? ' sel' : '')}
               onClick={() => setName(c.name)}>
-              {c.cover ? <img src={c.cover} alt="" loading="lazy" /> : <span className="add-cand-noart" />}
+              {c.cover ? <SpinImg box small lazy src={c.cover} /> : <span className="add-cand-noart" />}
               <span className="add-cand-info">
                 <span className="add-cand-name">{c.name}</span>
                 <span className="add-cand-meta">{[c.year, c.platforms.slice(0, 4).join(', ')].filter(Boolean).join(' · ')}</span>
@@ -2793,7 +2822,7 @@ function AddFromImage({ sources, systems, onAdded }: {
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => { e.preventDefault(); onFiles(e.dataTransfer.files) }}>
         {urls.length ? <div className="add-thumbs">{urls.map((u, i) =>
-          <img key={i} src={u} alt="" />)}</div>
+          <SpinImg key={i} box small src={u} />)}</div>
           : <span>Click or drop images here (up to 8)</span>}
         <input ref={fileRef} type="file" accept="image/*" multiple hidden
           onChange={(e) => onFiles(e.target.files)} />
@@ -6434,6 +6463,11 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                   <div className="hero-marquee-track"
                        style={{ animationDuration: Math.max(18, marquee.length * 7) + 's' }}>
                     {[...marquee, ...marquee].map((a, i) => (
+                      // deliberately a bare <img>: this track is a continuously
+                      // scrolling decorative loop and each tile lazy-loads as it
+                      // enters view, so per-tile spinners would strobe across the
+                      // hero for as long as it animates. The only image in the app
+                      // where marking the wait is worse than the wait.
                       <img key={i} className="hero-marquee-img" src={a.url} alt="" loading="lazy" />
                     ))}
                   </div>
@@ -6442,7 +6476,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
               <div className="hero-shade" />
               <div className="hero-fg">
                 {logo
-                  ? <img className="hero-logo" src={logo.url} alt={d.title} />
+                  ? <SpinImg box className="hero-logo" src={logo.url} alt={d.title} />
                   : <h2 className="hero-title">{d.title}</h2>}
                 <div className="hero-sub">{d.title}</div>
                 {(d.platform || (d.also_owned_on && d.also_owned_on.length > 0)) && (
@@ -7272,7 +7306,7 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
   // boxes that look like missing art rather than art on its way. `.mko-media` is
   // already positioned, which is what the overlay spinner needs.
   const thumb = (a: MediaAsset) => isVideo(a)
-    ? <video src={a.url} muted preload="metadata" playsInline />
+    ? <SpinVideo src={a.url} muted preload="metadata" playsInline />
     : (a.thumb || a.is_image)
     ? <SpinImg lazy src={a.thumb || a.url} alt={a.kind} />
     : <span className="mko-file">{(a.ext || 'file').toUpperCase()}</span>
@@ -7373,7 +7407,7 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
             {viewing.is_image
               ? <SpinImg src={viewing.url} alt={viewing.kind} />
               : isVideo(viewing)
-              ? <video src={viewing.url} controls autoPlay playsInline />
+              ? <SpinVideo box src={viewing.url} controls autoPlay playsInline />
               : isPdf(viewing)
               ? <iframe className="mko-pdf" src={viewing.url} title={viewing.kind} />
               : <a className="mko-file big" href={viewing.url} target="_blank" rel="noreferrer">
@@ -7444,7 +7478,7 @@ function MediaKindCard({ nk, kind, assets, onChange, frames, onFrame }: {
           {userAssets.map((a) => (
             <span key={a.id} className="am-thumb">
               {isVideo(a)
-                ? <video src={a.url} muted controls preload="metadata" playsInline />
+                ? <SpinVideo box src={a.url} muted controls preload="metadata" playsInline />
                 : (a.thumb || a.is_image)
                 ? <SpinImg src={a.thumb || a.url} />
                 : <span className="am-file">{(a.ext || 'file').toUpperCase()}</span>}
@@ -7757,7 +7791,7 @@ function Achievements({ nk }: { nk: string }) {
         {a.achievements.map((ac) => (
           <div key={ac.id} className={'ach' + (ac.earned ? ' earned' : '')}
                title={ac.description}>
-            {ac.badge && <img loading="lazy" src={ac.badge} alt="" />}
+            {ac.badge && <SpinImg box small lazy src={ac.badge} />}
             <div className="ach-meta">
               <div className="ach-title">{ac.title}</div>
               <div className="ach-desc">{ac.description}</div>
@@ -8883,7 +8917,7 @@ function ProviderMatchRows({ p }: { p: AiFindingPayload }) {
     <>
       {ms.map((m, i) => (
         <div key={i} className={'aim-provmatch' + (m.provider === 'screenscraper' ? ' ss' : '')}>
-          {m.cover && <img className="aim-pm-cover" src={m.cover} alt="" />}
+          {m.cover && <SpinImg box small className="aim-pm-cover" src={m.cover} />}
           <div className="aim-pm-txt">
             <span className="aim-pm-tag">✓ Matched to {pmLabel(m)}</span>
             <b>{m.name}</b>{m.year ? ` (${m.year})` : ''}
@@ -9055,7 +9089,7 @@ function ImageLightbox({ shots, index, onIndex, onClose }: {
       {index < shots.length - 1 && (
         <button className="mko-nav next" title="Next (→)" onClick={(e) => step(e, 1)}>›</button>)}
       <div className="mko-view-inner" onClick={(e) => e.stopPropagation()}>
-        <img src={cur.url} alt={cur.label} />
+        <SpinImg src={cur.url} alt={cur.label} />
         <div className="lb-caption">{cur.label}</div>
       </div>
     </div>
@@ -9097,7 +9131,7 @@ function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
               <button type="button" key={i} className={'chg-art chg-zoom' + (a.new ? '' : ' have')}
                 title={(a.new ? `New ${a.kind}` : `Already have ${a.kind}`) + ' — click to enlarge'}
                 onClick={() => setZoom(shotAt(a.url))}>
-                <img className="chg-art-thumb" src={a.url} alt="" loading="lazy" />
+                <SpinImg box small lazy className="chg-art-thumb" src={a.url} />
                 <span className="chg-art-kind">{a.kind.replace(/_/g, ' ')}{a.new ? '' : ' ✓'}</span>
               </button>
             ))}
@@ -9116,7 +9150,7 @@ function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
                   {p.has_before
                     ? <button type="button" className="chg-zoom" title="Click to enlarge"
                         onClick={() => setZoom(shotAt(api.mediaUrl(p.entry_key, 'cover', true)))}>
-                        <img className="chg-media-thumb" loading="lazy" alt=""
+                        <SpinImg box small lazy className="chg-media-thumb"
                           src={api.mediaUrl(p.entry_key, 'cover', true)} />
                       </button>
                     : <span className="chg-media-thumb none">none</span>}
@@ -9124,7 +9158,7 @@ function MediaDiffStrip({ diff, sgdb }: { diff: MediaDiff; sgdb?: boolean }) {
                   {diff.after_cover
                     ? <button type="button" className="chg-zoom" title="Click to enlarge"
                         onClick={() => setZoom(shotAt(diff.after_cover!))}>
-                        <img className="chg-media-thumb" loading="lazy" alt="" src={diff.after_cover} />
+                        <SpinImg box small lazy className="chg-media-thumb" src={diff.after_cover} />
                       </button>
                     : <span className="chg-media-thumb none">—</span>}
                 </div>
@@ -10106,7 +10140,7 @@ function MetadataChangeset({ runId, onApplied }: { runId?: number; onApplied?: (
               return c.type === 'match' ? (
                 <label key={c.id} className={'chg-row chg-link' + (man ? ' chg-manual' : '')}>
                   <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} />
-                  {c.cover && <img className="chg-cover" src={c.cover} alt="" />}
+                  {c.cover && <SpinImg box small className="chg-cover" src={c.cover} />}
                   <div className="chg-match-body">
                     {/* Reads top-down: what KIND of change, what it is now, what it
                         becomes. The arrow is bound to the incoming value so it can never

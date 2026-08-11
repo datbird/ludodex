@@ -1044,6 +1044,14 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
   border-top-color: var(--accent);
   animation: sync-spin 0.7s linear infinite; pointer-events: none; z-index: 1;
 }
+/* For thumbnails smaller than the spinner itself — a 22x30 .chg-cover with a 24px
+   ring around it reads as a broken image, not a loading one. */
+.img-spin.sm { width: 14px; height: 14px; margin: -7px 0 0 -7px; border-width: 1.5px; }
+/* SpinImg/SpinVideo box mode: shrink-wraps the image so the overlay has something to
+   centre on, without disturbing the image's own sizing. `line-height: 0` keeps the
+   inline box from adding descender space under the image, and `flex-shrink: 0`
+   preserves the behaviour of the images it replaces in flex rows (.aim-pm-cover). */
+.spin-box { position: relative; display: inline-block; line-height: 0; flex-shrink: 0; }
 .noart {
   position: relative;
   width: 100%;
