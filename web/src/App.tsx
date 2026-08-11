@@ -309,6 +309,48 @@ function NoArt({ title, compact, unmatched }: {
 // and the spinner would otherwise escape to whatever distant ancestor happens to be
 // positioned. `small` picks the 14px spinner: .img-spin is 24px, which is LARGER than
 // a 22x30 .chg-cover, and a spinner bigger than its image reads as breakage.
+// ONE rule for every modal: Escape does what the X does.
+//
+// Every overlay in this app renders `<button className="close">×</button>` inside a
+// container whose class contains "overlay" — 21 of them, of which exactly two handled
+// Escape. Settings even carried the comment "matches every other modal's expectation",
+// which was not true of any of them. Adding a hook to each is the same rule written 21
+// times, and overlay #22 silently misses it; driving it off the markup every modal
+// already shares means new ones are covered the day they are written.
+//
+// TOPMOST ONLY, so a stack (game detail -> media category -> full-size viewer) peels
+// one layer per press instead of collapsing. Ranked by computed z-index then document
+// order, which is what the browser itself paints — .overlay-2 is 30, .fixdup-overlay
+// 60, .mko-view 70, so DOM order alone would get it wrong.
+function useEscClosesOverlays() {
+  useEffect(() => {
+    const zOf = (el: Element | null) => {
+      for (; el; el = el.parentElement) {
+        const n = parseInt(getComputedStyle(el).zIndex, 10)
+        if (!Number.isNaN(n)) return n
+      }
+      return 0
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      // A dropdown owns Escape before the overlay behind it does. All three menus
+      // render this shared click-away backdrop, and each already closes itself on
+      // Escape — without this, one press would shut the menu AND the panel under it.
+      if (document.querySelector('.hero-cfg-backdrop')) return
+      const buttons = Array.from(
+        document.querySelectorAll<HTMLButtonElement>('button.close'))
+        .filter((b) => b.closest('[class*="overlay"]') && b.getClientRects().length > 0)
+      if (!buttons.length) return
+      buttons.sort((a, b) => (zOf(a) - zOf(b))
+        || (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+      e.preventDefault()
+      buttons[buttons.length - 1].click()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+}
+
 function SpinImg({ src, className, alt = '', lazy, spin = true, box, small, onError }: {
   src: string; className?: string; alt?: string; lazy?: boolean; spin?: boolean
   box?: boolean; small?: boolean; onError?: () => void
@@ -450,6 +492,8 @@ export default function App() {
   const refreshAuth = useCallback(
     () => api.authStatus().then(setAuthState).catch(() => setAuthState(null)), [])
   useEffect(() => { refreshAuth() }, [refreshAuth])
+  // Above the early returns below, so the listener exists for every render path.
+  useEscClosesOverlays()
 
   if (authState === undefined) return <div className="boot-screen">Loading…</div>
   if (!authState || !authState.authenticated) {
@@ -1414,13 +1458,6 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
   const reload = () => api.aiConfig().then(setCfg).catch(() => {})
   useEffect(() => { reload() }, [])
   useScrollLock()
-
-  // Escape closes the settings window (matches every other modal's expectation).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
 
   // "Account & Users" is admin-only. Sorted alphabetically by name so the list —
   // and any future section — stays in order without manual bookkeeping.
@@ -7237,8 +7274,9 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
     if (!viewing) return
     const onKey = (e: KeyboardEvent) => {
       const vi = order.findIndex((a) => a.id === viewing.id)
-      if (e.key === 'Escape') { e.stopPropagation(); setViewing(null) }
-      else if (e.key === 'ArrowLeft' && vi > 0) setViewing(order[vi - 1])
+      // Escape is handled globally by useEscClosesOverlays — this viewer holds the
+      // topmost .close button, so it is the one that closes.
+      if (e.key === 'ArrowLeft' && vi > 0) setViewing(order[vi - 1])
       else if (e.key === 'ArrowRight' && vi >= 0 && vi < order.length - 1) setViewing(order[vi + 1])
     }
     window.addEventListener('keydown', onKey)
@@ -9070,8 +9108,9 @@ function ImageLightbox({ shots, index, onIndex, onClose }: {
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-      else if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1)
+      // Escape is handled globally by useEscClosesOverlays; arrows are this
+      // component's own, so only they stay here.
+      if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1)
       else if (e.key === 'ArrowRight' && index < shots.length - 1) onIndex(index + 1)
     }
     window.addEventListener('keydown', onKey)
