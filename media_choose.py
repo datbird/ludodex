@@ -81,6 +81,47 @@ def _load_pins():
     return out
 
 
+def dry_run(kinds=None, only=None):
+    """What WOULD selection change? Returns (removed, added, moved) triples.
+
+    Runs the REAL `select()` against a copy of the index, because the alternative —
+    a script that re-implements the ranking to predict it — is the same "two
+    implementations of one rule" defect this module keeps fixing elsewhere, and it
+    drifts for exactly the same reason. It already did: a hand-written predictor said
+    seven buckets would change, six did, and the difference was a USER PIN the replica
+    did not model while the selector did. A predictor that can disagree with the thing
+    it predicts is worse than no predictor, because it is believed.
+
+    Pins, template frames and every config-derived preference resolve normally: the
+    copy is only of the media index, so `$DATA/pins.sqlite` and the config are the
+    live ones. Nothing is written back — the copy is thrown away."""
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="ludodex-dryrun-")
+    dst = os.path.join(tmp, "media-index.sqlite")
+    try:
+        src = sqlite3.connect("file:%s?mode=ro" % INDEX, uri=True)
+        cp = sqlite3.connect(dst)
+        src.backup(cp)          # consistent even with a WAL-active source
+        src.close()
+        cp.row_factory = sqlite3.Row
+        q = ("SELECT norm_key, COALESCE(system,'') s, kind, id, provider FROM media "
+             "WHERE chosen=1")
+        before = {(r["norm_key"], r["s"], r["kind"]): (r["id"], r["provider"])
+                  for r in cp.execute(q)}
+        select(cp, kinds=kinds, only=only)
+        after = {(r["norm_key"], r["s"], r["kind"]): (r["id"], r["provider"])
+                 for r in cp.execute(q)}
+        cp.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    removed = sorted(k for k in before if k not in after)
+    added = sorted(k for k in after if k not in before)
+    moved = sorted(k for k in before if k in after and before[k][0] != after[k][0])
+    return ([(k, before[k]) for k in removed],
+            [(k, after[k]) for k in added],
+            [(k, before[k], after[k]) for k in moved])
+
+
 def _offlang_yield(picked, prefs):
     """Ids the CONSOLE bucket should stand down on, in favour of the neutral bucket.
 
@@ -571,6 +612,21 @@ def main(argv):
     # --kinds a,b,c restricts the choose pass to those scalar kinds (non-destructive)
     kinds = (argv[argv.index("--kinds") + 1].split(",")
              if "--kinds" in argv else None)
+    # --dry-run answers "what would this change?" WITHOUT changing it, by running the
+    # real selector over a copy. Exits before anything can write.
+    if "--dry-run" in argv:
+        removed, added, moved = dry_run(kinds=kinds)
+        for label, items in (("would LOSE its pick", removed), ("would GAIN a pick", added)):
+            print("media_choose: %d %s" % (len(items), label), file=sys.stderr)
+            for (nk, s, kind), (_id, prov) in items[:40]:
+                print("    %-34s %-10s %-12s %s" % (nk[:34], s or "neutral", kind, prov),
+                      file=sys.stderr)
+        print("media_choose: %d would change pick" % len(moved), file=sys.stderr)
+        for (nk, s, kind), (_i, p0), (_j, p1) in moved[:40]:
+            print("    %-34s %-10s %-12s %s -> %s" % (nk[:34], s or "neutral", kind, p0, p1),
+                  file=sys.stderr)
+        return 0
+
     con = con_index()
     # --remeasure re-derives dimensions and the filler verdict from bytes already in
     # the repo, BEFORE selecting — for when the rule that produced them has changed.
