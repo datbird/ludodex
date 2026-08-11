@@ -1456,7 +1456,10 @@ button.mw-row:disabled:hover { background: transparent; }
 /* enlarged single-media view, layered above the kind overlay */
 .mko-view { z-index: 70; background: rgba(0,0,0,0.86); display: flex; align-items: center; justify-content: center; }
 .mko-view .close { position: fixed; top: 16px; right: 20px; z-index: 71; }
-.mko-view-inner { display: flex; max-width: 94vw; max-height: 92vh; }
+/* positioned so the full-size viewer's loading spinner centres over it rather than
+   escaping to the nearest positioned ancestor. Enlarging fetches the FULL asset, so
+   this is the slowest image in the app and the one most worth marking as in-flight. */
+.mko-view-inner { display: flex; max-width: 94vw; max-height: 92vh; position: relative; }
 .mko-view-inner img, .mko-view-inner video { max-width: 94vw; max-height: 92vh; object-fit: contain; }
 /* prev/next through the category in the enlarged view */
 .mko-nav { position: fixed; top: 50%; transform: translateY(-50%); z-index: 71;

@@ -6417,6 +6417,13 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
           <>
             <div className={'hero' + (bg ? '' : marquee.length ? ' hero-marquee-mode' : ' hero-plain')}
                  style={(bg || marquee.length) ? undefined : { ['--h' as string]: hueOf(d.title) } as CSSProperties}>
+              {/* The media list is a SEPARATE fetch from the detail, so there is a
+                  window where `d` has arrived but `assets` is still empty: `bg` is
+                  null, no SpinImg is mounted, and the hero renders its no-art
+                  gradient as though the game simply had none. SpinImg covers the
+                  image BYTES arriving; this covers the LIST arriving, which is the
+                  blank the eye actually catches when opening a game. */}
+              {!media && <span className="img-spin" aria-hidden="true" />}
               {bg && (
                 <div className="hero-bg-frame" style={frameStyle(bgKind ? frames[bgKind] : undefined)}>
                   <SpinImg className="hero-bg" src={bg.url} />
@@ -7260,10 +7267,14 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
       + `never re-downloaded from ${a.provider}. You can unban it later in `
       + `Settings › Banned media.`)) act(() => api.banMedia(nk, a.id))
   }
+  // SpinImg, not a bare <img>: opening a category mounts a whole grid at once and
+  // every tile fetches its own bytes, so without this the panel fills with empty
+  // boxes that look like missing art rather than art on its way. `.mko-media` is
+  // already positioned, which is what the overlay spinner needs.
   const thumb = (a: MediaAsset) => isVideo(a)
     ? <video src={a.url} muted preload="metadata" playsInline />
     : (a.thumb || a.is_image)
-    ? <img src={a.thumb || a.url} alt={a.kind} loading="lazy" />
+    ? <SpinImg lazy src={a.thumb || a.url} alt={a.kind} />
     : <span className="mko-file">{(a.ext || 'file').toUpperCase()}</span>
 
   return (
@@ -7360,7 +7371,7 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
           )}
           <div className="mko-view-inner" onClick={(e) => e.stopPropagation()}>
             {viewing.is_image
-              ? <img src={viewing.url} alt={viewing.kind} />
+              ? <SpinImg src={viewing.url} alt={viewing.kind} />
               : isVideo(viewing)
               ? <video src={viewing.url} controls autoPlay playsInline />
               : isPdf(viewing)
@@ -7435,7 +7446,7 @@ function MediaKindCard({ nk, kind, assets, onChange, frames, onFrame }: {
               {isVideo(a)
                 ? <video src={a.url} muted controls preload="metadata" playsInline />
                 : (a.thumb || a.is_image)
-                ? <img src={a.thumb || a.url} alt="" />
+                ? <SpinImg src={a.thumb || a.url} />
                 : <span className="am-file">{(a.ext || 'file').toUpperCase()}</span>}
               <button className="am-del" title="Remove upload" disabled={busy}
                 onClick={() => run(() => api.deleteUserMedia(nk, a.id), false)}>×</button>
