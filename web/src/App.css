@@ -1052,6 +1052,17 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
    inline box from adding descender space under the image, and `flex-shrink: 0`
    preserves the behaviour of the images it replaces in flex rows (.aim-pm-cover). */
 .spin-box { position: relative; display: inline-block; line-height: 0; flex-shrink: 0; }
+/* An <img> has NO intrinsic size until its bytes arrive, so any container that sizes
+   itself to its image collapses to zero height while loading. A spinner centred at
+   `top: 50%` of a zero-height box then sits half above it, and `.mko-item`'s
+   `overflow: hidden` clips that half off — leaving a bottom arc floating at the top of
+   the tile. Reserve room for exactly as long as the spinner is there: `:has()` stops
+   matching the moment it is removed, so a loaded image goes back to its own size and
+   nothing is padded permanently. Containers whose image carries an explicit CSS size
+   (.am-thumb, .chg-cover) never collapse and are unaffected. */
+.mko-media:has(> .img-spin) { min-height: 120px; }
+.mko-view-inner:has(> .img-spin) { min-width: 160px; min-height: 160px; }
+.spin-box:has(> .img-spin) { min-width: 26px; min-height: 26px; }
 .noart {
   position: relative;
   width: 100%;
