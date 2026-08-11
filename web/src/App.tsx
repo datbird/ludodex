@@ -90,6 +90,13 @@ const srcLabel = (s: string) => SRC_LABEL[s] || s.charAt(0).toUpperCase() + s.sl
 // re-clicks its own toggle button, which lives inside the ref'd wrapper) —
 // replaces the twitchy close-on-mouse-leave. Attach the returned ref to the
 // element that wraps both the toggle button and the menu.
+// Every open dropdown registers here while it lives, so Escape can find it. This hook
+// is already the app's registry of "dismissible popover" — 12 consumers — so putting
+// the registration in it means a new dropdown gets Escape by using the same hook it
+// already had to use for click-away, with nothing extra to remember.
+type EscLayer = { el: () => HTMLElement | null; close: () => void }
+const escLayers = new Set<EscLayer>()
+
 function useClickOutside<T extends HTMLElement>(active: boolean, onClose: () => void) {
   const ref = useRef<T>(null)
   const cb = useRef(onClose)
@@ -99,8 +106,13 @@ function useClickOutside<T extends HTMLElement>(active: boolean, onClose: () => 
     const onDown = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) cb.current()
     }
+    const layer: EscLayer = { el: () => ref.current, close: () => cb.current() }
+    escLayers.add(layer)
     document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
+    return () => {
+      escLayers.delete(layer)
+      document.removeEventListener('mousedown', onDown)
+    }
   }, [active])
   return ref
 }
@@ -337,14 +349,25 @@ function useEscClosesOverlays() {
       // render this shared click-away backdrop, and each already closes itself on
       // Escape — without this, one press would shut the menu AND the panel under it.
       if (document.querySelector('.hero-cfg-backdrop')) return
-      const buttons = Array.from(
-        document.querySelectorAll<HTMLButtonElement>('button.close'))
-        .filter((b) => b.closest('[class*="overlay"]') && b.getClientRects().length > 0)
-      if (!buttons.length) return
-      buttons.sort((a, b) => (zOf(a) - zOf(b))
-        || (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+      // TWO sources, ONE ranking. Overlays are found in the markup; dropdowns register
+      // themselves via useClickOutside. Ranking them together is what keeps a dropdown
+      // opened INSIDE a panel from being closed after the panel it sits in — and with
+      // no dropdown open the list is exactly the overlay list, so the layering that
+      // already works is unchanged by construction.
+      const cands: Array<{ el: HTMLElement; act: () => void }> = []
+      escLayers.forEach((l) => {
+        const el = l.el()
+        if (el && el.getClientRects().length > 0) cands.push({ el, act: l.close })
+      })
+      document.querySelectorAll<HTMLButtonElement>('button.close').forEach((b) => {
+        if (b.closest('[class*="overlay"]') && b.getClientRects().length > 0)
+          cands.push({ el: b, act: () => b.click() })
+      })
+      if (!cands.length) return
+      cands.sort((a, b) => (zOf(a.el) - zOf(b.el))
+        || (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
       e.preventDefault()
-      buttons[buttons.length - 1].click()
+      cands[cands.length - 1].act()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
