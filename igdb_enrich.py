@@ -465,6 +465,37 @@ def _consoles_by_norm():
     return out
 
 
+# Provenance values that mean "a MODEL decided this identity", as opposed to a
+# deterministic derivation. A tuple so a future AI route joins the protection below by
+# being added here, rather than by someone remembering that one line exists.
+AI_DECIDED = ("ai_name",)
+
+
+def decided_identities(con):
+    """norm_keys whose identity is a DECISION and must survive a full refresh.
+
+    `--all` ("Full refresh") exists to ignore the caches and redo everything, which is
+    right for a DERIVATION and wrong for a DECISION. Two kinds of decision:
+
+    * A hand pin (`manual`) is the user's explicit choice and outranks anything we can
+      work out — including a deliberate "this matches nothing", so a falsy manual row
+      counts too (the #25 lesson: a decision is respected, an absence of one is retried).
+    * An AI-confirmed match (`AI_DECIDED`) is a paid judgment made precisely BECAUSE the
+      deterministic search could not settle it. Re-deriving it re-runs the search that
+      already failed, and when it fails again the answer is silently discarded. Live,
+      every one of these 8 was a game name-matching had refused. A FALSY AI row is not a
+      decision, though — it is an attempt that found nothing — so it stays retryable.
+
+    Without this, a routine Full refresh reverted them all and could leave a game
+    UNMATCHED: identity drives `game_key`, so the entry loses its IGDB metadata, its
+    canonical title, and the ability to see its own neutral art (which is matched on
+    `game_key`). Observed: three dropped in one run, put back by hand afterwards."""
+    marks = ",".join("?" * len(AI_DECIDED))
+    return {nk for (nk,) in con.execute(
+        "SELECT norm_key FROM igdb_resolution WHERE matched_by='manual' "
+        "OR (matched_by IN (%s) AND igdb_id>0)" % marks, AI_DECIDED)}
+
+
 def era_reheal(argv):
     """Fix ALREADY-resolved games whose IGDB match is era-impossible for their
     console(s) — the same-name/different-era collisions that predate the era-aware
@@ -738,15 +769,9 @@ def main(argv):
 
     resolved = {}                       # norm_key -> igdb_id (found, >0)
     failed_at = {}                      # norm_key -> when a name-search last failed (id=0)
-    # A hand-pinned identity is the user's explicit decision and outranks anything we can
-    # work out. --all ("Full refresh") re-resolves everything EXCEPT these, otherwise a
-    # routine full sync silently reverts every manual pin — and can even leave one
-    # UNMATCHED if the name search now misses. The wand's own apply already skips them;
-    # this is the CLI/full-sync path catching up.
-    pinned = {nk for (nk,) in con.execute(
-        "SELECT norm_key FROM igdb_resolution WHERE matched_by='manual'")}
+    pinned = decided_identities(con)
     if pinned:
-        print("igdb: %d manually pinned game(s) left untouched" % len(pinned),
+        print("igdb: %d decided identit(ies) left untouched" % len(pinned),
               file=sys.stderr)
     if not do_all:
         for nk, iid, rat in con.execute(
