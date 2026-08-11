@@ -7489,7 +7489,8 @@ _EDITABLE_ATTR_KINDS = [
     "content_type",
     "release_type", "language", "release_year", "release_date", "platforms", "genres", "themes",
     "game_modes", "player_perspectives", "developers", "publishers", "series",
-    "features", "categories", "age_ratings", "regions", "os", "device",
+    "features", "categories", "age_ratings", "esrb_rating", "content_descriptors",
+    "regions", "os", "device",
     "version", "completion_status", "user_score", "critic_score",
     "community_score", "playtime", "description",
 ]

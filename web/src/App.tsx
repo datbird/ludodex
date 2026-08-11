@@ -5470,6 +5470,19 @@ function ScoreBadge({ v }: { v: number }) {
   return <span className={'score-badge ' + scoreClass(v)}>{v}</span>
 }
 
+// ESRB's own wording for each rating. Spelled out because the letter alone is the
+// part people misremember — E10+ and T are routinely read as stricter and looser
+// than they are, which is the whole reason to show a rating at all.
+const ESRB_MEANING: Record<string, string> = {
+  'EC': 'Early Childhood',
+  'E': 'Everyone',
+  'E10+': 'Everyone 10+',
+  'T': 'Teen',
+  'M': 'Mature 17+',
+  'AO': 'Adults Only 18+',
+  'RP': 'Rating Pending',
+}
+
 // The "About" block: description, scores, key facts and tag groups — built from
 // the raw game_attributes so nothing is shown as a cryptic key/value dump.
 // Manual game/non-game classification values. Anything other than "Game" hides the
@@ -5619,6 +5632,10 @@ function About({ attrs, scores, prov }: {
   const ludodex = scores?.ludodex ?? null
   const critic = scores?.critic ?? null
   const players = scores?.players ?? null
+  // Its own attribute rather than parsed out of the "ESRB: M" list, so the badge and
+  // the library facet read the same value from the same place.
+  const esrb = first('esrb_rating')
+  const descriptors = attrs['content_descriptors'] ?? []
 
   const facts: [string, string][] = []
   if (released) facts.push(['Released', released])
@@ -5660,6 +5677,20 @@ function About({ attrs, scores, prov }: {
           ))}
         </div>
       ) : null}
+      {esrb && (
+        <div className="esrb">
+          <span className={'esrb-badge esrb-' + esrb.toLowerCase().replace(/[^a-z0-9]/g, '')}
+            title={ESRB_MEANING[esrb] ? `ESRB ${esrb} — ${ESRB_MEANING[esrb]}` : `ESRB ${esrb}`}>
+            {esrb}
+          </span>
+          <span className="esrb-body">
+            <span className="esrb-name">{ESRB_MEANING[esrb] || 'ESRB rating'}</span>
+            {descriptors.length > 0 && (
+              <span className="esrb-desc">{descriptors.join(' · ')}</span>
+            )}
+          </span>
+        </div>
+      )}
       {facts.length > 0 && (
         <dl className="facts">
           {facts.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}

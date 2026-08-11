@@ -45,8 +45,43 @@ GAME_FIELDS = (
     "release_dates.y,release_dates.human,release_dates.platform.name,"
     "release_dates.platform.abbreviation,"
     "total_rating,total_rating_count,aggregated_rating,aggregated_rating_count,"
-    "rating,rating_count"
+    "rating,rating_count,"
+    # Age ratings, in IGDB's CURRENT shape. The older `age_ratings.category` /
+    # `.rating` enums were replaced by named `organization` / `rating_category`
+    # objects; asking for the old names now returns an error, not empty data, so
+    # this was verified against the live API rather than written from memory.
+    "age_ratings.organization.name,age_ratings.rating_category.rating,"
+    "age_ratings.rating_content_descriptions.description"
 )
+
+# The rating bodies worth storing, and the order a badge should prefer them in.
+# ESRB is what this library is browsed by; the rest cost nothing to keep and make
+# an import from a PAL/JP-heavy source legible.
+_RATING_BODIES = ("ESRB", "PEGI", "CERO", "ACB", "USK", "CLASS_IND", "GRAC")
+
+
+def age_ratings(g):
+    """-> (esrb_rating, [content descriptors], ["ESRB: M", "PEGI: 18", …]).
+
+    ESRB's own content descriptors are preferred for the descriptor list, since that
+    is the body being displayed; another body's descriptors are used only when ESRB
+    supplied none, so the words never contradict the badge beside them."""
+    esrb, all_ratings, esrb_desc, other_desc = None, [], [], []
+    for ar in (g.get("age_ratings") or []):
+        org = ((ar.get("organization") or {}).get("name") or "").strip()
+        rating = ((ar.get("rating_category") or {}).get("rating") or "").strip()
+        if not org or not rating:
+            continue
+        descs = [d.get("description") for d in
+                 (ar.get("rating_content_descriptions") or []) if d.get("description")]
+        if org == "ESRB":
+            esrb = rating
+            esrb_desc = descs
+        elif org in _RATING_BODIES:
+            other_desc = other_desc or descs
+        if org in _RATING_BODIES:
+            all_ratings.append("%s: %s" % (org, rating))
+    return esrb, sorted(set(esrb_desc or other_desc)), all_ratings
 
 # Vendor words dropped when slugging a platform that has no abbreviation, so
 # "Nintendo GameCube" -> "gamecube" rather than "nintendogamecube".
@@ -208,4 +243,14 @@ def map_record(g):
         out["community_score"] = round(g["total_rating"])
     if g.get("aggregated_rating"):
         out["critic_score"] = round(g["aggregated_rating"])
+    esrb, descs, all_ratings = age_ratings(g)
+    if esrb:
+        # its own kind, not parsed back out of "ESRB: M", because the library facet
+        # groups on this value and a facet that has to string-split is a facet that
+        # will one day split the wrong thing.
+        out["esrb_rating"] = esrb
+    if descs:
+        out["content_descriptors"] = descs
+    if all_ratings:
+        out["age_ratings"] = all_ratings
     return out
