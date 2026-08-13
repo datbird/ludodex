@@ -2404,6 +2404,32 @@ def publish_status():
     return publish.status()
 
 
+@app.post("/api/devices/{dev_id}/publish/plan")
+def publish_plan_compute(dev_id: int, body: dict = Body(default=None)):
+    """What publishing to this device WOULD do. Reads only — Apply is separate, and
+    does not exist yet."""
+    import publish_plan
+    b = body or {}
+    try:
+        res = publish_plan.plan(
+            dev_id, profile_id=b.get("profile"),
+            source_mgr_id=b.get("source_mgr_id"),
+            rom_path=b.get("rom_path"), media_path=b.get("media_path"),
+            observe=bool(b.get("observe", True)), limit=b.get("limit"))
+    except KeyError as e:                    # unknown profile — never a silent default
+        raise HTTPException(400, str(e))
+    if b.get("free_bytes") is not None:
+        res = publish_plan.check_capacity(res, int(b["free_bytes"]))
+    return res
+
+
+@app.get("/api/devices/{dev_id}/publish/ledger")
+def publish_ledger(dev_id: int):
+    """What ludodex has actually placed on this device."""
+    import publish_plan
+    return {"placed": publish_plan.ledger(dev_id)}
+
+
 @app.post("/api/publish/migrate")
 def publish_migrate(body: dict = Body(default=None)):
     import publish
