@@ -60,9 +60,59 @@ IGDB_DB = os.path.join(DATA, "igdb-catalog.sqlite")
 TOP_ID_SEEN = 535220
 DEAD_RUN_STOP = 4000        # consecutive dead ids past TOP_ID_SEEN that mean "done"
 BLOCK = 60                  # ids dispatched per round; cursor advances a whole block
-DAILY_RESERVE = 5000        # requests left unspent for the user's own scraping
-MAX_THREADS = 6             # the account's maxthreads; never exceed what SS grants
 CLOSED_STRIKES = 8          # consecutive "api closed" rounds that mean stop for now
+
+# EVERY LIMIT BELOW IS A FALLBACK, NOT A POLICY. ScreenScraper reports what an account
+# is actually granted — threads, requests per day, requests per minute — and those
+# numbers differ enormously between a free account and a financial contributor. Baking
+# one tier's numbers in is how a scraper works beautifully for its author and gets the
+# next person throttled or banned.
+#
+# So the account's own figures win, config can narrow them (never widen), and these
+# constants only apply when the server says nothing.
+HARD_THREAD_CAP = 16        # absurdity guard; the account's value normally decides
+FALLBACK_THREADS = 1        # what a free account typically gets
+FALLBACK_PER_MIN = 60       # deliberately timid when the server does not say
+RESERVE_FRACTION = 0.05     # keep 5% of the day back for the user's own scraping
+MIN_RESERVE = 200           # ...but always SOME, even on a tiny quota
+
+# Kept as a module attribute because the tests and older callers refer to it. It is now
+# a floor on the computed reserve rather than the reserve itself.
+DAILY_RESERVE = MIN_RESERVE
+
+
+def tier_limits(q, threads=None):
+    """What this account grants, and what this run will therefore use.
+
+    Config may only ever NARROW what the server reported. A user who sets 8 threads on a
+    1-thread account does not get 8 threads; they get a scraper that behaves and a
+    number in a settings box that was never a promise."""
+    granted_threads = max(1, int(q.get("maxthreads") or FALLBACK_THREADS))
+    want = threads or config.get("screenscraper_walk_threads")
+    try:
+        want = int(want) if want else granted_threads
+    except (TypeError, ValueError):
+        want = granted_threads
+    use_threads = max(1, min(want, granted_threads, HARD_THREAD_CAP))
+
+    per_day = int(q.get("maxrequestsperday") or 0)
+    cfg_res = config.get("screenscraper_walk_reserve")
+    try:
+        reserve = int(cfg_res) if cfg_res else 0
+    except (TypeError, ValueError):
+        reserve = 0
+    if not reserve:
+        reserve = max(MIN_RESERVE, int(per_day * RESERVE_FRACTION))
+    reserve = min(reserve, per_day)          # a reserve bigger than the quota is a stop
+
+    per_min = int(q.get("maxrequestspermin") or 0) or FALLBACK_PER_MIN
+    # The aggregate rate across the whole pool has to stay under the per-minute cap, so
+    # a block of N concurrent requests must take at least N * (60/per_min) seconds.
+    block_seconds = (60.0 / per_min) * use_threads
+
+    return {"threads": use_threads, "granted_threads": granted_threads,
+            "per_day": per_day, "reserve": reserve, "per_min": per_min,
+            "min_block_seconds": block_seconds}
 
 # SS systems whose names do not slug-match an IGDB platform but which ARE the same
 # hardware. Verified against the mirror one at a time; every other unmapped SS system
@@ -245,19 +295,20 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
         return {"skipped": "cooldown", "seconds_left": left}
 
     q = ss.user_info(creds)
-    nthreads = max(1, min(threads or MAX_THREADS, q.get("maxthreads") or 1))
-    limit = q.get("maxrequestsperday") or 0
-    used = q.get("requeststoday") or 0
-    budget = max(0, limit - DAILY_RESERVE - used) if limit else (max_requests or 0)
+    tier = tier_limits(q, threads)
+    nthreads = tier["threads"]
+    limit, used = tier["per_day"], (q.get("requeststoday") or 0)
+    budget = max(0, limit - tier["reserve"] - used) if limit else (max_requests or 0)
     if max_requests:
         budget = min(budget, max_requests)
     if budget <= 0:
         put(con, "cooldown_until", _next_utc_midnight())
         con.commit()
         con.close()
-        print("ss_mirror: daily quota spent (%d/%d used) — resuming after reset"
-              % (used, limit), file=sys.stderr)
-        return {"skipped": "quota", "used": used, "limit": limit}
+        print("ss_mirror: daily quota spent (%d/%d used, %d reserved) — resuming after "
+              "reset" % (used, limit, tier["reserve"]), file=sys.stderr)
+        return {"skipped": "quota", "used": used, "limit": limit,
+                "reserve": tier["reserve"]}
 
     if not con.execute("SELECT COUNT(*) FROM ss_systems").fetchone()[0]:
         print("ss_mirror: %s" % json.dumps(sync_systems(con, creds)), file=sys.stderr)
@@ -290,8 +341,16 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
                     stop = "until_id"
                     break
                 ids = list(range(lo, hi + 1))
+                block_started = time.time()
                 results = list(pool.map(fetch, ids))
                 reqs += len(ids)
+                # THE PER-MINUTE CAP IS A REAL LIMIT AND WAS PREVIOUSLY IGNORED. On a
+                # generous tier the block is never fast enough to matter; on a free one
+                # it is the difference between scraping and being throttled.
+                need = tier["min_block_seconds"] * len(ids) / max(1, nthreads)
+                spent = time.time() - block_started
+                if spent < need:
+                    time.sleep(need - spent)
 
                 hard = None
                 for gid, jeu, err in results:
@@ -344,7 +403,8 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
     con.close()
     return {"requests": reqs, "games_found": found, "cursor": cursor,
             "stopped": stop or "budget", "elapsed": round(time.time() - t0, 1),
-            "total_games": total, "total_roms": roms, "threads": nthreads}
+            "total_games": total, "total_roms": roms, "threads": nthreads,
+            "tier": tier}
 
 
 def _next_utc_midnight():

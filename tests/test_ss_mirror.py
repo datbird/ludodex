@@ -134,11 +134,14 @@ def main():
 
     print()
     print("7. the daily quota is the SERVER's number, minus the reserve")
-    state["quota"]["requeststoday"] = 100000 - M.DAILY_RESERVE - 10
+    # The reserve is COMPUTED from the tier now, so the test asks for it rather than
+    # assuming a constant — which is the same reason the code stopped assuming one.
+    reserve = M.tier_limits(state["quota"])["reserve"]
+    state["quota"]["requeststoday"] = 100000 - reserve - 10
     r = M.walk(progress=False)
-    check("only the 10 remaining requests were spent: %d" % r["requests"],
-          r["requests"] == 10)
-    state["quota"]["requeststoday"] = 100000 - M.DAILY_RESERVE
+    check("only the 10 remaining requests were spent: %d" % r.get("requests"),
+          r.get("requests") == 10)
+    state["quota"]["requeststoday"] = 100000 - reserve
     r = M.walk(progress=False)
     check("at the reserve line it declines outright", r.get("skipped") == "quota")
     check("and sets a cooldown so the next run does not hammer",
@@ -190,6 +193,58 @@ def main():
     check("only after a long dead run, not the first hole",
           r["requests"] >= M.DEAD_RUN_STOP)
     check("and recorded that the walk completed", M.status()["walk_complete"])
+
+    print()
+    print("12. the account's OWN limits decide, and config may only narrow them")
+    # The portability property. A scraper tuned to its author's contributor tier is a
+    # scraper that throttles or bans the next person who runs it.
+    free = {"maxthreads": 1, "maxrequestsperday": 20000, "maxrequestspermin": 60}
+    paid = {"maxthreads": 6, "maxrequestsperday": 100000, "maxrequestspermin": 7168}
+
+    f, p = M.tier_limits(free), M.tier_limits(paid)
+    check("a free account gets its 1 thread", f["threads"] == 1)
+    check("a contributor account gets its 6", p["threads"] == 6)
+    check("the reserve SCALES with the quota: %d vs %d"
+          % (f["reserve"], p["reserve"]),
+          f["reserve"] == 1000 and p["reserve"] == 5000)
+    # 5,000 held back from 20,000 would cost a free user a quarter of their day.
+    check("and is a fraction, not a fixed number carried over from a big tier",
+          f["reserve"] < 5000)
+
+    print()
+    print("13. the per-minute cap is honoured, not merely read")
+    # It was previously read into the quota view and never used. Invisible on a
+    # 7,168/min tier; the whole ballgame on 60/min.
+    check("a free tier paces itself: %.2fs per block of 1"
+          % f["min_block_seconds"], f["min_block_seconds"] >= 1.0)
+    check("a contributor tier is effectively unpaced",
+          p["min_block_seconds"] < 0.1)
+    check("a server that reports no per-minute cap gets a timid default",
+          M.tier_limits({"maxthreads": 2, "maxrequestsperday": 5000})["per_min"]
+          == M.FALLBACK_PER_MIN)
+
+    print()
+    print("14. config narrows the tier; it can never widen it")
+    import config as _cfg
+    _cfg.set_("screenscraper_walk_threads", "8")
+    try:
+        check("asking for 8 on a 1-thread account still gives 1",
+              M.tier_limits(free)["threads"] == 1)
+        check("and on a 6-thread account still gives 6",
+              M.tier_limits(paid)["threads"] == 6)
+        _cfg.set_("screenscraper_walk_threads", "2")
+        check("asking for FEWER is honoured", M.tier_limits(paid)["threads"] == 2)
+    finally:
+        _cfg.set_("screenscraper_walk_threads", "")
+    check("cleared, it returns to what the account grants",
+          M.tier_limits(paid)["threads"] == 6)
+
+    print()
+    print("15. a reserve bigger than the quota stops rather than going negative")
+    tiny = M.tier_limits({"maxthreads": 1, "maxrequestsperday": 100,
+                          "maxrequestspermin": 30})
+    check("the reserve never exceeds the day: %d of 100" % tiny["reserve"],
+          tiny["reserve"] <= 100)
 
     print()
     print("%d checks, all passed" % len(PASS))

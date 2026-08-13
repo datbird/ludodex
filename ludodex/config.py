@@ -148,6 +148,18 @@ SCHEMA = [
      "Your ScreenScraper account login (sets your tier/quota). Env: SS_SSID."),
     ("screenscraper_sspassword", "",
      "Your ScreenScraper account password. Env: SS_SSPASSWORD."),
+    # The catalog walk adapts to whatever tier your account has — ScreenScraper reports
+    # its own threads/day/minute limits and those win. These only NARROW that: useful if
+    # you want the walk to leave more room for interactive scraping, or to be gentler
+    # than your tier technically allows. Blank means "use what the account grants".
+    ("screenscraper_walk_threads", "",
+     "Concurrent requests for the catalog walk. Blank = whatever your ScreenScraper "
+     "tier grants (free is typically 1, contributors get more). A value higher than "
+     "your tier is ignored, never applied."),
+    ("screenscraper_walk_reserve", "",
+     "Requests held back each day for your own scraping while a multi-day catalog walk "
+     "runs. Blank = 5% of your daily quota (minimum 200), so it scales with your tier "
+     "instead of assuming a large one."),
     ("screenscraper_media", "1",
      "[media] Ingest the media URLs returned by each ScreenScraper scrape into "
      "the media index (no extra API calls — they come free with the metadata)."),
