@@ -133,7 +133,99 @@ FOLDER = {
 }
 
 
-PROFILES = {p["id"]: p for p in (ESDE, FOLDER)}
+# --------------------------------------------------------------------------- #
+#  EmulationStation gamelist layout (RetroBat / Batocera / rom-librarian)
+# --------------------------------------------------------------------------- #
+# TRANSCRIBED FROM A LIVE LIBRARY, not from documentation: G:\games\emulation\roms on
+# <workstation>, scraped by ScreenScraper. Everything below was read out of a real
+# gamelist.xml and the real folders beside it.
+#
+# The two ways it differs from ES-DE are exactly the ones the profile seam exists for:
+#
+#   * MEDIA LIVES INSIDE THE SYSTEM FOLDER (roms/<system>/images/…), not in a sibling
+#     downloaded_media tree. So does the gamelist.
+#   * THE GAMELIST RECORDS MEDIA PATHS EXPLICITLY (<image>./images/Foo-image.png</image>)
+#     where ES-DE stores none and matches by filename. A writer that omits them here
+#     produces a library with no art and no error.
+#
+# ...and the filenames carry a per-kind SUFFIX (-image, -marquee, -thumb, -video,
+# -manual), which is why a media map of kind->folder is not expressive enough.
+#
+# The system names are LaunchBox-style (sonyplaystation, nintendosupernes) rather than
+# Batocera's (psx, snes). That is what this library uses; a stock RetroBat install would
+# want a different map and the same everything else — which is the point of the split.
+ESGAMELIST = {
+    "id": "esgamelist",
+    "name": "EmulationStation gamelist (RetroBat / Batocera style)",
+
+    "systems": {
+        "psx": "sonyplaystation", "ps2": "sonyplaystation2", "ps3": "sonyplaystation3",
+        "psp": "sonyplaystationportable", "psvita": "sonyplaystationvita",
+        "snes": "nintendosupernes", "nes": "nintendones", "n64": "nintendo64",
+        "gameboy": "nintendogameboy", "gb": "nintendogameboy",
+        "gameboy color": "nintendogameboycolor", "gbc": "nintendogameboycolor",
+        "gameboy advance": "nintendogameboyadvance", "gba": "nintendogameboyadvance",
+        "nds": "nintendods", "3ds": "nintendo3ds",
+        "gamecube": "nintendogamecube", "gc": "nintendogamecube",
+        "wii": "nintendowii", "wiiu": "nintendowiiu",
+        "nintendo switch": "nintendoswitch", "switch": "nintendoswitch",
+        "virtualboy": "nintendovirtualboy",
+        "sega genesis": "segagenesis", "genesis": "segagenesis",
+        "sega ms": "segamastersystem", "mastersystem": "segamastersystem",
+        "sega cd": "segacd", "sega 32x": "sega32x",
+        "sega saturn": "segasaturn", "saturn": "segasaturn",
+        "dreamcast": "segadreamcast", "gamegear": "segagamegear",
+        "sg1000": "segasg1000",
+        "turbo gfx": "necturbografx", "tg16": "necturbografx",
+        "tg-cd": "necturbografxcd", "supergrafx": "necsupergrafx",
+        "neogeo": "snkneogeo", "neogeocd": "snkneogeocd",
+        "ngp": "snkneogeopocket", "neogeopocketcolor": "snkneogeopocketcolor",
+        "ngpc": "snkneogeopocketcolor",
+        "jaguar": "atarijaguar", "jaguar cd": "atarijaguarcd", "lynx": "atarilynx",
+        "atari st": "atarist",
+        "c64": "commodore64", "zx spectrum": "sinclairzxspectrum",
+        "wonderswan": "bandaiwonderswan",
+        "wonderswancolor": "bandaiwonderswancolor",
+        "intellivision": "mattelintellivision",
+        "mame": "mame", "arcade (mame)": "mame", "arcade": "mame",
+        "dos": "msdos", "cdi": "philipscdi",
+        "xbox": "msxbox", "xbox 360": "msxbox360",
+    },
+
+    # kind -> (folder, filename template). The suffix is not decoration: the scraper
+    # writes -image/-marquee/-thumb and the gamelist points at those exact names.
+    "media": {
+        "cover": ("images", "{base}-image.{ext}"),
+        "logo": ("images", "{base}-marquee.{ext}"),
+        "screenshot": ("images", "{base}-thumb.{ext}"),
+        "video": ("videos", "{base}-video.{ext}"),
+        "manual": ("manuals", "{base}-manual.{ext}"),
+    },
+    "media_layout": {"root": "rom", "path": "{system}/{folder}/{name}"},
+
+    "metadata": {
+        "writer": "gamelist_xml",
+        "root": "rom",                     # roms/<system>/gamelist.xml
+        "path": "{system}/gamelist.xml",
+        # ...and unlike ES-DE, the paths go IN the file, relative to the system folder.
+        "records_media_paths": True,
+        "relative_prefix": "./",
+    },
+
+    "discs": {
+        "systems": {"sonyplaystation", "sonyplaystation2", "segasaturn", "segacd",
+                    "necturbografxcd", "philipscdi", "3do", "snkneogeocd",
+                    "commodoreamigacd32", "atarijaguarcd", "segadreamcast"},
+        "src_exts": DISC_SRC_EXTS,
+        "entry_exts": DISC_ENTRY_EXTS,
+        "playlist": "m3u",
+    },
+    "convert": {"_disc_systems": ("chd", "chd")},
+    "archives": {"default": "keep"},
+}
+
+
+PROFILES = {p["id"]: p for p in (ESDE, FOLDER, ESGAMELIST)}
 DEFAULT_PROFILE = "esde"
 
 
@@ -158,7 +250,20 @@ def media_folder(profile, kind):
 
     None means "this target does not carry this kind", which is a real answer — the
     caller skips the asset rather than inventing a folder for it."""
-    return (profile.get("media") or {}).get(kind)
+    v = (profile.get("media") or {}).get(kind)
+    return v[0] if isinstance(v, tuple) else v
+
+
+def media_name(profile, kind, base, ext):
+    """The FILENAME a target expects for one asset.
+
+    ES-DE matches media to a ROM by name alone, so the file is simply <base>.<ext>. An
+    EmulationStation gamelist library writes <base>-image.png, <base>-marquee.png and so
+    on, and its gamelist points at those exact names — so this cannot be assumed."""
+    v = (profile.get("media") or {}).get(kind)
+    if isinstance(v, tuple):
+        return v[1].format(base=base, ext=ext)
+    return "%s.%s" % (base, ext)
 
 
 def is_disc_system(profile, system):
@@ -242,12 +347,24 @@ def metadata_path(profile, media_path, rom_path, system):
     return os.path.join(base, meta.get("path", "").format(system=system))
 
 
-def media_dest(profile, media_path, rom_path, system, folder, base, ext):
-    """Absolute destination for one media asset, or None when unsupported."""
+def media_dest(profile, media_path, rom_path, system, kind, base, ext):
+    """Absolute destination for one media asset, or None when this target has no home
+    for that kind.
+
+    Takes the KIND, not the folder. Deriving the kind back from the folder looks
+    equivalent and is not: cover and logo both live in images/ here, so a reverse
+    lookup returns whichever was declared first and silently writes the marquee to
+    <base>-image.png. The kind is the thing that determines the filename, so the kind
+    is what gets passed."""
     import os
     lay = profile.get("media_layout")
+    folder = media_folder(profile, kind)
     if not lay or not folder:
         return None
     root = media_path if lay.get("root") == "media" else rom_path
-    return os.path.join(root, lay.get("path", "").format(
+    tpl = lay.get("path", "")
+    if "{name}" in tpl:
+        return os.path.join(root, tpl.format(
+            system=system, folder=folder, name=media_name(profile, kind, base, ext)))
+    return os.path.join(root, tpl.format(
         system=system, folder=folder, base=base, ext=ext))

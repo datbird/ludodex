@@ -115,7 +115,7 @@ def main():
     check("no system renaming", P.system_for(P.FOLDER, "sega genesis") == "sega genesis")
     check("no media home", P.media_folder(P.FOLDER, "cover") is None)
     check("no media destination", P.media_dest(
-        P.FOLDER, "/m", "/r", "snes", "covers", "Game", "png") is None)
+        P.FOLDER, "/m", "/r", "snes", "cover", "Game", "png") is None)
     check("no metadata file", P.metadata_root(P.FOLDER, "/x/media") is None)
     check("no conversion — a psx cue ships as-is",
           P.convert_plan(P.FOLDER, "psx", "cue") == ("cue", "copy"))
@@ -153,6 +153,48 @@ def main():
     check("the folder profile does not", not P.is_disc_system(P.FOLDER, "psx"))
     check("but both agree on what an entry point looks like",
           P.entry_exts(P.ESDE) == P.entry_exts(P.FOLDER))
+
+    print()
+    print("8. the esgamelist profile reproduces a REAL library's paths")
+    # Every string below was read out of a live, ScreenScraper-scraped library:
+    # G:\games\emulation\roms\3do\gamelist.xml on <workstation>. This is the phase-6
+    # reality check — a profile that agrees only with its own assumptions proves
+    # nothing, so it is asserted against what the target actually contains.
+    g = P.get("esgamelist")
+    live = {"cover": ("png", "G:/roms/3do/images/Road Rash (USA)-image.png"),
+            "logo": ("png", "G:/roms/3do/images/Road Rash (USA)-marquee.png"),
+            "screenshot": ("png", "G:/roms/3do/images/Road Rash (USA)-thumb.png"),
+            "video": ("mp4", "G:/roms/3do/videos/Road Rash (USA)-video.mp4"),
+            "manual": ("pdf", "G:/roms/3do/manuals/Road Rash (USA)-manual.pdf")}
+    for kind, (ext, want) in live.items():
+        got = P.media_dest(g, None, "G:/roms", "3do", kind, "Road Rash (USA)", ext)
+        check("%-10s -> %s" % (kind, got), got == want)
+    check("the gamelist sits IN the system folder, not a sibling tree",
+          P.metadata_path(g, None, "G:/roms", "3do") == "G:/roms/3do/gamelist.xml")
+    check("and it records media paths, unlike ES-DE",
+          g["metadata"].get("records_media_paths") is True
+          and not P.ESDE["metadata"].get("records_media_paths"))
+
+    print()
+    print("9. cover and logo share a folder — the KIND decides the filename")
+    # The bug this catches: deriving the kind back from the folder returns whichever
+    # was declared first, so the marquee silently lands on <base>-image.png.
+    cov = P.media_dest(g, None, "/r", "3do", "cover", "X", "png")
+    logo = P.media_dest(g, None, "/r", "3do", "logo", "X", "png")
+    check("same folder", os.path.dirname(cov) == os.path.dirname(logo))
+    check("different filenames", cov != logo)
+    check("and the right ones", cov.endswith("-image.png")
+          and logo.endswith("-marquee.png"))
+
+    print()
+    print("10. observed system names, not guessed ones")
+    # Read off the real directory listing. These are LaunchBox-style, NOT Batocera's.
+    for ours, theirs in (("psx", "sonyplaystation"), ("snes", "nintendosupernes"),
+                         ("sega genesis", "segagenesis"), ("n64", "nintendo64"),
+                         ("dreamcast", "segadreamcast"), ("mame", "mame")):
+        check("%-14s -> %s" % (ours, theirs), P.system_for(g, ours) == theirs)
+    check("ES-DE still disagrees, which is the point",
+          P.system_for(P.ESDE, "psx") != P.system_for(g, "psx"))
 
     print()
     print("%d checks, all passed" % len(PASS))

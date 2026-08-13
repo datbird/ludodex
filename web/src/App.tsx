@@ -2189,6 +2189,7 @@ function PublishPanel({ onBrowse }: { onBrowse: () => void }) {
           <select value={profile} onChange={(e) => setProfile(e.target.value)}
             title="How this target expects its library laid out.">
             <option value="esde">ES-DE / RetroDECK</option>
+            <option value="esgamelist">EmulationStation gamelist (RetroBat / Batocera)</option>
             <option value="folder">Plain folder</option>
           </select>
         </label>
