@@ -93,6 +93,26 @@ PREFER_DYNAMIC, PREFER_SUPPLEMENT = "dynamic", "supplement"
 # external drive or a read-only mount are all reasonable, and pointing at one must not
 # require moving anything ludodex owns.
 PATH_KEY = "matchindex.path"
+
+# ScreenScraper's database is CC BY-NC-SA 4.0. An index built from it is a DERIVATIVE
+# WORK, so all three conditions ride along: attribution (below), non-commercial (a
+# standing constraint on however this is distributed — it can never be sold or bundled
+# into anything sold), and share-alike (this file carries the same licence onward).
+# Stamped INTO the database rather than into release notes, because the file outlives
+# the page it was downloaded from.
+LICENSE = "CC BY-NC-SA 4.0"
+LICENSE_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+ATTRIBUTION = ("Game data from ScreenScraper.fr (CC BY-NC-SA 4.0) and its contributors, "
+               "and from IGDB.com. Built by ludodex. Non-commercial use only; "
+               "derivative works must carry the same licence.")
+SOURCES = [
+    {"name": "ScreenScraper.fr", "url": "https://www.screenscraper.fr",
+     "license": "CC BY-NC-SA 4.0", "license_url": LICENSE_URL,
+     "provides": "game identities, regional names, ROM hashes"},
+    {"name": "IGDB.com", "url": "https://www.igdb.com",
+     "license": "see IGDB API terms", "license_url": "https://www.igdb.com/api",
+     "provides": "game identities, names, alternative names, release dates, store ids"},
+]
 # Where to look for a published build. A URL, not a hardcoded repo, because whoever runs
 # this may publish their own — and because a supplement built from someone else's
 # catalogs is theirs to distribute or not.
@@ -512,8 +532,17 @@ def build(progress=True):
     st = status(con)
     st.update({"ss_merged": ss_merged, "ss_own_identity": ss_own,
                "ss_hash_keys": ss_roms, "elapsed": round(time.time() - t0, 1)})
-    con.execute("INSERT OR REPLACE INTO identity_state(k,v) VALUES('built_at',?)",
-                (str(now),))
+    # PROVENANCE TRAVELS WITH THE FILE, not with the release page it was downloaded
+    # from. A published sqlite gets copied to a NAS, handed to a friend, restored from
+    # a backup — and every one of those separates it from the notes that said who made
+    # the data and under what licence. ScreenScraper's contents are CC BY-NC-SA 4.0, so
+    # attribution is a condition of redistributing them, and a condition that only holds
+    # while the file sits next to its README is not being met.
+    for k, v in (("built_at", str(now)),
+                 ("license", LICENSE),
+                 ("attribution", ATTRIBUTION),
+                 ("sources", json.dumps(SOURCES))):
+        con.execute("INSERT OR REPLACE INTO identity_state(k,v) VALUES(?,?)", (k, v))
     con.commit()
     con.close()
     return st
@@ -564,8 +593,12 @@ def status(con=None):
     own = con is None
     con = con or con_db()
     q = lambda s: con.execute(s).fetchone()[0]      # noqa: E731
+    meta = {r[0]: r[1] for r in con.execute("SELECT k,v FROM identity_state")}
     out = {"identities": q("SELECT COUNT(*) FROM identity"),
            "keys": q("SELECT COUNT(*) FROM identity_key"),
+           "license": meta.get("license"),
+           "attribution": meta.get("attribution"),
+           "sources": json.loads(meta.get("sources") or "[]"),
            "by_ns": {r[0]: r[1] for r in con.execute(
                "SELECT ns, COUNT(*) FROM identity_key GROUP BY ns ORDER BY 2 DESC")}}
     if own:

@@ -438,6 +438,9 @@ export interface MatchIndexState {
   identities?: number
   keys?: number
   built_at?: number | null
+  license?: string | null
+  attribution?: string | null
+  sources?: { name: string; url: string; license: string; provides: string }[]
   job: { state: string; got: number; total: number; error: string; mode?: string } | null
 }
 

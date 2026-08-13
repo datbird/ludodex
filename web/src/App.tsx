@@ -2071,6 +2071,17 @@ function MatchIndexPanel() {
         </div>
       ) : null}
 
+      {st.attribution ? (
+        <p className="hint">
+          <b>{st.license}</b> — {st.attribution}
+          {(st.sources || []).map((x) => (
+            <span key={x.name}>{' '}
+              <a href={x.url} target="_blank" rel="noreferrer">{x.name}</a>
+            </span>
+          ))}
+        </p>
+      ) : null}
+
       <p className="hint">
         A download lands in a temporary file and is only swapped in once it is complete
         and verified — a half-written index would attach cleanly and then miss every

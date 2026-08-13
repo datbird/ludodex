@@ -312,6 +312,29 @@ def main():
     check("md5 absent — dropped deliberately", "md5" not in ns)
 
     print()
+    print("13. licence and attribution are stamped INTO the file")
+    # A published sqlite gets copied to a NAS, handed to someone, restored from a
+    # backup — each of which separates it from the release notes. ScreenScraper's data
+    # is CC BY-NC-SA, so attribution is a CONDITION of redistributing it, and one that
+    # only holds while the file sits beside its README is not being met.
+    st2 = M.build(progress=False)
+    check("the licence is recorded: %r" % st2.get("license"),
+          st2.get("license") == "CC BY-NC-SA 4.0")
+    check("attribution names ScreenScraper",
+          "ScreenScraper" in (st2.get("attribution") or ""))
+    check("and states the non-commercial condition",
+          "commercial" in (st2.get("attribution") or "").lower())
+    srcs = {s["name"] for s in (st2.get("sources") or [])}
+    check("both upstreams are named: %s" % sorted(srcs),
+          {"ScreenScraper.fr", "IGDB.com"} <= srcs)
+    # It has to survive being read back by someone who only has the file.
+    ix = M.open_index()
+    got = {r[0]: r[1] for r in ix.execute("SELECT k,v FROM identity_state")}
+    ix.close()
+    check("readable from the file alone, with no ludodex code involved",
+          "ScreenScraper" in got.get("attribution", ""))
+
+    print()
     print("12. the index does not squat in the main db")
     # It shipped there briefly. Two copies, one of them stale, is worse than either.
     main = sqlite3.connect(M.MAIN_DB)

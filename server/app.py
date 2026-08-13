@@ -11714,9 +11714,15 @@ def matchindex_status():
                 "SELECT COUNT(*) FROM ix.identity").fetchone()[0]
             out["keys"] = con.execute(
                 "SELECT COUNT(*) FROM ix.identity_key").fetchone()[0]
-            row = con.execute("SELECT v FROM ix.identity_state WHERE k='built_at'"
-                              ).fetchone()
-            out["built_at"] = int(row[0]) if row else None
+            meta = {r[0]: r[1] for r in con.execute(
+                "SELECT k,v FROM ix.identity_state")}
+            out["built_at"] = int(meta["built_at"]) if meta.get("built_at") else None
+            # Attribution rides in the file, so the UI shows what the FILE says rather
+            # than what this build of ludodex assumes — a supplement from someone else
+            # states its own terms.
+            out["license"] = meta.get("license")
+            out["attribution"] = meta.get("attribution")
+            out["sources"] = json.loads(meta.get("sources") or "[]")
     finally:
         con.close()
     return out
