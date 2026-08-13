@@ -374,4 +374,16 @@ once: `bash auth_status.sh`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+**Code:** MIT — see [LICENSE](LICENSE).
+
+**Game data:** not MIT, and not shipped here. This repository contains no copy of anyone's
+game catalog — ludodex fetches data using credentials *you* supply, so a clone gives you
+code, not data. The providers' own terms apply to what you fetch.
+
+One thing worth knowing before you fork commercially: the optional prebuilt **match index**
+is derived from ScreenScraper's database and is therefore **CC BY-NC-SA 4.0** —
+attribution, non-commercial, share-alike. MIT lets you sell a fork of this code; that
+licence still does not let you ship or sell the index with it. Building your own index
+locally from your own API access is unaffected.
+
+See [DATA-LICENSE.md](DATA-LICENSE.md) for the full breakdown and per-provider terms.
