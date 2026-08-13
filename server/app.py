@@ -2477,6 +2477,48 @@ def publish_plan_compute(dev_id: int, body: dict = Body(default=None)):
     return res
 
 
+_PUBLISH_JOB = {"job": None}
+
+
+@app.post("/api/devices/{dev_id}/publish/apply")
+def publish_apply_run(dev_id: int, body: dict = Body(...)):
+    """Execute a plan. The plan is passed IN rather than recomputed, so what runs is
+    exactly what the user reviewed — recomputing here would silently apply a different
+    plan than the one on screen."""
+    import publish_apply
+    b = body or {}
+    plan = b.get("plan")
+    if not plan or not isinstance(plan, dict):
+        raise HTTPException(400, "no plan supplied — review one first")
+    if _PUBLISH_JOB["job"] and _PUBLISH_JOB["job"].get("running"):
+        raise HTTPException(409, "a publish is already running")
+    st = {"running": True, "device_id": dev_id, "done": 0,
+          "total": len(plan.get("items") or []), "current": None, "report": None,
+          "error": ""}
+    _PUBLISH_JOB["job"] = st
+
+    def _run():
+        try:
+            def prog(i, n, item):
+                st["done"], st["total"] = i, n
+                st["current"] = item.get("title") or item.get("entry_key")
+            st["report"] = publish_apply.apply_plan(
+                dev_id, plan, progress=prog,
+                allow_blocked=bool(b.get("allow_blocked")))
+        except Exception as e:                   # noqa: BLE001
+            st["error"] = str(e)[:300]
+        finally:
+            st["running"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True}
+
+
+@app.get("/api/publish/job")
+def publish_job():
+    return {"job": _PUBLISH_JOB["job"]}
+
+
 @app.get("/api/devices/{dev_id}/publish/ledger")
 def publish_ledger(dev_id: int):
     """What ludodex has actually placed on this device."""
