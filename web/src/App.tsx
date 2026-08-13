@@ -7,7 +7,7 @@ import type {
   DedupeSuggestion, Service, ServiceConnect, Achievements as AchData,
   MediaLibrary, MediaAsset, MediaKind, MatchedProvider, ProviderScopeState, BannedMedia, BackupsState, BackupJob,
   MatchIndexState, MatchIndexRelease,
-  PublishEffective, PublishEntry, PublishPlan, PublishPlanItem,
+  PublishEffective, PublishEntry, PublishPlan, PublishPlanItem, PublishJob,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device, LibraryManager, ImportMode, ImportEstimate, ResetScope, ResetPlan,
@@ -2118,6 +2118,7 @@ function PublishPanel({ onBrowse }: { onBrowse: () => void }) {
   const [romPath, setRomPath] = useState('')
   const [srcMgr, setSrcMgr] = useState('')
   const [expr, setExpr] = useState('')
+  const [job, setJob] = useState<PublishJob | null>(null)
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
 
@@ -2131,6 +2132,25 @@ function PublishPanel({ onBrowse }: { onBrowse: () => void }) {
     api.publishIntent(dev).then((r) => setMarked(r.entries)).catch(() => {})
   }, [dev])
   useEffect(() => { load(); setPlan(null) }, [load])
+
+  useEffect(() => {
+    if (!job?.running) return
+    const t = setInterval(() => api.publishJob().then((r) => setJob(r.job))
+      .catch(() => {}), 800)
+    return () => clearInterval(t)
+  }, [job?.running])
+
+  const runApply = async () => {
+    if (dev === null || !plan) return
+    // The plan the user READ is the plan that runs — recomputing here would silently
+    // apply something else.
+    setBusy('apply'); setMsg('')
+    try {
+      await api.publishApply(dev, plan)
+      setJob(await api.publishJob().then((r) => r.job))
+    } catch (e) { setMsg(String((e as Error).message || e)) }
+    finally { setBusy('') }
+  }
 
   const compute = async () => {
     if (dev === null) return
@@ -2316,11 +2336,58 @@ function PublishPanel({ onBrowse }: { onBrowse: () => void }) {
               </div>
             </div>
           ))}
-          <p className="hint">
-            This is a dry run. Applying a plan is not built yet — when it is, it will
-            consume this plan rather than recomputing one, and will only ever remove
-            files ludodex itself placed.
-          </p>
+          <div className="rows">
+            <div className="row">
+              <span>Apply</span>
+              <button className="btn primary"
+                disabled={busy === 'apply' || !!job?.running ||
+                          !!plan.blockers.length || !!plan.over_capacity}
+                onClick={runApply}
+                title={plan.blockers.length
+                  ? 'Resolve the blockers first — a plan is applied whole or not at all'
+                  : 'Run exactly the plan shown above'}>
+                {job?.running ? 'Publishing…' : 'Apply this plan'}
+              </button>
+              <span className="hint">
+                {plan.blockers.length
+                  ? 'blocked — nothing will be written'
+                  : 'writes to the target; only files ludodex placed are ever removed'}
+              </span>
+            </div>
+          </div>
+
+          {job && (
+            <div className="rows">
+              <div className="row">
+                <span>{job.running ? 'Working' : 'Finished'}</span>
+                <b>{job.running
+                  ? `${job.done} / ${job.total}`
+                  : job.error ? 'Failed' : 'Done ✓'}</b>
+                <span className="hint">{job.current || ''}</span>
+              </div>
+              {job.error && <div className="row"><span /><b className="err">{job.error}</b></div>}
+              {job.report && (
+                <div className="row">
+                  <span>Result</span>
+                  <b>
+                    {job.report.copied + job.report.converted + job.report.updated} written
+                    {job.report.removed ? `, ${job.report.removed} removed` : ''}
+                    {job.report.failed ? `, ${job.report.failed} failed` : ''}
+                  </b>
+                  <span className="hint">
+                    {job.report.skipped} already current
+                    {job.report.elapsed ? ` · ${job.report.elapsed}s` : ''}
+                  </span>
+                </div>
+              )}
+              {(job.report?.errors || []).slice(0, 10).map((e) => (
+                <div key={e.entry_key} className="row">
+                  <span className="dim">{e.entry_key}</span>
+                  <span className="hint err">{e.error}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </>
       )}
     </div>

@@ -452,6 +452,17 @@ export interface PublishPlan {
   blockers: string[]
   free_bytes?: number; over_capacity?: boolean
 }
+export interface PublishJob {
+  running: boolean; device_id: number; done: number; total: number
+  current: string | null; error: string
+  report: {
+    copied: number; converted: number; updated: number; removed: number
+    skipped: number; failed: number
+    errors: { entry_key: string; error: string }[]
+    elapsed?: number
+  } | null
+}
+
 export interface PublishStatus {
   intent_rows: number; included: number; excluded: number; devices: number
   catalog: boolean; legacy_device_wants?: number
@@ -1248,6 +1259,10 @@ export const api = {
     mutate<{ rules: PublishRule[] }>(`/api/devices/${dev}/publish/rules/${id}`, 'DELETE'),
   publishPlan: (dev: number, b: Record<string, unknown>) =>
     postJson<PublishPlan>(`/api/devices/${dev}/publish/plan`, b),
+  publishApply: (dev: number, plan: PublishPlan, allow_blocked = false) =>
+    postJson<{ ok: boolean }>(`/api/devices/${dev}/publish/apply`,
+      { plan, allow_blocked }),
+  publishJob: () => get<{ job: PublishJob | null }>('/api/publish/job'),
   publishLedger: (dev: number) =>
     get<{ placed: Record<string, unknown> }>(`/api/devices/${dev}/publish/ledger`),
 
