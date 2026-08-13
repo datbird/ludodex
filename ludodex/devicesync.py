@@ -18,7 +18,11 @@ per-system format-conversion rules.
 import os
 import re
 import sqlite3
+import sys
 import xml.etree.ElementTree as ET
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import publish_profiles     # noqa: E402  target layouts, as data
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 # DIR is this package; DATA is the REPO ROOT above it, which is where local
@@ -61,10 +65,13 @@ CATALOG_TO_ESDE = {
 }
 
 
-def esde_system(platform):
-    """Our catalog platform label -> the ES-DE system folder name."""
-    p = (platform or "").strip().lower()
-    return CATALOG_TO_ESDE.get(p, p)
+def esde_system(platform, profile=None):
+    """Our catalog platform label -> the target's system folder name.
+
+    Named for ES-DE because that is what every caller has always called it; the profile
+    argument is what makes it true of any target. Defaults to ES-DE, so an unqualified
+    call behaves exactly as it did."""
+    return publish_profiles.system_for(profile or publish_profiles.ESDE, platform)
 
 
 # --------------------------------------------------------------------------- #
@@ -96,16 +103,14 @@ _CD_SYSTEMS = {"psx", "ps2", "saturn", "segacd", "pcenginecd", "pcfx", "3do",
 _DISC_SRC_EXTS = {"cue", "bin", "iso", "img", "gdi", "toc", "ccd", "mdf", "nrg"}
 
 
-def convert_plan(esde_sys, ext):
-    """Return (target_ext, tool) for a source ROM. tool ∈ {copy, chd, rvz}. CD-based
-    systems → .chd via chdman; GameCube/Wii → .rvz via dolphin-tool; everything else
-    ships as-is (RetroArch cores read .zip/.7z and raw ROMs directly)."""
-    e = (ext or "").lower().lstrip(".")
-    if esde_sys in _CD_SYSTEMS and e in _DISC_SRC_EXTS:
-        return ("chd", "chd")
-    if esde_sys in ("gc", "wii") and e in ("iso", "gcm", "rvz", "wbfs", "ciso"):
-        return ("rvz", "rvz") if e != "rvz" else ("rvz", "copy")
-    return (e, "copy")
+def convert_plan(esde_sys, ext, profile=None):
+    """(target_ext, tool) for a source ROM. tool ∈ {copy, chd, rvz, unzip}.
+
+    The rules are the profile's, not this module's: what a file must BECOME is a fact
+    about the destination emulator, and it is the first thing that differs between two
+    frontends pointed at the same library."""
+    return publish_profiles.convert_plan(profile or publish_profiles.ESDE,
+                                         esde_sys, ext)
 
 
 # --------------------------------------------------------------------------- #
@@ -229,13 +234,10 @@ def _indent(elem, level=0):
 # --------------------------------------------------------------------------- #
 #  Push planning — pick which file(s) to send, and where they land
 # --------------------------------------------------------------------------- #
-def esde_gamelists_path(media_path):
-    """RetroDECK's gamelists dir sits beside downloaded_media — derive it so we don't
-    need a separate config field: …/ES-DE/downloaded_media → …/ES-DE/gamelists."""
-    mp = (media_path or "").rstrip("/")
-    if mp.endswith("/downloaded_media"):
-        return mp[:-len("/downloaded_media")] + "/gamelists"
-    return os.path.join(os.path.dirname(mp), "gamelists")
+def esde_gamelists_path(media_path, profile=None):
+    """The directory this target's per-system metadata files live in, or None when the
+    profile writes none."""
+    return publish_profiles.metadata_root(profile or publish_profiles.ESDE, media_path)
 
 
 # CD entry-point extensions (one per disc); the rest are member tracks pulled along.
@@ -288,9 +290,13 @@ def pick_rom_files(hits, esde_sys):
 # --------------------------------------------------------------------------- #
 #  Chosen media → local repo files (to push into ES-DE downloaded_media)
 # --------------------------------------------------------------------------- #
-def chosen_media_files(media_index_db, repo_dir, norm_key):
-    """{esde_folder: (local_repo_path, ext)} for a game's chosen, materialized media —
-    only kinds ES-DE has a folder for, only assets already pulled into the repo."""
+def chosen_media_files(media_index_db, repo_dir, norm_key, profile=None):
+    """{target_folder: (local_repo_path, ext)} for a game's chosen, materialized media —
+    only kinds THIS TARGET has a folder for, only assets already pulled into the repo.
+
+    A profile with no media map returns nothing, which is correct: a plain folder target
+    has nowhere to put a cover, and inventing a folder for it would be worse than
+    skipping it."""
     if not os.path.exists(media_index_db):
         return {}
     con = sqlite3.connect(media_index_db)
@@ -300,7 +306,8 @@ def chosen_media_files(media_index_db, repo_dir, norm_key):
         for r in con.execute(
                 "SELECT kind, sha1, ext FROM media WHERE norm_key=? AND chosen=1 "
                 "AND sha1 IS NOT NULL AND sha1!=''", (norm_key,)):
-            folder = KIND_TO_ESDE_FOLDER.get(r["kind"])
+            folder = publish_profiles.media_folder(
+                profile or publish_profiles.ESDE, r["kind"])
             if not folder:
                 continue
             ext = (r["ext"] or "jpg").split("?")[0].lstrip(".")
