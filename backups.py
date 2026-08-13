@@ -160,7 +160,7 @@ def _mark(job_id, ok, error="", fname="", size=0):
 # (166 MB of IGDB, ~1.5 GB of ScreenScraper when its walk finishes). 'ALL' means "every
 # database that holds something losing would cost you", which is not the same as every
 # file on disk. Name one explicitly in a job's contents to back it up anyway.
-DERIVED = {"igdb-catalog.sqlite", "ss-catalog.sqlite"}
+DERIVED = {"igdb-catalog.sqlite", "ss-catalog.sqlite", "match-index.sqlite"}
 
 
 def db_files(contents):

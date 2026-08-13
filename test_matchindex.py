@@ -169,6 +169,50 @@ def main():
     con.close()
 
     print()
+    print("10. the index is OPTIONAL, and absence is not the same as a miss")
+    # This is the whole risk of splitting it out. A machine with no index must fall
+    # back to the network; a machine WITH an index that has no row for this game has
+    # actually answered. Returning {} for both would collapse them into one, and the
+    # caller would refuse games it had merely never looked up.
+    con = M.open_index()
+    check("an index that exists opens", con is not None)
+    check("and a genuine miss is an empty answer, not None",
+          M.resolve(con, "steam", "000000") == {})
+    con.close()
+    moved = M.DB + ".away"
+    os.rename(M.DB, moved)
+    try:
+        check("with no index file at all, open_index returns None",
+              M.open_index() is None)
+    finally:
+        os.rename(moved, M.DB)
+    check("and it opens again once restored", M.open_index() is not None)
+
+    print()
+    print("11. md5 is not indexed; crc and sha1 are")
+    con = M.con_db()
+    ns = {r[0] for r in con.execute("SELECT DISTINCT ns FROM identity_key")}
+    con.close()
+    check("crc present", "crc" in ns)
+    check("sha1 present", "sha1" in ns)
+    check("md5 absent — dropped deliberately", "md5" not in ns)
+
+    print()
+    print("12. the index does not squat in the main db")
+    # It shipped there briefly. Two copies, one of them stale, is worse than either.
+    main = sqlite3.connect(M.MAIN_DB)
+    main.executescript("CREATE TABLE IF NOT EXISTS identity(id INTEGER PRIMARY KEY);"
+                       "CREATE TABLE IF NOT EXISTS identity_key(ns TEXT);")
+    main.commit(); main.close()
+    M.con_db().close()                       # opening the index evicts the legacy copy
+    main = sqlite3.connect(M.MAIN_DB)
+    left = {r[0] for r in main.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    main.close()
+    check("legacy tables were dropped from metadata-cache",
+          not ({"identity", "identity_key"} & left))
+
+    print()
     print("%d checks, all passed" % len(PASS))
 
 

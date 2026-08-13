@@ -31,6 +31,15 @@ IGDB does not still deserves an identity, so it gets SS_ID_BASE + ss_id. Asserte
 build time rather than assumed: if IGDB ever reaches the offset, the build fails loudly
 instead of silently merging two different games.
 
+OPTIONAL, AND THEREFORE FAIL-OPEN. This lives in its OWN file because it is entirely
+derived and runs to ~1 GB: the main match db holds decisions, this holds a rebuildable
+index, and backups should not be carrying the second to protect the first. ludodex must
+work without it — which makes absence newly reachable in every call site at once, and
+absence here means NO EVIDENCE, never NO MATCH. A miss falls back to the network path.
+Reading a miss as consent is the recurring defect in this codebase and an optional index
+is the easiest place yet to make it, so `open_index()` returns None when the file is not
+there and callers are expected to branch on that rather than on an empty result.
+
 REBUILDABLE. Everything here is derived from the two mirrors, so a rebuild is always
 safe and the index is never the only copy of anything.
 """
@@ -46,12 +55,19 @@ sys.path.insert(0, DIR)
 import matchgate                 # noqa: E402
 from titlenorm import norm       # noqa: E402
 
-DB = os.path.join(DATA, "metadata-cache.sqlite")     # the MAIN match db
+DB = os.path.join(DATA, "match-index.sqlite")        # optional, rebuildable supplement
+MAIN_DB = os.path.join(DATA, "metadata-cache.sqlite")  # where it used to live
 IGDB_DB = os.path.join(DATA, "igdb-catalog.sqlite")
 SS_DB = os.path.join(DATA, "ss-catalog.sqlite")
 
 SS_ID_BASE = 100_000_000
 YEAR_SLACK = 1                   # a year that disagrees by more than this is a refusal
+
+# Which ROM hashes earn their place. CRC32 is what No-Intro, TOSEC and every frontend
+# key on, and what ludodex already computes for a file; sha1 covers the DATs that
+# publish nothing else. MD5 was a third of the index and duplicated both — dropped
+# deliberately, not overlooked, and cheap to reinstate since this is all rebuilt.
+HASH_NS = ("crc", "sha1")
 
 # IGDB store-source names -> the namespace a caller will ask with. Anything not named
 # here still gets indexed, under a slug of its own name: a store we have no importer for
@@ -68,7 +84,51 @@ def _slug(s):
     return re.sub(r"[^a-z0-9]+", "_", (s or "").strip().lower()).strip("_")
 
 
+def open_index():
+    """The index if it is present, else None — the ONLY way a caller should reach it.
+
+    None means "this machine has no index", which is not the same as "this game is not
+    in the index". A caller that cannot tell those apart will refuse games it has simply
+    never looked up, so the distinction is a return value rather than an empty dict."""
+    if not os.path.exists(DB):
+        return None
+    con = sqlite3.connect("file:%s?mode=ro" % DB, uri=True, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        if not con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                           "AND name='identity_key'").fetchone()[0]:
+            con.close()
+            return None
+    except sqlite3.Error:
+        con.close()
+        return None
+    return con
+
+
+def _evict_legacy():
+    """The index shipped briefly inside metadata-cache.sqlite. Leaving it there would
+    mean two copies, one of them silently stale, and the main db carrying the ~1 GB this
+    split exists to remove."""
+    if not os.path.exists(MAIN_DB):
+        return
+    try:
+        con = sqlite3.connect(MAIN_DB, timeout=30)
+        have = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        gone = [t for t in ("identity_key", "identity", "identity_state") if t in have]
+        for t in gone:
+            con.execute("DROP TABLE %s" % t)
+        if gone:
+            con.commit()
+            con.execute("VACUUM")          # the pages are the entire point of moving it
+            con.commit()
+        con.close()
+    except sqlite3.Error:
+        pass
+
+
 def con_db():
+    _evict_legacy()
     con = sqlite3.connect(DB, timeout=60)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
@@ -214,8 +274,8 @@ def build(progress=True):
                         "VALUES('ss',?,?,'exact')", (str(g["id"]), ident))
             for r in con.execute("SELECT crc,md5,sha1 FROM ss.ss_roms WHERE game_id=?",
                                  (g["id"],)):
-                for ns, v in (("crc", r["crc"]), ("md5", r["md5"]), ("sha1", r["sha1"])):
-                    if v:
+                for ns, v in (("crc", r["crc"]), ("sha1", r["sha1"])):
+                    if v and ns in HASH_NS:
                         con.execute(
                             "INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind)"
                             " VALUES(?,?,?,'exact')", (ns, v, ident))
