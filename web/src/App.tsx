@@ -2239,7 +2239,7 @@ function PublishPanel({ onBrowse }: { onBrowse: () => void }) {
           <input value={romPath} onChange={(e) => setRomPath(e.target.value)}
             placeholder="/run/media/deck/SD/roms" />
           <input value={srcMgr} onChange={(e) => setSrcMgr(e.target.value)}
-            placeholder="source ROM manager id" style={{ maxWidth: 180 }}
+            placeholder="source ROM manager id" className="pb-narrow"
             title="Which indexed ROM library the files come FROM." />
         </label>
       </div>

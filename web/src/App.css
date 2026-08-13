@@ -4435,3 +4435,72 @@ img.ms-icon { display: block; object-fit: contain; flex: 0 0 auto; }
 .esrb-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .esrb-name { font-size: 13px; font-weight: 600; color: var(--text-h); }
 .esrb-desc { font-size: 11px; color: var(--text); }
+
+/* ---------------------------------------------------------------------------
+   Panel primitives — rows / fields / hints
+   ---------------------------------------------------------------------------
+   The Publish and Match-database panels were written against .rows/.row/.field/
+   .hint/.btn, none of which existed: both rendered as unstyled divs on every
+   screen size, not just small ones. Defining them here rather than rewriting the
+   markup keeps one vocabulary for panels built this way, and scoping them under
+   .panel stops names this generic leaking into the rest of the app.
+
+   Mobile is the default direction, not an afterthought: a .field is a column that
+   becomes a row only when there is width for one. A phone gets the layout it
+   wants without a media query having to undo a desktop assumption.        */
+.panel .rows { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 16px; }
+.panel .row {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
+  font-size: 13px;
+}
+.panel .row > span:first-child {
+  color: var(--text); opacity: .75; min-width: 96px; font-size: 12px;
+}
+.panel .row > b { color: var(--text-h); }
+.panel .row > b.muted { color: var(--text); opacity: .6; font-weight: 500; }
+
+.panel .field {
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  margin: 0 0 14px;
+}
+.panel .field > span:first-child {
+  color: var(--text-h); font-size: 13px; font-weight: 600;
+}
+.panel .field input, .panel .field select {
+  flex: 1 1 200px; min-width: 0;          /* min-width:0 or a flex child cannot shrink */
+  padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-2, transparent); color: var(--text-h); font-size: 13px;
+}
+.panel .hint { color: var(--text); opacity: .75; font-size: 12px; margin: 4px 0 14px; }
+.panel .hint.err, .panel p.err { color: var(--danger, #e5534b); opacity: 1; }
+
+.panel .btn {
+  padding: 7px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: transparent; color: var(--text-h); font-size: 13px; cursor: pointer;
+}
+.panel .btn:hover:not(:disabled) { border-color: var(--accent, #6cf); }
+.panel .btn:disabled { opacity: .45; cursor: default; }
+.panel .btn.primary { border-color: var(--accent, #6cf); color: var(--accent, #6cf); }
+
+/* From ~640px up there is room to put a label and its control side by side. */
+@media (min-width: 640px) {
+  .panel .field { flex-direction: row; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .panel .field > span:first-child { min-width: 150px; flex: 0 0 auto; }
+}
+
+/* A five-column grid in 360px is five unreadable columns. Below 720 the list rows
+   stack, keeping the title prominent and letting long paths wrap instead of being
+   ellipsed into nothing. Applies to banned media too, which had the same problem. */
+@media (max-width: 720px) {
+  .bm-row { grid-template-columns: 1fr; gap: 4px; }
+  .bm-row .bm-ref { white-space: normal; overflow-wrap: anywhere; }
+  .bm-row button { justify-self: start; }
+  .panel .row > span:first-child { min-width: 0; flex: 1 0 100%; }
+}
+
+/* Publish panel. The narrow input is capped rather than fixed: 180px is fine beside
+   a path field on a desktop and is 50% of a phone, so it shrinks when it must. */
+.publish-panel .pb-narrow { flex: 0 1 180px; max-width: 100%; }
+.publish-panel h4 { margin: 18px 0 8px; color: var(--text-h); font-size: 14px; }
+.publish-panel .bm-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }

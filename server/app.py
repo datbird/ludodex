@@ -2378,14 +2378,30 @@ def publish_intent_add(dev_id: int, body: dict = Body(...)):
                                           note=b.get("note"))}
 
 
-@app.delete("/api/devices/{dev_id}/publish")
-def publish_intent_remove(dev_id: int, body: dict = Body(...)):
-    """Forget an opinion — distinct from recording an exclude."""
+@app.delete("/api/devices/{dev_id}/publish/{entry_key:path}")
+def publish_intent_remove(dev_id: int, entry_key: str):
+    """Forget an opinion about one entry — distinct from recording an exclude.
+
+    A path param, not a body: every other DELETE in this API identifies its target in
+    the URL, and the sibling /wants endpoint directly above does exactly this. An API
+    where one verb behaves differently in one place is an API people get wrong."""
+    import publish
+    return {"cleared": publish.intent_clear(dev_id, [entry_key])}
+
+
+@app.post("/api/devices/{dev_id}/publish/clear")
+def publish_intent_clear_many(dev_id: int, body: dict = Body(default=None)):
+    """Forget MANY opinions at once. A POST, because a bulk operation needs a body and
+    DELETE-with-a-body is the inconsistency this pair exists to avoid — the same shape
+    /api/jobs/clear and /api/fileops/manifest/delete already use."""
     import publish
     b = body or {}
     keys = list(b.get("entry_keys") or [])
     for nk in (b.get("norm_keys") or []):
         keys += [e["entry_key"] for e in publish.entries_for(nk)]
+    if b.get("all"):
+        publish.intent_clear_device(dev_id)
+        return {"cleared": "all"}
     return {"cleared": publish.intent_clear(dev_id, keys)}
 
 

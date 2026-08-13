@@ -1249,8 +1249,11 @@ export const api = {
       `/api/devices/${dev}/publish?state=${state}`),
   publishMark: (dev: number, b: { entry_keys?: string[]; norm_keys?: string[]; state?: string }) =>
     postJson<{ written: number }>(`/api/devices/${dev}/publish`, b),
-  publishUnmark: (dev: number, b: { entry_keys?: string[]; norm_keys?: string[] }) =>
-    mutate<{ cleared: number }>(`/api/devices/${dev}/publish`, 'DELETE', b),
+  publishUnmark: (dev: number, entryKey: string) =>
+    mutate<{ cleared: number }>(
+      `/api/devices/${dev}/publish/${encodeURIComponent(entryKey)}`, 'DELETE'),
+  publishUnmarkMany: (dev: number, b: { entry_keys?: string[]; norm_keys?: string[]; all?: boolean }) =>
+    postJson<{ cleared: number | string }>(`/api/devices/${dev}/publish/clear`, b),
   publishRules: (dev: number) =>
     get<{ rules: PublishRule[] }>(`/api/devices/${dev}/publish/rules`),
   publishRuleSave: (dev: number, b: Partial<PublishRule>) =>
