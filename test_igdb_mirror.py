@@ -239,7 +239,37 @@ def main():
     check("every game joined to its platform: %d" % n, n == 1200)
 
     print()
+    print("13. the exact release date is KEPT, not truncated to a year on the way in")
+    # The timestamp arrives in the same payload the year is derived from. Storing only
+    # the year threw away month and day for free, and getting them back cost a full
+    # re-sweep — so the raw value is persisted and the year stays a derived convenience.
+    CATALOG[11]["first_release_date"] = 858124800      # 1997-03-12 UTC
+    CATALOG[11]["updated_at"] = int(time.time()) + 9
+    M.sweep(progress=False)
+    con = M.con_db()
+    r = con.execute("SELECT year, first_release_date FROM games WHERE id=11").fetchone()
+    con.close()
+    check("the year is still there: %r" % r["year"], r["year"] == 1997)
+    check("and so is the full timestamp: %r" % r["first_release_date"],
+          r["first_release_date"] == 858124800)
+    check("which recovers the day, not just the year: %s"
+          % time.strftime("%Y-%m-%d", time.gmtime(r["first_release_date"])),
+          time.strftime("%Y-%m-%d", time.gmtime(r["first_release_date"]))
+          == "1997-03-12")
+    check("a game with no date stores null, not epoch 0",
+          con_null(M) is None)
+
+    print()
     print("%d checks, all passed" % len(PASS))
+
+
+def con_null(M):
+    """first_release_date for a record IGDB has no date for. 0 and NULL are different
+    claims: one says 1970, the other says unknown."""
+    con = M.con_db()
+    r = con.execute("SELECT first_release_date FROM games WHERE id=12").fetchone()
+    con.close()
+    return r["first_release_date"]
 
 
 if __name__ == "__main__":

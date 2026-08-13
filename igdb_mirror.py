@@ -62,6 +62,11 @@ def con_db():
       id INTEGER PRIMARY KEY,
       name TEXT, slug TEXT, norm_key TEXT,
       game_type INTEGER, year INTEGER,
+      -- The full unix timestamp, kept alongside the year. It arrives in the same
+      -- payload the year is derived from, so truncating to a year at write time threw
+      -- away month and day for free and would have cost a whole re-sweep to recover.
+      -- Store what the source gave you; derive on the way out, not on the way in.
+      first_release_date INTEGER,
       platforms TEXT,                 -- csv of IGDB platform ids
       parent_game INTEGER, version_parent INTEGER,
       updated_at INTEGER, seen_at INTEGER);
@@ -101,11 +106,14 @@ def con_db():
     # A table created by an earlier version keeps its old shape: CREATE TABLE IF NOT
     # EXISTS is a no-op, not a migration. Heal the columns added since, the same way
     # the media index does.
-    _have = {r[1] for r in con.execute("PRAGMA table_info(platforms)")}
-    for _c, _d in (("alternative_name", "TEXT"), ("platform_type", "TEXT"),
-                   ("platform_family", "TEXT"), ("generation", "INTEGER")):
-        if _c not in _have:
-            con.execute("ALTER TABLE platforms ADD COLUMN %s %s" % (_c, _d))
+    for _tbl, _cols in (
+            ("platforms", (("alternative_name", "TEXT"), ("platform_type", "TEXT"),
+                           ("platform_family", "TEXT"), ("generation", "INTEGER"))),
+            ("games", (("first_release_date", "INTEGER"),))):
+        _have = {r[1] for r in con.execute("PRAGMA table_info(%s)" % _tbl)}
+        for _c, _d in _cols:
+            if _c not in _have:
+                con.execute("ALTER TABLE %s ADD COLUMN %s %s" % (_tbl, _c, _d))
     con.commit()
     return con
 
@@ -138,16 +146,18 @@ def _upsert(con, rows, now):
         nm = g.get("name") or ""
         ts = g.get("first_release_date")
         con.execute(
-            "INSERT INTO games(id,name,slug,norm_key,game_type,year,platforms,"
+            "INSERT INTO games(id,name,slug,norm_key,game_type,year,"
+            "first_release_date,platforms,"
             "parent_game,version_parent,updated_at,seen_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
             "name=excluded.name, slug=excluded.slug, norm_key=excluded.norm_key, "
             "game_type=excluded.game_type, year=excluded.year, "
+            "first_release_date=excluded.first_release_date, "
             "platforms=excluded.platforms, parent_game=excluded.parent_game, "
             "version_parent=excluded.version_parent, "
             "updated_at=excluded.updated_at, seen_at=excluded.seen_at",
             (gid, nm, g.get("slug"), norm(nm), g.get("game_type"),
-             time.gmtime(ts).tm_year if ts else None,
+             time.gmtime(ts).tm_year if ts else None, ts or None,
              ",".join(str(p) for p in (g.get("platforms") or [])),
              g.get("parent_game"), g.get("version_parent"),
              g.get("updated_at"), now))
@@ -417,7 +427,10 @@ def status():
     p = con.execute("SELECT COUNT(*) FROM platforms").fetchone()[0]
     ext = con.execute("SELECT COUNT(*) FROM external_ids").fetchone()[0]
     gp = con.execute("SELECT COUNT(*) FROM game_platforms").fetchone()[0]
+    frd = con.execute("SELECT COUNT(*) FROM games "
+                      "WHERE first_release_date IS NOT NULL").fetchone()[0]
     out = {"games": g["n"], "alt_names": a, "platforms": p,
+           "first_release_dates": frd,
            "external_ids": ext, "game_platforms": gp,
            "ext_cursor": int(get(con, "ext_cursor", 0) or 0),
            "newest_updated_at": g["u"],
