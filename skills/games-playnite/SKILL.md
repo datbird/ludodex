@@ -17,10 +17,10 @@ Playnite stores its library in **LiteDB** (a .NET format), a PowerShell **bridge
 
 ## Import (Playnite → ludodex)
 1. On the Playnite machine, run the bridge (Extensions → Execute script):
-   `.\playnite_bridge.ps1 -Export -Path playnite_games.json`
+   `.\scripts/playnite_bridge.ps1 -Export -Path playnite_games.json`
 2. Copy that JSON to the Deck (scp/share), then point ludodex at it:
    `python3 ~/game-ownership/config.py set playnite_import_json /path/playnite_games.json`
-3. Rebuild: run the **games-update** skill (`bash update.sh`). Playnite games enrich
+3. Rebuild: run the **games-update** skill (`bash scripts/update.sh`). Playnite games enrich
    their provider entries; new providers (EA/Battle.net/Xbox/…) appear as sources.
 
 ## Export (ludodex → Playnite)
@@ -28,7 +28,7 @@ Playnite stores its library in **LiteDB** (a .NET format), a PowerShell **bridge
    (one record per deduped game, full attributes; ludodex-only games get a synthesized
    provider id).
 2. Copy it to the Playnite machine and run:
-   `.\playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json`  (creates missing games
+   `.\scripts/playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json`  (creates missing games
    + enriches existing; add `-NoCreate` to only enrich).
 
 ## Notes

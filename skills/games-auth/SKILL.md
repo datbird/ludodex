@@ -14,7 +14,7 @@ Account/environment values (SteamID, API keys, ROM host/paths) are NOT
 hardcoded — they live in a `config` table. For a fresh machine / full onboarding, run
 the guided wizard which also explains where to obtain each credential:
 ```bash
-cd ~/game-ownership && ./setup.sh
+cd ~/game-ownership && ./scripts/setup.sh
 ```
 For individual tweaks:
 ```bash

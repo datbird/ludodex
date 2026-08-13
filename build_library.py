@@ -370,7 +370,7 @@ if os.path.exists(CRAWL_DB):
     cc.close()
 
 
-# ---- Playnite library (playnite_bridge.ps1 -Export -> JSON) ----
+# ---- Playnite library (scripts/playnite_bridge.ps1 -Export -> JSON) ----
 # Playnite is NOT a source; it's a meta/consolidation layer. Each game maps to
 # its UNDERLYING provider (steam/gog/ea/xbox/…), enriching that source's entry.
 # "In Playnite" is recorded as provenance only (the in_playnite flag).

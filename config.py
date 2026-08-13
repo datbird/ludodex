@@ -28,7 +28,7 @@ locally (they go into config.sqlite, never into git):
   python3 config.py mount rm <name>
   python3 config.py archive add <name> <path> [rom|flat]   # (same registry, name-first)
 
-For first-time onboarding with credential how-to guidance, run ./setup.sh instead.
+For first-time onboarding with credential how-to guidance, run ./scripts/setup.sh instead.
 """
 import os
 import sqlite3
@@ -57,7 +57,7 @@ SCHEMA = [
      "Path to the ROM index DB (emulation input, built by build_romdb.py)."),
     ("unraid_host", "",
      "ssh target where the ROM archive lives, e.g. root@192.168.1.10 "
-     "(only needed for `update.sh --roms`)."),
+     "(only needed for `scripts/update.sh --roms`)."),
     ("roms_path", "",
      "Absolute path to the ROM archive on that host (only needed for --roms)."),
     # --- preferences: behavior toggles (1 = on, 0 = off) ---
@@ -83,7 +83,7 @@ SCHEMA = [
     ("source_emulation_enabled", "1", "[source] Include the emulation ROM index."),
     ("source_playnite_enabled", "1", "[source] Include an imported Playnite library."),
     ("playnite_import_json", "", "Path to the Playnite export JSON produced by "
-     "playnite_bridge.ps1 (-Export); ingested by build_library."),
+     "scripts/playnite_bridge.ps1 (-Export); ingested by build_library."),
     ("playnite_export_json", "", "Where playnite_export.py writes the ludodex->"
      "Playnite JSON (blank = ludodex_to_playnite.json next to the scripts). A "
      "portable art bundle is written beside it as <name>_media/ — copy BOTH to the "
@@ -193,7 +193,7 @@ SCHEMA = [
      "community/publisher art until you have authorization. Default 0."),
     # --- remote sync (push the catalog to a remote DB mirror) ---
     ("sync_target", "",
-     "Where `update.sh` pushes the catalog after a rebuild: blank (off), "
+     "Where `scripts/update.sh` pushes the catalog after a rebuild: blank (off), "
      "'pocketbase', 'firebase', or 'both'."),
     ("pocketbase_url", "",
      "PocketBase base URL, e.g. https://pb.example.com (no trailing slash)."),
@@ -697,12 +697,12 @@ INTEGRATIONS = [
      "url": "(no signup — runs inside your Playnite install)",
      "steps": [
          "In Playnite (Extensions > Execute script) run the bridge to EXPORT its "
-         "library + art paths to JSON:  .\\playnite_bridge.ps1 -Export -Path "
+         "library + art paths to JSON:  .\\scripts/playnite_bridge.ps1 -Export -Path "
          "playnite_games.json   — copy it to this machine and set: config.py set "
          "playnite_import_json <path>  (then update.sh imports it).",
          "To push BACK: python3 playnite_export.py  (writes ludodex_to_playnite.json "
          "+ a <name>_media/ art bundle). Copy BOTH to the Playnite machine and run: "
-         ".\\playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json",
+         ".\\scripts/playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json",
          "Tune behavior: playnite_media_overwrite (gaps|all|playnite-wins) and "
          "playnite_icon_source (logo|cover|none)."],
      "config_keys": ["playnite_import_json", "playnite_export_json",
@@ -1051,7 +1051,7 @@ def main(argv):
                         print_integration(it, detail=False)
                 print()
             print("No credential needed: %s" % NO_AUTH_NOTE)
-            print("\nFull guide: AUTH.md   |   verify all: bash auth_status.sh")
+            print("\nFull guide: AUTH.md   |   verify all: bash scripts/auth_status.sh")
     elif cmd == "set":
         if len(argv) < 3:
             sys.exit("usage: config.py set <key> <value>")
@@ -1066,7 +1066,7 @@ def main(argv):
             new = input("%s [%s]: " % (k, cur)).strip()
             if new:
                 set_(k, new)
-        print("\nSaved to config.sqlite. Verify with: bash auth_status.sh")
+        print("\nSaved to config.sqlite. Verify with: bash scripts/auth_status.sh")
     else:
         sys.exit("unknown command %r — use init|setup|list|get|set|steam-key|"
                  "itch-key|sources|enable|disable|mount|mounts|archive|"

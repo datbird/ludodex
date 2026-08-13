@@ -18,7 +18,7 @@ import config
 
 KEY = (os.environ.get("ITCH_API_KEY", "").strip() or config.itch_key())
 if not KEY:
-    sys.exit("no itch.io API key — run ./setup.sh, or set it with "
+    sys.exit("no itch.io API key — run ./scripts/setup.sh, or set it with "
              "config.py set itch_api_key <key> (get one at "
              "https://itch.io/user/settings/api-keys)")
 

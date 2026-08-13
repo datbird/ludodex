@@ -12,11 +12,11 @@ cached, so refreshing is one command with no prompts.
 It's driven through three Claude skills (`skills/`), so the day-to-day interface is just
 asking Claude to *update*, *query*, or *re-auth* — but every script runs standalone too.
 
-> **Where it's headed:** see [`DESIGN.md`](DESIGN.md) for the canonical spec and roadmap
+> **Where it's headed:** see [`DESIGN.md`](docs/DESIGN.md) for the canonical spec and roadmap
 > — the **Device layer** (push curated games + metadata/media to named devices, with a
 > detect/pin install ledger, provenance, changelog, and conflict awareness) and the
 > Build-now / Next / Someday docket. For a single-page orientation + the full plan for
-> the **AI-forward server**, see [`HANDOFF.md`](HANDOFF.md).
+> the **AI-forward server**, see [`HANDOFF.md`](docs/HANDOFF.md).
 
 ## Why
 
@@ -28,13 +28,13 @@ No public-profile toggling, no logins on every run. One DB, deduped, queryable.
 ## Quick start
 
 ```bash
-./setup.sh
+./scripts/setup.sh
 ```
 
 A guided wizard: it initializes the config DB and walks you through obtaining and
 entering each credential (with the exact URLs/steps), authenticates Steam/Epic/GOG,
 optionally indexes a ROM archive, and builds the first catalog. Re-runnable any time
-(existing values are offered as defaults). After that, refresh with `bash update.sh`.
+(existing values are offered as defaults). After that, refresh with `bash scripts/update.sh`.
 
 ## How it works
 
@@ -62,10 +62,10 @@ optionally indexes a ROM archive, and builds the first catalog. Re-runnable any 
   and flags variants of known games. Ingested as the `archive` source.
 - **`build_library.py`** — normalizes titles and dedupes all sources into
   `game-library.sqlite`.
-- **`update.sh`** — refresh all stores (cached auth) → rebuild → report games new since
+- **`scripts/update.sh`** — refresh all stores (cached auth) → rebuild → report games new since
   the last run. `--roms` also re-scans the ROM archive (slow). Pushes to a remote DB if
   `sync_target` is set.
-- **`auth_status.sh`** — prints `OK`/`BROKEN` per source.
+- **`scripts/auth_status.sh`** — prints `OK`/`BROKEN` per source.
 - **`sync.py`** — mirror the catalog to a remote PocketBase / Firebase DB (see below).
 
 ## Skills
@@ -145,7 +145,7 @@ This is a **two-stage pipeline** over a persistent `crawl-index.sqlite` (gitigno
    revision/disc/dump-flags, and whether the file is a **variant of a game already in the
    catalog** (`is_variant` + `base_norm_key`). Marks each file processed → incremental.
 
-`build_library.py` ingests `extracted`; `update.sh` runs both stages before each rebuild,
+`build_library.py` ingests `extracted`; `scripts/update.sh` runs both stages before each rebuild,
 so archives refresh with every **games-update**. (`process.py --all` re-extracts
 everything.)
 
@@ -167,7 +167,7 @@ python3 config.py enable igdb            # on by default; no-ops without creds
 
 IGDB data is cached in `metadata-cache.sqlite` (gitignored) by **`igdb_enrich.py`** —
 re-runs only fetch new/stale records (`igdb_meta_ttl_days`); `--all` re-does everything.
-`update.sh` runs enrichment after each rebuild, then re-merges. Each link is recorded in
+`scripts/update.sh` runs enrichment after each rebuild, then re-merges. Each link is recorded in
 `metadata_links` (provider `igdb`, the id, slug and `igdb.com` URL).
 
 ## Media (covers, backgrounds, logos, screenshots…)
@@ -190,7 +190,7 @@ python3 media_choose.py --materialize --kind cover   # pull chosen bytes into me
 
 Hybrid storage: everything is indexed as a reference; only the **chosen** asset per kind
 is materialized into a content-addressed local repo (`media/`, gitignored) on demand —
-so the index is cheap and complete while the repo stays small. `update.sh` runs
+so the index is cheap and complete while the repo stays small. `scripts/update.sh` runs
 index → fetch → choose automatically.
 
 ## Playnite interoperability (import/export)
@@ -207,8 +207,8 @@ Playnite (it stores its library in LiteDB, which needs .NET):
 
 ```powershell
 # in Playnite (Extensions > Execute script):
-.\playnite_bridge.ps1 -Export -Path playnite_games.json     # Playnite -> JSON
-.\playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json  # JSON -> Playnite (create+enrich)
+.\scripts/playnite_bridge.ps1 -Export -Path playnite_games.json     # Playnite -> JSON
+.\scripts/playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json  # JSON -> Playnite (create+enrich)
 ```
 
 ```bash
@@ -265,7 +265,7 @@ export to each).
 
 `sync.py` mirrors the catalog (`games` + `sources`) one-way to a remote backend so
 other devices/apps can read it. Targets: **PocketBase** (self-hosted) and/or **Firebase
-Firestore**. Set `sync_target` (`pocketbase` | `firebase` | `both`) and `update.sh` pushes
+Firestore**. Set `sync_target` (`pocketbase` | `firebase` | `both`) and `scripts/update.sh` pushes
 after every rebuild; or run it directly:
 
 ```bash
@@ -311,7 +311,7 @@ Fuzzy near-misses may stay separate — acceptable.
 
 ## Configuration
 
-`./setup.sh` (above) handles this interactively. Under the hood, account- and
+`./scripts/setup.sh` (above) handles this interactively. Under the hood, account- and
 environment-specific values are **not hardcoded** — they live in a `config` table inside
 `config.sqlite` (gitignored), managed by `config.py`. Only safe/public defaults ship in
 the code. To tweak values directly:
@@ -328,7 +328,7 @@ python3 config.py get steam_id                 # read one (used by the shell scr
 | `steam_api_key` | the Steam Web API key, stored locally (gitignored); env `STEAM_API_KEY` overrides |
 | `itch_api_key` | itch.io API key, stored locally (gitignored); env `ITCH_API_KEY` overrides |
 | `library_db` / `roms_index_db` | output catalog + ROM-index DB paths |
-| `unraid_host` / `roms_path` | ssh target + ROM archive path (only for `update.sh --roms`) |
+| `unraid_host` / `roms_path` | ssh target + ROM archive path (only for `scripts/update.sh --roms`) |
 | `gog_client_id` / `gog_client_secret` | GOG Galaxy's public OAuth client (defaults work) |
 
 Behavior **preferences** live in the same table (`1`/`0`):
@@ -345,7 +345,7 @@ The Steam key is resolved at runtime as **`STEAM_API_KEY` env → `steam_api_key
 
 ## Auth
 
-**See [AUTH.md](AUTH.md) for the complete, authoritative guide** to obtaining and
+**See [AUTH.md](docs/AUTH.md) for the complete, authoritative guide** to obtaining and
 wiring up the credentials for *every* integration (ownership sources, metadata and
 media providers, and remote sync), plus the env → config credential precedence.
 
@@ -366,7 +366,7 @@ Quick version — once cached, auth needs no further interaction:
 Get the exact steps for any integration right from the CLI:
 `python3 config.py integrations` (overview + which are configured) or
 `python3 config.py integrations <id>` (e.g. `ea`, `igdb`). Verify all sources at
-once: `bash auth_status.sh`.
+once: `bash scripts/auth_status.sh`.
 
 > **Privacy note:** the SQLite catalogs, per-store ownership dumps (`*_games.tsv`), and
 > cached auth tokens (`.gog/`, `.ea/`) are `.gitignore`d — only code, skills, and docs

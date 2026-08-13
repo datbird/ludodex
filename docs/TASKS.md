@@ -214,7 +214,7 @@ the first sync + build:
 - `test_dbsync_live.py <backend>` — real two-way round-trip (push, no-op re-sync, pull,
   delete both ways, convergence) against an isolated `LUDODEX_DATA`. Run it inside the
   container, where the psycopg/PyMySQL drivers live:
-  `docker exec -e LUDODEX_DATA=/tmp/dbsync-live ludodex python3 /app/test_dbsync_live.py postgres`
+  `docker exec -e LUDODEX_DATA=/tmp/dbsync-live ludodex python3 /app/tests/test_dbsync_live.py postgres`
 - For Firestore without a Google project, run a Firestore emulator and set
   `FIRESTORE_EMULATOR_HOST=<host:port>` (also settable as config `firestore_emulator_host`).
   The adapter skips service-account token minting in that mode.
@@ -299,11 +299,11 @@ Guards added so it cannot recur:
 - `test_dbsync_live.py`'s hand-rolled version of that check now calls the shared one.
 - The three tests that mutate the running instance BY DESIGN (`test_autosync`,
   `test_dbsync_roundtrip`, `test_dbsync_live`) require `LUDODEX_LIVE_TESTS=1`.
-- `run_tests.sh` gives every test its own scratch dir instead of trusting it.
+- `scripts/run_tests.sh` gives every test its own scratch dir instead of trusting it.
 - `test_isolation_guard.py` pins all of the above, including a sweep that fails if any
   test file reintroduces `setdefault` on `LUDODEX_DATA`.
 
-**Run the suite with `docker exec -i ludodex bash /app/run_tests.sh`** — never by looping
+**Run the suite with `docker exec -i ludodex bash /app/scripts/run_tests.sh`** — never by looping
 over `test_*.py` by hand.
 
 ## Guards

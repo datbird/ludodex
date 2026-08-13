@@ -21,7 +21,7 @@ itch.io** PC ownership. Each game lists all the sources it's available from.
   (`config.py mounts` lists them with live mounted/present/MISSING status; an unplugged
   drive is skipped but its indexed games stay). Local archives use a two-stage pipeline (in `crawl-index.sqlite`): `crawl.py` appends new
   files to a raw `files` inventory, then `process.py` extracts system/title/region/
-  version/etc. into `extracted` and flags variants of known games. `update.sh` runs both
+  version/etc. into `extracted` and flags variants of known games. `scripts/update.sh` runs both
   before each rebuild. Disabled sources are skipped on both pull and rebuild.
 
 ## To run an update

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Playnite interchange — the canonical record format shared by ludodex and the
-Playnite PowerShell bridge (playnite_bridge.ps1).
+Playnite PowerShell bridge (scripts/playnite_bridge.ps1).
 
 Both directions speak ONE JSON shape: a list of game records. The bridge maps a
 Playnite `Game` <-> this record; ludodex (build_library import / playnite_export

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI features (HANDOFF.md §6.5) — BYOAI provider registry.
+"""AI features (docs/HANDOFF.md §6.5) — BYOAI provider registry.
 
 Phase 3 starts with natural-language search: an LLM turns a free-text question
 into a structured catalog query (a subset of the /api/games filters), which the

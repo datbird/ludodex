@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Export the ludodex catalog to the canonical Playnite interchange JSON
-(see playnite.py). playnite_bridge.ps1 -Import reads it to create/enrich games.
+(see playnite.py). scripts/playnite_bridge.ps1 -Import reads it to create/enrich games.
 
 One record per deduped game, merging attributes across its sources. When a game
 was originally imported from Playnite, its lossless source_attrs record seeds the
