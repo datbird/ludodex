@@ -15,6 +15,7 @@ Attribute names map onto the same vocabulary as the Playnite interchange
 plus a few IGDB-specific kinds (themes, game_modes, player_perspectives).
 """
 import json
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -136,12 +137,23 @@ def releases(g):
 
 MIN_INTERVAL = 0.26            # IGDB rate limit ~4 req/s — throttle to stay under
 _last = [0.0]
+# A caller doing a long sweep can ask for a gentler sustained pace than the ceiling
+# (see igdb_mirror). Set, don't reassign MIN_INTERVAL: the floor stays the floor.
+_pace = [0.0]
+# How many 429s this process has taken — the mirror reads it to back its pace off.
+_throttled = [0]
+
+
+def set_pace(seconds):
+    """Minimum seconds between requests for THIS process, on top of MIN_INTERVAL."""
+    _pace[0] = max(0.0, float(seconds or 0))
 
 
 def _throttle():
+    gap = max(MIN_INTERVAL, _pace[0])
     dt = time.time() - _last[0]
-    if dt < MIN_INTERVAL:
-        time.sleep(MIN_INTERVAL - dt)
+    if dt < gap:
+        time.sleep(gap - dt)
     _last[0] = time.time()
 
 
@@ -189,13 +201,24 @@ def query(endpoint, body, client_id, token, retries=4, reauth=None):
                     continue
                 raise
             if e.code in (429, 500, 502, 503, 504) and attempt < retries:
-                time.sleep(delay)
+                # Honour Retry-After when the server sends one: a 429 that says how
+                # long to wait is an instruction, and guessing over the top of it is
+                # how a client turns a throttle into a ban. Jitter otherwise, so N
+                # retries started together do not resynchronise on every round.
+                ra = 0.0
+                try:
+                    ra = float(e.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    ra = 0.0
+                time.sleep(ra if ra > 0 else delay * (1.0 + random.random() * 0.4))
                 delay *= 2
+                if e.code == 429:
+                    _throttled[0] += 1
                 continue
             raise
         except urllib.error.URLError:
             if attempt < retries:
-                time.sleep(delay)
+                time.sleep(delay * (1.0 + random.random() * 0.4))
                 delay *= 2
                 continue
             raise
