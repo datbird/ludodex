@@ -7,6 +7,7 @@ import type {
   DedupeSuggestion, Service, ServiceConnect, Achievements as AchData,
   MediaLibrary, MediaAsset, MediaKind, MatchedProvider, ProviderScopeState, BannedMedia, BackupsState, BackupJob,
   MatchIndexState, MatchIndexRelease,
+  PublishEffective, PublishEntry, PublishPlan, PublishPlanItem,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device, LibraryManager, ImportMode, ImportEstimate, ResetScope, ResetPlan,
@@ -680,7 +681,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [prefsTick, setPrefsTick] = useState(0)   // bump to push prefs changes live
   const [mediaTick, setMediaTick] = useState(0)   // bump to refresh spotlight covers live
   // Dashboard is always the landing page (not persisted), per product decision.
-  const [tab, setTab] = useState<'library' | 'dashboard' | 'files'>('dashboard')
+  const [tab, setTab] = useState<'library' | 'dashboard' | 'files' | 'publish'>('dashboard')
   const [theme, setTheme] = useState<'dark' | 'light'>(
     () => (readPref('theme', 'dark') as 'dark' | 'light'))
   const [view, setView] = useState<'poster' | 'table'>(
@@ -930,9 +931,11 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       </header>
 
       <ParticleTabs className="main-tabs" fill active={tab}
-        onSelect={(id) => setTab(id as 'library' | 'dashboard' | 'files')}
+        onSelect={(id) => setTab(id as 'library' | 'dashboard' | 'files' | 'publish')}
         tabs={[{ id: 'dashboard', label: 'Dashboard' }, { id: 'library', label: 'Library' },
-               { id: 'files', label: 'Files' }]} />
+               { id: 'files', label: 'Files' }, { id: 'publish', label: 'Publish' }]} />
+
+      {tab === 'publish' && <PublishPanel onBrowse={() => setTab('library')} />}
 
       {tab === 'dashboard' && <Dashboard stats={stats} onBrowse={() => setTab('library')}
         onFilter={(f) => { setFilters(f); setTab('library') }} onOpen={setSelected}
@@ -2094,6 +2097,231 @@ function MatchIndexPanel() {
         Rebuild from local mirrors
       </button>
       {msg ? <p className="hint">{msg}</p> : null}
+    </div>
+  )
+}
+
+
+/** Publish — pick a target, decide what belongs on it, see exactly what would change.
+ *
+ *  The panel is deliberately plan-first. Publishing writes to someone else's disk, so
+ *  the thing on screen is a DIFF you review, not a button you press and hope about;
+ *  Apply does not exist yet, and when it does it consumes this plan rather than
+ *  recomputing one. Everything here reads. */
+function PublishPanel({ onBrowse }: { onBrowse: () => void }) {
+  const [devices, setDevices] = useState<Device[] | null>(null)
+  const [dev, setDev] = useState<number | null>(null)
+  const [eff, setEff] = useState<PublishEffective | null>(null)
+  const [marked, setMarked] = useState<PublishEntry[]>([])
+  const [plan, setPlan] = useState<PublishPlan | null>(null)
+  const [profile, setProfile] = useState('esde')
+  const [romPath, setRomPath] = useState('')
+  const [srcMgr, setSrcMgr] = useState('')
+  const [expr, setExpr] = useState('')
+  const [busy, setBusy] = useState('')
+  const [msg, setMsg] = useState('')
+
+  useEffect(() => { api.devices().then((d) => {
+    setDevices(d.devices); if (d.devices.length && dev === null) setDev(d.devices[0].id)
+  }).catch(() => setDevices([])) }, [dev])
+
+  const load = useCallback(() => {
+    if (dev === null) return
+    api.publishEffective(dev).then(setEff).catch(() => {})
+    api.publishIntent(dev).then((r) => setMarked(r.entries)).catch(() => {})
+  }, [dev])
+  useEffect(() => { load(); setPlan(null) }, [load])
+
+  const compute = async () => {
+    if (dev === null) return
+    setBusy('plan'); setMsg('')
+    try {
+      setPlan(await api.publishPlan(dev, {
+        profile, rom_path: romPath || null,
+        source_mgr_id: srcMgr ? Number(srcMgr) : null,
+      }))
+    } catch (e) { setMsg(String((e as Error).message || e)) }
+    finally { setBusy('') }
+  }
+
+  const addRule = async () => {
+    if (dev === null || !expr.trim()) return
+    setBusy('rule')
+    try { await api.publishRuleSave(dev, { expr: expr.trim(), label: expr.trim() });
+          setExpr(''); load() }
+    catch (e) { setMsg(String((e as Error).message || e)) }
+    finally { setBusy('') }
+  }
+
+  if (!devices) return <div className="loading">Loading…</div>
+  if (!devices.length) return (
+    <div className="panel">
+      <h3>Publish</h3>
+      <p className="hint">
+        No devices yet. Add one under <b>Settings → Connections → Devices</b>, then come
+        back to choose what belongs on it.
+      </p>
+    </div>
+  )
+
+  const byAction = (plan?.items || []).reduce<Record<string, PublishPlanItem[]>>(
+    (acc, it) => { (acc[it.action] ||= []).push(it); return acc }, {})
+  const ORDER = ['blocked', 'convert', 'copy', 'update', 'remove', 'skip']
+  const LABEL: Record<string, string> = {
+    blocked: 'Blocked', convert: 'Convert & copy', copy: 'Copy', update: 'Update',
+    remove: 'Remove', skip: 'Already current',
+  }
+
+  return (
+    <div className="panel publish-panel">
+      <h3>Publish</h3>
+      <p className="hint">
+        Push a curated selection to a device, with the formats, artwork and metadata
+        that device expects. Nothing is written until you apply a plan.
+      </p>
+
+      <div className="rows">
+        <label className="field">
+          <span>Target</span>
+          <select value={dev ?? ''} onChange={(e) => setDev(Number(e.target.value))}>
+            {devices.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </select>
+          <select value={profile} onChange={(e) => setProfile(e.target.value)}
+            title="How this target expects its library laid out.">
+            <option value="esde">ES-DE / RetroDECK</option>
+            <option value="folder">Plain folder</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>ROM path on target</span>
+          <input value={romPath} onChange={(e) => setRomPath(e.target.value)}
+            placeholder="/run/media/deck/SD/roms" />
+          <input value={srcMgr} onChange={(e) => setSrcMgr(e.target.value)}
+            placeholder="source ROM manager id" style={{ maxWidth: 180 }}
+            title="Which indexed ROM library the files come FROM." />
+        </label>
+      </div>
+
+      <h4>What belongs on it</h4>
+      {eff && (
+        <div className="rows">
+          <div className="row">
+            <span>Selected</span>
+            <b>{eff.entries.length.toLocaleString()} entries</b>
+            <span className="hint">
+              {eff.from_rules.toLocaleString()} from rules ·{' '}
+              {eff.explicit_includes.toLocaleString()} marked by hand
+              {eff.explicit_excludes ? ` · ${eff.explicit_excludes} excluded` : ''}
+            </span>
+          </div>
+          {eff.excluded_from_rules.length > 0 && (
+            <div className="row">
+              <span>Overridden</span>
+              <b>{eff.excluded_from_rules.length}</b>
+              <span className="hint">
+                matched a rule but you excluded them — your call wins
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      <label className="field">
+        <span>Add a rule</span>
+        <input value={expr} onChange={(e) => setExpr(e.target.value)}
+          placeholder="platform:snes    (the same filters the Library grid uses)"
+          onKeyDown={(e) => { if (e.key === 'Enter') addRule() }} />
+        <button className="btn" disabled={!expr.trim() || busy === 'rule'}
+          onClick={addRule}>Add</button>
+      </label>
+      <p className="hint">
+        A rule is a saved selection, not a saved list — "everything SNES" keeps meaning
+        that after your next ingest. Anything you mark or exclude by hand outranks it.
+      </p>
+
+      {!!(eff?.rules || []).length && (
+        <div className="bm-list">
+          {eff!.rules.map((r) => (
+            <div key={r.id} className="bm-row">
+              <span className="bm-title">{r.label || r.expr}</span>
+              <span className="bm-ref dim">{r.expr}</span>
+              <button className="ops-btn" onClick={() => dev !== null &&
+                api.publishRuleDelete(dev, r.id).then(load).catch(() => {})}>Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <p className="hint">
+        To mark individual games, filter them in the <a onClick={onBrowse}
+        style={{ cursor: 'pointer', textDecoration: 'underline' }}>Library</a> and add
+        them from there. {marked.length.toLocaleString()} marked by hand so far.
+      </p>
+
+      <h4>Plan</h4>
+      <button className="btn primary" disabled={busy === 'plan' || dev === null}
+        onClick={compute}>
+        {busy === 'plan' ? 'Working…' : 'Compute plan'}
+      </button>
+      {msg && <p className="err">{msg}</p>}
+
+      {plan && (
+        <>
+          <div className="rows">
+            <div className="row">
+              <span>Would write</span>
+              <b>{((plan.totals.bytes_to_write || 0) / 1e9).toFixed(2)} GB</b>
+              <span className="hint">
+                across {plan.totals.items} items · profile {plan.profile}
+              </span>
+            </div>
+            {!plan.observed && (
+              <div className="row">
+                <span>Note</span>
+                <b className="muted">Target not inspected</b>
+                <span className="hint">
+                  computed from what ludodex recorded placing, so anything changed on
+                  the device itself is not reflected
+                </span>
+              </div>
+            )}
+          </div>
+
+          {plan.blockers.map((b) => (
+            <p key={b} className="err">⚠ {b}</p>
+          ))}
+
+          {ORDER.filter((a) => byAction[a]?.length).map((a) => (
+            <div key={a}>
+              <h4>{LABEL[a]} <span className="hint">({byAction[a].length})</span></h4>
+              <div className="bm-list">
+                {byAction[a].slice(0, 50).map((it, i) => (
+                  <div key={it.entry_key + i} className="bm-row">
+                    <span className="bm-title">{it.title || it.entry_key}</span>
+                    <span className="bm-kind">{it.platform}</span>
+                    <span className="bm-ref dim" title={it.dest.join('\n')}>
+                      {it.convert
+                        ? `${it.convert.from} → ${it.convert.to}`
+                        : it.reason}
+                    </span>
+                    {!!it.blockers.length &&
+                      <span className="hint err">{it.blockers.join(', ')}</span>}
+                  </div>
+                ))}
+                {byAction[a].length > 50 &&
+                  <div className="sync-note dim">
+                    …and {byAction[a].length - 50} more
+                  </div>}
+              </div>
+            </div>
+          ))}
+          <p className="hint">
+            This is a dry run. Applying a plan is not built yet — when it is, it will
+            consume this plan rather than recomputing one, and will only ever remove
+            files ludodex itself placed.
+          </p>
+        </>
+      )}
     </div>
   )
 }

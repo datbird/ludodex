@@ -60,6 +60,15 @@ def _con():
     # idempotence is only as good as the rows still being present — and a user who
     # migrates, then removes an entry they do not want, gets it back on the next run.
     # INSERT OR IGNORE cannot express "was here once"; this table can.
+    # A saved SELECTION, not a saved list. "Everything SNES" should keep meaning that
+    # after the next ingest, so the set is re-evaluated rather than frozen into 33,000
+    # rows that go stale the moment the library grows. Explicit intent still overrides
+    # whatever a rule concludes.
+    con.execute("""CREATE TABLE IF NOT EXISTS publish_rule(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id INTEGER, enabled INTEGER DEFAULT 1,
+        label TEXT, expr TEXT, ord INTEGER DEFAULT 0, created REAL)""")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_pr_dev ON publish_rule(device_id)")
     con.execute("""CREATE TABLE IF NOT EXISTS publish_migrated(
         device_id INTEGER, norm_key TEXT, at REAL,
         PRIMARY KEY(device_id, norm_key))""")
@@ -242,6 +251,68 @@ def intent_for_title(norm_key, state=INCLUDE):
             out.setdefault(r["device_id"], []).append(r["entry_key"])
     con.close()
     return out
+
+
+# --- rules ------------------------------------------------------------------- #
+def rules_list(device_id):
+    con = _con()
+    rows = [dict(r) for r in con.execute(
+        "SELECT * FROM publish_rule WHERE device_id=? ORDER BY ord, id",
+        (int(device_id),))]
+    con.close()
+    return rows
+
+
+def rule_set(device_id, expr, label=None, rule_id=None, enabled=True, ord=0):
+    con = _con()
+    if rule_id:
+        con.execute("UPDATE publish_rule SET expr=?, label=?, enabled=?, ord=? "
+                    "WHERE id=? AND device_id=?",
+                    (expr, label, 1 if enabled else 0, ord, int(rule_id),
+                     int(device_id)))
+        rid = int(rule_id)
+    else:
+        cur = con.execute(
+            "INSERT INTO publish_rule(device_id,enabled,label,expr,ord,created) "
+            "VALUES(?,?,?,?,?,?)",
+            (int(device_id), 1 if enabled else 0, label, expr, ord, time.time()))
+        rid = cur.lastrowid
+    con.commit()
+    con.close()
+    return rid
+
+
+def rule_rm(device_id, rule_id):
+    con = _con()
+    con.execute("DELETE FROM publish_rule WHERE id=? AND device_id=?",
+                (int(rule_id), int(device_id)))
+    con.commit()
+    con.close()
+
+
+def effective(device_id, rule_matches):
+    """The set a device should actually hold: what the rules matched, plus explicit
+    includes, minus explicit excludes.
+
+    `rule_matches` is passed IN rather than computed here, because evaluating a library
+    filter is the server's job and duplicating that grammar is how two implementations
+    of "everything SNES" start disagreeing.
+
+    An explicit exclude beats a rule. That is the whole reason exclude is a stored state
+    rather than an absent row."""
+    con = _con()
+    inc = {r["entry_key"] for r in con.execute(
+        "SELECT entry_key FROM publish_intent WHERE device_id=? AND state=?",
+        (int(device_id), INCLUDE))}
+    exc = {r["entry_key"] for r in con.execute(
+        "SELECT entry_key FROM publish_intent WHERE device_id=? AND state=?",
+        (int(device_id), EXCLUDE))}
+    con.close()
+    from_rules = set(rule_matches or [])
+    return {"entries": sorted((from_rules | inc) - exc),
+            "from_rules": len(from_rules), "explicit_includes": len(inc),
+            "explicit_excludes": len(exc),
+            "excluded_from_rules": sorted(from_rules & exc)}
 
 
 # --- migration from device_wants --------------------------------------------- #

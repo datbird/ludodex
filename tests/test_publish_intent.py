@@ -162,6 +162,43 @@ def main():
           counts.get(2) == 2)
 
     print()
+    print("11. a rule is a saved SELECTION; explicit marks outrank it")
+    # The precedence that makes "everything SNES except these four" expressible. The
+    # rule's matches come in from the caller (the server evaluates the filter); what is
+    # under test is how they combine with what the user said by hand.
+    publish.intent_clear_device(9)
+    rule_hits = ["rayman@psx", "rayman@saturn", "pulseman@genesis"]
+    e = publish.effective(9, rule_hits)
+    check("with no manual opinions, the rule IS the set",
+          e["entries"] == sorted(rule_hits))
+
+    publish.intent_set(9, ["rayman@saturn"], state=publish.EXCLUDE)
+    e = publish.effective(9, rule_hits)
+    check("an exclude removes it even though the rule matched",
+          "rayman@saturn" not in e["entries"])
+    check("and it is reported as an override, not silently dropped",
+          e["excluded_from_rules"] == ["rayman@saturn"])
+
+    publish.intent_set(9, ["rayman@steam"])          # not matched by the rule
+    e = publish.effective(9, rule_hits)
+    check("a manual include joins the set", "rayman@steam" in e["entries"])
+    check("the parts are reported separately: rules=%d manual=%d excluded=%d"
+          % (e["from_rules"], e["explicit_includes"], e["explicit_excludes"]),
+          e["from_rules"] == 3 and e["explicit_includes"] == 1
+          and e["explicit_excludes"] == 1)
+
+    print()
+    print("12. rules persist, list in order, and can be removed")
+    rid = publish.rule_set(9, "platform:snes", label="All SNES")
+    publish.rule_set(9, "platform:genesis", label="All Genesis", ord=1)
+    rules = publish.rules_list(9)
+    check("both saved", len(rules) == 2)
+    check("in order", [r["label"] for r in rules] == ["All SNES", "All Genesis"])
+    publish.rule_rm(9, rid)
+    check("and one can be removed", len(publish.rules_list(9)) == 1)
+    check("a device with no rules has none", publish.rules_list(999) == [])
+
+    print()
     print("%d checks, all passed" % len(PASS))
 
 

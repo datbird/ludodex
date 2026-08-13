@@ -2404,6 +2404,60 @@ def publish_status():
     return publish.status()
 
 
+@app.get("/api/devices/{dev_id}/publish/rules")
+def publish_rules_list(dev_id: int):
+    import publish
+    return {"rules": publish.rules_list(dev_id)}
+
+
+@app.post("/api/devices/{dev_id}/publish/rules")
+def publish_rule_save(dev_id: int, body: dict = Body(...)):
+    """A rule is a saved SELECTION, expressed in the same filter grammar the library
+    grid uses — so 'everything SNES' keeps meaning that after the next ingest."""
+    import publish
+    b = body or {}
+    if not (b.get("expr") or "").strip():
+        raise HTTPException(400, "a rule needs an expression")
+    rid = publish.rule_set(dev_id, b["expr"].strip(), label=b.get("label"),
+                           rule_id=b.get("id"),
+                           enabled=b.get("enabled", True), ord=b.get("ord", 0))
+    return {"id": rid, "rules": publish.rules_list(dev_id)}
+
+
+@app.delete("/api/devices/{dev_id}/publish/rules/{rule_id}")
+def publish_rule_delete(dev_id: int, rule_id: int):
+    import publish
+    publish.rule_rm(dev_id, rule_id)
+    return {"ok": True, "rules": publish.rules_list(dev_id)}
+
+
+def _rule_entries(con, expr, cap=20000):
+    """Entry keys a rule's filter expression matches. Uses the library's own query
+    path, so a rule means exactly what the same text means in the grid."""
+    toks = [t for t in (expr or "").split() if t]
+    res = _query_games(con, include=toks, limit=cap)
+    return [g["entry_key"] for g in res["items"] if g.get("entry_key")]
+
+
+@app.get("/api/devices/{dev_id}/publish/effective")
+def publish_effective(dev_id: int):
+    """What this device should actually hold: rules, plus explicit marks, minus
+    explicit exclusions. Reported with the parts separated, because 'why is this game
+    here' is the first question anyone asks of a computed set."""
+    import publish
+    rules = [r for r in publish.rules_list(dev_id) if r["enabled"]]
+    matched = []
+    con = lib()
+    try:
+        for r in rules:
+            matched += _rule_entries(con, r["expr"])
+    finally:
+        con.close()
+    out = publish.effective(dev_id, matched)
+    out["rules"] = rules
+    return out
+
+
 @app.post("/api/devices/{dev_id}/publish/plan")
 def publish_plan_compute(dev_id: int, body: dict = Body(default=None)):
     """What publishing to this device WOULD do. Reads only — Apply is separate, and

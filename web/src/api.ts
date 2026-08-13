@@ -425,6 +425,38 @@ export interface BackupRun {
 }
 /** The supplemental match index: a file, optional, replaced wholesale.
  *  `present` and populated-ness are different questions, so both are reported. */
+/** Publish — see docs/superpowers/specs/2026-08-13-publish-design.md */
+export interface PublishEntry {
+  entry_key: string; state: string; source: string; added: number
+  title?: string; platform?: string; norm_key?: string
+}
+export interface PublishRule {
+  id: number; device_id: number; enabled: number; label: string | null
+  expr: string; ord: number
+}
+export interface PublishEffective {
+  entries: string[]; from_rules: number; explicit_includes: number
+  explicit_excludes: number; excluded_from_rules: string[]; rules: PublishRule[]
+}
+export interface PublishPlanItem {
+  entry_key: string; title: string | null; platform: string | null
+  system: string | null; action: string; reason: string
+  source: string[]; dest: string[]
+  convert: { from: string; to: string; tool: string } | null
+  bytes_in: number; disc: number | null; blockers: string[]
+}
+export interface PublishPlan {
+  device_id: number; profile: string; observed: boolean; dry_run: boolean
+  items: PublishPlanItem[]
+  totals: Record<string, number>
+  blockers: string[]
+  free_bytes?: number; over_capacity?: boolean
+}
+export interface PublishStatus {
+  intent_rows: number; included: number; excluded: number; devices: number
+  catalog: boolean; legacy_device_wants?: number
+}
+
 export interface MatchIndexState {
   path: string
   default_path: string
@@ -1197,6 +1229,28 @@ export const api = {
     postJson<{ backend: string; dry_run: boolean; restored: number
       stores: { name: string; remote: number; local_before: number; written: number }[] }>(
       '/api/backingstore/restore', { dry_run }),
+  // --- Publish -------------------------------------------------------------
+  publishStatus: () => get<PublishStatus>('/api/publish/status'),
+  publishEffective: (dev: number) =>
+    get<PublishEffective>(`/api/devices/${dev}/publish/effective`),
+  publishIntent: (dev: number, state = 'include') =>
+    get<{ entries: PublishEntry[]; state: string }>(
+      `/api/devices/${dev}/publish?state=${state}`),
+  publishMark: (dev: number, b: { entry_keys?: string[]; norm_keys?: string[]; state?: string }) =>
+    postJson<{ written: number }>(`/api/devices/${dev}/publish`, b),
+  publishUnmark: (dev: number, b: { entry_keys?: string[]; norm_keys?: string[] }) =>
+    mutate<{ cleared: number }>(`/api/devices/${dev}/publish`, 'DELETE', b),
+  publishRules: (dev: number) =>
+    get<{ rules: PublishRule[] }>(`/api/devices/${dev}/publish/rules`),
+  publishRuleSave: (dev: number, b: Partial<PublishRule>) =>
+    postJson<{ id: number; rules: PublishRule[] }>(`/api/devices/${dev}/publish/rules`, b),
+  publishRuleDelete: (dev: number, id: number) =>
+    mutate<{ rules: PublishRule[] }>(`/api/devices/${dev}/publish/rules/${id}`, 'DELETE'),
+  publishPlan: (dev: number, b: Record<string, unknown>) =>
+    postJson<PublishPlan>(`/api/devices/${dev}/publish/plan`, b),
+  publishLedger: (dev: number) =>
+    get<{ placed: Record<string, unknown> }>(`/api/devices/${dev}/publish/ledger`),
+
   matchIndex: () => get<MatchIndexState>('/api/matchindex'),
   setMatchIndex: (b: { prefer?: string; path?: string; release_url?: string }) =>
     postJson<MatchIndexState>('/api/matchindex/settings', b),
