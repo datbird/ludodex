@@ -1506,6 +1506,10 @@ button.mw-row:disabled:hover { background: transparent; }
 .bm-title { font-weight: 600; color: var(--text-h); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bm-kind { text-transform: capitalize; color: var(--text); font-size: 12px; }
 .bm-ref { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+/* The ref is a link when it points somewhere reachable. It stays dim like the rest of
+   the row until hovered, so a list of them does not read as a wall of blue. */
+a.bm-ref { color: inherit; text-decoration: none; }
+a.bm-ref:hover, a.bm-ref:focus-visible { color: var(--accent, #6cf); text-decoration: underline; }
 .am-desc { font-size: 11px; color: var(--text); margin-top: 4px; line-height: 1.35; }
 .am-meta { font-size: 10px; color: var(--text); margin-top: 6px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.7; }
 

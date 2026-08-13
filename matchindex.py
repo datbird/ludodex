@@ -88,6 +88,25 @@ HASH_NS = ("crc", "sha1")
 PREFER_KEY = "matchindex.prefer"
 PREFER_DYNAMIC, PREFER_SUPPLEMENT = "dynamic", "supplement"
 
+# The supplement is a FILE, and the user gets to say where. It is ~0.85 GB of
+# rebuildable data with no reason to sit on the same disk as the app — a NAS share, an
+# external drive or a read-only mount are all reasonable, and pointing at one must not
+# require moving anything ludodex owns.
+PATH_KEY = "matchindex.path"
+# Where to look for a published build. A URL, not a hardcoded repo, because whoever runs
+# this may publish their own — and because a supplement built from someone else's
+# catalogs is theirs to distribute or not.
+RELEASE_KEY = "matchindex.release_url"
+
+
+def index_path():
+    """Where the supplement lives — the configured path, else beside the other dbs."""
+    try:
+        p = (config.get(PATH_KEY, "") or "").strip()
+    except Exception:                            # noqa: BLE001
+        p = ""
+    return p or DB
+
 # IGDB store-source names -> the namespace a caller will ask with. Anything not named
 # here still gets indexed, under a slug of its own name: a store we have no importer for
 # is exactly the kind of thing this table should already know when we add one.
@@ -139,9 +158,10 @@ def connect():
       created_at INTEGER, PRIMARY KEY(ns, val));
     """)
     con.commit()
-    if os.path.exists(DB):
+    _ix = index_path()
+    if os.path.exists(_ix):
         try:
-            con.execute("ATTACH DATABASE ? AS ix", ("file:%s?mode=ro" % DB,))
+            con.execute("ATTACH DATABASE ? AS ix", ("file:%s?mode=ro" % _ix,))
         except sqlite3.Error:
             pass
     # Read the preference ONCE per connection. resolve() runs at 0.25 ms and is called
@@ -173,9 +193,10 @@ def has_index(con):
 
 def open_index():
     """Read-only handle on the bulk index alone, or None when it is not present."""
-    if not os.path.exists(DB):
+    _ix = index_path()
+    if not os.path.exists(_ix):
         return None
-    con = sqlite3.connect("file:%s?mode=ro" % DB, uri=True, timeout=30)
+    con = sqlite3.connect("file:%s?mode=ro" % _ix, uri=True, timeout=30)
     con.row_factory = sqlite3.Row
     try:
         if not con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "

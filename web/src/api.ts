@@ -423,6 +423,34 @@ export interface BackupRun {
   ok: boolean | null; error?: string; scheduled?: boolean
   result?: { file: string; size: number; databases: number; pruned: number; dest: string }
 }
+/** The supplemental match index: a file, optional, replaced wholesale.
+ *  `present` and populated-ness are different questions, so both are reported. */
+export interface MatchIndexState {
+  path: string
+  default_path: string
+  present: boolean
+  has_index: boolean
+  size: number
+  prefer: 'dynamic' | 'supplement'
+  release_url: string
+  learned_keys: number
+  overrides: number
+  identities?: number
+  keys?: number
+  built_at?: number | null
+  job: { state: string; got: number; total: number; error: string; mode?: string } | null
+}
+
+export interface MatchIndexRelease {
+  configured: boolean
+  url?: string
+  error?: string
+  version?: string
+  published_at?: string
+  notes?: string
+  asset?: { url?: string; size?: number; name?: string; sha256?: string }
+}
+
 export interface BackupsState {
   jobs: BackupJob[]; available: BackupItem[]; job: BackupRun | null
   devices: { id: number; name: string; transport: string }[]
@@ -1166,6 +1194,13 @@ export const api = {
     postJson<{ backend: string; dry_run: boolean; restored: number
       stores: { name: string; remote: number; local_before: number; written: number }[] }>(
       '/api/backingstore/restore', { dry_run }),
+  matchIndex: () => get<MatchIndexState>('/api/matchindex'),
+  setMatchIndex: (b: { prefer?: string; path?: string; release_url?: string }) =>
+    postJson<MatchIndexState>('/api/matchindex/settings', b),
+  matchIndexRelease: () => get<MatchIndexRelease>('/api/matchindex/release'),
+  matchIndexDownload: (b: { url: string; size?: number }) =>
+    postJson<{ ok: boolean }>('/api/matchindex/download', b),
+  matchIndexRebuild: () => postJson<{ ok: boolean }>('/api/matchindex/rebuild', {}),
   backups: () => get<BackupsState>('/api/backups/jobs'),
   backupStatus: () => get<{ job: BackupRun | null; jobs: BackupJob[] }>('/api/backups/status'),
   setBackupJob: (j: Partial<BackupJob> & { passphrase?: string | null }) =>

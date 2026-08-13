@@ -11684,6 +11684,178 @@ def _backingstore_scheduler():
 threading.Thread(target=_backingstore_scheduler, daemon=True).start()
 
 # ------------------------------------------------------------ snapshot backup jobs
+# --- the supplemental match index ------------------------------------------- #
+# A file, not a service: optional, read-only, replaced wholesale. Everything here is
+# about telling the user what they have and letting them point at a different copy.
+_INDEX_DL = {"job": None}
+
+
+@app.get("/api/matchindex")
+def matchindex_status():
+    """What the local match db knows, split by the layer it came from — because
+    'populated' and 'present' are different questions and the UI has to show both."""
+    import matchindex
+    path = matchindex.index_path()
+    out = {"path": path, "default_path": matchindex.DB,
+           "present": os.path.exists(path),
+           "size": os.path.getsize(path) if os.path.exists(path) else 0,
+           "prefer": config.get(matchindex.PREFER_KEY, matchindex.PREFER_DYNAMIC),
+           "release_url": config.get(matchindex.RELEASE_KEY, "") or "",
+           "job": _INDEX_DL["job"]}
+    con = matchindex.connect()
+    try:
+        out["learned_keys"] = con.execute(
+            "SELECT COUNT(*) FROM learned_key").fetchone()[0]
+        out["overrides"] = con.execute(
+            "SELECT COUNT(*) FROM override_key").fetchone()[0]
+        out["has_index"] = matchindex.has_index(con)
+        if out["has_index"]:
+            out["identities"] = con.execute(
+                "SELECT COUNT(*) FROM ix.identity").fetchone()[0]
+            out["keys"] = con.execute(
+                "SELECT COUNT(*) FROM ix.identity_key").fetchone()[0]
+            row = con.execute("SELECT v FROM ix.identity_state WHERE k='built_at'"
+                              ).fetchone()
+            out["built_at"] = int(row[0]) if row else None
+    finally:
+        con.close()
+    return out
+
+
+@app.post("/api/matchindex/settings")
+def matchindex_settings(body: dict = Body(...)):
+    """Point at a different supplement, flip the preference, set the release URL.
+
+    A path that is not a readable sqlite file is REFUSED rather than stored: silently
+    accepting one turns every later lookup into a miss, and a miss is indistinguishable
+    from 'this game is not in the index' at the call site."""
+    import matchindex
+    b = body or {}
+    if "prefer" in b:
+        matchindex.set_preference(b["prefer"])
+    if "release_url" in b:
+        config.set_(matchindex.RELEASE_KEY, (b["release_url"] or "").strip())
+    if "path" in b:
+        p = (b["path"] or "").strip()
+        if p:
+            if not os.path.exists(p):
+                raise HTTPException(400, "No file at %s" % p)
+            try:
+                t = sqlite3.connect("file:%s?mode=ro" % p, uri=True)
+                ok = t.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                               "AND name='identity_key'").fetchone()[0]
+                t.close()
+            except sqlite3.Error as e:
+                raise HTTPException(400, "Not a readable database: %s" % str(e)[:120])
+            if not ok:
+                raise HTTPException(400, "That database has no identity_key table — it "
+                                         "is not a ludodex match index")
+        config.set_(matchindex.PATH_KEY, p)
+    return matchindex_status()
+
+
+@app.get("/api/matchindex/release")
+def matchindex_release():
+    """Ask the configured URL what build is published. The manifest is expected to be
+    JSON with version/url/size/sha256; anything else is reported, not guessed at."""
+    import matchindex
+    url = (config.get(matchindex.RELEASE_KEY, "") or "").strip()
+    if not url:
+        return {"configured": False}
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "ludodex",
+                                                   "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.load(r)
+    except Exception as e:                       # noqa: BLE001
+        return {"configured": True, "url": url, "error": str(e)[:200]}
+    # A GitHub release payload names its assets; a hand-rolled manifest may just be the
+    # fields directly. Accept both rather than dictating one.
+    asset = None
+    for a in (data.get("assets") or []):
+        if str(a.get("name", "")).endswith(".sqlite") or "match-index" in str(a.get("name", "")):
+            asset = {"url": a.get("browser_download_url"), "size": a.get("size"),
+                     "name": a.get("name")}
+            break
+    return {"configured": True, "url": url,
+            "version": data.get("tag_name") or data.get("version"),
+            "published_at": data.get("published_at"),
+            "notes": (data.get("body") or "")[:2000],
+            "asset": asset or {"url": data.get("url"), "size": data.get("size"),
+                               "name": data.get("name"), "sha256": data.get("sha256")}}
+
+
+@app.post("/api/matchindex/download")
+def matchindex_download(body: dict = Body(...)):
+    """Fetch a published supplement. Downloads to a .part beside the destination and
+    only swaps it in once complete — a half-written index that ludodex would happily
+    attach and quietly miss every lookup against is worse than no index."""
+    import matchindex
+    if _INDEX_DL["job"] and _INDEX_DL["job"].get("state") == "running":
+        raise HTTPException(409, "A download is already running")
+    url = (body or {}).get("url")
+    if not url:
+        raise HTTPException(400, "No url")
+    dest = matchindex.index_path()
+    st = {"state": "running", "got": 0, "total": int((body or {}).get("size") or 0),
+          "dest": dest, "error": ""}
+    _INDEX_DL["job"] = st
+
+    def _run():
+        part = dest + ".part"
+        try:
+            os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+            req = urllib.request.Request(url, headers={"User-Agent": "ludodex"})
+            with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+                st["total"] = st["total"] or int(r.headers.get("Content-Length") or 0)
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    st["got"] += len(chunk)
+            t = sqlite3.connect("file:%s?mode=ro" % part, uri=True)
+            ok = t.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                           "AND name='identity_key'").fetchone()[0]
+            t.close()
+            if not ok:
+                raise ValueError("downloaded file has no identity_key table")
+            os.replace(part, dest)
+            st["state"] = "done"
+        except Exception as e:                   # noqa: BLE001
+            st["state"], st["error"] = "error", str(e)[:300]
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True}
+
+
+@app.post("/api/matchindex/rebuild")
+def matchindex_rebuild():
+    """Rebuild the supplement locally from the mirrors, for whoever has them."""
+    import matchindex
+    if not os.path.exists(matchindex.IGDB_DB):
+        raise HTTPException(400, "No IGDB mirror on this machine to build from")
+    if _INDEX_DL["job"] and _INDEX_DL["job"].get("state") == "running":
+        raise HTTPException(409, "A download is already running")
+    st = {"state": "running", "got": 0, "total": 0, "dest": matchindex.index_path(),
+          "error": "", "mode": "rebuild"}
+    _INDEX_DL["job"] = st
+
+    def _run():
+        try:
+            res = matchindex.build(progress=False)
+            st["state"], st["result"] = "done", res
+        except Exception as e:                   # noqa: BLE001
+            st["state"], st["error"] = "error", str(e)[:300]
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True}
+
+
 # Point-in-time archives (backups.py), as opposed to the live two-way mirror above.
 # Several independent jobs, each with its own contents / destination / timing.
 _BACKUP_JOB = {"job": None}

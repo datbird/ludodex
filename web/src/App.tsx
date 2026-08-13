@@ -6,6 +6,7 @@ import type {
   AiUsageModel, AiUsageDay, AiUsageSummary, AiPrice, Currency, Caps,
   DedupeSuggestion, Service, ServiceConnect, Achievements as AchData,
   MediaLibrary, MediaAsset, MediaKind, MatchedProvider, ProviderScopeState, BannedMedia, BackupsState, BackupJob,
+  MatchIndexState, MatchIndexRelease,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device, LibraryManager, ImportMode, ImportEstimate, ResetScope, ResetPlan,
@@ -1416,7 +1417,7 @@ const KEY_FIELD: Record<string, string> = {
 const SECTIONS = [
   { id: 'ai', name: 'AI settings', icon: '✨' },
   { id: 'connections', name: 'Connections', icon: '🔌' },
-  { id: 'backup', name: 'Backup & Restore', icon: '🗄️' },
+  { id: 'backup', name: 'Database', icon: '🗄️' },
   { id: 'library', name: 'Library', icon: '📚' },
   { id: 'dashboard', name: 'Dashboard', icon: '🎛️' },
   { id: 'metadata', name: 'AI Metadata', icon: '🔎' },
@@ -1432,7 +1433,8 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
   // Two ways to protect the same data, each with its own backup AND restore:
   // Database = a live external copy, continuously reconciled.
   // Snapshot = point-in-time zips you can roll back to.
-  backup: [{ id: 'dbstore', name: 'Database' },
+  backup: [{ id: 'matchdb', name: 'Settings' },
+           { id: 'dbstore', name: 'Backup & Restore' },
            { id: 'snapshot', name: 'Snapshot' }],
   library: [{ id: 'preferences', name: 'Preferences' }, { id: 'banned', name: 'Banned media' }],
   dashboard: [{ id: 'spotlight', name: 'Spotlight' }],
@@ -1455,6 +1457,7 @@ const SETTINGS_KEYWORDS: Record<string, string> = {
   // learned them still lands on the right panel.
   dbstore: 'backup restore backing store two-way sync database postgres supabase mysql pocketbase firebase backend durable migrate another machine pull',
   snapshot: 'snapshot zip archive schedule retention encrypt passphrase restore rollback backup device folder',
+  matchdb: 'match index supplement identity resolve store id rom hash crc sha1 offline release download path prefer dynamic supplement setting database',
   limits: 'rate limit api throttle quota cooldown per minute per day',
   preferences: 'media language ban file operations browse commander manifests apply mode preferences distribution',
   banned: 'banned media unban hidden',
@@ -1543,7 +1546,8 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
                 : sub === 'credentials' ? <Credentials />
                 : sub === 'limits' ? <RateLimits /> : null)
               : section === 'backup'
-              ? (sub === 'snapshot' ? <SnapshotBackups /> : <BackingStore />)
+              ? (sub === 'snapshot' ? <SnapshotBackups />
+                : sub === 'matchdb' ? <MatchIndexPanel /> : <BackingStore />)
               : section === 'library'
               ? (sub === 'banned' ? <BannedMediaPanel /> : <LibraryPrefs onChanged={onPrefsChanged} />)
               : section === 'dashboard'
@@ -1925,6 +1929,164 @@ const SCHEDULES = [
 
 // Point-in-time archives, as opposed to the live mirror above. Several independent jobs:
 // each picks its own contents, destination, timing and retention.
+/** The supplemental match index.
+ *
+ *  Three layers answer an identity question — your corrections, what ludodex learned
+ *  while scraping, and this file — and the only one that is optional is this one. So the
+ *  panel's job is to make the difference between "no supplement installed" and "the
+ *  supplement has no row for that game" visible, because they are not the same and the
+ *  matching code is not allowed to confuse them either. */
+function MatchIndexPanel() {
+  const [st, setSt] = useState<MatchIndexState | null>(null)
+  const [rel, setRel] = useState<MatchIndexRelease | null>(null)
+  const [path, setPath] = useState('')
+  const [url, setUrl] = useState('')
+  const [busy, setBusy] = useState('')
+  const [msg, setMsg] = useState('')
+
+  const load = useCallback(() => {
+    api.matchIndex().then((r) => {
+      setSt(r); setPath(r.path); setUrl(r.release_url)
+    }).catch(() => {})
+  }, [])
+  useEffect(() => { load() }, [load])
+  // Poll only while a download or rebuild is actually in flight.
+  useEffect(() => {
+    if (st?.job?.state !== 'running') return
+    const t = setInterval(() => api.matchIndex().then(setSt).catch(() => {}), 1000)
+    return () => clearInterval(t)
+  }, [st?.job?.state])
+
+  const save = async (b: { prefer?: string; path?: string; release_url?: string }) => {
+    setBusy('save'); setMsg('')
+    try { setSt(await api.setMatchIndex(b)); setMsg('Saved ✓') }
+    catch (e) { setMsg(String((e as Error).message || e)) }
+    finally { setBusy('') }
+  }
+  const checkRelease = async () => {
+    setBusy('rel'); setMsg('')
+    try { setRel(await api.matchIndexRelease()) }
+    catch (e) { setMsg(String((e as Error).message || e)) }
+    finally { setBusy('') }
+  }
+
+  if (!st) return <div className="loading">Loading…</div>
+  const job = st.job
+  const pct = job && job.total ? Math.round((job.got / job.total) * 100) : 0
+
+  return (
+    <div className="panel">
+      <h3>Match database</h3>
+      <p className="hint">
+        Resolves a game from any handle to every other one — a store id, a normalized
+        title, or a ROM hash — without a network round trip. The supplement is optional;
+        ludodex works without it and simply falls back to searching providers, learning
+        what it finds as it goes.
+      </p>
+
+      <div className="rows">
+        <div className="row">
+          <span>Your own data</span>
+          <b>{st.learned_keys.toLocaleString()} learned</b>
+          <span className="hint">
+            {st.overrides.toLocaleString()} override{st.overrides === 1 ? '' : 's'} ·
+            {' '}backed up, never overwritten by a supplement
+          </span>
+        </div>
+        <div className="row">
+          <span>Supplement</span>
+          {st.has_index
+            ? <b>{(st.identities ?? 0).toLocaleString()} games ·{' '}
+                {(st.keys ?? 0).toLocaleString()} handles ·{' '}
+                {(st.size / 1e9).toFixed(2)} GB</b>
+            : <b className="muted">Not installed</b>}
+          {st.built_at
+            ? <span className="hint">built {new Date(st.built_at * 1000).toLocaleString()}</span>
+            : null}
+        </div>
+      </div>
+
+      <label className="field">
+        <span>Supplement file</span>
+        <input value={path} onChange={(e) => setPath(e.target.value)}
+          placeholder={st.default_path}
+          title="Point at a match index anywhere ludodex can read — a NAS share or an external drive is fine. It is only ever read, never written." />
+        <button className="btn" disabled={busy === 'save' || path === st.path}
+          onClick={() => save({ path })}>Use this file</button>
+      </label>
+
+      <label className="field">
+        <span>When both have an answer</span>
+        <select value={st.prefer} onChange={(e) => save({ prefer: e.target.value })}
+          title="Which layer decides when your own data and the supplement disagree about the same handle. Your corrections outrank both either way.">
+          <option value="dynamic">Prefer my own data (default)</option>
+          <option value="supplement">Prefer the supplement</option>
+        </select>
+        <span className="hint">
+          The other is still used whenever the preferred one has nothing.
+        </span>
+      </label>
+
+      <h4>Published build</h4>
+      <label className="field">
+        <span>Release URL</span>
+        <input value={url} onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://api.github.com/repos/…/releases/latest"
+          title="A JSON endpoint describing the published build. A GitHub releases API URL works as-is." />
+        <button className="btn" disabled={busy === 'save' || url === st.release_url}
+          onClick={() => save({ release_url: url })}>Save</button>
+        <button className="btn" disabled={!st.release_url || busy === 'rel'}
+          onClick={checkRelease}>{busy === 'rel' ? 'Checking…' : 'Check'}</button>
+      </label>
+
+      {rel && !rel.configured ? <p className="hint">No release URL set.</p> : null}
+      {rel?.error ? <p className="err">Could not read the release: {rel.error}</p> : null}
+      {rel?.asset?.url ? (
+        <div className="rows">
+          <div className="row">
+            <span>Available</span>
+            <b>{rel.version || rel.asset.name}</b>
+            {rel.asset.size
+              ? <span className="hint">{(rel.asset.size / 1e9).toFixed(2)} GB</span> : null}
+            <button className="btn primary" disabled={job?.state === 'running'}
+              onClick={() => api.matchIndexDownload({
+                url: rel.asset!.url!, size: rel.asset!.size,
+              }).then(load).catch((e) => setMsg(String(e)))}>
+              ⬇ Download{st.has_index ? ' & replace' : ''}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {job ? (
+        <div className="rows">
+          <div className="row">
+            <span>{job.mode === 'rebuild' ? 'Rebuilding' : 'Downloading'}</span>
+            {job.state === 'running'
+              ? <b>{job.total ? `${pct}%` : `${(job.got / 1e6).toFixed(0)} MB`}</b>
+              : job.state === 'error' ? <b className="err">Failed</b>
+              : <b>Done ✓</b>}
+            {job.error ? <span className="hint err">{job.error}</span> : null}
+          </div>
+        </div>
+      ) : null}
+
+      <p className="hint">
+        A download lands in a temporary file and is only swapped in once it is complete
+        and verified — a half-written index would attach cleanly and then miss every
+        lookup made against it.
+      </p>
+
+      <button className="btn" disabled={job?.state === 'running'}
+        onClick={() => api.matchIndexRebuild().then(load).catch((e) => setMsg(String(e)))}
+        title="Rebuild the supplement from the local IGDB and ScreenScraper mirrors, if this machine has them.">
+        Rebuild from local mirrors
+      </button>
+      {msg ? <p className="hint">{msg}</p> : null}
+    </div>
+  )
+}
+
 function SnapshotBackups() {
   const [st, setSt] = useState<BackupsState | null>(null)
   const [open, setOpen] = useState<number | null>(null)
@@ -2281,7 +2443,13 @@ function BannedMediaPanel() {
                 <span className="bm-title">{b.title}</span>
                 <span className="bm-kind">{b.kind.replace(/_/g, ' ')}</span>
                 <span className="bm-prov"><ProvTag origin={b.provider} /></span>
-                <span className="bm-ref dim" title={b.ref}>{b.ref.replace(/^https?:\/\//, '').slice(0, 48)}</span>
+                {/* Only a real http(s) ref becomes a link — a provider id or a local
+                    path is not somewhere a browser can go, and a dead link that looks
+                    live is worse than plain text. */}
+                {/^https?:\/\//i.test(b.ref)
+                  ? <a className="bm-ref dim" href={b.ref} target="_blank" rel="noreferrer"
+                      title={`Open ${b.ref}`}>{b.ref.replace(/^https?:\/\//, '').slice(0, 48)}</a>
+                  : <span className="bm-ref dim" title={b.ref}>{b.ref.slice(0, 48)}</span>}
                 <button className="ops-btn" disabled={busy === b.norm_key + b.ref}
                   onClick={() => unban(b)}>Unban</button>
               </div>
