@@ -280,6 +280,29 @@ def main():
     con.close()
 
     print()
+    print("10g. the preference is a toggle, and overrides ignore it entirely")
+    con = M.connect()
+    check("it defaults to the user's own data",
+          getattr(con, "_prefer") == M.PREFER_DYNAMIC)
+    con.close()
+    M.set_preference(M.PREFER_SUPPLEMENT)
+    con = M.connect()
+    r = M.resolve(con, "sha1", "sha1mario")
+    check("flipped, the supplement now answers first: %r" % r.get("_name"),
+          r.get("_name") == "Super Mario 64")
+    # An override is the user's explicit word and is not part of this contest.
+    check("but an override still outranks BOTH layers",
+          M.resolve(con, "crc", "aabbccdd").get("igdb") == ["20"])
+    check("and a handle only the dynamic table knows still resolves",
+          M.resolve(con, "steam", "424242").get("ss") == ["88888"])
+    con.close()
+    M.set_preference(M.PREFER_DYNAMIC)
+    con = M.connect()
+    check("flipping back restores the user's own answer",
+          M.resolve(con, "sha1", "sha1mario").get("_name") == "My Own Conclusion")
+    con.close()
+
+    print()
     print("11. md5 is not indexed; crc and sha1 are")
     con = M.con_db()
     ns = {r[0] for r in con.execute("SELECT DISTINCT ns FROM identity_key")}

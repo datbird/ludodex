@@ -52,8 +52,17 @@ import time
 DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, DIR)
+import config                    # noqa: E402
 import matchgate                 # noqa: E402
 from titlenorm import norm       # noqa: E402
+
+
+class _Con(sqlite3.Connection):
+    """A connection that can carry the resolved preference. sqlite3.Connection has no
+    __dict__, so this is the difference between caching it once and paying a settings
+    lookup per resolve() — which at 0.25 ms a call, across a 573k-file library, would
+    cost more than the resolution."""
+    _prefer = None
 
 DB = os.path.join(DATA, "match-index.sqlite")        # optional, rebuildable supplement
 MAIN_DB = os.path.join(DATA, "metadata-cache.sqlite")  # where it used to live
@@ -69,6 +78,15 @@ YEAR_SLACK = 1                   # a year that disagrees by more than this is a 
 # publish nothing else. MD5 was a third of the index and duplicated both — dropped
 # deliberately, not overlooked, and cheap to reinstate since this is all rebuilt.
 HASH_NS = ("crc", "sha1")
+
+# Which of the two lower layers is asked first when BOTH have an answer for a handle.
+# Defaults to the user's own data: it was obtained on this library, about these files,
+# and a shipped supplement is by definition someone else's conclusion. Flippable because
+# the opposite is a legitimate preference — a user who trusts a curated catalog over
+# matches their own earlier, worse rules produced wants the supplement in front, and
+# should not have to delete anything to get it. Overrides outrank both either way.
+PREFER_KEY = "matchindex.prefer"
+PREFER_DYNAMIC, PREFER_SUPPLEMENT = "dynamic", "supplement"
 
 # IGDB store-source names -> the namespace a caller will ask with. Anything not named
 # here still gets indexed, under a slug of its own name: a store we have no importer for
@@ -102,7 +120,7 @@ def connect():
 
     Put learned rows in the rebuildable file and the next rebuild silently deletes the
     only copy of the most expensive data in the system."""
-    con = sqlite3.connect(MAIN_DB, timeout=60)
+    con = sqlite3.connect(MAIN_DB, timeout=60, factory=_Con)
     con.row_factory = sqlite3.Row
     con.executescript("""
     CREATE TABLE IF NOT EXISTS learned_identity(
@@ -126,7 +144,22 @@ def connect():
             con.execute("ATTACH DATABASE ? AS ix", ("file:%s?mode=ro" % DB,))
         except sqlite3.Error:
             pass
+    # Read the preference ONCE per connection. resolve() runs at 0.25 ms and is called
+    # per file in a 573k-file library; a settings lookup inside it would cost more than
+    # the resolution does.
+    try:
+        con._prefer = config.get(PREFER_KEY, PREFER_DYNAMIC) or PREFER_DYNAMIC
+    except Exception:                            # noqa: BLE001 — config is optional here
+        con._prefer = PREFER_DYNAMIC
     return con
+
+
+def set_preference(value):
+    """Flip which layer answers first. Takes effect on the next connect()."""
+    if value not in (PREFER_DYNAMIC, PREFER_SUPPLEMENT):
+        raise ValueError("prefer must be %r or %r" % (PREFER_DYNAMIC, PREFER_SUPPLEMENT))
+    config.set_(PREFER_KEY, value)
+    return value
 
 
 def has_index(con):
@@ -292,12 +325,20 @@ def resolve(con, ns, val):
         return {}
     iid = ov["identity_id"] if ov is not None else None
     if iid is None:
-        r = con.execute("SELECT identity_id FROM learned_key WHERE ns=? AND val=?",
-                        (ns, str(val))).fetchone()
-        if r is None and has_index(con):
-            # Only NOW is the supplement consulted.
-            r = con.execute("SELECT identity_id FROM ix.identity_key "
-                            "WHERE ns=? AND val=?", (ns, str(val))).fetchone()
+        def _dyn():
+            return con.execute("SELECT identity_id FROM learned_key "
+                               "WHERE ns=? AND val=?", (ns, str(val))).fetchone()
+
+        def _sup():
+            if not has_index(con):
+                return None
+            return con.execute("SELECT identity_id FROM ix.identity_key "
+                               "WHERE ns=? AND val=?", (ns, str(val))).fetchone()
+
+        first, second = ((_sup, _dyn)
+                         if getattr(con, "_prefer", PREFER_DYNAMIC) == PREFER_SUPPLEMENT
+                         else (_dyn, _sup))
+        r = first() or second()          # the second layer is a FALLBACK, not a vote
         if r is None:
             return {}
         iid = r["identity_id"]
