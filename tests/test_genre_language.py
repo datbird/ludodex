@@ -52,6 +52,8 @@ DE = {"name": "3DMark", "type": "game",
 def main():
     d = test_support.isolate("ludodex-genrelang-")
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     import config
     import media_fetch
     from server import app as srv

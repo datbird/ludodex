@@ -19,7 +19,7 @@ import re
 import sqlite3
 import sys
 
-DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex")
 sys.path.insert(0, DIR)
 import test_support                              # noqa: E402
 D = test_support.isolate("ludodex-order-")
@@ -152,7 +152,7 @@ def main():
     print("4. every media path repairs identity BEFORE it chooses")
     # The behaviour above only holds because the repair runs first. Nothing enforces
     # that but convention, and convention is what drifted in the first place.
-    src = open(os.path.join(DIR, "server", "app.py"), encoding="utf-8").read().splitlines()
+    src = open(os.path.join(os.path.dirname(DIR), "server", "app.py"), encoding="utf-8").read().splitlines()
     offenders = []
     for i, line in enumerate(src):
         if not re.search(r"media_choose\.select\(", line):

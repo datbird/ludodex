@@ -32,6 +32,8 @@ if os.environ.get("LUDODEX_LIVE_TESTS") != "1":
 BACKEND = sys.argv[1] if len(sys.argv) > 1 else "postgres"
 LIVE_CONFIG = os.environ.get("LUDODEX_LIVE_CONFIG", "/data/config.sqlite")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))), "ludodex"))
 sys.path.insert(0, "/app")
 
 # This file had its own hand-rolled version of this check (`SCRATCH in ("/data","/app")`),

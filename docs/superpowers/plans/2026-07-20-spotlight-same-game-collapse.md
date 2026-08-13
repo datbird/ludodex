@@ -123,7 +123,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run it to confirm the assertions define the target**
 
-Run: `cd ~/gitrepos/ludodex && python3 verify_spotlight_collapse.py`
+Run: `cd ~/gitrepos/ludodex && python3 ludodex/verify_spotlight_collapse.py`
 Expected: `verify_spotlight_collapse: OK` (this script is self-contained — it passes once written; it is the executable spec the server rewrite must match).
 
 - [ ] **Step 3: Rewrite `_spotlight_rows` to the CTE + window-function form**

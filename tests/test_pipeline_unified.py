@@ -31,7 +31,7 @@ import os
 import re
 import sys
 
-DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex")
 sys.path.insert(0, DIR)
 
 PASS = []
@@ -44,7 +44,7 @@ def check(label, cond):
         sys.exit("FAILED: " + label)
 
 
-SRC = open(os.path.join(DIR, "server", "app.py"), encoding="utf-8").read()
+SRC = open(os.path.join(os.path.dirname(DIR), "server", "app.py"), encoding="utf-8").read()
 LINES = SRC.split("\n")
 
 # Raw pipeline primitives. An onramp calling these directly is re-implementing the chain.
@@ -183,7 +183,7 @@ def main():
     # read it. The detail hero had its own `pinned ?? of[0]` rule and therefore rendered
     # a different logo than the picker labelled #1 USED — the panel and the page
     # disagreeing about the same asset, on the same screen.
-    app = open(os.path.join(DIR, "web", "src", "App.tsx"), encoding="utf-8").read()
+    app = open(os.path.join(os.path.dirname(DIR), "web", "src", "App.tsx"), encoding="utf-8").read()
     i = app.index("const pickKind = (kind: string)")
     body = app[i:i + 420]
     check("pickKind consults `used`", "a.used" in body)

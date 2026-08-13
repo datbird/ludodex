@@ -34,6 +34,8 @@ def check(l, c):
 def main():
     d = test_support.isolate("ludodex-spend-")
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     import config
     from server import app as srv
     from server import ai

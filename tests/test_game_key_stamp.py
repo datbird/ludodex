@@ -25,6 +25,8 @@ import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))), "ludodex"))
 import test_support                              # noqa: E402
 D = test_support.isolate("ludodex-gamekey-")
 

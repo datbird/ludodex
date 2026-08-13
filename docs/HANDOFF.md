@@ -75,8 +75,8 @@ the `media/` content-addressed repo (`<sha1>.<ext>`). The Deck-local ROM index i
 - **`skills/*/SKILL.md`** — the 5 Claude skills: `games-update`, `games-query`,
   `games-auth`, `games-sync`, `games-playnite`.
 
-**Self-service:** `python3 config.py integrations` lists every integration with its
-credential steps; `python3 config.py integrations <id>` drills in.
+**Self-service:** `python3 ludodex/config.py integrations` lists every integration with its
+credential steps; `python3 ludodex/config.py integrations <id>` drills in.
 
 ---
 
@@ -102,7 +102,7 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements-firebase.txt   # + FastAPI deps once §6 adds requirements.txt
 # bring over the data artifacts (gitignored) from the Deck:
 #   rsync -av deck:~/game-ownership/{*.sqlite,media} ./
-python3 config.py init
+python3 ludodex/config.py init
 ```
 Node 22 + pnpm are already on the Deck for the React build (`deck-build-toolchain`
 memory); install the same on the VM, or build the SPA on the Deck and ship static.

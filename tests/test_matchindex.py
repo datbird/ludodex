@@ -24,7 +24,7 @@ def check(label, cond):
 
 
 def main():
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    here = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex")
     sys.path.insert(0, here)
     import test_support
     test_support.isolate("ludodex-matchindex-")

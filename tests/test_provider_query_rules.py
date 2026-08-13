@@ -31,7 +31,8 @@ import os
 import re
 import sys
 
-DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex")
+sys.path.insert(0, os.path.dirname(DIR))   # for `import server`
 sys.path.insert(0, DIR)
 import test_support                              # noqa: E402
 test_support.isolate("ludodex-qrules-")

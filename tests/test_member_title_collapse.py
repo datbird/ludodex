@@ -32,6 +32,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))), "ludodex"))
 import catalog_patch                                    # noqa: E402
 import compilations                                     # noqa: E402
 from titlenorm import norm                              # noqa: E402
@@ -231,7 +233,7 @@ def main():
     # just collapsed — and nothing failed, because each path was self-consistent.
     import os as _os
     bl = open(_os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                            "build_library.py"), encoding="utf-8").read()
+                            "ludodex", "build_library.py"), encoding="utf-8").read()
     check("build_library calls catalog_patch.resolve_member_key",
           "catalog_patch.resolve_member_key(" in bl)
     check("and does not use the stored member_key raw for the credited base",

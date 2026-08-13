@@ -30,9 +30,9 @@ def check(l, c):
 
 def main():
     test_support.isolate("ludodex-conc-")
-    d = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex")
     sys.path.insert(0, d)
-    src = open(os.path.join(d, "server", "app.py")).read()
+    src = open(os.path.join(os.path.dirname(d), "server", "app.py")).read()
 
     check("there is one shared parallel matcher", "def _parallel_match(" in src)
     check("the IMPORT uses it rather than a sequential sweep",
@@ -59,6 +59,7 @@ def main():
     check("the vision pass reports progress while it runs",
           "AI art%s — judged %d/%d game(s)" in src)
 
+    sys.path.insert(0, os.path.dirname(d))   # `server` lives beside the package
     from server import app as srv
     w = srv._ss_workers()
     check("workers stay within what the provider advertises (got %d)" % w,

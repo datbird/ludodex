@@ -19,15 +19,15 @@ environment variable   >   local config (config.sqlite)
 ```
 
 - **Env var** — highest priority; handy for one-off runs / CI.
-- **Local config** — `python3 config.py set <key> <value>` (or enter it in the web
+- **Local config** — `python3 ludodex/config.py set <key> <value>` (or enter it in the web
   UI: **Settings › Services**); stored in `config.sqlite` (gitignored).
 
 Resolver helpers (used by the pull scripts and `scripts/auth_status.sh`):
 
 | Helper | Resolves |
 |---|---|
-| `python3 config.py steam-key` | Steam Web API key |
-| `python3 config.py itch-key` | itch.io API key |
+| `python3 ludodex/config.py steam-key` | Steam Web API key |
+| `python3 ludodex/config.py itch-key` | itch.io API key |
 | `config.igdb_creds()` | IGDB (Twitch) Client ID + Secret |
 | `config.steamgriddb_key()` | SteamGridDB API key |
 
@@ -72,11 +72,11 @@ profile**.
    > account. The API key only reads its **own** owner's data.
 3. Store:
    ```
-   python3 config.py set steam_id <SteamID64>
-   python3 config.py set steam_api_key <key>
+   python3 ludodex/config.py set steam_id <SteamID64>
+   python3 ludodex/config.py set steam_api_key <key>
    ```
    (Env override: `STEAM_API_KEY`.)
-- Pull: `python3 steam_owned.py` → `steam_games.tsv`
+- Pull: `python3 ludodex/steam_owned.py` → `steam_games.tsv`
 
 ### Epic
 Uses the **`legendary`** CLI (installed locally; pipx).
@@ -84,14 +84,14 @@ Uses the **`legendary`** CLI (installed locally; pipx).
 legendary auth          # opens/echoes a URL
 # visit https://legendary.gl/epiclogin, copy the authorizationCode, paste it
 ```
-Token is cached in `~/.config/legendary` and auto-refreshes. Pull: `python3 epic_owned.py`.
+Token is cached in `~/.config/legendary` and auto-refreshes. Pull: `python3 ludodex/epic_owned.py`.
 
 ### GOG
 GOG Galaxy **OAuth** using Galaxy's public client (defaults already in config).
 ```
-python3 gog_owned.py            # prints the login URL on first run
+python3 ludodex/gog_owned.py            # prints the login URL on first run
 # log in, copy the `code=...` value from the redirected URL, then:
-python3 gog_owned.py --code <code>
+python3 ludodex/gog_owned.py --code <code>
 ```
 A refresh token is cached in `.gog/tokens.json` and auto-refreshes thereafter.
 
@@ -100,9 +100,9 @@ A personal **API key**.
 1. Create one at **https://itch.io/user/settings/api-keys**.
 2. Store:
    ```
-   python3 config.py set itch_api_key <key>
+   python3 ludodex/config.py set itch_api_key <key>
    ```
-   (Env override: `ITCH_API_KEY`.) Pull: `python3 itch_owned.py` → `itch_games.tsv`.
+   (Env override: `ITCH_API_KEY`.) Pull: `python3 ludodex/itch_owned.py` → `itch_games.tsv`.
    > The itch *login* (user/pass) is separate from the API key — you only need the key.
 
 ### EA (EA app / Origin)
@@ -118,8 +118,8 @@ tokens non-interactively (`prompt=none` grant), refreshing on its own.
    the **`remid`** value (the long durable one).
 3. Store it (either):
    ```
-   python3 ea_owned.py --login --remid <value>     # validates + caches to .ea/cookies.json
-   python3 config.py set ea_remid <value>           # or enter it in the web UI
+   python3 ludodex/ea_owned.py --login --remid <value>     # validates + caches to .ea/cookies.json
+   python3 ludodex/config.py set ea_remid <value>           # or enter it in the web UI
    ```
    (Env override: `EA_REMID`.)
 
@@ -136,11 +136,11 @@ from your logged-in browser:
    ```
 2. Inject it (whole JSON or just the token value):
    ```
-   python3 ea_owned.py --token '{"access_token":"...","expires_in":14400}'
+   python3 ludodex/ea_owned.py --token '{"access_token":"...","expires_in":14400}'
    ```
    Cached in `.ea/token.json` for **~4 hours**; pulls run headless until it expires.
 
-- Pull (either path): `python3 ea_owned.py` → `ea_games.tsv`
+- Pull (either path): `python3 ludodex/ea_owned.py` → `ea_games.tsv`
 - **Durability:** with a working `remid` (Path A) EA is effectively set-and-forget.
   Where Akamai blocks it (Path B), EA is a **re-grab-on-demand** source — re-do the
   URL→JSON step when you want to refresh ownership (EA libraries change rarely). Full
@@ -151,8 +151,8 @@ No cloud auth. The emulation ROM index is built from `roms-index.sqlite`
 (optionally rescanned over **SSH** to the ROM host — `unraid_host`/`roms_path`).
 Local archives are registered as **crawl mounts**:
 ```
-python3 config.py mount add <path> [rom|flat] [name]
-python3 config.py mounts
+python3 ludodex/config.py mount add <path> [rom|flat] [name]
+python3 ludodex/config.py mounts
 ```
 
 ### LaunchBox (desktop frontend)
@@ -163,13 +163,13 @@ source: imported games map to their underlying provider and only flag
 `Data/`, `Images/`, `Videos/`, `Manuals/`) — locally or via a mounted network/Unraid
 share:
 ```
-python3 config.py set launchbox_path <LaunchBox root>
+python3 ludodex/config.py set launchbox_path <LaunchBox root>
 ```
 Then every `scripts/update.sh` imports it, and you push the consolidated catalog + chosen
 art back with:
 ```
-python3 launchbox_export.py            # copies art into <root>/Images/...
-python3 launchbox_export.py --link     # symlink art -> media_repo/<sha1> instead
+python3 ludodex/launchbox_export.py            # copies art into <root>/Images/...
+python3 ludodex/launchbox_export.py --link     # symlink art -> media_repo/<sha1> instead
 ```
 **Reference mode (`--link` / `launchbox_media_mode=link`)** keeps a single stored
 copy of each asset (e.g. on Unraid) and points every frontend at it — use it when
@@ -188,8 +188,8 @@ Like LaunchBox it's a **meta-layer**, not a source (`in_playnite` provenance onl
 .\scripts/playnite_bridge.ps1 -Export -Path playnite_games.json
 ```
 ```
-python3 config.py set playnite_import_json <path to playnite_games.json>  # update.sh ingests it
-python3 playnite_export.py        # catalog + chosen art -> ludodex_to_playnite.json + _media/ bundle
+python3 ludodex/config.py set playnite_import_json <path to playnite_games.json>  # update.sh ingests it
+python3 ludodex/playnite_export.py        # catalog + chosen art -> ludodex_to_playnite.json + _media/ bundle
 # copy the JSON AND its <name>_media/ folder to the Playnite machine, then:
 #   .\scripts/playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json
 ```
@@ -216,12 +216,12 @@ client-credentials, the access token auto-mints/refreshes).
    > Client ID stays the same.
 3. Store + enable:
    ```
-   python3 config.py set igdb_client_id <id>
-   python3 config.py set igdb_client_secret <secret>
-   python3 config.py enable igdb
+   python3 ludodex/config.py set igdb_client_id <id>
+   python3 ludodex/config.py set igdb_client_secret <secret>
+   python3 ludodex/config.py enable igdb
    ```
    (Env overrides: `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET`.)
-- Enrich: `python3 igdb_enrich.py` (incremental; `--all` re-does). Caches in
+- Enrich: `python3 ludodex/igdb_enrich.py` (incremental; `--all` re-does). Caches in
   `metadata-cache.sqlite`; `build_library.py` merges **fill-gaps only**.
 
 ### ScreenScraper (screenscraper.fr) — emulation metadata **and** media
@@ -236,16 +236,16 @@ IGDB misses and the backgrounds ES-DE lacks.
    Past contribution / a Patreon pledge raises your **tier** (more threads + a
    higher daily request cap). Store it:
    ```
-   python3 config.py set screenscraper_ssid <login>
-   python3 config.py set screenscraper_sspassword <password>
+   python3 ludodex/config.py set screenscraper_ssid <login>
+   python3 ludodex/config.py set screenscraper_sspassword <password>
    ```
 2. **`devid`/`devpassword`** — a *software* credential the API **requires** (you
    cannot call it with only an account). Request one on the **dev forum**
    **https://www.screenscraper.fr/forumsujets.php?frub=12** describing your free,
    non-commercial use. ⚠️ Manual approval, **can take days–weeks — request early.**
    ```
-   python3 config.py set screenscraper_devid <id>
-   python3 config.py set screenscraper_devpassword <pw>
+   python3 ludodex/config.py set screenscraper_devid <id>
+   python3 ludodex/config.py set screenscraper_devpassword <pw>
    ```
    (Env overrides: `SS_DEVID`, `SS_DEVPASSWORD`, `SS_SSID`, `SS_SSPASSWORD`.)
 
@@ -259,8 +259,8 @@ IGDB misses and the backgrounds ES-DE lacks.
 
 The engine reads your **live `ssuser` quota** from every response, paces under the
 per-minute limit, runs at your thread count, and **stops before the daily cap**,
-resuming the next day. Check it any time: `python3 ss_scrape.py --status`. Scrape:
-`python3 ss_scrape.py` (resumable; `--limit N` to cap a run). Metadata merges
+resuming the next day. Check it any time: `python3 ludodex/ss_scrape.py --status`. Scrape:
+`python3 ludodex/ss_scrape.py` (resumable; `--limit N` to cap a run). Metadata merges
 fill-gaps (after IGDB); media URLs are indexed as the `screenscraper` provider and
 downloaded (with auth) only when a chosen asset is materialized.
 
@@ -274,7 +274,7 @@ lists registered local paths.
 
 | Provider | Auth | Setup |
 |---|---|---|
-| **ES-DE** (RetroDECK / EmuDeck) | none | `python3 config.py media-mount add "<downloaded_media path>" esde [name]` |
+| **ES-DE** (RetroDECK / EmuDeck) | none | `python3 ludodex/config.py media-mount add "<downloaded_media path>" esde [name]` |
 | **Steam grid** (local custom art) | none | autodetected (`~/.steam/.../userdata/<id>/config/grid`); or `config.py set steam_grid_path <dir>` |
 | **Steam CDN** | none | works for any owned Steam appid |
 | **IGDB images** | reuses IGDB (Twitch) creds above | runs once IGDB is configured |
@@ -282,15 +282,15 @@ lists registered local paths.
 
 - ES-DE roots: RetroDECK → `<retrodeck>/ES-DE/downloaded_media`; EmuDeck →
   `<Emulation>/tools/downloaded_media`. Register each as an `esde` media mount.
-- Index local: `python3 media_index.py`. Fetch remote: `python3 media_fetch.py`
+- Index local: `python3 ludodex/media_index.py`. Fetch remote: `python3 ludodex/media_fetch.py`
   (`--steamgriddb` for the gap-fill pass).
 
 ### SteamGridDB
 1. Get a free API key at **https://www.steamgriddb.com/profile/preferences/api**.
 2. Store + enable:
    ```
-   python3 config.py set steamgriddb_api_key <key>
-   python3 config.py enable steamgriddb
+   python3 ludodex/config.py set steamgriddb_api_key <key>
+   python3 ludodex/config.py enable steamgriddb
    ```
    (Env override: `STEAMGRIDDB_API_KEY`.)
 
@@ -330,10 +330,10 @@ rejected by URL pattern before reaching the vision picker; see `media_web._is_ju
 ### PocketBase
 Mirrors the catalog to a PocketBase instance. Auth = a dedicated **superuser**.
 ```
-python3 config.py set pocketbase_url https://<host>:8090
-python3 config.py set pocketbase_admin_email <email>
-python3 config.py set pocketbase_admin_password <password>
-python3 config.py set sync_target pocketbase        # auto-sync after each rebuild
+python3 ludodex/config.py set pocketbase_url https://<host>:8090
+python3 ludodex/config.py set pocketbase_admin_email <email>
+python3 ludodex/config.py set pocketbase_admin_password <password>
+python3 ludodex/config.py set sync_target pocketbase        # auto-sync after each rebuild
 ```
 Create the superuser on the server:
 `docker exec <container> /pb/pocketbase superuser upsert <email> <password>`.
@@ -341,9 +341,9 @@ Sync: `python3 sync.py` (delta) / `python3 sync.py --reconcile` (self-heal).
 
 ### Firebase Firestore
 ```
-python3 config.py set firebase_project_id <project>
-python3 config.py set firebase_sa_json /path/to/service-account.json
-python3 config.py set sync_target firebase      # or 'both'
+python3 ludodex/config.py set firebase_project_id <project>
+python3 ludodex/config.py set firebase_sa_json /path/to/service-account.json
+python3 ludodex/config.py set sync_target firebase      # or 'both'
 pip install -r requirements-firebase.txt        # google-auth, etc.
 ```
 Get the service-account JSON from the Firebase console → Project settings →

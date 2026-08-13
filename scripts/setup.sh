@@ -10,8 +10,8 @@ export PATH="$HOME/.local/bin:$PATH"
 b() { printf '\033[1m%s\033[0m\n' "$*"; }          # bold
 dim() { printf '\033[2m%s\033[0m\n' "$*"; }        # dim
 rule() { printf '\033[2m%s\033[0m\n' "------------------------------------------------------------"; }
-cfg() { python3 config.py get "$1"; }
-setcfg() { python3 config.py set "$1" "$2" >/dev/null; }
+cfg() { python3 ludodex/config.py get "$1"; }
+setcfg() { python3 ludodex/config.py set "$1" "$2" >/dev/null; }
 
 # ask KEY "Prompt text"  -> prompt showing current value; Enter keeps it
 ask() {
@@ -41,7 +41,7 @@ echo "  python3: ok"
 command -v sqlite3 >/dev/null && echo "  sqlite3: ok" || echo "  sqlite3: MISSING (needed to query the catalog)"
 command -v legendary >/dev/null && echo "  legendary: ok (Epic)" || echo "  legendary: not found — needed only for Epic (pipx install legendary)"
 echo
-python3 config.py init
+python3 ludodex/config.py init
 echo
 
 # --- Steam -------------------------------------------------------------------
@@ -66,7 +66,7 @@ ask steam_id "  SteamID64"
 echo
 read -rp "  paste your Steam Web API key (leave blank to skip): " sk
 [ -n "$sk" ] && setcfg steam_api_key "$sk"
-if [ -n "$(python3 config.py steam-key)" ]; then echo "  steam key: resolved ok"; else echo "  steam key: not set yet (you can add it later)"; fi
+if [ -n "$(python3 ludodex/config.py steam-key)" ]; then echo "  steam key: resolved ok"; else echo "  steam key: not set yet (you can add it later)"; fi
 echo
 
 # --- Epic --------------------------------------------------------------------
@@ -102,7 +102,7 @@ if [ -f .gog/tokens.json ]; then
   echo "  already have a cached GOG token."
 elif yes "  Authenticate GOG now?"; then
   read -rp "  paste code: " gc
-  [ -n "$gc" ] && python3 gog_owned.py --code "$gc" >/dev/null && echo "  GOG: token cached"
+  [ -n "$gc" ] && python3 ludodex/gog_owned.py --code "$gc" >/dev/null && echo "  GOG: token cached"
 fi
 echo
 
@@ -116,7 +116,7 @@ TXT
 echo
 read -rp "  paste your itch.io API key (leave blank to skip): " ik
 [ -n "$ik" ] && setcfg itch_api_key "$ik"
-if [ -n "$(python3 config.py itch-key)" ]; then echo "  itch key: resolved ok"; else echo "  itch key: not set yet (you can add it later)"; fi
+if [ -n "$(python3 ludodex/config.py itch-key)" ]; then echo "  itch key: resolved ok"; else echo "  itch key: not set yet (you can add it later)"; fi
 echo
 
 # --- emulation ROMs (optional) ----------------------------------------------
@@ -126,7 +126,7 @@ ludodex can fold in a ROM archive. build_romdb.py scans a directory tree into
 roms-index.sqlite (parses No-Intro/GoodTools tags for system/region/version).
 Set a host + path only if your ROMs live on another machine reached over ssh;
 for a local archive, just point roms_index_db at a DB you build with:
-  python3 build_romdb.py <filelist.tsv> roms-index.sqlite <roms-root>
+  python3 ludodex/build_romdb.py <filelist.tsv> roms-index.sqlite <roms-root>
 TXT
 if yes "  Configure a remote ROM host for 'update.sh --roms'?"; then
   ask unraid_host "  ssh target (e.g. root@192.168.1.10)"
@@ -220,7 +220,7 @@ while true; do
   [ -z "$ap" ] && break
   read -rp "    kind [rom/flat]: " ak; ak=${ak:-rom}
   read -rp "    name [auto from path]: " an
-  python3 config.py mount add "$ap" "$ak" $an
+  python3 ludodex/config.py mount add "$ap" "$ak" $an
 done
 echo
 
@@ -229,9 +229,9 @@ rule; b "Verifying auth"
 bash auth_status.sh
 echo
 if yes "Build the catalog now?"; then
-  python3 build_library.py
+  python3 ludodex/build_library.py
 fi
 echo
 b "Done."
 echo "Update anytime with:  bash update.sh        (add --roms to rescan ROMs)"
-echo "Inspect settings:     python3 config.py list"
+echo "Inspect settings:     python3 ludodex/config.py list"

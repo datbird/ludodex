@@ -38,6 +38,8 @@ def main():
     mc.close()
     os.environ["LUDODEX_DATA"] = d
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     from server import app as srv
 
     print("1. IGDB — an id-only link row still yields a page URL")

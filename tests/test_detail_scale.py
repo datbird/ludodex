@@ -29,6 +29,8 @@ def check(label, cond):
 
 def main():
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     import test_support
     d = test_support.isolate("ludodex-dscale-")
     import media
@@ -59,8 +61,7 @@ def main():
 
     print()
     print("2. the guard that keeps this safe is 'all pastes', not 'constant'")
-    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "media_choose.py")).read()
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex", "media_choose.py")).read()
     check("select() still requires every candidate to be a paste",
           "all(c[3] == 1 for c in cands)" in src)
     check("...and has not been widened to a constancy test",
@@ -79,8 +80,7 @@ def main():
     print("4. looks_padded and detail_density read ONE measurement")
     # The docstring claimed this and the code did not: looks_padded used to recompute
     # the bands inline, so the two could drift apart silently.
-    msrc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             "media.py")).read()
+    msrc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex", "media.py")).read()
     body = msrc[msrc.index("def looks_padded"):]
     body = body[:body.index("\n# ---")]
     check("looks_padded calls band_energy", "band_energy(path, bands)" in body)

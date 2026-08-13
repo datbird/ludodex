@@ -22,6 +22,8 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))), "ludodex"))
 # setdefault KEEPS an inherited value, so in the container this resolved to /data and
 # the test ran against live databases. See test_support for what that cost.
 import test_support                              # noqa: E402

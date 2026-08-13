@@ -26,7 +26,7 @@ fi
 find "${LUDODEX_MEDIA:-$LUDODEX_DATA/media}" -maxdepth 1 -name '*.tmp' -type f -delete 2>/dev/null || true
 
 # Seed config.sqlite + its default keys on first run (idempotent, non-fatal).
-python /app/config.py init >/dev/null 2>&1 || true
+python /app/ludodex/config.py init >/dev/null 2>&1 || true
 
 echo "ludodex → data: ${LUDODEX_DATA}   media: ${LUDODEX_MEDIA:-$LUDODEX_DATA/media}   tmp: ${TMPDIR}   port: 8001"
 exec "$@"

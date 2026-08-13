@@ -13,7 +13,7 @@ import os
 import subprocess
 import sys
 
-DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex")
 sys.path.insert(0, DIR)
 
 PASS = []

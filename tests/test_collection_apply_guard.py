@@ -96,6 +96,8 @@ def main():
     d = build_data_dir()
     os.environ["LUDODEX_DATA"] = d
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     import compilations
     from server import app as srv
 

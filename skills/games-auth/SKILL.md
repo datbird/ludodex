@@ -18,9 +18,9 @@ cd ~/game-ownership && ./scripts/setup.sh
 ```
 For individual tweaks:
 ```bash
-python3 config.py list                 # all keys + descriptions
-python3 config.py get steam_id         # read one value
-python3 config.py set steam_id <id>    # change one
+python3 ludodex/config.py list                 # all keys + descriptions
+python3 ludodex/config.py get steam_id         # read one value
+python3 ludodex/config.py set steam_id <id>    # change one
 ```
 
 ## Step 1 — check what's broken
@@ -34,7 +34,7 @@ Prints `OK`/`BROKEN` per source. Only re-auth the BROKEN ones.
 
 ### Steam — Web API key (rarely needed; the key does not expire)
 Steam works via a Web API key, NOT a login. The key's privacy-bypass works **only for
-its owner's SteamID** — the `steam_id` in config (`python3 config.py get steam_id`).
+its owner's SteamID** — the `steam_id` in config (`python3 ludodex/config.py get steam_id`).
 ⚠️ Use the SteamID of the account that *generated the key* (find it in
 `~/.steam/steam/config/loginusers.vdf`); a vanity URL can resolve to a different
 account and return 0 games. Do NOT pursue Steam *password* login — Steam rejects the
@@ -43,7 +43,7 @@ CM and WebAuth flows here; the API key is the only working path.
 If `steam: BROKEN`:
 1. Ask the user to generate a key at **https://steamcommunity.com/dev/apikey** while
    logged into the account whose `steam_id` is in config; domain field = `localhost`.
-2. Store it: `python3 config.py set steam_api_key <KEY>` (local, gitignored; env
+2. Store it: `python3 ludodex/config.py set steam_api_key <KEY>` (local, gitignored; env
    `STEAM_API_KEY` overrides).
 3. Verify: `bash ~/game-ownership/auth_status.sh`.
 
@@ -64,7 +64,7 @@ Token then auto-refreshes; cached in `~/.config/legendary`.
 ### itch.io — personal API key (does not expire)
 1. Ask the user to open **https://itch.io/user/settings/api-keys**, click "Generate new
    API key", and copy it (any scope can read the library).
-2. Store it: `python3 config.py set itch_api_key <KEY>` (local, gitignored; env
+2. Store it: `python3 ludodex/config.py set itch_api_key <KEY>` (local, gitignored; env
    `ITCH_API_KEY` overrides).
 3. Verify: `bash ~/game-ownership/auth_status.sh` (the resolver is `config.py itch-key`).
 

@@ -34,6 +34,8 @@ def main():
     d = tempfile.mkdtemp(prefix="ludodex-joinrun-")
     os.environ["LUDODEX_DATA"] = d
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     import catalog_patch
     import compilations
     from titlenorm import norm

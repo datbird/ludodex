@@ -39,6 +39,8 @@ def check(label, cond):
 def main():
     test_support.isolate("ludodex-ssvar-")
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     from server import app as srv
 
     ok = srv._ss_candidate_score
@@ -157,8 +159,7 @@ def main():
     import media_fetch
     check("the server's SS gate delegates to the shared one",
           srv._ss_candidate_score(["Doom"], "Doom") == matchgate.score(["Doom"], "Doom"))
-    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "media_fetch.py")).read()
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex", "media_fetch.py")).read()
     # match the STATEMENT, not the substring — the fix's own comment quotes the old
     # line, and a check that cannot tell code from a comment about code is not a check.
     check("SteamGridDB no longer takes the first autocomplete row unchecked",

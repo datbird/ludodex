@@ -36,6 +36,8 @@ def check(l, c):
 def main():
     d = test_support.isolate("ludodex-revprov-")
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     from server import app as srv
 
     mc = sqlite3.connect(os.path.join(d, "metadata-cache.sqlite"))

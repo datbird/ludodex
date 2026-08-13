@@ -31,6 +31,8 @@ def main():
     d = tempfile.mkdtemp(prefix="ludodex-nongame-")
     os.environ["LUDODEX_DATA"] = d
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     from server import app as srv
 
     con = sqlite3.connect(":memory:")

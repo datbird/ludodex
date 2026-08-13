@@ -28,7 +28,9 @@ def check(l,c):
     if not c: sys.exit("FAILED: "+l)
 def main():
     d=test_support.isolate("ludodex-uniq-")
-    sys.path.insert(0,os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     import provider_ids as P
     con=sqlite3.connect(":memory:"); P.ensure_tables(con)
     check("first searched match is recorded",

@@ -13,7 +13,7 @@ Run:  LUDODEX_DATA=$(mktemp -d) python3 test_shape_select.py
 import os
 import sys
 
-DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex")
 sys.path.insert(0, DIR)
 
 # MUST come before any ludodex import: they resolve their paths at import time. This

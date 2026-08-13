@@ -29,6 +29,8 @@ import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))), "ludodex"))
 import test_support                              # noqa: E402
 D = test_support.isolate("ludodex-sysidentity-")
 
@@ -116,7 +118,8 @@ def main():
 
     env = dict(os.environ, LUDODEX_DATA=D)
     out = subprocess.run([sys.executable, os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "check_invariants.py")],
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "ludodex", "check_invariants.py")],
         capture_output=True, text=True, env=env).stdout
     i11 = [ln for ln in out.splitlines() if "I11" in ln]
     check("the checker reports an I11", bool(i11))

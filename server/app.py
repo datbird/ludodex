@@ -31,9 +31,10 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo root
+PKG = os.path.join(DIR, "ludodex")                                  # the modules
 DATA = os.environ.get("LUDODEX_DATA", DIR)
-sys.path.insert(0, DIR)
+sys.path.insert(0, PKG)
 import config          # noqa: E402  pipeline config store (config.sqlite)
 import media           # noqa: E402  pipeline vocab/priority (pure data)
 import media_choose    # noqa: E402  reuse _materialize_row (non-destructive)
@@ -2609,7 +2610,7 @@ def import_estimate(mgr: int = None, mode: str = "lite"):
     if mode == "algo":
         return dict(out, targets=0, cost_usd=0)
     try:
-        sys.path.insert(0, DIR)
+        sys.path.insert(0, PKG)
         import ingest_ai
         n = len(ingest_ai.targets(mgr, take_all=(mode == "heavy")))
         out.update(ingest_ai._estimate(n))

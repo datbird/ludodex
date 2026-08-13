@@ -13,9 +13,9 @@ itch.io** PC ownership. Each game lists all the sources it's available from.
 - Unified DB: `~/game-ownership/game-library.sqlite`
 - ROM index (input): `~/roms-index.sqlite`
 - Account/environment settings (SteamID, API keys, ROM host/paths) live in a
-  `config` table — `python3 config.py list` to see them, `config.py set <key> <value>`
+  `config` table — `python3 ludodex/config.py list` to see them, `config.py set <key> <value>`
   to change. Nothing personal is hardcoded in the scripts.
-- Sources can be toggled and extended: `python3 config.py sources` (list + on/off),
+- Sources can be toggled and extended: `python3 ludodex/config.py sources` (list + on/off),
   `config.py enable|disable <steam|epic|gog|itch|emulation|archive-name>`. Add local
   folders/drives as sources with `config.py mount add <path> [rom|flat] [name]`
   (`config.py mounts` lists them with live mounted/present/MISSING status; an unplugged
@@ -71,7 +71,7 @@ sqlite3 ~/game-ownership/game-library.sqlite \
 ## Auth notes (only relevant if a pull fails)
 
 - **Steam**: Web API key (`steam_api_key` in config) + the SteamID in config
-  (`python3 config.py get steam_id`) — must be the account that *owns the key*. NOTE a
+  (`python3 ludodex/config.py get steam_id`) — must be the account that *owns the key*. NOTE a
   vanity URL can resolve to a different account and return 0 games. The key bypasses
   profile privacy only for its owner's SteamID, so no public profile / login / 2FA.
 - **Epic**: `legendary` token in `~/.config/legendary` (auto-refreshes). Re-auth:

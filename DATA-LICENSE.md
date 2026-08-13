@@ -55,7 +55,7 @@ use is commercial, assume it is and don't.
 
 ## Building your own instead
 
-`python3 matchindex.py` builds the index locally from mirrors you fetched with your own
+`python3 ludodex/matchindex.py` builds the index locally from mirrors you fetched with your own
 credentials. Nothing is redistributed, so only the providers' own terms apply to you.
 
 ## Reporting a licensing problem

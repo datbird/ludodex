@@ -93,7 +93,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cd ~/gitrepos/ludodex && python3 verify_per_entry_identity.py`
+Run: `cd ~/gitrepos/ludodex && python3 ludodex/verify_per_entry_identity.py`
 Expected: `AttributeError: module 'igdb_enrich' has no attribute 'per_entry_resolve'`.
 
 - [ ] **Step 3: Implement `entry_fits` + `per_entry_resolve` in `igdb_enrich.py`**
@@ -149,7 +149,7 @@ def per_entry_resolve(candidates, platform, primary_id):
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cd ~/gitrepos/ludodex && python3 verify_per_entry_identity.py`
+Run: `cd ~/gitrepos/ludodex && python3 ludodex/verify_per_entry_identity.py`
 Expected: `verify_per_entry_identity: OK`
 
 - [ ] **Step 5: Byte-compile the module**

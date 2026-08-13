@@ -32,6 +32,8 @@ def check(label, cond):
 
 def main():
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     import test_support
     test_support.isolate("ludodex-alldec-")
     import igdb_enrich
@@ -74,8 +76,7 @@ def main():
 
     print()
     print("4. the rule lives in one place")
-    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "igdb_enrich.py")).read()
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex", "igdb_enrich.py")).read()
     check("the resolver consults decided_identities()", "decided_identities(con)" in src)
     check("...and no longer hardcodes the manual-only test there",
           "WHERE matched_by='manual'\")}" not in src)

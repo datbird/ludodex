@@ -57,6 +57,8 @@ def main():
     if os.path.exists(src):
         shutil.copy2(src, os.path.join(d, "config.sqlite"))
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     from server import ai
     if not ai.area_available("art"):
         sys.exit("SKIPPED: no art provider configured")

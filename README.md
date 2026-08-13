@@ -113,9 +113,9 @@ sqlite3 "$DB" \
 Every source can be toggled, and you can add your own local directories as sources.
 
 ```bash
-python3 config.py sources                 # list all sources + on/off state
-python3 config.py disable gog             # skip a built-in (steam|epic|gog|itch|emulation)
-python3 config.py enable gog
+python3 ludodex/config.py sources                 # list all sources + on/off state
+python3 ludodex/config.py disable gog             # skip a built-in (steam|epic|gog|itch|emulation)
+python3 ludodex/config.py enable gog
 ```
 
 **Local archives / mounts** — register any local folder or drive (SD card, USB, NAS
@@ -126,13 +126,13 @@ games stay in the catalog.
 
 ```bash
 # kind 'rom':  recurse, first folder = system, ROM/disc files only, tags cleaned
-python3 config.py mount add /run/media/deck/SDCARD rom        # name defaults to "SDCARD"
+python3 ludodex/config.py mount add /run/media/deck/SDCARD rom        # name defaults to "SDCARD"
 # kind 'flat': each immediate child (file or folder) is one title
-python3 config.py mount add ~/Games flat installers          # explicit name
+python3 ludodex/config.py mount add ~/Games flat installers          # explicit name
 
-python3 config.py mounts                  # list paths + mounted/present/MISSING status
-python3 config.py disable installers      # mounts toggle like any source
-python3 config.py mount rm <name>
+python3 ludodex/config.py mounts                  # list paths + mounted/present/MISSING status
+python3 ludodex/config.py disable installers      # mounts toggle like any source
+python3 ludodex/config.py mount rm <name>
 ```
 
 This is a **two-stage pipeline** over a persistent `crawl-index.sqlite` (gitignored):
@@ -160,9 +160,9 @@ store or Playnite), IGDB leaves that kind untouched, so owned-source data always
 
 ```bash
 # one-time: Twitch app creds (free) at https://dev.twitch.tv/console/apps
-python3 config.py set igdb_client_id     <client-id>
-python3 config.py set igdb_client_secret <client-secret>   # env IGDB_CLIENT_SECRET overrides
-python3 config.py enable igdb            # on by default; no-ops without creds
+python3 ludodex/config.py set igdb_client_id     <client-id>
+python3 ludodex/config.py set igdb_client_secret <client-secret>   # env IGDB_CLIENT_SECRET overrides
+python3 ludodex/config.py enable igdb            # on by default; no-ops without creds
 ```
 
 IGDB data is cached in `metadata-cache.sqlite` (gitignored) by **`igdb_enrich.py`** —
@@ -182,10 +182,10 @@ stable `norm_key`, from several **media providers**:
   cover/artwork/screenshots by id. **SteamGridDB** (remote, needs a key) gap-fills.
 
 ```bash
-python3 media_index.py          # scan local providers (ES-DE, Steam grid)
-python3 media_fetch.py          # add remote refs (Steam CDN, IGDB images)
-python3 media_choose.py         # pick the ONE best asset per game+kind (by priority)
-python3 media_choose.py --materialize --kind cover   # pull chosen bytes into media/ repo
+python3 ludodex/media_index.py          # scan local providers (ES-DE, Steam grid)
+python3 ludodex/media_fetch.py          # add remote refs (Steam CDN, IGDB images)
+python3 ludodex/media_choose.py         # pick the ONE best asset per game+kind (by priority)
+python3 ludodex/media_choose.py --materialize --kind cover   # pull chosen bytes into media/ repo
 ```
 
 Hybrid storage: everything is indexed as a reference; only the **chosen** asset per kind
@@ -213,8 +213,8 @@ Playnite (it stores its library in LiteDB, which needs .NET):
 
 ```bash
 # ludodex side:
-python3 config.py set playnite_import_json /path/playnite_games.json   # then update.sh ingests it
-python3 playnite_export.py                                  # catalog -> ludodex_to_playnite.json
+python3 ludodex/config.py set playnite_import_json /path/playnite_games.json   # then update.sh ingests it
+python3 ludodex/playnite_export.py                                  # catalog -> ludodex_to_playnite.json
 ```
 
 ludodex adopts Playnite's full attribute vocabulary (genres, tags, features, categories,
@@ -247,9 +247,9 @@ as plain files (Platform XMLs + `Images/` folders), so **no bridge is needed** �
 ludodex reads and writes the install directly:
 
 ```
-python3 config.py set launchbox_path <LaunchBox root>   # update.sh then imports it
-python3 launchbox_export.py            # catalog + chosen art -> LaunchBox
-python3 launchbox_export.py --link     # symlink art -> media_repo/<sha1> (1 stored copy)
+python3 ludodex/config.py set launchbox_path <LaunchBox root>   # update.sh then imports it
+python3 ludodex/launchbox_export.py            # catalog + chosen art -> LaunchBox
+python3 ludodex/launchbox_export.py --link     # symlink art -> media_repo/<sha1> (1 stored copy)
 ```
 
 Export upserts each game by a **stable per-game GUID** (idempotent — re-runs update
@@ -292,7 +292,7 @@ cache, manual remote edits, or a failed partial run.
   2. **Build → Firestore Database → Create database** (Native mode).
   3. **Project settings → Service accounts → Generate new private key** → downloads a
      JSON (or in Google Cloud: a service account with role *Cloud Datastore User*).
-  4. Put the JSON on the machine and `python3 config.py set firebase_sa_json <path>`
+  4. Put the JSON on the machine and `python3 ludodex/config.py set firebase_sa_json <path>`
      (it's gitignored), plus `firebase_project_id`. Optional: `firebase_database` (for a
      named, non-default DB) and `firebase_collection_prefix`.
   5. Install the one dependency: `python3 -m pip install --user -r requirements-firebase.txt`.
@@ -317,9 +317,9 @@ environment-specific values are **not hardcoded** — they live in a `config` ta
 the code. To tweak values directly:
 
 ```bash
-python3 config.py list      # show all keys, values, and descriptions
-python3 config.py set steam_id 7656119...      # set one value
-python3 config.py get steam_id                 # read one (used by the shell scripts)
+python3 ludodex/config.py list      # show all keys, values, and descriptions
+python3 ludodex/config.py set steam_id 7656119...      # set one value
+python3 ludodex/config.py get steam_id                 # read one (used by the shell scripts)
 ```
 
 | key | what it is |
@@ -354,7 +354,7 @@ Quick version — once cached, auth needs no further interaction:
 - **Steam** — Web API key (no expiry). https://steamcommunity.com/dev/apikey + the
   owning account's SteamID64.
 - **Epic** — `legendary auth` → paste the code from https://legendary.gl/epiclogin.
-- **GOG** — `python3 gog_owned.py --code <code>` once; refresh token auto-renews.
+- **GOG** — `python3 ludodex/gog_owned.py --code <code>` once; refresh token auto-renews.
 - **itch.io** — key from https://itch.io/user/settings/api-keys.
 - **EA** — browser-minted token (`ea_owned.py --token …`); see AUTH.md (EA's Akamai
   shield blocks headless refresh, so it's a re-grab-on-demand source).
@@ -364,8 +364,8 @@ Quick version — once cached, auth needs no further interaction:
 - **SteamGridDB** (media) — key from https://www.steamgriddb.com/profile/preferences/api.
 
 Get the exact steps for any integration right from the CLI:
-`python3 config.py integrations` (overview + which are configured) or
-`python3 config.py integrations <id>` (e.g. `ea`, `igdb`). Verify all sources at
+`python3 ludodex/config.py integrations` (overview + which are configured) or
+`python3 ludodex/config.py integrations <id>` (e.g. `ea`, `igdb`). Verify all sources at
 once: `bash scripts/auth_status.sh`.
 
 > **Privacy note:** the SQLite catalogs, per-store ownership dumps (`*_games.tsv`), and

@@ -42,7 +42,7 @@ to re-assert every record and prune anything stale — it converges with no dupl
   Firebase/GCP console — `./scripts/setup.sh` step 7 walks through it. Upserts by doc id and
   prunes removed docs.
 
-Set values with `python3 config.py set <key> <value>`, or run `./scripts/setup.sh` (step 7).
+Set values with `python3 ludodex/config.py set <key> <value>`, or run `./scripts/setup.sh` (step 7).
 
 ## Notes
 - Sync is **one-way** (local → remote); the local `game-library.sqlite` is the source

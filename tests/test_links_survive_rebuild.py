@@ -46,6 +46,8 @@ def check(label, cond):
 def main():
     d = test_support.isolate("ludodex-links-")
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     import provider_ids
     import provider_links
 
@@ -183,7 +185,8 @@ def main():
           not uncovered)
     check("...and igdb is covered by the fill path rather than forgotten",
           "igdb_resolution" in open(os.path.join(
-              os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "provider_links.py")).read())
+              os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+              "ludodex", "provider_links.py")).read())
 
     # An identity that BECOMES a miss must take its link with it. sync() only visited
     # games that still had an identity, so a corrected match that resolved to nothing

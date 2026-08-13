@@ -258,7 +258,7 @@ Every wrong-art report in this project traced to derived truth computed twice an
 drifting, and the symptom only ever showed up in the END STATE. So that is where it is
 now checked. **Read-only, safe against a live instance:**
 
-    docker exec -i ludodex python3 /app/check_invariants.py
+    docker exec -i ludodex python3 /app/ludodex/check_invariants.py
 
 - **I1** neutral media identity matches its entry
 - **I2** no falsy identity (`igdb:0`) is used as a key
@@ -493,7 +493,7 @@ own pass) and ScreenScraper found it correctly — the failure was transient, as
 
 ### The scrub, and why it was NOT run
 
-`provider_ids.rescore()` + `python3 provider_ids.py --scrub [--apply]` re-decides recorded
+`provider_ids.rescore()` + `python3 ludodex/provider_ids.py --scrub [--apply]` re-decides recorded
 identities under today's gate. Built, tested (`test_identity_rescore.py`, 15) and
 deployed, because a gate that gets stricter otherwise leaves everything it would now
 refuse sitting in the cache, unreachable by every later pass.

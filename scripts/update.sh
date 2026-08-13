@@ -13,7 +13,7 @@ export PATH="$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
 DATA_DIR="${LUDODEX_DATA:-$(pwd)}"
 mkdir -p "$DATA_DIR"
 
-cfg() { python3 config.py get "$1"; }
+cfg() { python3 ludodex/config.py get "$1"; }
 enabled() { [ "$(cfg "source_$1_enabled")" != 0 ]; }   # default on
 meta_enabled() { [ "$(cfg "metadata_$1_enabled")" != 0 ]; }   # default on
 LIB=$(cfg library_db)
@@ -28,12 +28,12 @@ fi
 
 echo "== Steam =="
 if ! enabled steam; then echo "  steam: disabled"; else
-  KEY=$(python3 config.py steam-key)
+  KEY=$(python3 ludodex/config.py steam-key)
   if [ -n "$KEY" ]; then
-    STEAM_API_KEY="$KEY" python3 steam_owned.py > "$DATA_DIR/steam_games.tsv" 2>steam.err \
+    STEAM_API_KEY="$KEY" python3 ludodex/steam_owned.py > "$DATA_DIR/steam_games.tsv" 2>steam.err \
       && echo "  steam: $(wc -l < "$DATA_DIR/steam_games.tsv") games" \
       || echo "  steam FAILED: $(tail -1 steam.err)"
-    STEAM_API_KEY="$KEY" python3 steam_wishlist.py > "$DATA_DIR/steam_wishlist.tsv" 2>steam_wl.err \
+    STEAM_API_KEY="$KEY" python3 ludodex/steam_wishlist.py > "$DATA_DIR/steam_wishlist.tsv" 2>steam_wl.err \
       && echo "  steam wishlist: $(wc -l < "$DATA_DIR/steam_wishlist.tsv") wanted" \
       || echo "  steam wishlist: $(tail -1 steam_wl.err 2>/dev/null)"
   else echo "  steam: no API key (run ./setup.sh, or set steam_api_key)"; fi
@@ -41,31 +41,31 @@ fi
 
 echo "== Epic =="
 if ! enabled epic; then echo "  epic: disabled"; else
-  python3 epic_owned.py 2>epic.err && echo "  epic: $(wc -l < "$DATA_DIR/epic_games.tsv") games" \
+  python3 ludodex/epic_owned.py 2>epic.err && echo "  epic: $(wc -l < "$DATA_DIR/epic_games.tsv") games" \
     || echo "  epic FAILED: $(tail -1 epic.err)"
 fi
 
 echo "== GOG =="
 if ! enabled gog; then echo "  gog: disabled"; else
-  python3 gog_owned.py > "$DATA_DIR/gog_games.tsv" 2>gog.err && echo "  gog: $(wc -l < "$DATA_DIR/gog_games.tsv") games" \
+  python3 ludodex/gog_owned.py > "$DATA_DIR/gog_games.tsv" 2>gog.err && echo "  gog: $(wc -l < "$DATA_DIR/gog_games.tsv") games" \
     || echo "  gog FAILED: $(tail -1 gog.err)"
-  python3 gog_wishlist.py > "$DATA_DIR/gog_wishlist.tsv" 2>gog_wl.err && echo "  gog wishlist: $(wc -l < "$DATA_DIR/gog_wishlist.tsv") wanted" \
+  python3 ludodex/gog_wishlist.py > "$DATA_DIR/gog_wishlist.tsv" 2>gog_wl.err && echo "  gog wishlist: $(wc -l < "$DATA_DIR/gog_wishlist.tsv") wanted" \
     || echo "  gog wishlist: $(tail -1 gog_wl.err 2>/dev/null)"
 fi
 
 echo "== itch.io =="
 if ! enabled itch; then echo "  itch: disabled"; else
-  if [ -n "$(python3 config.py itch-key)" ]; then
-    python3 itch_owned.py > "$DATA_DIR/itch_games.tsv" 2>itch.err && echo "  itch: $(wc -l < "$DATA_DIR/itch_games.tsv") games" \
+  if [ -n "$(python3 ludodex/config.py itch-key)" ]; then
+    python3 ludodex/itch_owned.py > "$DATA_DIR/itch_games.tsv" 2>itch.err && echo "  itch: $(wc -l < "$DATA_DIR/itch_games.tsv") games" \
       || echo "  itch FAILED: $(tail -1 itch.err)"
   else echo "  itch: no API key (run ./setup.sh, or set itch_api_key)"; fi
 fi
 
 echo "== EA =="
 if ! enabled ea; then echo "  ea: disabled"; else
-  if python3 ea_owned.py > "$DATA_DIR/ea_games.tsv" 2>ea.err; then
+  if python3 ludodex/ea_owned.py > "$DATA_DIR/ea_games.tsv" 2>ea.err; then
     echo "  ea: $(wc -l < "$DATA_DIR/ea_games.tsv") games"
-  else echo "  ea: $(tail -1 ea.err 2>/dev/null) (set up once: python3 ea_owned.py --login)"; fi
+  else echo "  ea: $(tail -1 ea.err 2>/dev/null) (set up once: python3 ludodex/ea_owned.py --login)"; fi
 fi
 
 if [ "$1" = "--roms" ]; then
@@ -82,8 +82,8 @@ if [ "$1" = "--roms" ]; then
 fi
 
 echo "== local archives =="
-python3 crawl.py          # stage 1: append new files to the inventory
-python3 process.py        # stage 2: extract system/title/attributes from new files
+python3 ludodex/crawl.py          # stage 1: append new files to the inventory
+python3 ludodex/process.py        # stage 2: extract system/title/attributes from new files
 
 # LaunchBox: a frontend meta-layer (like Playnite). Read its Platform XMLs into
 # the interchange JSON build_library merges, and index its Images/ as media.
@@ -91,17 +91,17 @@ python3 process.py        # stage 2: extract system/title/attributes from new fi
 if [ "$(python3 -c 'import config; print(int(config.source_enabled("launchbox")))')" = "1" ] && \
    [ -n "$(cfg launchbox_path)" ] && [ -d "$(cfg launchbox_path)" ]; then
   echo "== LaunchBox import =="
-  python3 launchbox_import.py 2>&1 | sed 's/^/  /'
+  python3 ludodex/launchbox_import.py 2>&1 | sed 's/^/  /'
 fi
 
 echo "== rebuilding unified library =="
-python3 build_library.py
+python3 ludodex/build_library.py
 
 # metadata providers enrich attributes AFTER the catalog exists, then we re-merge
 if meta_enabled igdb && \
    [ -n "$(python3 -c 'import config; print("1" if all(config.igdb_creds()) else "")')" ]; then
   echo "== IGDB metadata enrichment =="
-  python3 igdb_enrich.py && python3 build_library.py
+  python3 ludodex/igdb_enrich.py && python3 ludodex/build_library.py
 fi
 
 # ScreenScraper: emulation metadata + media in one scrape (tier-aware, resumable,
@@ -109,25 +109,25 @@ fi
 if meta_enabled screenscraper && \
    [ -n "$(python3 -c 'import config; print("1" if config.screenscraper_creds() else "")')" ]; then
   echo "== ScreenScraper (emulation metadata + media) =="
-  python3 ss_scrape.py 2>&1 | sed 's/^/  /'
-  python3 build_library.py >/dev/null      # re-merge ScreenScraper metadata
+  python3 ludodex/ss_scrape.py 2>&1 | sed 's/^/  /'
+  python3 ludodex/build_library.py >/dev/null      # re-merge ScreenScraper metadata
 fi
 
 echo "== media index =="
-python3 media_index.py 2>&1 | sed 's/^/  /'      # local: ES-DE + Steam grid
+python3 ludodex/media_index.py 2>&1 | sed 's/^/  /'      # local: ES-DE + Steam grid
 # Playnite's own cover/background/icon art, indexed as the 'playnite' provider.
 if [ "$(python3 -c 'import config; print(int(config.source_enabled("playnite")))')" = "1" ] && \
    [ -n "$(cfg playnite_import_json)" ] && [ -f "$(cfg playnite_import_json)" ]; then
-  python3 playnite_import.py 2>&1 | sed 's/^/  /'
+  python3 ludodex/playnite_import.py 2>&1 | sed 's/^/  /'
 fi
-python3 media_fetch.py 2>&1 | sed 's/^/  /'      # remote refs: Steam CDN + IGDB + ScreenScraper
-python3 media_choose.py 2>&1 | tail -1 | sed 's/^/  /'   # pick the best per game
-# (materialize is on-demand: python3 media_choose.py --materialize; ~17GB if all)
+python3 ludodex/media_fetch.py 2>&1 | sed 's/^/  /'      # remote refs: Steam CDN + IGDB + ScreenScraper
+python3 ludodex/media_choose.py 2>&1 | tail -1 | sed 's/^/  /'   # pick the best per game
+# (materialize is on-demand: python3 ludodex/media_choose.py --materialize; ~17GB if all)
 
 # Push the consolidated catalog + chosen art BACK to the desktop frontends. Opt-in
 # (writes into your LaunchBox/Playnite installs) — run manually when they're reachable:
-#   python3 launchbox_export.py            # -> launchbox_path (--link for shared/Unraid)
-#   python3 playnite_export.py             # -> Playnite interchange JSON (bridge -Import)
+#   python3 ludodex/launchbox_export.py            # -> launchbox_path (--link for shared/Unraid)
+#   python3 ludodex/playnite_export.py             # -> Playnite interchange JSON (bridge -Import)
 
 echo "== new since last run =="
 sqlite3 "$LIB" "SELECT norm_key FROM games" | sort > .cur_keys

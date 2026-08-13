@@ -30,6 +30,8 @@ def check(label, cond):
 def main():
     d = test_support.isolate("ludodex-region-")
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "ludodex"))
     import config
     import medialang as M
     import media_choose
