@@ -61,6 +61,7 @@ IGDB_DB = os.path.join(DATA, "igdb-catalog.sqlite")
 SS_DB = os.path.join(DATA, "ss-catalog.sqlite")
 
 SS_ID_BASE = 100_000_000
+LEARNED_ID_BASE = 200_000_000    # a game neither mirror knows, found by live search
 YEAR_SLACK = 1                   # a year that disagrees by more than this is a refusal
 
 # Which ROM hashes earn their place. CRC32 is what No-Intro, TOSEC and every frontend
@@ -84,12 +85,61 @@ def _slug(s):
     return re.sub(r"[^a-z0-9]+", "_", (s or "").strip().lower()).strip("_")
 
 
-def open_index():
-    """The index if it is present, else None — the ONLY way a caller should reach it.
+def connect():
+    """THE handle the pipeline uses. Always succeeds.
 
-    None means "this machine has no index", which is not the same as "this game is not
-    in the index". A caller that cannot tell those apart will refuse games it has simply
-    never looked up, so the distinction is a return value rather than an empty dict."""
+    Two stores, split by PROVENANCE rather than by size, because they have opposite
+    lifecycles:
+
+      learned_key   in the main db. Written by the live search path when the index had
+                    no answer. This is a DECISION, it cost a rate-limited round trip and
+                    an acceptance gate to obtain, it is not reproducible from any mirror,
+                    and it must survive a rebuild and be backed up. Always present, even
+                    when empty — an empty table is a populated-ness question, not an
+                    existence one.
+      identity_key  in match-index.sqlite. Bulk, derived, ~0.85 GB, rebuilt from the
+                    mirrors whenever the rules improve, excluded from backups.
+
+    Put learned rows in the rebuildable file and the next rebuild silently deletes the
+    only copy of the most expensive data in the system."""
+    con = sqlite3.connect(MAIN_DB, timeout=60)
+    con.row_factory = sqlite3.Row
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS learned_identity(
+      id INTEGER PRIMARY KEY, name TEXT, norm_key TEXT, year INTEGER, learned_at INTEGER);
+    CREATE TABLE IF NOT EXISTS learned_key(
+      ns TEXT, val TEXT, identity_id INTEGER, kind TEXT, provider TEXT,
+      learned_at INTEGER, PRIMARY KEY(ns, val, identity_id));
+    CREATE INDEX IF NOT EXISTS ix_lk_ident ON learned_key(identity_id);
+    -- The user's word, and the ONLY thing that outranks the shipped supplement. A
+    -- shipped index is someone else's conclusion about the user's library; when they
+    -- disagree, they are right and the file is not editable to say so. action='unbind'
+    -- exists because "this is not that game" is a different statement from "this is
+    -- some other game", and only one of them names a replacement.
+    CREATE TABLE IF NOT EXISTS override_key(
+      ns TEXT, val TEXT, identity_id INTEGER, action TEXT, note TEXT,
+      created_at INTEGER, PRIMARY KEY(ns, val));
+    """)
+    con.commit()
+    if os.path.exists(DB):
+        try:
+            con.execute("ATTACH DATABASE ? AS ix", ("file:%s?mode=ro" % DB,))
+        except sqlite3.Error:
+            pass
+    return con
+
+
+def has_index(con):
+    """Is the bulk index attached? NOT the same question as whether a game is in it.
+
+    A caller that conflates them refuses games it has merely never looked up — the
+    fail-open shape this codebase keeps rediscovering."""
+    return bool(con.execute("SELECT COUNT(*) FROM pragma_database_list "
+                            "WHERE name='ix'").fetchone()[0])
+
+
+def open_index():
+    """Read-only handle on the bulk index alone, or None when it is not present."""
     if not os.path.exists(DB):
         return None
     con = sqlite3.connect("file:%s?mode=ro" % DB, uri=True, timeout=30)
@@ -103,6 +153,54 @@ def open_index():
         con.close()
         return None
     return con
+
+
+def learn(con, pairs, name=None, year=None, provider=None, identity_id=None):
+    """Record what the live search path found, so the next lookup is local.
+
+    `pairs` is [(ns, val), ...] — everything the search established about ONE game.
+    Binds to an existing identity when any pair already resolves to one, so a Steam
+    search and a later ScreenScraper search on the same game converge instead of
+    minting two. Otherwise mints a learned identity.
+
+    Returns the identity id it wrote against."""
+    now = int(time.time())
+    pairs = [(ns, str(v)) for ns, v in (pairs or []) if ns and v not in (None, "")]
+    if not pairs:
+        return None
+    if identity_id is None:
+        for ns, val in pairs:
+            hit = _lookup_identity(con, ns, val)
+            if hit is not None:
+                identity_id = hit
+                break
+    if identity_id is None:
+        identity_id = LEARNED_ID_BASE + (
+            con.execute("SELECT COALESCE(MAX(id), ?) + 1 FROM learned_identity "
+                        "WHERE id >= ?", (LEARNED_ID_BASE, LEARNED_ID_BASE)
+                        ).fetchone()[0] - LEARNED_ID_BASE)
+        con.execute("INSERT OR REPLACE INTO learned_identity"
+                    "(id,name,norm_key,year,learned_at) VALUES(?,?,?,?,?)",
+                    (identity_id, name, norm(name or ""), year, now))
+    for ns, val in pairs:
+        con.execute("INSERT OR IGNORE INTO learned_key"
+                    "(ns,val,identity_id,kind,provider,learned_at) "
+                    "VALUES(?,?,?,'learned',?,?)", (ns, val, identity_id, provider, now))
+    con.commit()
+    return identity_id
+
+
+def _lookup_identity(con, ns, val):
+    r = con.execute("SELECT identity_id FROM learned_key WHERE ns=? AND val=?",
+                    (ns, str(val))).fetchone()
+    if r:
+        return r["identity_id"]
+    if has_index(con):
+        r = con.execute("SELECT identity_id FROM ix.identity_key WHERE ns=? AND val=?",
+                        (ns, str(val))).fetchone()
+        if r:
+            return r["identity_id"]
+    return None
 
 
 def _evict_legacy():
@@ -149,22 +247,82 @@ def con_db():
 
 
 # --- the one query --------------------------------------------------------- #
+_ALL_KEYS = """
+    SELECT ns, val, kind, identity_id FROM learned_key
+    UNION ALL SELECT ns, val, kind, identity_id FROM ix.identity_key
+"""
+_LEARNED_ONLY = "SELECT ns, val, kind, identity_id FROM learned_key"
+
+
+def _keys_sql(con):
+    """The union when the bulk index is attached, the learned table alone when it is
+    not. A machine with no index still resolves everything it has LEARNED."""
+    return _ALL_KEYS if has_index(con) else _LEARNED_ONLY
+
+
+def override(con, ns, val, identity_id=None, note=None):
+    """The user's correction. identity_id=None means "this handle is NOT that game" and
+    suppresses whatever the supplement claims, without asserting a replacement."""
+    con.execute("INSERT OR REPLACE INTO override_key"
+                "(ns,val,identity_id,action,note,created_at) VALUES(?,?,?,?,?,?)",
+                (ns, str(val), identity_id,
+                 "bind" if identity_id is not None else "unbind", note,
+                 int(time.time())))
+    con.commit()
+
+
 def resolve(con, ns, val):
-    """Every handle on the game that `ns`/`val` identifies. THE query — one shape for
-    a store id, a name, or a ROM hash."""
+    """Every handle on the game that `ns`/`val` identifies. THE query — one shape for a
+    store id, a name, or a ROM hash.
+
+    PRECEDENCE: override > learned > supplement. The supplement is shipped, read-only
+    and replaced wholesale on sync, so the user's correction cannot live in it and must
+    outrank it here instead — otherwise the next sync silently reverts them.
+
+    An empty result means "not known here", which is a real answer and the pipeline's
+    signal to go and search. It is NOT the same as having no index; ask has_index()."""
+    # IDENTITY IS CHOSEN BY THE HIGHEST LAYER THAT HAS AN ANSWER — it is not voted on.
+    # Unioning the layers and joining across them looks equivalent and is not: when the
+    # dynamic table and the supplement disagree about a handle, that returns the keys of
+    # BOTH games welded into one answer. A user who has been running without the
+    # supplement and then adds it must not have their own conclusions diluted by it.
+    ov = con.execute("SELECT identity_id, action FROM override_key WHERE ns=? AND val=?",
+                     (ns, str(val))).fetchone()
+    if ov is not None and ov["action"] == "unbind":
+        return {}
+    iid = ov["identity_id"] if ov is not None else None
+    if iid is None:
+        r = con.execute("SELECT identity_id FROM learned_key WHERE ns=? AND val=?",
+                        (ns, str(val))).fetchone()
+        if r is None and has_index(con):
+            # Only NOW is the supplement consulted.
+            r = con.execute("SELECT identity_id FROM ix.identity_key "
+                            "WHERE ns=? AND val=?", (ns, str(val))).fetchone()
+        if r is None:
+            return {}
+        iid = r["identity_id"]
+
+    # Identity settled, every layer contributes its keys FOR THAT IDENTITY — a handle
+    # learned against a supplement identity is exactly the case worth supporting.
     rows = con.execute(
-        "SELECT k2.ns, k2.val, k2.kind, k2.identity_id "
-        "FROM identity_key k1 JOIN identity_key k2 USING (identity_id) "
-        "WHERE k1.ns=? AND k1.val=?", (ns, str(val))).fetchall()
-    out = {}
+        "WITH k AS (%s) SELECT ns, val, kind FROM k WHERE identity_id=?"
+        % _keys_sql(con), (iid,)).fetchall()
+    out, seen = {}, set()
     for r in rows:
+        if (r["ns"], r["val"]) in seen:
+            continue
+        seen.add((r["ns"], r["val"]))
         out.setdefault(r["ns"], []).append(r["val"])
-    if rows:
-        out["_identity_id"] = rows[0]["identity_id"]
-        ident = con.execute("SELECT name, year FROM identity WHERE id=?",
-                            (rows[0]["identity_id"],)).fetchone()
-        if ident:
-            out["_name"], out["_year"] = ident["name"], ident["year"]
+    if not out:
+        return {}
+    out["_identity_id"] = iid
+    ident = con.execute("SELECT name, year FROM learned_identity WHERE id=?",
+                        (iid,)).fetchone()
+    if ident is None and has_index(con):
+        ident = con.execute("SELECT name, year FROM ix.identity WHERE id=?",
+                            (iid,)).fetchone()
+    if ident:
+        out["_name"], out["_year"] = ident["name"], ident["year"]
     return out
 
 
@@ -177,11 +335,14 @@ def resolve_name(con, title, year=None):
     nk = norm(title or "")
     if not nk:
         return []
+    idents = "SELECT id,name,year FROM learned_identity" + (
+        " UNION ALL SELECT id,name,year FROM ix.identity" if has_index(con) else "")
     seen, out = set(), []
     for r in con.execute(
-            "SELECT k.identity_id, i.name, i.year FROM identity_key k "
-            "JOIN identity i ON i.id=k.identity_id "
-            "WHERE k.ns IN ('name','alias') AND k.val=?", (nk,)):
+            "WITH k AS (%s), i AS (%s) "
+            "SELECT k.identity_id, i.name, i.year FROM k JOIN i ON i.id=k.identity_id "
+            "WHERE k.ns IN ('name','alias') AND k.val=?" % (_keys_sql(con), idents),
+            (nk,)):
         if r["identity_id"] in seen:
             continue
         seen.add(r["identity_id"])

@@ -101,7 +101,7 @@ def main():
     check("ss games that did not match got their own: %d" % st["ss_own_identity"],
           st["ss_own_identity"] == 2)
 
-    con = M.con_db()
+    con = M.connect()
 
     print()
     print("2. THE query — a GOG id in, every other handle out, one hop")
@@ -122,7 +122,7 @@ def main():
     print()
     print("4. exact and derived are distinguishable, because they are not equal")
     kinds = {r["ns"]: r["kind"] for r in con.execute(
-        "SELECT ns,kind FROM identity_key WHERE identity_id=20")}
+        "SELECT ns,kind FROM ix.identity_key WHERE identity_id=20")}
     check("a store id is exact", kinds.get("steam") == "exact")
     check("a name is derived", kinds.get("name") == "derived")
 
@@ -170,23 +170,114 @@ def main():
 
     print()
     print("10. the index is OPTIONAL, and absence is not the same as a miss")
-    # This is the whole risk of splitting it out. A machine with no index must fall
-    # back to the network; a machine WITH an index that has no row for this game has
-    # actually answered. Returning {} for both would collapse them into one, and the
-    # caller would refuse games it had merely never looked up.
-    con = M.open_index()
-    check("an index that exists opens", con is not None)
-    check("and a genuine miss is an empty answer, not None",
-          M.resolve(con, "steam", "000000") == {})
+    # A machine with no index must fall back to the network; a machine WITH an index
+    # that has no row for this game has actually answered. Collapsing those into one
+    # empty dict makes the caller refuse games it merely never looked up.
+    con = M.connect()
+    check("the pipeline handle always opens", con is not None)
+    check("the bulk index is attached", M.has_index(con))
+    check("a genuine miss is an empty answer", M.resolve(con, "steam", "000000") == {})
     con.close()
     moved = M.DB + ".away"
     os.rename(M.DB, moved)
     try:
-        check("with no index file at all, open_index returns None",
-              M.open_index() is None)
+        con = M.connect()
+        check("with no index file, the handle STILL opens", con is not None)
+        check("but reports it has no index", not M.has_index(con))
+        con.close()
     finally:
         os.rename(moved, M.DB)
-    check("and it opens again once restored", M.open_index() is not None)
+
+    print()
+    print("10b. the pipeline: miss -> search -> learn -> hit, locally, next time")
+    con = M.connect()
+    check("before searching, ludodex knows nothing about it",
+          M.resolve(con, "steam", "424242") == {})
+    # ...this is where the old provider search runs. It comes back with three handles
+    # for one game, which get written back so the round trip is never repeated.
+    iid = M.learn(con, [("steam", "424242"), ("ss", "88888"), ("crc", "feedface")],
+                  name="Some Obscure Game", year=1998, provider="screenscraper")
+    r = M.resolve(con, "steam", "424242")
+    check("now the steam id resolves locally", r.get("ss") == ["88888"])
+    check("and so does the ROM hash, from the other direction",
+          M.resolve(con, "crc", "feedface").get("steam") == ["424242"])
+    check("the learned identity is in its own id range",
+          iid >= M.LEARNED_ID_BASE)
+    check("and it is marked learned, not exact or derived",
+          con.execute("SELECT kind FROM learned_key WHERE ns='ss' AND val='88888'"
+                      ).fetchone()["kind"] == "learned")
+
+    print()
+    print("10c. a learned handle BINDS to a mirror identity when one already exists")
+    # A live search that finds a Steam appid we already know must not mint a second
+    # identity for a game the index already has.
+    iid2 = M.learn(con, [("steam", "7670"), ("ss", "31337")], provider="screenscraper")
+    check("it bound to the existing BioShock identity, not a new one: %s" % iid2,
+          iid2 == 20)
+    check("and the new ss id now hangs off BioShock",
+          "31337" in (M.resolve(con, "gog", "1207658930").get("ss") or []))
+
+    print()
+    print("10d. REBUILDING THE INDEX MUST NOT DESTROY WHAT WAS LEARNED")
+    # The whole reason learned rows live in the main db. A rebuild regenerates the
+    # bulk index from the mirrors; anything obtained by a rate-limited search that no
+    # mirror contains would be gone forever if it lived in the rebuilt file.
+    con.close()
+    M.build(progress=False)
+    con = M.connect()
+    check("the learned game survived the rebuild",
+          M.resolve(con, "steam", "424242").get("ss") == ["88888"])
+    check("and so did the learned key on a mirror identity",
+          "31337" in (M.resolve(con, "igdb", "20").get("ss") or []))
+    con.close()
+
+    print()
+    print("10e. the user's override outranks the shipped supplement")
+    # The supplement is read-only and replaced wholesale on sync, so a correction
+    # cannot be written into it. If it did not outrank the file here, the next sync
+    # would silently revert the user.
+    con = M.connect()
+    check("the supplement's answer, before any correction",
+          M.resolve(con, "crc", "aabbccdd").get("igdb") == ["1074"])
+    M.override(con, "crc", "aabbccdd", identity_id=20, note="actually bioshock")
+    check("the override wins", M.resolve(con, "crc", "aabbccdd").get("igdb") == ["20"])
+    M.override(con, "crc", "11223344", note="not a game I own")
+    check("an unbind suppresses without naming a replacement",
+          M.resolve(con, "crc", "11223344") == {})
+    con.close()
+    M.build(progress=False)                      # a resync/rebuild must not undo it
+    con = M.connect()
+    check("and it survives the supplement being rebuilt",
+          M.resolve(con, "crc", "aabbccdd").get("igdb") == ["20"])
+    con.close()
+
+    print()
+    print("10f. running WITHOUT the supplement, then adding it, keeps your own answers")
+    # The user's scenario: work for a while with only the dynamic table, then drop the
+    # supplement in. What was learned stays authoritative; the supplement fills gaps.
+    moved = M.DB + ".away"
+    os.rename(M.DB, moved)
+    con = M.connect()
+    check("no supplement present", not M.has_index(con))
+    # Learn something the supplement will later DISAGREE with: this sha1 is Super Mario
+    # 64 in the shipped file, but this user has concluded otherwise.
+    M.learn(con, [("sha1", "sha1mario"), ("ss", "424243")], name="My Own Conclusion",
+            year=2001, provider="screenscraper")
+    check("it resolves from the dynamic table alone",
+          M.resolve(con, "sha1", "sha1mario").get("ss") == ["424243"])
+    con.close()
+    os.rename(moved, M.DB)                       # ...the user adds the supplement
+
+    con = M.connect()
+    check("the supplement is now present", M.has_index(con))
+    r = M.resolve(con, "sha1", "sha1mario")
+    check("the DYNAMIC answer still wins: %r" % r.get("_name"),
+          r.get("_name") == "My Own Conclusion")
+    check("and the supplement's conflicting game is NOT welded in",
+          "1074" not in (r.get("igdb") or []))
+    check("while a handle only the supplement knows still resolves",
+          M.resolve(con, "crc", "99887766").get("_name") == "Pulseman")
+    con.close()
 
     print()
     print("11. md5 is not indexed; crc and sha1 are")
