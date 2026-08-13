@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""One table, one query, any direction — and the ways that can go quietly wrong.
+
+  * A STORE ID IS EXACT, A NAME IS NOT. Both live in the same table, so `kind` is the
+    only thing keeping "IGDB publishes this pairing" apart from "we concluded it".
+  * A ScreenScraper game that does NOT match must get its OWN identity. The recurring
+    defect in this codebase is a lookup that misses and gets read as consent; here that
+    would silently weld two different games together and hand one the other's hashes.
+  * HARDWARE HAS TO AGREE. Two games can share a name across systems, and the ROM
+    hashes hanging off the wrong one would be worse than no match at all.
+  * IDENTITY ID RANGES MUST NOT COLLIDE. IGDB ids and SS-only ids share one column.
+"""
+import os
+import sys
+
+PASS = []
+
+
+def check(label, cond):
+    PASS.append((label, bool(cond)))
+    print("  %s   %s" % ("ok " if cond else "FAIL", label))
+    if not cond:
+        sys.exit("FAILED: " + label)
+
+
+def main():
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, here)
+    import test_support
+    test_support.isolate("ludodex-matchindex-")
+    import sqlite3
+    import matchindex as M
+
+    # ---- fake mirrors ------------------------------------------------------- #
+    ig = sqlite3.connect(M.IGDB_DB)
+    ig.executescript("""
+    CREATE TABLE games(id INTEGER PRIMARY KEY, name TEXT, slug TEXT, norm_key TEXT,
+      game_type INTEGER, year INTEGER, first_release_date INTEGER, platforms TEXT,
+      parent_game INTEGER, version_parent INTEGER, updated_at INTEGER, seen_at INTEGER);
+    CREATE TABLE alt_names(game_id INTEGER, name TEXT, norm_key TEXT);
+    CREATE TABLE platforms(id INTEGER PRIMARY KEY, name TEXT, abbreviation TEXT,
+      alternative_name TEXT, platform_type TEXT, platform_family TEXT, generation INT);
+    CREATE TABLE game_platforms(game_id INTEGER, platform_id INTEGER);
+    CREATE TABLE stores(id INTEGER PRIMARY KEY, name TEXT);
+    CREATE TABLE external_ids(game_id INTEGER, source_id INTEGER, uid TEXT, name TEXT);
+    """)
+    ig.execute("INSERT INTO games VALUES(20,'BioShock','bioshock','bioshock',0,2007,"
+               "1187654400,'6',NULL,NULL,0,0)")
+    ig.execute("INSERT INTO games VALUES(1074,'Super Mario 64','sm64','super mario 64',"
+               "0,1996,835488000,'4',NULL,NULL,0,0)")
+    # Same name, different hardware — the trap the platform check exists for.
+    ig.execute("INSERT INTO games VALUES(555,'Golden Axe','ga','golden axe',0,1989,"
+               "NULL,'29',NULL,NULL,0,0)")
+    ig.executemany("INSERT INTO alt_names VALUES(?,?,?)",
+                   [(1074, 'Mario 64', 'mario 64'), (1074, 'SM64', 'sm64')])
+    ig.executemany("INSERT INTO game_platforms VALUES(?,?)",
+                   [(20, 6), (1074, 4), (555, 29)])
+    ig.executemany("INSERT INTO stores VALUES(?,?)",
+                   [(1, 'Steam'), (5, 'GOG'), (26, 'Epic Games Store')])
+    ig.executemany("INSERT INTO external_ids VALUES(?,?,?,?)",
+                   [(20, 1, '7670', 'BioShock'), (20, 5, '1207658930', 'BioShock'),
+                    (20, 26, 'epic-bio', 'BioShock')])
+    ig.commit(); ig.close()
+
+    ss = sqlite3.connect(M.SS_DB)
+    ss.executescript("""
+    CREATE TABLE ss_games(id INTEGER PRIMARY KEY, systeme INTEGER, name TEXT,
+      norm_key TEXT, year INTEGER, developer TEXT, publisher TEXT, notgame INTEGER,
+      n_roms INTEGER, seen_at INTEGER);
+    CREATE TABLE ss_names(game_id INTEGER, region TEXT, name TEXT, norm_key TEXT);
+    CREATE TABLE ss_roms(game_id INTEGER, crc TEXT, md5 TEXT, sha1 TEXT,
+      filename TEXT, size INTEGER, region TEXT);
+    CREATE TABLE ss_systems(id INTEGER PRIMARY KEY, name TEXT, names TEXT,
+      company TEXT, type TEXT, igdb_platform INTEGER, mapped_by TEXT);
+    """)
+    ss.executemany("INSERT INTO ss_systems VALUES(?,?,?,?,?,?,?)",
+                   [(14, 'N64', '[]', 'Nintendo', 'console', 4, 'name'),
+                    (1, 'Genesis', '[]', 'Sega', 'console', 29, 'name'),
+                    (9, 'Arcade', '[]', '', 'arcade', 52, 'name')])
+    # matches igdb 1074 by name+year+platform
+    ss.execute("INSERT INTO ss_games VALUES(500,14,'Super Mario 64','super mario 64',"
+               "1996,'N','N',0,2,0)")
+    # same name as igdb 555 but on ARCADE, which igdb 555 is not on -> must NOT merge
+    ss.execute("INSERT INTO ss_games VALUES(600,9,'Golden Axe','golden axe',1989,"
+               "'S','S',0,1,0)")
+    # nothing like it in igdb at all -> its own identity
+    ss.execute("INSERT INTO ss_games VALUES(700,1,'Pulseman','pulseman',1994,"
+               "'G','S',0,1,0)")
+    ss.executemany("INSERT INTO ss_roms VALUES(?,?,?,?,?,?,?)",
+                   [(500, 'aabbccdd', 'md5mario', 'sha1mario', 'sm64.z64', 8, 'us'),
+                    (600, '11223344', 'md5axe', 'sha1axe', 'ga.zip', 4, 'us'),
+                    (700, '99887766', 'md5pulse', 'sha1pulse', 'pulse.md', 4, 'jp')])
+    ss.commit(); ss.close()
+
+    print("1. it builds, and every handle lands in one table")
+    st = M.build(progress=False)
+    check("3 igdb + 2 ss-only identities: %d" % st["identities"],
+          st["identities"] == 5)
+    check("ss games that matched were merged, not duplicated: %d merged"
+          % st["ss_merged"], st["ss_merged"] == 1)
+    check("ss games that did not match got their own: %d" % st["ss_own_identity"],
+          st["ss_own_identity"] == 2)
+
+    con = M.con_db()
+
+    print()
+    print("2. THE query — a GOG id in, every other handle out, one hop")
+    r = M.resolve(con, "gog", "1207658930")
+    check("found BioShock: %r" % r.get("_name"), r.get("_name") == "BioShock")
+    check("steam appid came back: %s" % r.get("steam"), r.get("steam") == ["7670"])
+    check("epic came back too", r.get("epic") == ["epic-bio"])
+    check("and the igdb id", r.get("igdb") == ["20"])
+
+    print()
+    print("3. a ROM hash resolves the same way, with no name matching at all")
+    r = M.resolve(con, "sha1", "sha1mario")
+    check("the hash found Super Mario 64: %r" % r.get("_name"),
+          r.get("_name") == "Super Mario 64")
+    check("and carries the screenscraper id", r.get("ss") == ["500"])
+    check("and the igdb id — the two catalogs joined", r.get("igdb") == ["1074"])
+
+    print()
+    print("4. exact and derived are distinguishable, because they are not equal")
+    kinds = {r["ns"]: r["kind"] for r in con.execute(
+        "SELECT ns,kind FROM identity_key WHERE identity_id=20")}
+    check("a store id is exact", kinds.get("steam") == "exact")
+    check("a name is derived", kinds.get("name") == "derived")
+
+    print()
+    print("5. same name, wrong hardware -> NOT merged")
+    # SS 600 is arcade Golden Axe; IGDB 555 is the Genesis one. A name-only merge would
+    # hang the arcade ROM hashes off the console game.
+    r = M.resolve(con, "ss", "600")
+    check("it did not take the igdb identity: %s" % r.get("igdb"),
+          not r.get("igdb"))
+    check("it got an id in the SS-only range",
+          r["_identity_id"] >= M.SS_ID_BASE)
+    r555 = M.resolve(con, "igdb", "555")
+    check("and the genesis game kept no arcade hash", not r555.get("crc"))
+
+    print()
+    print("6. a game only ScreenScraper knows still gets an identity")
+    r = M.resolve(con, "crc", "99887766")
+    check("Pulseman resolved: %r" % r.get("_name"), r.get("_name") == "Pulseman")
+    check("with its ss id", r.get("ss") == ["700"])
+
+    print()
+    print("7. a name off a filename resolves through the SAME gate as a provider")
+    hits = M.resolve_name(con, "Super Mario 64", 1996)
+    check("it matched", hits and hits[0]["name"] == "Super Mario 64")
+    check("an alias works too", M.resolve_name(con, "Mario 64", 1996))
+    check("a year that disagrees is refused, not merely ranked lower",
+          not M.resolve_name(con, "Super Mario 64", 2015))
+
+    print()
+    print("8. a miss returns nothing rather than a plausible neighbour")
+    check("unknown store id", M.resolve(con, "steam", "999999") == {})
+    check("unknown hash", M.resolve(con, "sha1", "deadbeef") == {})
+    check("unknown name", M.resolve_name(con, "Not A Real Game At All") == [])
+
+    print()
+    print("9. rebuilding is idempotent — the same input gives the same table")
+    before = con.execute("SELECT COUNT(*) FROM identity_key").fetchone()[0]
+    con.close()
+    M.build(progress=False)
+    con = M.con_db()
+    after = con.execute("SELECT COUNT(*) FROM identity_key").fetchone()[0]
+    check("no duplication on rebuild: %d -> %d" % (before, after), before == after)
+    con.close()
+
+    print()
+    print("%d checks, all passed" % len(PASS))
+
+
+if __name__ == "__main__":
+    main()

@@ -155,17 +155,25 @@ def _mark(job_id, ok, error="", fname="", size=0):
         con.close()
 
 
+# Rebuildable scraper artifacts. These are MIRRORS of external catalogs — every byte
+# can be re-fetched, they carry no user decision, and together they run to gigabytes
+# (166 MB of IGDB, ~1.5 GB of ScreenScraper when its walk finishes). 'ALL' means "every
+# database that holds something losing would cost you", which is not the same as every
+# file on disk. Name one explicitly in a job's contents to back it up anyway.
+DERIVED = {"igdb-catalog.sqlite", "ss-catalog.sqlite"}
+
+
 def db_files(contents):
     """Resolve a job's content selection to real files present in DATA. 'ALL' (stored as
-    the literal string) means every *.sqlite — including ones added by future features,
-    which is what you want from a backup."""
+    the literal string) means every *.sqlite that is not a rebuildable mirror — including
+    ones added by future features, which is what you want from a backup."""
     try:
         present = sorted(f for f in os.listdir(DATA)
                          if f.endswith(".sqlite") and os.path.isfile(os.path.join(DATA, f)))
     except OSError:
         return []
     if contents == "ALL" or not contents:
-        return present
+        return [f for f in present if f not in DERIVED]
     want = {c.strip() for c in contents.split(",") if c.strip()}
     return [f for f in present if f in want]
 
