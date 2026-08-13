@@ -223,7 +223,7 @@ function hueOf(s: string): number {
 const BURST_COLORS = ['#ff6b6b', '#ffd166', '#06d6a0', '#118ab2', '#ef476f']
 
 function ParticleTabs({ tabs, active, onSelect, className, fill }: {
-  tabs: { id: string; label: string }[]
+  tabs: { id: string; label: string; hint?: string }[]
   active: string
   onSelect: (id: string) => void
   className?: string
@@ -283,6 +283,7 @@ function ParticleTabs({ tabs, active, onSelect, className, fill }: {
         <button key={t.id} data-t
           ref={(el) => { btnRefs.current[t.id] = el }}
           className={'pt-tab' + (t.id === active ? ' active' : '')}
+          title={t.hint}
           onClick={(e) => pick(t.id, e.currentTarget)}>{t.label}</button>
       ))}
     </nav>
@@ -932,8 +933,28 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       <ParticleTabs className="main-tabs" fill active={tab}
         onSelect={(id) => setTab(id as 'library' | 'dashboard' | 'files' | 'publish')}
-        tabs={[{ id: 'dashboard', label: 'Dashboard' }, { id: 'library', label: 'Library' },
-               { id: 'files', label: 'Files' }, { id: 'publish', label: 'Publish' }]} />
+        tabs={[
+          { id: 'dashboard', label: 'Dashboard',
+            hint: 'An overview of the whole collection — how many games you own, where '
+                + 'they came from, what was added recently, and what still needs '
+                + 'attention. Start here, then jump into anything it surfaces.' },
+          { id: 'library', label: 'Library',
+            hint: 'Every game you own, one entry per game and platform, with its art, '
+                + 'metadata and every source it can be played from. Search, filter and '
+                + 'sort it, open any game to see or correct what ludodex matched, and '
+                + 'select games to add to a device.' },
+          { id: 'files', label: 'Files',
+            hint: 'The files behind the library. Browse your ROM archives and drives, '
+                + 'see what is indexed and what is not, and move, copy, rename or '
+                + 'convert files in place — a two-pane file manager that knows which '
+                + 'game each file belongs to.' },
+          { id: 'publish', label: 'Publish',
+            hint: 'Send a curated selection to a device — a handheld, a cabinet, an SD '
+                + 'card. Choose what belongs there, and ludodex works out what is '
+                + 'missing, converts anything that device cannot read, and copies the '
+                + 'right artwork and metadata alongside. Always shows you the plan '
+                + 'before it writes anything.' },
+        ]} />
 
       {tab === 'publish' && <PublishPanel onBrowse={() => setTab('library')} />}
 
