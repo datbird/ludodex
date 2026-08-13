@@ -74,10 +74,38 @@ def con_db():
       game_id INTEGER, name TEXT, norm_key TEXT,
       PRIMARY KEY(game_id, name));
     CREATE INDEX IF NOT EXISTS ix_alt_norm ON alt_names(norm_key);
+    -- IGDB models an OS AS a platform, so "is this a system or an OS" is not a
+    -- field on the game — it is platform_type on the platform. Linux and
+    -- "PC (Microsoft Windows)" are Operating_system; Nintendo 64 is Console. Storing
+    -- the type, family and generation is what lets a pool be sliced by any of them.
     CREATE TABLE IF NOT EXISTS platforms(
-      id INTEGER PRIMARY KEY, name TEXT, abbreviation TEXT);
+      id INTEGER PRIMARY KEY, name TEXT, abbreviation TEXT, alternative_name TEXT,
+      platform_type TEXT, platform_family TEXT, generation INTEGER);
+    -- The csv on games is fine for display and useless for joining. This is the
+    -- indexed form, and it is what makes "every Switch game" a query instead of a scan.
+    CREATE TABLE IF NOT EXISTS game_platforms(
+      game_id INTEGER, platform_id INTEGER, PRIMARY KEY(game_id, platform_id));
+    CREATE INDEX IF NOT EXISTS ix_gp_plat ON game_platforms(platform_id);
+    -- Store identities, straight from IGDB's own join table. These are EXACT ids,
+    -- not matches: a Steam appid needs no acceptance gate and cannot be wrong.
+    -- Every source is kept, including stores ludodex has no importer for, because
+    -- the row costs nothing now and re-pulling it later costs 1,352 requests.
+    CREATE TABLE IF NOT EXISTS stores(id INTEGER PRIMARY KEY, name TEXT);
+    CREATE TABLE IF NOT EXISTS external_ids(
+      game_id INTEGER, source_id INTEGER, uid TEXT, name TEXT,
+      PRIMARY KEY(game_id, source_id, uid));
+    CREATE INDEX IF NOT EXISTS ix_ext_uid  ON external_ids(source_id, uid);
+    CREATE INDEX IF NOT EXISTS ix_ext_game ON external_ids(game_id);
     CREATE TABLE IF NOT EXISTS state(k TEXT PRIMARY KEY, v TEXT);
     """)
+    # A table created by an earlier version keeps its old shape: CREATE TABLE IF NOT
+    # EXISTS is a no-op, not a migration. Heal the columns added since, the same way
+    # the media index does.
+    _have = {r[1] for r in con.execute("PRAGMA table_info(platforms)")}
+    for _c, _d in (("alternative_name", "TEXT"), ("platform_type", "TEXT"),
+                   ("platform_family", "TEXT"), ("generation", "INTEGER")):
+        if _c not in _have:
+            con.execute("ALTER TABLE platforms ADD COLUMN %s %s" % (_c, _d))
     con.commit()
     return con
 
@@ -123,6 +151,10 @@ def _upsert(con, rows, now):
              ",".join(str(p) for p in (g.get("platforms") or [])),
              g.get("parent_game"), g.get("version_parent"),
              g.get("updated_at"), now))
+        con.execute("DELETE FROM game_platforms WHERE game_id=?", (gid,))
+        for p in (g.get("platforms") or []):
+            con.execute("INSERT OR IGNORE INTO game_platforms(game_id,platform_id) "
+                        "VALUES(?,?)", (gid, p))
         alts = [a.get("name") for a in (g.get("alternative_names") or [])
                 if a.get("name")]
         con.execute("DELETE FROM alt_names WHERE game_id=?", (gid,))
@@ -131,24 +163,179 @@ def _upsert(con, rows, now):
                         "VALUES(?,?,?)", (gid, a, norm(a)))
 
 
-def sync_platforms(con, cid, tok):
-    """The platform table is ~250 rows and changes about never, so it is fetched
-    whenever it is empty and otherwise left alone."""
-    if con.execute("SELECT COUNT(*) FROM platforms").fetchone()[0]:
+def sync_platforms(con, cid, tok, force=False):
+    """~250 rows that change about never — fetched when empty, when a new column has
+    not been filled yet, or on demand."""
+    have = con.execute("SELECT COUNT(*) FROM platforms").fetchone()[0]
+    typed = con.execute("SELECT COUNT(*) FROM platforms "
+                        "WHERE platform_type IS NOT NULL").fetchone()[0]
+    if have and typed and not force:
         return 0
     n, last = 0, 0
     while True:
-        rows = igdb.query("platforms", "fields id,name,abbreviation; "
+        rows = igdb.query("platforms", "fields id,name,abbreviation,alternative_name,"
+                          "generation,platform_type.name,platform_family.name; "
                           "where id > %d; sort id asc; limit 500;" % last, cid, tok)
         if not rows:
             break
         for p in rows:
-            con.execute("INSERT OR REPLACE INTO platforms(id,name,abbreviation) "
-                        "VALUES(?,?,?)", (p["id"], p.get("name"),
-                                          p.get("abbreviation")))
+            con.execute(
+                "INSERT OR REPLACE INTO platforms(id,name,abbreviation,"
+                "alternative_name,platform_type,platform_family,generation) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (p["id"], p.get("name"), p.get("abbreviation"),
+                 p.get("alternative_name"),
+                 (p.get("platform_type") or {}).get("name"),
+                 (p.get("platform_family") or {}).get("name"),
+                 p.get("generation")))
         last, n = rows[-1]["id"], n + len(rows)
     con.commit()
     return n
+
+
+def backfill_game_platforms(con):
+    """Derive the indexed join table from the csv already on `games`. Local only —
+    the data was fetched once and re-fetching it to reshape it would be silly."""
+    n = 0
+    for gid, pl in con.execute("SELECT id, platforms FROM games WHERE platforms!=''"):
+        for x in (pl or "").split(","):
+            if x.strip().isdigit():
+                con.execute("INSERT OR IGNORE INTO game_platforms(game_id,platform_id) "
+                            "VALUES(?,?)", (gid, int(x)))
+                n += 1
+    con.commit()
+    return n
+
+
+def sweep_external(max_requests=None, pace=TARGET_PACE, progress=True):
+    """Pull IGDB's game<->store join table — ~676k rows across every store it knows,
+    including ones ludodex has no importer for.
+
+    This is the cheapest identity in the whole system: a store id is EXACT. It needs
+    no name search, no acceptance gate, and cannot be a wrong bind — which is why
+    2,070 of the library's 2,210 identities already come from one, resolved 200 at a
+    time. Pulled whole, every game the user will ever buy on these stores is matched
+    before they own it.
+
+    One caveat this table makes visible: a store id identifies an EDITION, and one
+    ludodex norm_key can span several. 'bioshock' owns appid 7670 (IGDB 20, 2007) and
+    409710 (IGDB 34293, Remastered). Both are correct; they are answers to different
+    questions. Resolve from a SOURCE ROW, never from a norm_key."""
+    con = con_db()
+    left = _Pacer.cooling(con)
+    if left:
+        print("igdb_mirror: cooling down for another %dm%02ds (a previous run was "
+              "throttled hard)" % (left // 60, left % 60), file=sys.stderr)
+        return {"skipped": "cooldown", "seconds_left": left}
+
+    cid, csec, tok = _auth()
+
+    def _reauth(_cid):
+        t, _ = igdb.get_token(cid, csec)
+        return t
+
+    pacer = _Pacer(con, pace)
+    for s in igdb.query("external_game_sources", "fields id,name; limit 100;",
+                        cid, tok, reauth=_reauth):
+        con.execute("INSERT OR REPLACE INTO stores(id,name) VALUES(?,?)",
+                    (s["id"], s.get("name")))
+    con.commit()
+
+    cursor = int(get(con, "ext_cursor", 0) or 0)
+    reqs = rows_seen = 0
+    t0 = time.time()
+    try:
+        while max_requests is None or reqs < max_requests:
+            rows = igdb.query(
+                "external_games",
+                "fields id,game,uid,external_game_source,name; where id > %d; "
+                "sort id asc; limit %d;" % (cursor, PAGE), cid, tok, reauth=_reauth)
+            reqs += 1
+            if not rows:
+                put(con, "ext_cursor", 0)
+                put(con, "ext_done", int(time.time()))
+                con.commit()
+                break
+            for r in rows:
+                if not (r.get("game") and r.get("uid")):
+                    continue
+                con.execute(
+                    "INSERT OR IGNORE INTO external_ids(game_id,source_id,uid,name) "
+                    "VALUES(?,?,?,?)",
+                    (r["game"], r.get("external_game_source"), str(r["uid"]),
+                     r.get("name")))
+            cursor = rows[-1]["id"]
+            rows_seen += len(rows)
+            put(con, "ext_cursor", cursor)
+            con.commit()
+            if progress and reqs % 40 == 0:
+                print("igdb_mirror: %d external ids, %d requests, cursor %d"
+                      % (rows_seen, reqs, cursor), file=sys.stderr)
+            if not pacer.page():
+                break
+    finally:
+        con.commit()
+    pacer.done()
+    total = con.execute("SELECT COUNT(*) FROM external_ids").fetchone()[0]
+    con.close()
+    return {"rows_seen": rows_seen, "requests": reqs, "cursor": cursor,
+            "elapsed": round(time.time() - t0, 1), "total_external_ids": total}
+
+
+class _Pacer:
+    """The throttle discipline both sweeps run under, in one place.
+
+    Two sweeps hammering the same rate limit with two copies of this logic is how
+    one of them quietly ends up without the cooldown — so the games sweep and the
+    external-ids sweep share it. State lives in the db, not the object: the pace
+    that was actually working survives the process that discovered it."""
+
+    def __init__(self, con, pace=TARGET_PACE):
+        self.con = con
+        # Adaptive: start at the requested pace, and if this account is being
+        # throttled anyway, slow the SUSTAINED rate rather than just backing off one
+        # request. Persisted, so the next run starts where this one ended up.
+        self.pace = max(float(get(con, "pace", pace) or pace), TARGET_PACE)
+        self.strikes = 0
+        igdb.set_pace(self.pace)
+        igdb._throttled[0] = 0
+
+    @staticmethod
+    def cooling(con):
+        """Seconds left on a cooldown a previous run earned; 0 when clear."""
+        return max(0, int(float(get(con, "cooldown_until", 0) or 0) - time.time()))
+
+    def page(self):
+        """Call after each page. -> False when the run should stop and cool down.
+
+        STRIKES ARE PER PAGE, and the counter has to be drained each page or it can
+        never accumulate: reading and clearing in the same breath is what makes "six
+        CONSECUTIVE throttled pages" mean that, rather than "six in one page", which
+        is a thing a single page cannot do."""
+        hits, igdb._throttled[0] = igdb._throttled[0], 0
+        if hits:
+            self.strikes += 1
+            self.pace = min(MAX_PACE, self.pace * 1.5)
+            igdb.set_pace(self.pace)
+            put(self.con, "pace", self.pace)
+        else:
+            self.strikes = 0                 # a clean page ends the streak
+        if self.strikes >= COOLDOWN_AFTER:
+            put(self.con, "cooldown_until", time.time() + COOLDOWN_SECS)
+            put(self.con, "pace", min(MAX_PACE, self.pace * 2))
+            self.con.commit()
+            print("igdb_mirror: throttled on %d pages in a row — stopping and cooling "
+                  "down for %d minutes. The cursor is saved; just run it again after."
+                  % (self.strikes, COOLDOWN_SECS // 60), file=sys.stderr)
+            return False
+        return True
+
+    def done(self):
+        """A clean run earns its pace back, slowly. Never below the documented
+        ceiling."""
+        if not self.strikes:
+            put(self.con, "pace", max(TARGET_PACE, self.pace * 0.9))
+        self.con.commit()
 
 
 def sweep(full=False, max_requests=None, pace=TARGET_PACE, progress=True):
@@ -158,9 +345,8 @@ def sweep(full=False, max_requests=None, pace=TARGET_PACE, progress=True):
     rate-limited records a cooldown and stops cleanly, because the cursor is durable
     and stopping early costs nothing but time."""
     con = con_db()
-    cool = float(get(con, "cooldown_until", 0) or 0)
-    if time.time() < cool:
-        left = int(cool - time.time())
+    left = _Pacer.cooling(con)
+    if left:
         print("igdb_mirror: cooling down for another %dm%02ds (a previous run was "
               "throttled hard)" % (left // 60, left % 60), file=sys.stderr)
         return {"skipped": "cooldown", "seconds_left": left}
@@ -171,13 +357,7 @@ def sweep(full=False, max_requests=None, pace=TARGET_PACE, progress=True):
         t, _ = igdb.get_token(cid, _csec)
         return t
 
-    # Adaptive: start at the requested pace, and if this account is being throttled
-    # anyway, slow the SUSTAINED rate rather than just backing off one request.
-    # Persisted, so the next run starts at the pace that was actually working.
-    pace = max(float(get(con, "pace", pace) or pace), TARGET_PACE)
-    igdb.set_pace(pace)
-    igdb._throttled[0] = 0
-
+    pacer = _Pacer(con, pace)
     started = int(time.time())
     if full:
         put(con, "cursor", 0)
@@ -192,7 +372,7 @@ def sweep(full=False, max_requests=None, pace=TARGET_PACE, progress=True):
         w = "id > %d" % cur
         return w + (" & updated_at >= %d" % since if since else "")
 
-    reqs = seen = strikes = 0
+    reqs = seen = 0
     t0 = time.time()
     try:
         while max_requests is None or reqs < max_requests:
@@ -217,35 +397,12 @@ def sweep(full=False, max_requests=None, pace=TARGET_PACE, progress=True):
                 rate = seen / max(0.001, time.time() - t0)
                 print("igdb_mirror: %d rows, %d requests, %.0f rows/s, cursor %d"
                       % (seen, reqs, rate, cursor), file=sys.stderr)
-            # STRIKES ARE PER PAGE, and the counter has to be drained each page or it
-            # can never accumulate: reading and clearing in the same breath is what
-            # makes "six CONSECUTIVE throttled pages" mean that, rather than "six in
-            # one page", which is a thing a single page cannot do.
-            hits, igdb._throttled[0] = igdb._throttled[0], 0
-            if hits:
-                strikes += 1
-                pace = min(MAX_PACE, pace * 1.5)
-                igdb.set_pace(pace)
-                put(con, "pace", pace)
-            else:
-                strikes = 0                  # a clean page ends the streak
-            if strikes >= COOLDOWN_AFTER:
-                put(con, "cooldown_until", time.time() + COOLDOWN_SECS)
-                put(con, "pace", min(MAX_PACE, pace * 2))
-                con.commit()
-                print("igdb_mirror: throttled on %d pages in a row — stopping and "
-                      "cooling down for %d minutes. Cursor %d is saved; just run it "
-                      "again after." % (strikes, COOLDOWN_SECS // 60, cursor),
-                      file=sys.stderr)
+            if not pacer.page():
                 break
     finally:
         con.commit()
 
-    # A clean run earns its pace back, slowly. Nothing here ever goes below the
-    # documented ceiling.
-    if not strikes:
-        put(con, "pace", max(TARGET_PACE, pace * 0.9))
-    con.commit()
+    pacer.done()
     total = con.execute("SELECT COUNT(*) FROM games").fetchone()[0]
     con.close()
     return {"rows_seen": seen, "requests": reqs, "cursor": cursor,
@@ -258,7 +415,11 @@ def status():
     g = con.execute("SELECT COUNT(*) n, MAX(updated_at) u FROM games").fetchone()
     a = con.execute("SELECT COUNT(*) FROM alt_names").fetchone()[0]
     p = con.execute("SELECT COUNT(*) FROM platforms").fetchone()[0]
+    ext = con.execute("SELECT COUNT(*) FROM external_ids").fetchone()[0]
+    gp = con.execute("SELECT COUNT(*) FROM game_platforms").fetchone()[0]
     out = {"games": g["n"], "alt_names": a, "platforms": p,
+           "external_ids": ext, "game_platforms": gp,
+           "ext_cursor": int(get(con, "ext_cursor", 0) or 0),
            "newest_updated_at": g["u"],
            "cursor": int(get(con, "cursor", 0) or 0),
            "watermark": int(get(con, "watermark", 0) or 0),
@@ -279,6 +440,16 @@ def main(argv):
     pace = TARGET_PACE
     if "--rps" in argv:
         pace = max(TARGET_PACE, 1.0 / max(0.1, float(argv[argv.index("--rps") + 1])))
+    if "--external" in argv:
+        res = sweep_external(max_requests=mx)
+        print("igdb_mirror: " + json.dumps(res), file=sys.stderr)
+        return 0
+    if "--backfill-platforms" in argv:
+        con = con_db()
+        print("igdb_mirror: %d game-platform rows" % backfill_game_platforms(con),
+              file=sys.stderr)
+        con.close()
+        return 0
     res = sweep(full="--full" in argv, max_requests=mx, pace=pace)
     print("igdb_mirror: " + json.dumps(res), file=sys.stderr)
     return 0

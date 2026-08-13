@@ -46,12 +46,29 @@ def main():
                       "alternative_names": [{"name": "Alias %d" % i}]}
     state = {"throttle_after": None, "calls": 0}
 
+    # The store join table: 700 rows, and row 3 is deliberately malformed (no game),
+    # because IGDB really does return those and a sweep that trips over one is a
+    # sweep that stops 600k rows early.
+    EXT = [{"id": i, "game": (i % 300) + 1, "uid": "app%d" % i,
+            "external_game_source": 1 + (i % 3), "name": "Store Row %d" % i}
+           for i in range(1, 701)]
+    EXT[2] = {"id": 3, "uid": "orphan", "external_game_source": 1}
+
     def fake_query(endpoint, body, cid, tok, retries=4, reauth=None):
         state["calls"] += 1
         if endpoint == "platforms":
             return [] if "id > 0" not in body else [
-                {"id": 6, "name": "PC (Microsoft Windows)", "abbreviation": "PC"}]
+                {"id": 6, "name": "PC (Microsoft Windows)", "abbreviation": "PC",
+                 "platform_type": {"name": "Operating_system"}}]
+        if endpoint == "external_game_sources":
+            return [{"id": 1, "name": "Steam"}, {"id": 2, "name": "GOG"},
+                    {"id": 3, "name": "Epic"}]
         import re
+        if endpoint == "external_games":
+            cur = int(re.search(r"id > (\d+)", body).group(1))
+            if state["throttle_after"] and state["calls"] > state["throttle_after"]:
+                igdb._throttled[0] += 1
+            return [r for r in EXT if r["id"] > cur][:M.PAGE]
         cur = int(re.search(r"id > (\d+)", body).group(1))
         since = re.search(r"updated_at >= (\d+)", body)
         since = int(since.group(1)) if since else 0
@@ -147,6 +164,79 @@ def main():
     M.sweep(pace=0.0001, progress=False)      # ask for absurdly fast
     check("the sweep clamped the pace to the ceiling (%.3fs)" % igdb._pace[0],
           igdb._pace[0] >= M.TARGET_PACE)
+
+    print()
+    print("9. the store-id sweep resumes on its OWN cursor, not the games cursor")
+    # Two sweeps sharing one cursor key is a bug that looks like success: each run
+    # appears to work while silently restarting or skipping the other's progress.
+    con = M.con_db()
+    M.put(con, "cursor", 12345)
+    con.commit(); con.close()
+    e1 = M.sweep_external(max_requests=1, progress=False)
+    check("one page of store ids", e1["rows_seen"] == M.PAGE)
+    check("its own cursor advanced", M.status()["ext_cursor"] == 500)
+    check("the games cursor was untouched", M.status()["cursor"] == 12345)
+    e2 = M.sweep_external(progress=False)
+    check("the rest arrived", e2["rows_seen"] == 200)
+    st = M.status()
+    check("ext cursor reset once exhausted", st["ext_cursor"] == 0)
+    # 700 rows minus the one with no game. A row IGDB gives us half-filled is skipped,
+    # not stored with a null game_id that would later join to nothing.
+    check("the malformed row was skipped, not stored: %d" % st["external_ids"],
+          st["external_ids"] == 699)
+    con = M.con_db()
+    nm = con.execute("SELECT name FROM stores WHERE id=1").fetchone()["name"]
+    # The production lookup, exactly: a store id in hand -> which IGDB game is it.
+    hit = con.execute("SELECT game_id FROM external_ids WHERE source_id=1 AND uid=?",
+                      ("app300",)).fetchone()
+    con.close()
+    check("store names came with them", nm == "Steam")
+    check("a store id resolves to its game: %r" % (hit and hit[0]),
+          hit and hit["game_id"] == 1)
+
+    print()
+    print("10. the store sweep obeys the SAME cooldown the games sweep sets")
+    # Both sweeps hit one rate limit. A cooldown earned by one that the other ignores
+    # is not a cooldown.
+    con = M.con_db()
+    M.put(con, "cooldown_until", time.time() + 600)
+    con.commit(); con.close()
+    before_calls = state["calls"]
+    r = M.sweep_external(progress=False)
+    check("it declined", r.get("skipped") == "cooldown")
+    check("and made no requests", state["calls"] == before_calls)
+
+    print()
+    print("11. platform type/family/generation survive an OLD db missing the columns")
+    # CREATE TABLE IF NOT EXISTS is a no-op, not a migration: a mirror built by an
+    # earlier version has a 3-column platforms table and must not crash on open.
+    con = M.con_db()
+    M.put(con, "cooldown_until", 0)
+    con.execute("DROP TABLE platforms")
+    con.execute("CREATE TABLE platforms(id INTEGER PRIMARY KEY, name TEXT, "
+                "abbreviation TEXT)")
+    con.commit(); con.close()
+    con = M.con_db()                       # the heal happens here
+    cols = {r[1] for r in con.execute("PRAGMA table_info(platforms)")}
+    con.close()
+    check("the new columns were added to the existing table",
+          {"platform_type", "platform_family", "generation",
+           "alternative_name"} <= cols)
+    # ...and an empty/untyped platform table is re-fetched rather than left blank.
+    M.sweep(progress=False)
+    con = M.con_db()
+    pt = con.execute("SELECT platform_type FROM platforms WHERE id=6").fetchone()
+    con.close()
+    check("and the type was populated: %r" % (pt and pt[0]),
+          pt and pt[0] == "Operating_system")
+
+    print()
+    print("12. the platform join table is queryable, not just a csv")
+    con = M.con_db()
+    n = con.execute("SELECT COUNT(*) FROM game_platforms WHERE platform_id=6"
+                    ).fetchone()[0]
+    con.close()
+    check("every game joined to its platform: %d" % n, n == 1200)
 
     print()
     print("%d checks, all passed" % len(PASS))
