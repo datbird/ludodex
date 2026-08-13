@@ -915,8 +915,18 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
                 kind, val = rest.split(":", 1)
                 return ("EXISTS(SELECT 1 FROM game_attributes ga WHERE "
                         "ga.game_id=g.id AND ga.kind=? AND ga.value=?)", [kind, val])
+        if tok.startswith("wanted_entry:"):
+            # PER-PLATFORM intent: matches the exact entries marked, so a device that
+            # wants the Saturn Rayman does not also show the PS1 one.
+            import publish
+            v = tok[len("wanted_entry:"):]
+            keys = publish.intent_keys(v) if v.isdigit() else []
+            if not keys:
+                return "0", []
+            return "g.entry_key IN (%s)" % ",".join("?" * len(keys)), list(keys)
         if tok.startswith("wanted:"):
-            # device wishlist lives in connections.sqlite; resolve its norm_keys here
+            # TITLE-level intent, kept for callers that only know a norm_key. Broader
+            # than wanted_entry by design: it matches every platform of a marked title.
             keys = devices.wants_keys(tok[7:]) if tok[7:].isdigit() else []
             if not keys:
                 return "0", []
@@ -2306,7 +2316,7 @@ def device_wants_list(dev_id: int):
     """Games on a device's wishlist, as full catalog rows (title, cover, tags…)."""
     con = lib()
     try:
-        res = _query_games(con, include=["wanted:%d" % dev_id], limit=1000)
+        res = _query_games(con, include=["wanted_entry:%d" % dev_id], limit=1000)
     finally:
         con.close()
     return {"wants": res["items"], "total": res["total"]}
@@ -2338,6 +2348,66 @@ def device_wants_add(dev_id: int, body: dict = Body(...)):
 def device_wants_remove(dev_id: int, norm_key: str):
     devices.wants_remove(dev_id, norm_key)
     return {"ok": True}
+
+
+# --- Publish intent (per game+platform) — see docs/superpowers/specs/…publish-design #
+@app.get("/api/devices/{dev_id}/publish")
+def publish_intent_list(dev_id: int, state: str = "include"):
+    """What is marked for this device, per ENTRY — the answer 'wants' cannot give."""
+    import publish
+    return {"entries": publish.intent_list(dev_id, state=state), "state": state}
+
+
+@app.post("/api/devices/{dev_id}/publish")
+def publish_intent_add(dev_id: int, body: dict = Body(...)):
+    """Mark entries for a device. `entry_keys` is the unit; `norm_keys` is accepted as
+    a convenience and expands to every platform of each title."""
+    import publish
+    if not devices._device(dev_id):
+        raise HTTPException(404, "no such device")
+    b = body or {}
+    state = b.get("state") or publish.INCLUDE
+    if state not in publish.STATES:
+        raise HTTPException(400, "state must be one of %r" % (publish.STATES,))
+    keys = list(b.get("entry_keys") or [])
+    for nk in (b.get("norm_keys") or []):
+        keys += [e["entry_key"] for e in publish.entries_for(nk)]
+    if not keys:
+        return {"written": 0}
+    return {"written": publish.intent_set(dev_id, keys, state=state,
+                                          note=b.get("note"))}
+
+
+@app.delete("/api/devices/{dev_id}/publish")
+def publish_intent_remove(dev_id: int, body: dict = Body(...)):
+    """Forget an opinion — distinct from recording an exclude."""
+    import publish
+    b = body or {}
+    keys = list(b.get("entry_keys") or [])
+    for nk in (b.get("norm_keys") or []):
+        keys += [e["entry_key"] for e in publish.entries_for(nk)]
+    return {"cleared": publish.intent_clear(dev_id, keys)}
+
+
+@app.get("/api/games/{norm_key:path}/publish")
+def publish_intent_for_title(norm_key: str):
+    """Which devices want which PLATFORMS of this game. 'on 2 devices' is a worse
+    answer than 'PS1 on the Deck, Saturn on the cabinet'."""
+    import publish
+    return {"by_device": publish.intent_for_title(norm_key),
+            "entries": publish.entries_for(norm_key)}
+
+
+@app.get("/api/publish/status")
+def publish_status():
+    import publish
+    return publish.status()
+
+
+@app.post("/api/publish/migrate")
+def publish_migrate(body: dict = Body(default=None)):
+    import publish
+    return publish.migrate(dry_run=bool((body or {}).get("dry_run")))
 
 
 # --- Collections / compilations (DESIGN §13) -------------------------------- #

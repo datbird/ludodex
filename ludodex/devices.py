@@ -249,6 +249,11 @@ def device_rm(dev_id):
     con.execute("DELETE FROM device_wants WHERE device_id=?", (dev_id,))
     con.commit()
     con.close()
+    # publish_intent is owned by publish.py, which creates it on demand — going through
+    # the module rather than raw SQL means removing a device works on an install where
+    # nothing has touched Publish yet.
+    import publish
+    publish.intent_clear_device(dev_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -434,54 +439,53 @@ def all_managed_paths():
     return out
 
 
+# These four are the TITLE-shaped view of intent, kept because the existing API and UI
+# speak norm_key. They now read and write publish_intent, which is keyed per (game,
+# platform): adding a title marks every platform of it, and a title counts as wanted
+# when ANY of its entries is. That is lossy in one direction on purpose — a caller that
+# needs "which platforms" must ask publish.intent_for_title(), and the Publish tab does.
 def wants_add(device_id, norm_keys):
-    """Add games to a device's wishlist. Returns how many new rows landed."""
-    con = _con()
-    now = time.time()
-    before = con.total_changes
-    con.executemany(
-        "INSERT OR IGNORE INTO device_wants(device_id, norm_key, added) VALUES(?,?,?)",
-        [(int(device_id), k, now) for k in norm_keys])
-    added = con.total_changes - before
-    con.commit()
-    con.close()
-    return added
+    """Mark every entry of these titles for a device. Returns rows written."""
+    import publish
+    n = 0
+    for k in (norm_keys or []):
+        ents = [e["entry_key"] for e in publish.entries_for(k)]
+        if ents:
+            n += publish.intent_set(device_id, ents, source="manual")
+    return n
 
 
 def wants_remove(device_id, norm_key):
-    con = _con()
-    con.execute("DELETE FROM device_wants WHERE device_id=? AND norm_key=?",
-                (int(device_id), norm_key))
-    con.commit()
-    con.close()
+    """Forget every entry of this title on this device."""
+    import publish
+    ents = [e["entry_key"] for e in publish.entries_for(norm_key)]
+    if ents:
+        publish.intent_clear(device_id, ents)
 
 
 def wants_keys(device_id):
-    """norm_keys wanted on a device, newest first."""
-    con = _con()
-    keys = [r["norm_key"] for r in con.execute(
-        "SELECT norm_key FROM device_wants WHERE device_id=? ORDER BY added DESC",
-        (int(device_id),))]
-    con.close()
-    return keys
-
-
-def wants_counts():
-    """device_id -> number of wanted games (for badges)."""
-    con = _con()
-    out = {r["device_id"]: r["n"] for r in con.execute(
-        "SELECT device_id, COUNT(*) AS n FROM device_wants GROUP BY device_id")}
-    con.close()
+    """norm_keys wanted on a device, newest first — distinct titles, not entries."""
+    import publish
+    rows = publish.intent_list(device_id)
+    seen, out = set(), []
+    for r in rows:
+        nk = r.get("norm_key")
+        if nk and nk not in seen:
+            seen.add(nk)
+            out.append(nk)
     return out
 
 
+def wants_counts():
+    """device_id -> number of wanted ENTRIES (for badges)."""
+    import publish
+    return publish.intent_counts()
+
+
 def wants_for_key(norm_key):
-    """device ids that want this game (to show on the game itself)."""
-    con = _con()
-    ids = [r["device_id"] for r in con.execute(
-        "SELECT device_id FROM device_wants WHERE norm_key=?", (norm_key,))]
-    con.close()
-    return ids
+    """device ids that want any entry of this game."""
+    import publish
+    return sorted(publish.intent_for_title(norm_key).keys())
 
 
 IMPORT_MODES = ("algo", "lite", "heavy")
