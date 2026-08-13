@@ -39,13 +39,29 @@ ENV PYTHONUNBUFFERED=1 \
 #                                      video candidate is dropped before the model sees
 #                                      it — media_video degrades explicitly rather than
 #                                      scoring a trailer blind.
+# mame-tools ships chdman and dolphin-emu ships dolphin-tool: the two converters the
+# publish planner needs. Without them every disc-based and GameCube/Wii item plans as
+# BLOCKED — correctly, but nothing can actually be published for those systems.
+#
+# The cost is lopsided and worth knowing: chdman is ~26 MB, dolphin-tool ~528 MB,
+# because Debian's dolphin-emu drags 229 packages in even with --no-install-recommends.
+# chdman is the one that matters most (PS1/PS2/Saturn/SegaCD all convert to CHD); if the
+# image size ever becomes the problem, dolphin-emu is the line to cut, and RVZ
+# conversion falls back to running on the target where RetroDECK already bundles it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client rsync sshpass \
         p7zip-full zip unzip \
         cifs-utils nfs-common smbclient \
         ca-certificates bash findutils tzdata \
         ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+        mame-tools dolphin-emu \
+    && rm -rf /var/lib/apt/lists/* \
+    # Debian installs dolphin-tool into /usr/games, which is not on PATH — so
+    # shutil.which() would report it missing and the planner would block every RVZ
+    # item on a machine that has the tool sitting right there. Link it where the rest
+    # of the toolchain lives rather than editing PATH, so a shell and a subprocess
+    # agree about what exists.
+    && ln -sf /usr/games/dolphin-tool /usr/local/bin/dolphin-tool
 
 WORKDIR /app
 
