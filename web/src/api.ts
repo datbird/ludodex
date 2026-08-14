@@ -452,6 +452,16 @@ export interface PublishPlan {
   blockers: string[]
   free_bytes?: number; over_capacity?: boolean
 }
+/** ScreenScraper grants limits PER ACCOUNT; ludodex reads them rather than assuming. */
+export interface SsTier {
+  configured: boolean
+  error?: string
+  granted?: { threads: number; per_day: number; per_min: number }
+  using?: { threads: number; reserve: number; min_block_seconds: number }
+  used_today?: number | null
+  level?: string
+}
+
 export interface PublishJob {
   running: boolean; device_id: number; done: number; total: number
   current: string | null; error: string
@@ -1241,6 +1251,7 @@ export const api = {
       stores: { name: string; remote: number; local_before: number; written: number }[] }>(
       '/api/backingstore/restore', { dry_run }),
   // --- Publish -------------------------------------------------------------
+  ssTier: () => get<SsTier>('/api/services/screenscraper/tier'),
   publishStatus: () => get<PublishStatus>('/api/publish/status'),
   publishEffective: (dev: number) =>
     get<PublishEffective>(`/api/devices/${dev}/publish/effective`),

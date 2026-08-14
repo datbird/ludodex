@@ -7,7 +7,7 @@ import type {
   DedupeSuggestion, Service, ServiceConnect, Achievements as AchData,
   MediaLibrary, MediaAsset, MediaKind, MatchedProvider, ProviderScopeState, BannedMedia, BackupsState, BackupJob,
   MatchIndexState, MatchIndexRelease,
-  PublishEffective, PublishEntry, PublishPlan, PublishPlanItem, PublishJob,
+  PublishEffective, PublishEntry, PublishPlan, PublishPlanItem, PublishJob, SsTier,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device, LibraryManager, ImportMode, ImportEstimate, ResetScope, ResetPlan,
@@ -4729,6 +4729,29 @@ function SteamMediaPref() {
   )
 }
 
+/** What a ScreenScraper account is actually granted, and what ludodex will use.
+ *
+ *  Shown because "why am I only getting one thread" is unanswerable without the
+ *  number the server reported — and because the two walk settings beside it only ever
+ *  narrow these, so seeing the ceiling is what makes them meaningful. */
+function ScreenScraperTier() {
+  const [t, setT] = useState<SsTier | null>(null)
+  useEffect(() => { api.ssTier().then(setT).catch(() => {}) }, [])
+  if (!t || !t.configured) return null
+  if (t.error) return <span className="prov-hint err">Could not read your tier: {t.error}</span>
+  const g = t.granted, u = t.using
+  if (!g || !u) return null
+  return (
+    <span className="prov-hint ss-tier">
+      Your account grants <b>{g.threads}</b> thread{g.threads === 1 ? '' : 's'},{' '}
+      <b>{g.per_day.toLocaleString()}</b>/day, <b>{g.per_min.toLocaleString()}</b>/min
+      {t.used_today != null && <> · {t.used_today.toLocaleString()} used today</>}.
+      {' '}The catalog walk will use <b>{u.threads}</b> thread{u.threads === 1 ? '' : 's'}{' '}
+      and hold <b>{u.reserve.toLocaleString()}</b> back for your own scraping.
+    </span>
+  )
+}
+
 function Credentials() {
   const [data, setData] = useState<Service[] | null>(null)
   const [vals, setVals] = useState<Record<string, string>>({})
@@ -4803,6 +4826,7 @@ function Credentials() {
                 {open && (
                   <div className="svc-body">
                     {s.hint && <span className="prov-hint">{s.hint}</span>}
+                    {s.id === 'screenscraper' && <ScreenScraperTier />}
                     {s.doc && <a className="prov-doc" href={s.doc.url} target="_blank" rel="noreferrer noopener">{s.doc.label}</a>}
                     {s.fields.map((f) => (
                       <div key={f.key} className="svc-field">

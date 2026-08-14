@@ -2414,6 +2414,31 @@ def publish_intent_for_title(norm_key: str):
             "entries": publish.entries_for(norm_key)}
 
 
+@app.get("/api/services/screenscraper/tier")
+def screenscraper_tier():
+    """What THIS account is granted, and what the catalog walk will therefore use.
+
+    Reads the live quota, because a tier is a fact about the account rather than about
+    ludodex — and because 'why am I only getting one thread' is unanswerable without
+    showing the number the server reported."""
+    import screenscraper as ss
+    import ss_mirror
+    creds = config.screenscraper_creds()
+    if not creds.get("devid"):
+        return {"configured": False}
+    try:
+        q = ss.user_info(creds)
+    except Exception as e:                       # noqa: BLE001
+        return {"configured": True, "error": str(e)[:200]}
+    t = ss_mirror.tier_limits(q)
+    return {"configured": True,
+            "granted": {"threads": t["granted_threads"], "per_day": t["per_day"],
+                        "per_min": t["per_min"]},
+            "using": {"threads": t["threads"], "reserve": t["reserve"],
+                      "min_block_seconds": round(t["min_block_seconds"], 3)},
+            "used_today": q.get("requeststoday"), "level": q.get("level")}
+
+
 @app.get("/api/publish/status")
 def publish_status():
     import publish
@@ -9833,11 +9858,22 @@ SERVICES = [
          {"key": "igdb_client_secret", "label": "Twitch Client Secret", "secret": True}],
      "limits": _limits("igdb", cooldown="250", per_min="240")},
     {"id": "screenscraper", "name": "ScreenScraper", "role": "provider",
-     "hint": "screenscraper.fr — the app authenticates automatically. Optionally add "
-             "YOUR screenscraper.fr account below to raise the daily request quota.",
+     "hint": "screenscraper.fr — the app authenticates automatically. Add YOUR "
+             "screenscraper.fr account to use your own tier: ScreenScraper grants "
+             "threads, requests/day and requests/minute per account, and ludodex "
+             "reads those from the server and adapts. Contributors get more of all "
+             "three. The two catalog-walk settings below only ever NARROW what your "
+             "account already allows.",
      "creds": [
          {"key": "screenscraper_ssid", "label": "Your account user (optional)", "secret": False},
-         {"key": "screenscraper_sspassword", "label": "Your account password (optional)", "secret": True}],
+         {"key": "screenscraper_sspassword", "label": "Your account password (optional)", "secret": True},
+         {"key": "screenscraper_walk_threads",
+          "label": "Catalog walk: threads (blank = your tier's maximum)",
+          "secret": False},
+         {"key": "screenscraper_walk_reserve",
+          "label": "Catalog walk: requests held back per day (blank = 5% of quota)",
+          "secret": False}],
+     "tier": "/api/services/screenscraper/tier",
      "limits": _limits("screenscraper", cooldown="1000")},
     {"id": "steamgriddb", "name": "SteamGridDB", "role": "provider",
      "hint": "steamgriddb.com/profile/preferences/api",

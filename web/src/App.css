@@ -4504,3 +4504,10 @@ img.ms-icon { display: block; object-fit: contain; flex: 0 0 auto; }
 .publish-panel .pb-narrow { flex: 0 1 180px; max-width: 100%; }
 .publish-panel h4 { margin: 18px 0 8px; color: var(--text-h); font-size: 14px; }
 .publish-panel .bm-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+
+/* The ScreenScraper tier readout: the numbers your ACCOUNT grants, shown next to the
+   settings that can only narrow them. Wraps rather than truncates — the whole value is
+   in the figures, so losing them to an ellipsis on a phone defeats the purpose. */
+.prov-hint.ss-tier { display: block; margin-top: 6px; line-height: 1.5; }
+.prov-hint.ss-tier b { color: var(--text-h); }
+.prov-hint.err { color: var(--danger, #e5534b); }
