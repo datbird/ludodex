@@ -247,6 +247,31 @@ def main():
           tiny["reserve"] <= 100)
 
     print()
+    print("16. a quota wait is a RE-CHECK, never a guess at the upstream reset time")
+    # The bug: parking until "next UTC midnight" gated the quota read behind the
+    # cooldown, so a walk could not notice the reset it was waiting for. Observed live
+    # holding 77,000 available requests with 20 hours still on the clock.
+    con = M.con_db()
+    M.put(con, "cooldown_until", 0)
+    con.commit(); con.close()
+    state["quota"]["requeststoday"] = 100000        # spent
+    M.walk(progress=False)
+    left = M.status()["cooldown_until"] - time.time()
+    check("it waits minutes, not most of a day: %.0fm" % (left / 60),
+          0 < left <= M.QUOTA_RECHECK_SECS + 60)
+    check("and far less than a day", left < 86400 / 4)
+
+    # ...and when the counter HAS reset, the next attempt proceeds rather than
+    # sitting out a timer set before the reset happened.
+    con = M.con_db()
+    M.put(con, "cooldown_until", 0)                 # the re-check has come round
+    con.commit(); con.close()
+    state["quota"]["requeststoday"] = 0             # upstream reset
+    r = M.walk(max_requests=60, progress=False)
+    check("it resumes immediately once quota is back",
+          r.get("skipped") != "quota" and r.get("requests"))
+
+    print()
     print("%d checks, all passed" % len(PASS))
 
 

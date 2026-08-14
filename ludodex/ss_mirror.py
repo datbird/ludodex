@@ -70,6 +70,19 @@ CLOSED_STRIKES = 8          # consecutive "api closed" rounds that mean stop for
 #
 # So the account's own figures win, config can narrow them (never widen), and these
 # constants only apply when the server says nothing.
+# How long to wait before ASKING AGAIN whether the daily quota has reset.
+#
+# Not "until midnight". The first version parked until the next UTC midnight and was
+# wrong by up to a day: ScreenScraper's counter resets on its own schedule, and the walk
+# gated the quota READ behind the cooldown — so once parked it could not notice the
+# reset it was waiting for. Observed live sitting on 77,000 available requests with
+# 20 hours still to run.
+#
+# So the cooldown is now a re-check interval, and the live quota decides. Costs ~48
+# extra requests a day against a five-figure budget, and cannot be wrong by more than
+# this interval however the upstream schedule works.
+QUOTA_RECHECK_SECS = 30 * 60
+
 HARD_THREAD_CAP = 16        # absurdity guard; the account's value normally decides
 FALLBACK_THREADS = 1        # what a free account typically gets
 FALLBACK_PER_MIN = 60       # deliberately timid when the server does not say
@@ -288,8 +301,7 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
     cool = float(get(con, "cooldown_until", 0) or 0)
     if time.time() < cool:
         left = int(cool - time.time())
-        print("ss_mirror: quota cooldown, %dh%02dm left" % (left // 3600,
-                                                            (left % 3600) // 60),
+        print("ss_mirror: quota spent; re-checking in %dm" % max(1, left // 60),
               file=sys.stderr)
         con.close()
         return {"skipped": "cooldown", "seconds_left": left}
@@ -302,7 +314,7 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
     if max_requests:
         budget = min(budget, max_requests)
     if budget <= 0:
-        put(con, "cooldown_until", _next_utc_midnight())
+        put(con, "cooldown_until", time.time() + QUOTA_RECHECK_SECS)
         con.commit()
         con.close()
         print("ss_mirror: daily quota spent (%d/%d used, %d reserved) — resuming after "
@@ -396,7 +408,7 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
         con.commit()
 
     if stop == "quota":
-        put(con, "cooldown_until", _next_utc_midnight())
+        put(con, "cooldown_until", time.time() + QUOTA_RECHECK_SECS)
     con.commit()
     total = con.execute("SELECT COUNT(*) FROM ss_games").fetchone()[0]
     roms = con.execute("SELECT COUNT(*) FROM ss_roms").fetchone()[0]
@@ -408,6 +420,8 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
 
 
 def _next_utc_midnight():
+    """Kept for reference and tests. NOT used to schedule a quota wait any more — see
+    QUOTA_RECHECK_SECS for why guessing the upstream reset time was a mistake."""
     now = time.time()
     return now + (86400 - (now % 86400)) + 60      # a minute past, to be safe
 
