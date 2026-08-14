@@ -69,6 +69,8 @@ def main():
     def fake_jeu_infos(creds, gameid=None, **kw):
         state["calls"] += 1
         if state["raise_at"] and state["calls"] >= state["raise_at"]:
+            if state.get("spend_on_raise"):
+                state["quota"]["requeststoday"] = state["spend_on_raise"]
             raise ss.SSError(state["raise_kind"], "injected")
         return CATALOG.get(int(gameid)), {}
 
@@ -155,25 +157,34 @@ def main():
     check("no requests made", state["calls"] == before)
 
     print()
-    print("9. a quota error mid-walk stops the run and does NOT advance the cursor")
+    print("9. REAL quota exhaustion mid-walk stops the run and does NOT advance the cursor")
     con = M.con_db()
     M.put(con, "cooldown_until", 0)
     con.commit()
     cur_before = int(M.get(con, "cursor", 0))
     con.close()
+    # The counter has to say the day IS spent: since a 429 and daily exhaustion arrive
+    # as the same error kind, the ssuser numbers are what tells them apart. With the
+    # counter at zero this same injection is a throttle, which test 17 asserts.
+    # Run out DURING the run, which is the only way both checks are exercised: the
+    # budget check at the start must pass, and the mid-run check must then find the
+    # counter genuinely spent. A static value cannot be both.
     state["quota"]["requeststoday"] = 0
     state["raise_kind"], state["raise_at"] = "quota", state["calls"] + 5
+    state["spend_on_raise"] = 99999
     r = M.walk(max_requests=600, progress=False)
     check("it stopped on quota", r["stopped"] == "quota")
     check("the cursor did not move past the failed block: %d -> %d"
           % (cur_before, r["cursor"]), r["cursor"] == cur_before)
     check("a cooldown was set", M.status()["cooldown_until"] > time.time())
+    state["spend_on_raise"] = None
 
     print()
     print("10. bad credentials stop immediately rather than burning the day")
     con = M.con_db()
     M.put(con, "cooldown_until", 0)
     con.commit(); con.close()
+    state["quota"]["requeststoday"] = 0        # test 9 left the day spent
     state["raise_kind"], state["raise_at"] = "badcreds", state["calls"] + 1
     r = M.walk(max_requests=600, progress=False)
     check("stopped on badcreds", r["stopped"] == "badcreds")
@@ -270,6 +281,32 @@ def main():
     r = M.walk(max_requests=60, progress=False)
     check("it resumes immediately once quota is back",
           r.get("skipped") != "quota" and r.get("requests"))
+
+    print()
+    print("17. a transient 429 is NOT the daily quota running out")
+    # ScreenScraper reports both as kind='quota'. Six threads produce the occasional
+    # throttle; treating one as exhaustion stopped a run with 77,000 requests left.
+    con = M.con_db()
+    M.put(con, "cooldown_until", 0)
+    M.put(con, "cursor", 0)
+    con.commit(); con.close()
+    state["quota"]["requeststoday"] = 500        # nowhere near the limit
+    state["raise_kind"], state["raise_at"] = "quota", state["calls"] + 3
+    r = M.walk(max_requests=180, progress=False)
+    check("it did NOT stop on quota: %s" % r.get("stopped"),
+          r.get("stopped") != "quota")
+    state["raise_kind"], state["raise_at"] = None, None
+
+    print()
+    print("18. ...but real exhaustion still stops it")
+    con = M.con_db()
+    M.put(con, "cooldown_until", 0)
+    con.commit(); con.close()
+    state["quota"]["requeststoday"] = 99999      # genuinely spent
+    state["raise_kind"], state["raise_at"] = "quota", state["calls"] + 1
+    r = M.walk(max_requests=180, progress=False)
+    check("it stops", r.get("stopped") == "quota" or r.get("skipped") == "quota")
+    state["raise_kind"], state["raise_at"] = None, None
 
     print()
     print("%d checks, all passed" % len(PASS))

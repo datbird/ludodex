@@ -367,7 +367,18 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
                 hard = None
                 for gid, jeu, err in results:
                     if err is not None:
-                        if err.kind in ("quota", "badcreds"):
+                        if err.kind == "quota":
+                            # A 429 and "you are done for the day" arrive as the same
+                            # kind, and they are not the same thing. Six concurrent
+                            # threads produce the occasional transient throttle;
+                            # treating that as daily exhaustion killed a run that had
+                            # 77,000 requests left and parked it for half an hour.
+                            # The ssuser counters are the authority, as everywhere else.
+                            if _really_out_of_quota(creds, tier):
+                                hard = err
+                            else:
+                                hard = hard or ss.SSError("closed", "rate limited")
+                        elif err.kind == "badcreds":
                             hard = err
                         elif err.kind == "closed":
                             hard = hard or err
@@ -417,6 +428,24 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
             "stopped": stop or "budget", "elapsed": round(time.time() - t0, 1),
             "total_games": total, "total_roms": roms, "threads": nthreads,
             "tier": tier}
+
+
+def _really_out_of_quota(creds, tier):
+    """Is the DAILY quota actually spent, or was that just a rate-limit?
+
+    Costs one request to ask, which is the right trade: the alternative is a run that
+    stops on its first transient 429 and waits half an hour to discover it could have
+    carried on. Fails SAFE — if the check itself errors we assume exhaustion, because
+    hammering an API that just refused us is the worse mistake."""
+    try:
+        q = ss.user_info(creds)
+    except Exception:                            # noqa: BLE001
+        return True
+    used = int(q.get("requeststoday") or 0)
+    limit = int(q.get("maxrequestsperday") or 0)
+    if not limit:
+        return False
+    return used >= (limit - tier["reserve"])
 
 
 def _next_utc_midnight():
