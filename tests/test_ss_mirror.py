@@ -309,6 +309,58 @@ def main():
     state["raise_kind"], state["raise_at"] = None, None
 
     print()
+    print("19. a COMPLETED walk probes forward again on the next run")
+    # Otherwise "check every few months" is a lie: dead_run persists past the stop line,
+    # so a re-run walks one block, finds it dead, and re-declares itself finished —
+    # creeping 60 ids per invocation and never finding what was added since.
+    con = M.con_db()
+    M.put(con, "cursor", M.TOP_ID_SEEN + 100)
+    M.put(con, "dead_run", M.DEAD_RUN_STOP + 500)     # as a finished walk leaves it
+    M.put(con, "walk_complete", 1234567)
+    M.put(con, "cooldown_until", 0)
+    con.commit(); con.close()
+    check("it starts out marked complete", M.status()["walk_complete"])
+    state["quota"]["requeststoday"] = 0
+    r = M.walk(max_requests=120, progress=False)
+    check("the new run actually walked: %s requests" % r.get("requests"),
+          r.get("requests") == 120)
+    check("rather than instantly re-declaring itself done",
+          r.get("stopped") != "exhausted")
+
+    print()
+    print("20. refreshing STALE games is how existing entries stay current")
+    # The id walk finds NEW games and can never see a new ROM dump added to one we
+    # already hold — which is ScreenScraper's most common change, and the one that
+    # matters most for matching a file you just acquired.
+    con = M.con_db()
+    con.execute("UPDATE ss_games SET seen_at=0")      # everything is ancient
+    con.commit(); con.close()
+    state["quota"]["requeststoday"] = 0
+    res = M.refresh_stale(days=1, max_requests=30, progress=False)
+    check("it selected stale rows: %s" % res.get("stale_examined"),
+          res.get("stale_examined") == 30)
+    check("and re-fetched them", res.get("refreshed", 0) > 0)
+    con = M.con_db()
+    fresh = con.execute("SELECT COUNT(*) FROM ss_games WHERE seen_at > 0").fetchone()[0]
+    con.close()
+    check("their seen_at is no longer ancient: %d" % fresh, fresh > 0)
+
+    print()
+    print("21. refresh respects the same quota and cooldown as the walk")
+    con = M.con_db()
+    M.put(con, "cooldown_until", time.time() + 600)
+    con.commit(); con.close()
+    check("a cooldown blocks it",
+          M.refresh_stale(days=1, progress=False).get("skipped") == "cooldown")
+    con = M.con_db()
+    M.put(con, "cooldown_until", 0)
+    con.commit(); con.close()
+    state["quota"]["requeststoday"] = 100000
+    check("a spent quota blocks it",
+          M.refresh_stale(days=1, progress=False).get("skipped") == "quota")
+    state["quota"]["requeststoday"] = 0
+
+    print()
     print("%d checks, all passed" % len(PASS))
 
 

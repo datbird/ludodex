@@ -327,6 +327,14 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
 
     cursor = int(get(con, "cursor", 0) or 0)
     dead_run = int(get(con, "dead_run", 0) or 0)
+    # A FINISHED walk has dead_run already past the stop line, so without this a re-run
+    # walks one block, finds it dead, and re-declares itself complete — creeping 60 ids
+    # per invocation and never actually looking for what was added since. Starting a
+    # fresh run means the question is open again.
+    if get(con, "walk_complete"):
+        dead_run = 0
+        put(con, "walk_complete", "")
+        con.commit()
     region = q.get("favregion") or "us"
     reqs = found = closed_strikes = 0
     t0 = time.time()
@@ -430,6 +438,83 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
             "tier": tier}
 
 
+def refresh_stale(days=90, max_requests=None, progress=True):
+    """Re-fetch games not seen for `days`, oldest first.
+
+    The id walk finds games that are NEW. It can never find what changed about a game
+    already held — and ScreenScraper's most frequent change is exactly that: a new ROM
+    dump added to an existing entry. Those are the hashes that match a file you just
+    acquired, so a mirror that only ever walks forward goes quietly stale where it
+    matters most.
+
+    Bounded by max_requests on purpose. 175,000 games is two days of quota to re-check
+    in full, so this is meant to be run against the oldest slice repeatedly rather than
+    all at once."""
+    con = con_db()
+    left = _Pacer_cooling(con)
+    if left:
+        con.close()
+        return {"skipped": "cooldown", "seconds_left": left}
+    creds = config.screenscraper_creds()
+    q = ss.user_info(creds)
+    tier = tier_limits(q)
+    budget = max(0, tier["per_day"] - tier["reserve"] - (q.get("requeststoday") or 0))
+    if max_requests:
+        budget = min(budget, max_requests)
+    if budget <= 0:
+        con.close()
+        return {"skipped": "quota"}
+
+    cutoff = time.time() - days * 86400
+    rows = [r["id"] for r in con.execute(
+        "SELECT id FROM ss_games WHERE COALESCE(seen_at,0) < ? ORDER BY seen_at LIMIT ?",
+        (cutoff, budget))]
+    if not rows:
+        con.close()
+        return {"stale": 0, "note": "nothing older than %d days" % days}
+
+    nthreads = tier["threads"]
+    now = int(time.time())
+    done = roms_before = 0
+    roms_before = con.execute("SELECT COUNT(*) FROM ss_roms").fetchone()[0]
+
+    def fetch(gid):
+        try:
+            jeu, _ = ss.jeu_infos(creds, gameid=gid)
+            return gid, jeu
+        except Exception:                        # noqa: BLE001
+            return gid, None
+
+    from concurrent.futures import ThreadPoolExecutor
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=nthreads) as pool:
+        for i in range(0, len(rows), BLOCK):
+            chunk = rows[i:i + BLOCK]
+            started = time.time()
+            for gid, jeu in pool.map(fetch, chunk):
+                if jeu and jeu.get("id"):
+                    _store(con, gid, jeu, now, q.get("favregion") or "us")
+                    done += 1
+            con.commit()
+            need = tier["min_block_seconds"] * len(chunk) / max(1, nthreads)
+            spent = time.time() - started
+            if spent < need:
+                time.sleep(need - spent)
+            if progress and (i // BLOCK) % 20 == 0:
+                print("ss_mirror: refreshed %d/%d stale games" % (done, len(rows)),
+                      file=sys.stderr)
+    roms_after = con.execute("SELECT COUNT(*) FROM ss_roms").fetchone()[0]
+    con.close()
+    return {"stale_examined": len(rows), "refreshed": done,
+            "new_rom_rows": roms_after - roms_before,
+            "elapsed": round(time.time() - t0, 1)}
+
+
+def _Pacer_cooling(con):
+    """Cooldown check, shared with walk()."""
+    return max(0, int(float(get(con, "cooldown_until", 0) or 0) - time.time()))
+
+
 def _really_out_of_quota(creds, tier):
     """Is the DAILY quota actually spent, or was that just a rate-limit?
 
@@ -487,6 +572,12 @@ def main(argv):
     mx = None
     if "--max-requests" in argv:
         mx = int(argv[argv.index("--max-requests") + 1])
+    if "--refresh-stale" in argv:
+        i = argv.index("--refresh-stale")
+        days = int(argv[i + 1]) if len(argv) > i + 1 and argv[i + 1].isdigit() else 90
+        print("ss_mirror: " + json.dumps(refresh_stale(days=days, max_requests=mx)),
+              file=sys.stderr)
+        return 0
     until = None
     if "--until-id" in argv:
         until = int(argv[argv.index("--until-id") + 1])
