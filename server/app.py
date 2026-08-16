@@ -8634,6 +8634,23 @@ def game_media(norm_key: str):
         _pick = sorted(_own or _cands, key=lambda a: a["id"])[0]
         _pick["used"] = True
 
+    # PLURAL kinds get no `chosen` row, so until now the panel received them in row-id
+    # order and called whatever arrived first "#1". Order them by the same terms
+    # select() applies to scalar kinds — shape, resolution band, provider, pixels — so
+    # the first screenshot is the best one rather than the oldest one. Pinned assets
+    # keep their explicit rank above all of it, because a pin is the user speaking.
+    _plural = {a["kind"] for a in assets} - set(media.SCALAR_KINDS)
+    if _plural:
+        def _dk(a):
+            return (0 if a.get("pinned") else 1,
+                    a.get("rank") if a.get("rank") is not None else 1 << 30,
+                    media.display_key(a["kind"], a.get("provider"),
+                                      a.get("width"), a.get("height")),
+                    a["id"])
+        _keep = [a for a in assets if a["kind"] not in _plural]
+        _sorted = sorted([a for a in assets if a["kind"] in _plural], key=_dk)
+        assets = _keep + _sorted
+
     # durable user uploads (added via the All Media upload buttons) — always "active"
     uc = _umedia_con()
     try:

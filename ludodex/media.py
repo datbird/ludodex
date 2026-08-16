@@ -560,7 +560,18 @@ PRIORITY = {
     "header":       ["steamgrid", "steam", "steamgriddb", "launchbox", "screenscraper"],
     "logo":         ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb", "steamgriddb", "launchbox"],
     "icon":         ["steamgrid", "steamgriddb", "igdb", "screenscraper", "playnite"],
-    "screenshot":   ["gamelist", "esde", "screenscraper", "launchbox"],
+    # Steam and IGDB supply 99.8% of screenshots (24,867 and 16,858 rows against
+    # ScreenScraper's 64) and NEITHER was named here, so both fell to the unranked
+    # default — making provider rank constant across almost every candidate, and a
+    # constant term decides nothing. That is how a pillarboxed Game Gear shot came first
+    # for Genesis Sonic 2: with nothing above it, order fell through to row id.
+    #
+    # Steam leads because for a Steam game its own captures ARE the game, and it simply
+    # has no rows for an emulated ROM so the position costs nothing there. IGDB above
+    # ScreenScraper is deliberate: IGDB's shots are curated per game, SS's are community
+    # uploads that may be from a different system entirely. Frontends last — they are
+    # scraped copies of these same sources.
+    "screenshot":   ["steam", "igdb", "screenscraper", "gamelist", "esde", "launchbox"],
     "title_screen": ["esde", "screenscraper", "launchbox"],
     "box_3d":       ["esde", "screenscraper", "steamgriddb", "launchbox"],
     "box_back":     ["esde", "screenscraper", "launchbox"],
@@ -581,3 +592,32 @@ DEFAULT_PRIORITY = ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "
 
 def priority(kind):
     return PRIORITY.get(kind, DEFAULT_PRIORITY)
+
+
+def display_key(kind, provider, w, h):
+    """Sort key for ordering the assets of a PLURAL kind (screenshot, manual, map…).
+
+    select() sets `chosen` for SCALAR kinds only, and rightly so: a game has one cover
+    but many screenshots, and collapsing them to one would throw the rest away. But the
+    ORDER is still visible — the panel calls the first one #1 and the serve path leads
+    with it — and until now nothing ranked it, so a plural kind was displayed in row-id
+    order, i.e. whatever arrived first.
+
+    The terms are the same ones select() uses and in the same direction (lower sorts
+    first), so a plural kind is ordered by the rules that already govern a scalar one
+    rather than by a second, quietly different opinion:
+
+        shape   an asset the wrong shape for its kind goes last
+        band    LARGE(0) before UNKNOWN(1) before SMALL(2)
+        provider the kind's priority order
+        pixels  more first, as the tie-break inside a band
+    """
+    pri = priority(kind)
+    try:
+        prank = pri.index(provider)
+    except ValueError:
+        prank = len(pri)
+    return (0 if shape_ok(kind, w, h) else 1,
+            res_band(w, h, kind),
+            prank,
+            -((w or 0) * (h or 0)))
