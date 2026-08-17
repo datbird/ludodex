@@ -140,6 +140,27 @@ def main():
           offsets[1] == 100)
 
     print()
+    print("3b. THE SILENT CEILING — measured live, and refused rather than trusted")
+    # Verified with a real key on 2026-08-17: offset 205,000 returns 100 rows, 210,000
+    # returns an empty list with NO error and NO 429. A walk that trusts the empty page
+    # stops ~124,000 games short of 332,414 and reports success.
+    check("the measured ceiling is recorded, not rediscovered",
+          MG.GLOBAL_OFFSET_CEILING == 205000)
+    try:
+        list(MG.walk_ids(fmt="id", start_offset=MG.GLOBAL_OFFSET_CEILING + 1))
+        check("unfiltered paging past it RAISED", False)
+    except MG.MobyError as e:
+        check("unfiltered paging past it raises rather than returning []",
+              "stop short" in str(e))
+    calls.clear()
+    got = [rows for _pid, _off, rows in MG.walk_all(fmt="id", platform_ids=[3])]
+    check("but a PLATFORM window pages freely", sum(len(r) for r in got) == 250)
+    check("and every request carried the platform filter",
+          all(c[1].get("platform") == [3] for c in calls))
+    check("walk_all yields the platform id, so (game, platform) survives the walk",
+          [p for p, _o, _r in MG.walk_all(fmt="id", platform_ids=[3, 5])][:1] == [3])
+
+    print()
     print("4. FORMAT=NORMAL IS FREE — asking for ids alone wastes the request")
     check("the default walk format is normal",
           config.DEFAULTS["mobygames_walk_format"] == "normal")

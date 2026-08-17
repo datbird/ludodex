@@ -240,16 +240,51 @@ def product_codes(game_id, platform_id):
     return out
 
 
+# MEASURED 2026-08-17 WITH A REAL KEY: the UNFILTERED /games list stops returning rows
+# between offset 205,000 (100 rows, first id 264310) and 210,000 (zero rows). There is NO
+# error and NO 429 — just an empty list, which is indistinguishable from the end of the
+# catalogue. MobyGames holds 332,414 games, so a global walk would quietly stop ~124,000
+# short and report success. That is the fail-open shape in a new costume, and the reason
+# `walk_ids` refuses rather than trusting the empty page.
+#
+# A PLATFORM-FILTERED window does not hit it (platform=3 at offset 40,000 answers fine),
+# so the real walk goes per platform. Not merely a workaround — it is the shape ludodex
+# wants anyway: it yields (game, platform) pairs directly instead of a game carrying a
+# platform list to explode afterwards.
+GLOBAL_OFFSET_CEILING = 205000
+
+
+def walk_platform(platform_id, fmt="normal", start_offset=0, max_pages=None):
+    """Page ONE platform. Yields (offset, rows) so a caller can checkpoint.
+
+    A zero-length page ends THIS WINDOW. It does not mean the catalogue is finished, and
+    conflating the two is exactly how a global walk lies about being done."""
+    off, pages = int(start_offset), 0
+    while True:
+        rows = games(offset=off, limit=PAGE, fmt=fmt, platform=platform_id)
+        if not rows:
+            return
+        yield off, rows
+        off += len(rows)
+        pages += 1
+        if len(rows) < PAGE or (max_pages and pages >= max_pages):
+            return
+
+
 def walk_ids(fmt="normal", platform=None, start_offset=0, max_pages=None,
              progress=None):
-    """Page the whole catalogue. Yields (offset, rows) so a caller can checkpoint.
+    """Page a filtered window. Yields (offset, rows) so a 4-hour job can be resumed.
 
-    Deliberately a GENERATOR with the offset attached: 3,325 pages is four and a half
-    hours, and a walk that cannot be resumed from where it stopped is a walk that has to
-    start again every time something reboots."""
-    off = int(start_offset)
-    pages = 0
+    UNFILTERED PAGING IS REFUSED past the measured ceiling rather than allowed to return
+    an empty page and be read as 'done'. For the whole catalogue use walk_all()."""
+    off, pages = int(start_offset), 0
     while True:
+        if platform is None and off > GLOBAL_OFFSET_CEILING:
+            raise MobyError("error",
+                            "unfiltered paging silently returns nothing past offset "
+                            "~%d; MobyGames holds 332,414 games, so this walk would "
+                            "stop short and look finished. Use walk_all()."
+                            % GLOBAL_OFFSET_CEILING)
         rows = games(offset=off, limit=PAGE, fmt=fmt, platform=platform)
         if not rows:
             return
@@ -258,10 +293,26 @@ def walk_ids(fmt="normal", platform=None, start_offset=0, max_pages=None,
             progress(off, len(rows))
         off += len(rows)
         pages += 1
-        if len(rows) < PAGE:
-            return                                   # short page = the end
-        if max_pages and pages >= max_pages:
+        if len(rows) < PAGE or (max_pages and pages >= max_pages):
             return
+
+
+def walk_all(fmt="normal", platform_ids=None, progress=None, max_requests=None):
+    """The whole catalogue, platform by platform. Yields (platform_id, offset, rows).
+
+    Deduping is the CALLER's job, deliberately: a game on three platforms comes back
+    three times, and for ludodex those are three ENTRIES rather than one game to
+    collapse. Discarding that here would throw away the fact the entry model rests on."""
+    plats = platform_ids or [p.get("platform_id") for p in platforms()]
+    spent = 0
+    for pid in plats:
+        for off, rows in walk_platform(pid, fmt=fmt):
+            spent += 1
+            yield pid, off, rows
+            if progress:
+                progress(pid, off, len(rows))
+            if max_requests and spent >= max_requests:
+                return
 
 
 # --------------------------------------------------------------------------- #
