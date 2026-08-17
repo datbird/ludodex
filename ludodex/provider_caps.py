@@ -43,14 +43,23 @@ import config                       # noqa: E402
 LABEL = {
     "igdb": "IGDB",
     "screenscraper": "ScreenScraper",
+    # Steam is a SOURCE and an enrichment provider at once — it supplies genres,
+    # categories, developers, publishers, the store description and its own
+    # game/dlc/tool classification, for the titles you own there. Leaving it out of a
+    # list of "who can fill this" would describe the library as less served than it is.
     "steam": "Steam",
     "steamspy": "SteamSpy",
     "thegamesdb": "TheGamesDB",
     "ai": "AI (the wand)",
+    # Not remote providers, but they DO fill attributes, and a tooltip that omits them
+    # tells the user nothing can.
+    "rom": "the ROM filename",
+    "xbox": "Xbox",
+    "ludodex": "you",
 }
 
 # provider -> the config flag that decides whether it is even consulted. Steam is a
-# SOURCE as well as a provider and has no metadata_* toggle of its own.
+# SOURCE as well as a provider and has no metadata_* toggle of its own — see STEAM_NOTE.
 ENABLED_KEY = {
     "igdb": "metadata_igdb_enabled",
     "screenscraper": "metadata_screenscraper_enabled",
@@ -58,57 +67,96 @@ ENABLED_KEY = {
     "thegamesdb": "metadata_thegamesdb_enabled",
 }
 
+# Steam is the odd one out and the tooltip has to say so: it is BOTH an ownership source
+# and an enrichment provider, and it only ever enriches titles you own there. For a ROM
+# that is not "switched off", it is INELIGIBLE — the same distinction the review page
+# already draws — so promising it as a filler for an emulated game would be a lie.
+STEAM_NOTE = " (Steam-owned titles only)"
+
 # attribute kind -> {provider: what it actually gives}. The note is tooltip copy, so it
 # says what arrives, not how it is fetched.
+#
+# EVERY ENTRY IS CHECKED AGAINST THE PROVIDER'S REAL MAPPER by tests/test_provider_caps.py
+# — igdb.map_record, screenscraper.extract_metadata, media_fetch._extract_steam_attrs,
+# tgdb_normalize.to_attributes and aimeta.SUPPLEMENT_KINDS are called and their output
+# keys must cover what is claimed here. That check found three claims I had invented
+# (steam/features, igdb/platforms, screenscraper/regions) and three real capabilities I
+# had missed (igdb's esrb_rating, content_descriptors and age_ratings), which is exactly
+# why the check exists rather than a careful reading.
 CAPS = {
     "release_year": {
         "igdb": "first release year", "screenscraper": "release year",
-        "steam": "from the store release date",
-        "thegamesdb": "year of THIS regional release"},
+        "steam": "from the store release date" + STEAM_NOTE,
+        "thegamesdb": "year of THIS regional release",
+        "ai": "inferred from the title and whatever context the file gives"},
     "release_date": {
-        "igdb": "exact first release date", "steam": "store release date",
+        "igdb": "exact first release date",
+        "steam": "store release date" + STEAM_NOTE,
         "thegamesdb": "exact date for THIS region — PAL and NTSC differ"},
     "genres": {
         "igdb": "curated genre list", "screenscraper": "genre list",
-        "steam": "store genres",
+        "steam": "store genres" + STEAM_NOTE,
         "thegamesdb": "30-genre list; its non-genre entries (Demo, Unofficial, "
-                      "Virtual Console…) are split off as flags, never filed here"},
-    "themes": {"igdb": "themes (horror, sci-fi, comedy…)"},
+                      "Virtual Console\u2026) are split off as flags, never filed here",
+        "ai": "inferred when no provider has the game"},
+    "themes": {"igdb": "themes (horror, sci-fi, comedy\u2026)",
+               "ai": "inferred when no provider has the game"},
     "game_modes": {
         "igdb": "single player / co-op / multiplayer",
-        "thegamesdb": "derived from its player count + explicit co-op yes/no"},
-    "player_perspectives": {"igdb": "first person, third person, isometric…"},
+        "thegamesdb": "derived from its player count + explicit co-op yes/no",
+        "ai": "inferred when no provider has the game"},
+    "player_perspectives": {"igdb": "first person, third person, isometric\u2026",
+                            "ai": "inferred when no provider has the game"},
     "developers": {
         "igdb": "developer companies", "screenscraper": "developer",
-        "steam": "store developers", "thegamesdb": "developer companies"},
+        "steam": "store developers" + STEAM_NOTE,
+        "thegamesdb": "developer companies", "ai": "inferred when no provider has the game"},
     "publishers": {
         "igdb": "publisher companies", "screenscraper": "publisher",
-        "steam": "store publishers", "thegamesdb": "publisher companies"},
+        "steam": "store publishers" + STEAM_NOTE,
+        "thegamesdb": "publisher companies", "ai": "inferred when no provider has the game"},
     "series": {"igdb": "franchise / collection"},
     "description": {
         "igdb": "the IGDB summary paragraph",
         "screenscraper": "the community-written synopsis",
-        "steam": "the store description",
-        "thegamesdb": "its overview paragraph"},
-    "categories": {"steam": "store categories (achievements, cloud saves, controller…)"},
-    "features": {"steam": "store feature flags"},
+        "steam": "the store short description" + STEAM_NOTE,
+        "thegamesdb": "its overview paragraph",
+        "ai": "written from what is known about the title"},
+    "categories": {
+        "steam": "store categories (achievements, cloud saves, controller support\u2026)"
+                 + STEAM_NOTE},
+    "content_type": {
+        "steam": "its own game / dlc / tool / soundtrack classification" + STEAM_NOTE},
     "critic_score": {"igdb": "aggregated critic rating"},
     "community_score": {
-        "igdb": "IGDB user rating", "screenscraper": "community rating",
-        "thegamesdb": "community rating"},
-    "content_type": {"steam": "game / application / tool / soundtrack / video"},
-    "platforms": {"igdb": "every platform the title released on"},
-    # --- kinds NO provider could fill before TheGamesDB ------------------------------
-    # Each of these measured ZERO rows from every provider on the live library. They were
-    # hand-entry-only and the UI gave no hint of that.
+        "igdb": "IGDB user rating, 0-100",
+        "screenscraper": "community rating, rescaled to 0-100",
+        "thegamesdb": "community rating, rescaled to 0-100"},
     "esrb_rating": {
-        "thegamesdb": "ESRB as a readable string (\"E - Everyone\") rather than an id "
-                      "needing a second lookup"},
+        "igdb": "the ESRB badge, as its own value rather than parsed back out of a "
+                "combined string",
+        "thegamesdb": "ESRB as a readable string (\"E - Everyone\")"},
+    "content_descriptors": {
+        "igdb": "the descriptors behind the badge (Blood and Gore, Strong Language\u2026)"},
+    "age_ratings": {"igdb": "every rating body it knows — ESRB, PEGI, USK, CERO\u2026"},
+    "tags": {
+        "steamspy": "Steam community tags, fetched from SteamSpy and badged as Steam's",
+        "ludodex": "tags you set yourself, kept across rebuilds"},
+    # --- filled by things that are not remote providers at all -----------------------
+    # Left out of the first cut, and their absence made the tooltip say "no provider
+    # supplies this" about three kinds that are routinely filled. A wrong tooltip sends
+    # someone to switch on a provider that will not help; this one sent them looking for
+    # a provider that was never the answer.
+    "release_type": {"rom": "read from the filename tags (Proto, Beta, Demo, Hack\u2026)"},
+    "language": {"rom": "read from the filename tags (En, Fr, Ja\u2026) and patch info"},
+    "version": {"rom": "read from the filename tags (v1.1, Rev A\u2026)"},
     "regions": {
-        "screenscraper": "region codes on the ROM dumps it knows",
-        "thegamesdb": "BOTH axes: the TV standard (NTSC-U / PAL / NTSC-J…) and the "
-                      "release country — it is the only source that separates them"},
-    "os": {"thegamesdb": "for PC titles: the OS its minimum spec names"},
+        "thegamesdb": "BOTH axes: the TV standard (NTSC-U / PAL / NTSC-J\u2026) and the "
+                      "release market — it is the only source that separates them"},
+    "os": {
+        "xbox": "the platforms an Xbox store entry lists",
+        "thegamesdb": "for PC titles: the OS its minimum spec names"},
+    "device": {"xbox": "the devices an Xbox store entry lists"},
 }
 
 # Kinds the vocabulary offers that NOTHING can currently fill. Listed explicitly rather

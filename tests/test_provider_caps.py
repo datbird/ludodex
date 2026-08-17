@@ -17,9 +17,13 @@ The rules:
   * ENABLED, CONFIGURED AND CAPABLE ARE THREE DIFFERENT FACTS. A provider switched on
     with no credentials is not ready, and reporting it as ready is the same broken
     promise in a different costume.
-  * THE MEASURED ZEROES STAY HONEST. `esrb_rating`, `regions` and `os` had no rows from
-    any provider on the live library before TheGamesDB; the matrix must not quietly
-    credit an older provider with them.
+  * CLAIMS ARE CHECKED AGAINST THE MAPPERS, NOT AGAINST PROSE. The first cut of this
+    matrix was written from what the live `game_attributes` HAPPENED to contain, and
+    that was wrong in both directions: it invented three claims no mapper backs
+    (steam/features, igdb/platforms, screenscraper/regions) and denied three real ones
+    (igdb emits esrb_rating, content_descriptors and age_ratings — zero rows exist only
+    because the cached payloads predate the field being requested). Observed rows are
+    evidence of what has run, never of what a provider can do.
 """
 import os
 import sys
@@ -61,23 +65,107 @@ def main():
     block = src.split("_EDITABLE_ATTR_KINDS = [", 1)[1].split("]", 1)[0]
     vocab = {x.strip().strip('"\'') for x in block.replace("\n", "").split(",")
              if x.strip().strip('"\'')}
-    # Two kinds are deliberately outside the editable vocabulary: they are consumed by
-    # nongame/homebrew and by the PC panel rather than edited as facets.
-    extra = {k for k in PC.CAPS if k not in vocab}
+    # `tags` is rendered by the library rather than the attribute editor, so it is a
+    # legitimate exception rather than an orphan. Anything else outside the vocabulary is
+    # a tooltip on a row the UI never draws.
+    extra = {k for k in PC.CAPS if k not in vocab} - {"tags"}
     check("no orphan kinds: %s" % (sorted(extra) or "none"), not extra)
 
     print()
-    print("3. the measured zeroes are still zeroes")
-    # Live on 2026-08-16: no provider had EVER written these. Only TheGamesDB may claim
-    # them, and if another provider ever genuinely gains one, the measurement — not this
-    # test — is what should change first.
-    for kind in ("esrb_rating", "regions", "os"):
-        owners = set(PC.CAPS.get(kind) or {})
-        check("%-12s is not credited to igdb or steam" % kind,
-              not (owners & {"igdb", "steam"}))
-        check("%-12s IS claimed by thegamesdb" % kind, "thegamesdb" in owners)
-    check("regions also credits screenscraper, which really does carry rom regions",
-          "screenscraper" in PC.CAPS["regions"])
+    print("3. EVERY CLAIM IS CHECKED AGAINST THE PROVIDER'S REAL MAPPER")
+    # The check that matters. Prose about what a provider gives you drifts from the code
+    # that maps it; calling the mapper does not. This found three claims that were
+    # invented (steam/features, igdb/platforms, screenscraper/regions) and three real
+    # capabilities that were missing (igdb's esrb_rating, content_descriptors,
+    # age_ratings), which is the whole argument for doing it this way.
+    import igdb
+    import screenscraper as ss
+    import aimeta
+    import tgdb_normalize as TN
+
+    emitted = {}
+    emitted["igdb"] = set(igdb.map_record({
+        "genres": [{"name": "Platform"}], "themes": [{"name": "Action"}],
+        "game_modes": [{"name": "Single player"}],
+        "player_perspectives": [{"name": "Side view"}],
+        "franchises": [{"name": "Sonic"}],
+        "involved_companies": [{"company": {"name": "Sega"}, "developer": True,
+                                "publisher": True}],
+        "first_release_date": 722476800, "summary": "x",
+        "total_rating": 80.0, "aggregated_rating": 85.0,
+        "age_ratings": [
+            {"organization": {"name": "ESRB"}, "rating_category": {"rating": "M"},
+             "rating_content_descriptions": [{"description": "Blood"}]},
+            {"organization": {"name": "PEGI"}, "rating_category": {"rating": "18"}}]}))
+    emitted["screenscraper"] = set(ss.extract_metadata({
+        "noms": [{"region": "us", "text": "Sonic"}],
+        "synopsis": [{"langue": "en", "text": "x"}],
+        "genres": [{"noms": [{"langue": "en", "text": "Platform"}]}],
+        "developpeur": {"text": "Sonic Team"}, "editeur": {"text": "Sega"},
+        "joueurs": {"text": "2"}, "note": {"text": "18"},
+        "dates": [{"region": "us", "text": "1992-11-24"}]}))
+    emitted["ai"] = set(aimeta.SUPPLEMENT_KINDS)
+    emitted["thegamesdb"] = set(TN.to_attributes(
+        {"release_date": "1992-11-24", "overview": "x", "rating": "E - Everyone",
+         "region_id": 2, "players": 2, "coop": "Yes", "os": "Win", "processor": "p",
+         "ram": "r", "hdd": "h", "video": "v", "sound": "s", "youtube": "abc",
+         "rating_community": 4.2},
+        genre_names=["Platform"], developer_names=["Sega"], publisher_names=["Sega"]))
+    try:
+        import media_fetch
+        emitted["steam"] = set(media_fetch._extract_steam_attrs({
+            "genres": [{"id": 1, "description": "Action"}],
+            "categories": [{"description": "Single-player"}],
+            "developers": ["Valve"], "publishers": ["Valve"],
+            "release_date": {"date": "12 Nov, 2007"}, "short_description": "x",
+            "type": "game"}))
+    except Exception as e:                                  # noqa: BLE001
+        print("      (steam mapper unavailable here: %s)" % str(e)[:60])
+
+    # These fill attributes without a mapper function to interrogate — the write is
+    # inline in build_library. Asserted against that source instead, so a rename there
+    # still breaks this test rather than silently orphaning a tooltip.
+    bl = open(os.path.join(root, "ludodex", "build_library.py"), encoding="utf-8").read()
+    for kind, origin in (("release_type", "rom"), ("language", "rom"),
+                         ("version", "rom"), ("os", "xbox"), ("device", "xbox")):
+        check("build_library really writes %-12s with origin %-4s"
+              % (kind, origin), '"%s"' % kind in bl and '"%s"' % origin in bl)
+    check("steamspy really supplies tags",
+          "steamspy" in open(os.path.join(root, "ludodex", "steam_tags.py"),
+                             encoding="utf-8").read())
+
+    for provider, kinds in sorted(emitted.items()):
+        claimed = {k for k, v in PC.CAPS.items() if provider in v}
+        overclaimed = sorted(claimed - kinds)
+        check("%-14s claims nothing its mapper cannot emit%s"
+              % (provider, (" (invented: %s)" % overclaimed) if overclaimed else ""),
+              not overclaimed)
+
+    print()
+    print("3b. and nothing REAL is left unclaimed")
+    # The opposite failure, and the one that had actually shipped: igdb.map_record emits
+    # esrb_rating / content_descriptors / age_ratings and the matrix credited none of
+    # them, so three kinds it can fill read as "manual only".
+    INTERNAL = {"name", "players", "genre_ids", "min_spec", "video_url"}
+    for provider, kinds in sorted(emitted.items()):
+        claimed = {k for k, v in PC.CAPS.items() if provider in v}
+        missing = sorted(kinds - claimed - INTERNAL)
+        check("%-14s claims everything its mapper emits%s"
+              % (provider, (" (missing: %s)" % missing) if missing else ""),
+              not missing)
+    check("igdb IS credited with esrb_rating — the capability it had and we denied",
+          "igdb" in PC.CAPS["esrb_rating"])
+
+    print()
+    print("3c. STEAM is an enrichment provider, not only a source")
+    steam_kinds = sorted(k for k, v in PC.CAPS.items() if "steam" in v)
+    check("it fills %d kinds: %s" % (len(steam_kinds), steam_kinds),
+          len(steam_kinds) >= 8)
+    check("every Steam note says it only covers titles you own there",
+          all(PC.STEAM_NOTE.strip() in v["steam"]
+              for v in PC.CAPS.values() if "steam" in v))
+    check("SteamSpy is credited separately, for the tags it actually fetches",
+          "steamspy" in PC.CAPS.get("tags", {}))
 
     print()
     print("4. nothing is claimed for a media-only provider")
@@ -115,9 +203,11 @@ def main():
     config.set_("thegamesdb_api_key", "0123456789abcdef")
     check("on and credentialled reads as ready",
           PC.enabled("thegamesdb") and PC.configured("thegamesdb"))
-    t = PC.tooltip("esrb_rating")
-    check("with no caveat left in the tooltip: %s" % t[:56],
-          "(off)" not in t and "no credentials" not in t)
+    # `esrb_rating` has two providers now, and IGDB has no credentials in an isolated
+    # test dir — so assert on TheGamesDB's own segment rather than the whole sentence.
+    seg = [x for x in PC.tooltip("esrb_rating").split("; ") if "TheGamesDB" in x][0]
+    check("no caveat left on the TheGamesDB segment: %s" % seg[:52],
+          "(off)" not in seg and "no credentials" not in seg)
     config.set_("metadata_thegamesdb_enabled", "0")
 
     print()

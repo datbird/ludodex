@@ -229,6 +229,15 @@ def to_attributes(row, genre_names=(), developer_names=(), publisher_names=()):
     rating = (row.get("rating") or "").strip()
     if rating:
         out["esrb_rating"] = rating
+    # Its community rating is 0-5; every other provider's community_score is 0-100, and
+    # a facet that has to know which scale each row came from is a facet that will one
+    # day compare them directly.
+    try:
+        note = float(row.get("rating_community") or row.get("community_rating") or 0)
+    except (TypeError, ValueError):
+        note = 0.0
+    if note > 0:
+        out["community_score"] = round(note / 5.0 * 100)
 
     tv, market = region_of(row)
     regions = [x for x in (tv, market) if x]
