@@ -71,6 +71,7 @@ DB = os.path.join(DATA, "match-index.sqlite")        # optional, rebuildable sup
 MAIN_DB = os.path.join(DATA, "metadata-cache.sqlite")  # where it used to live
 IGDB_DB = os.path.join(DATA, "igdb-catalog.sqlite")
 SS_DB = os.path.join(DATA, "ss-catalog.sqlite")
+MOBY_DB = os.path.join(DATA, "moby-catalog.sqlite")
 
 SS_ID_BASE = 100_000_000
 LEARNED_ID_BASE = 200_000_000    # a game neither mirror knows, found by live search
@@ -78,6 +79,10 @@ LEARNED_ID_BASE = 200_000_000    # a game neither mirror knows, found by live se
 # later rebuild can drop the whole layer without touching anything else, and so a stray
 # id can always be traced back to the source that minted it.
 TGDB_ID_BASE = 300_000_000
+# A MobyGames game neither mirror knows. Its own range, above TheGamesDB's, so the whole
+# layer can be dropped without touching anything else and a stray id is always traceable
+# to what minted it.
+MOBY_ID_BASE = 400_000_000
 YEAR_SLACK = 1                   # a year that disagrees by more than this is a refusal
 
 # Which ROM hashes earn their place. CRC32 is what No-Intro, TOSEC and every frontend
@@ -124,6 +129,10 @@ ATTRIBUTION = ("Game data from ScreenScraper.fr (CC BY-NC-SA 4.0) and its contri
                "Built by ludodex. Non-commercial use only; derivative works must carry "
                "the same licence.")
 SOURCES = [
+    {"name": "MobyGames", "url": "https://www.mobygames.com",
+     "license": "non-commercial use only (their API licence agreement)",
+     "license_url": "https://www.mobygames.com/info/api/",
+     "provides": "game identities, alternate titles, platforms, years"},
     {"name": "Wikidata", "url": "https://www.wikidata.org",
      "license": "CC0 1.0", "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
      "provides": "cross-database identifiers (MobyGames, TheGamesDB, Redump), "
@@ -468,7 +477,7 @@ def resolve_name(con, title, year=None):
 
 # --- building -------------------------------------------------------------- #
 def _attach(con):
-    for path, alias in ((IGDB_DB, "ig"), (SS_DB, "ss")):
+    for path, alias in ((IGDB_DB, "ig"), (SS_DB, "ss"), (MOBY_DB, "mb")):
         if os.path.exists(path):
             con.execute("ATTACH DATABASE ? AS %s" % alias,
                         ("file:%s?mode=ro" % path,))
@@ -569,11 +578,15 @@ def build(progress=True):
     # 7. Free cross-database pointers from Wikidata — see _merge_wikidata_ids.
     wd_keys = _merge_wikidata_ids(con, progress, t0)
 
+    # 8. The MobyGames catalogue — see _merge_moby.
+    moby_linked, moby_new = _merge_moby(con, have, now, progress, t0)
+
     st = status(con)
     st.update({"ss_merged": ss_merged, "ss_own_identity": ss_own,
                "ss_hash_keys": ss_roms, "tgdb_linked": tgdb_linked,
                "tgdb_new_identities": tgdb_new, "dat_serials": dat_serials,
                "dat_hash_keys": dat_hashes, "wikidata_keys": wd_keys,
+               "moby_linked": moby_linked, "moby_new_identities": moby_new,
                "elapsed": round(time.time() - t0, 1)})
     # PROVENANCE TRAVELS WITH THE FILE, not with the release page it was downloaded
     # from. A published sqlite gets copied to a NAS, handed to a friend, restored from
@@ -589,6 +602,101 @@ def build(progress=True):
     con.commit()
     con.close()
     return st
+
+
+def _merge_moby(con, have, now, progress=True, t0=None):
+    """Attach MobyGames ids from the local catalogue. -> (linked, newly_minted).
+
+    THE FREE POINTERS GO FIRST. Wikidata already anchored ~34,000 moby ids to identities,
+    so a game whose id is already recorded is done — re-matching it by name could only
+    produce a WORSE answer than the curated cross-reference already gave us.
+
+    For the rest this is `_merge_ss` in a different hat, and for the same reason: a name
+    that matches on the wrong hardware is a different product, so a candidate must agree
+    on platform when both sides state one and pass the same acceptance gate. A miss mints
+    its own identity rather than settling on a plausible neighbour — the recurring bug
+    here is a lookup that misses and gets read as consent.
+
+    Never raises: the catalogue is optional and a rebuild must not die without it."""
+    linked = new = 0
+    t0 = t0 or time.time()
+    if "mb" not in have or not _has_table(con, "mb", "moby_games"):
+        return 0, 0
+    try:
+        known = {r["val"] for r in
+                 con.execute("SELECT val FROM identity_key WHERE ns='mobygames'")}
+        # MobyGames platform id -> the IGDB platform it is. Built once; without it every
+        # candidate would be judged on its name alone.
+        platmap = {}
+        for r in con.execute("SELECT DISTINCT platform_id, platform_name "
+                             "FROM mb.moby_platforms WHERE platform_name IS NOT NULL"):
+            row = con.execute("SELECT id FROM ig.platforms WHERE LOWER(name)=? OR "
+                              "LOWER(abbreviation)=? LIMIT 1",
+                              (r["platform_name"].lower(),
+                               _slug(r["platform_name"]))).fetchone()
+            if row:
+                platmap[r["platform_id"]] = row["id"]
+
+        for g in con.execute("SELECT id,title,norm_key,year FROM mb.moby_games"):
+            gid = str(g["id"])
+            if gid in known:
+                continue                      # already anchored, by something better
+            plats = [r["platform_id"] for r in con.execute(
+                "SELECT platform_id FROM mb.moby_platforms WHERE game_id=?", (g["id"],))]
+            ident = _match_moby(con, g, plats, platmap)
+            if ident is None:
+                ident = MOBY_ID_BASE + int(g["id"])
+                con.execute(
+                    "INSERT OR IGNORE INTO identity(id,name,norm_key,year,built_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (ident, g["title"], g["norm_key"], g["year"], now))
+                if g["norm_key"]:
+                    con.execute(
+                        "INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
+                        "VALUES('name',?,?,'derived')", (g["norm_key"], ident))
+                new += 1
+            else:
+                linked += 1
+            con.execute("INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
+                        "VALUES('mobygames',?,?,'exact')", (gid, ident))
+            if (linked + new) % 20000 == 0:
+                con.commit()
+                if progress:
+                    print("matchindex: moby %d linked, %d new, %.0fs"
+                          % (linked, new, time.time() - t0), file=sys.stderr)
+        con.commit()
+        if progress:
+            print("matchindex: mobygames — %d linked, %d new identities, %.0fs"
+                  % (linked, new, time.time() - t0), file=sys.stderr)
+    except Exception as e:                          # noqa: BLE001
+        print("matchindex: mobygames skipped (%s)" % str(e)[:120], file=sys.stderr)
+    return linked, new
+
+
+def _match_moby(con, g, plats, platmap):
+    """The identity this MobyGames game already is, or None. Same gate as ScreenScraper."""
+    nk = g["norm_key"]
+    if not nk:
+        return None
+    cands = con.execute(
+        "SELECT DISTINCT k.identity_id, i.name, i.year FROM identity_key k "
+        "JOIN identity i ON i.id=k.identity_id "
+        "WHERE k.ns IN ('name','alias') AND k.val=? AND k.identity_id < ?",
+        (nk, SS_ID_BASE)).fetchall()
+    want = sorted({platmap[p] for p in plats if p in platmap})
+    best, best_sc = None, 0.0
+    for c in cands:
+        if want:
+            on = con.execute(
+                "SELECT 1 FROM ig.game_platforms WHERE game_id=? AND platform_id IN "
+                "(%s) LIMIT 1" % ",".join("?" * len(want)),
+                [c["identity_id"]] + want).fetchone()
+            if not on:
+                continue
+        ok, sc = matchgate.score([g["title"] or ""], c["name"], g["year"], c["year"])
+        if ok and sc > best_sc:
+            best, best_sc = c["identity_id"], sc
+    return best
 
 
 def _merge_wikidata_ids(con, progress=True, t0=None):

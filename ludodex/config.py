@@ -209,6 +209,11 @@ SCHEMA = [
      "What the catalogue walk asks for: 'id', 'brief' or 'normal'. All three page at "
      "100 and cost ONE request, so 'normal' is free — it brings genres, platforms, "
      "release dates, alternate titles, score and sample art for the same 3,325 pages."),
+    ("mobygames_store_payload", "0",
+     "Keep each game's RAW record in the local catalogue instead of just the identity "
+     "fields. Off by default: descriptions and art urls are most of the bytes and can be "
+     "re-fetched per game on demand, so the mirror stays ~20-30 MB rather than several "
+     "hundred. Turn it on if you would rather spend disk than a second 4.6-hour walk."),
     ("mobygames_media", "1",
      "[media] Ingest the sample cover and screenshots that ride along with each game "
      "record (no extra requests; they arrive with width/height already)."),
