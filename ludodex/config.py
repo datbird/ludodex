@@ -201,6 +201,10 @@ SCHEMA = [
     ("mobygames_min_interval_ms", "1000",
      "Never send two requests closer together than this, whatever the hourly limit "
      "works out to. 1000ms is their own 429 advice ('wait at least 1 seconds')."),
+    ("mobygames_burst_reserve", "",
+     "Requests held out of the burst allowance so a long walk cannot spend the whole "
+     "hour in twelve minutes and leave an interactive lookup waiting forty-eight. "
+     "Blank = 10% of the hourly limit (minimum 20). Set 0 to allow full-speed bursting."),
     ("mobygames_walk_format", "normal",
      "What the catalogue walk asks for: 'id', 'brief' or 'normal'. All three page at "
      "100 and cost ONE request, so 'normal' is free — it brings genres, platforms, "

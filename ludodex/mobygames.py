@@ -6,12 +6,19 @@ WHY IT BEATS THE ALTERNATIVES ON IDS. TheGamesDB rations 12,000 requests a MONTH
 time, so the whole id space is 3,325 requests, which is FOUR AND A HALF HOURS. Two and a
 half times the catalogue, in an afternoon instead of a month, for $9.99 instead of $29.
 
-THE LIMIT IS PER HOUR, NOT PER MONTH, AND THAT CHANGES THE ENGINEERING. There is no
-budget to husband and no reserve to hold back — the only cost of a request is time. So
-this client does not count spend, it PACES: 3600/hourly_limit seconds between calls,
-evenly. Their docs give 720/hour ("one every five seconds") with 1/sec as a BURST
-ceiling, not a sustained rate; bursting to 720 in twelve minutes and then stalling for
-forty-eight buys nothing on a job measured in hours, and looks far worse from their side.
+THE LIMIT IS PER HOUR, NOT PER MONTH, AND THAT CHANGES THE ENGINEERING. The only cost of
+a request is time, so the client does not count a budget — it goes AS FAST AS THE HOUR
+ALLOWS. Their docs give 720/hour ("one every five seconds") with 1/sec as a burst
+ceiling, and both numbers matter: a 3,325-page walk converges on 720/hour whatever it
+does, but a 100-game enrichment fits entirely inside the hour and has no reason to crawl.
+So `_pace` bursts at 1/sec while the ROLLING HOUR has headroom past a small reserve, and
+settles to even 5s spacing once it does not. Long jobs are unchanged; short ones finish
+five times sooner.
+
+THE WINDOW IS PERSISTED, not counted in memory. A four-hour walk restarts, and an
+in-memory counter comes back believing it has spent nothing — which is exactly how a
+paced client becomes an unpaced one after a container restart, with the server the only
+thing that notices.
 
 FORMAT=NORMAL IS FREE. `format=id`, `brief` and `normal` all page at 100 and all cost one
 request, so asking for ids alone is leaving the genres, platforms, release dates,
@@ -29,6 +36,7 @@ Non-commercial terms on every tier: this data can never end up in anything sold.
 """
 import json
 import os
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -39,6 +47,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config                       # noqa: E402
 
+DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 API = "https://api.mobygames.com/v1"
 
 # Their documented non-commercial ceiling. Legacy keys get 360; a commercial agreement
@@ -83,22 +92,97 @@ def hourly_limit():
 
 
 def _interval():
-    """Seconds between requests. Even pacing, never below the burst floor."""
+    """The SUSTAINED spacing implied by the hourly limit — the floor a long job settles
+    into once its burst allowance is gone."""
+    return 3600.0 / max(1, hourly_limit())
+
+
+def _burst_floor():
+    """The fastest we may ever go. Their 429: 'wait at least 1 seconds between requests'."""
     try:
-        floor = int((config.get("mobygames_min_interval_ms") or "").strip())
+        ms = int((config.get("mobygames_min_interval_ms") or "").strip())
     except (TypeError, ValueError):
-        floor = MIN_INTERVAL_MS
-    return max(max(floor, 0) / 1000.0, 3600.0 / max(1, hourly_limit()))
+        ms = MIN_INTERVAL_MS
+    return max(ms, 0) / 1000.0
+
+
+def _reserve():
+    """Requests held out of the burst allowance so a long job cannot spend the whole
+    hour in twelve minutes and leave an interactive lookup waiting forty-eight."""
+    try:
+        n = int((config.get("mobygames_burst_reserve") or "").strip())
+    except (TypeError, ValueError):
+        n = -1
+    return n if n >= 0 else max(20, int(hourly_limit() * 0.1))
+
+
+STATE_DB = os.path.join(DATA, "mobygames-state.sqlite")
+
+
+def _state():
+    con = sqlite3.connect(STATE_DB, timeout=30)
+    con.execute("CREATE TABLE IF NOT EXISTS req(at REAL)")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_req_at ON req(at)")
+    return con
+
+
+def _spend_window():
+    """(requests in the last hour, oldest timestamp still inside it).
+
+    PERSISTED, because a four-hour walk restarts. An in-memory counter resets to zero on
+    every relaunch, which is precisely how a paced client turns into an unpaced one after
+    a container restart — and the server only tells you by starting to 429."""
+    now = time.time()
+    con = _state()
+    try:
+        con.execute("DELETE FROM req WHERE at < ?", (now - 3600.0,))
+        con.commit()
+        n = con.execute("SELECT COUNT(*) FROM req").fetchone()[0]
+        oldest = con.execute("SELECT MIN(at) FROM req").fetchone()[0]
+        return n, oldest
+    finally:
+        con.close()
+
+
+def _note_request():
+    con = _state()
+    try:
+        con.execute("INSERT INTO req(at) VALUES(?)", (time.time(),))
+        con.commit()
+    finally:
+        con.close()
 
 
 _last = [0.0]
 
 
 def _pace():
-    wait = _interval() - (time.time() - _last[0])
+    """Go as fast as the hour allows, and no faster.
+
+    THIS IS THE WHOLE POINT OF THE HOURLY MODEL. Even pacing at 5s is correct for a
+    3,325-page walk, but it is five times too slow for a 100-game enrichment that would
+    fit inside the burst allowance with room to spare. So: burst at 1/sec while the
+    rolling hour has headroom beyond the reserve, and fall back to even spacing once it
+    does not. A long job converges on 720/hour either way; a short one finishes five
+    times sooner.
+
+    The window is PERSISTED rather than counted in memory, because a walk that restarts
+    would otherwise believe it had spent nothing."""
+    used, oldest = _spend_window()
+    budget = max(1, hourly_limit() - _reserve())
+    if used < budget:
+        gap = _burst_floor()                     # headroom: go at the burst ceiling
+    elif oldest:
+        # No headroom. Wait for the oldest request to age out of the rolling hour, which
+        # is exactly when one more becomes affordable — never a blind sleep.
+        gap = max(_burst_floor(), (oldest + 3600.0) - _last[0])
+    else:
+        gap = _interval()
+    wait = gap - (time.time() - _last[0])
     if wait > 0:
         time.sleep(wait)
     _last[0] = time.time()
+    _note_request()
 
 
 def _get(path, params=None, timeout=60, attempts=3):
@@ -406,9 +490,15 @@ def extract_covers(cover_groups):
 
 
 def status():
+    used, _oldest = _spend_window()
     return {"configured": bool(api_key()), "enabled": enabled(),
             "hourly_limit": hourly_limit(),
-            "seconds_between_requests": round(_interval(), 2),
+            "used_last_hour": used,
+            "burst_reserve": _reserve(),
+            "burst_headroom": max(0, hourly_limit() - _reserve() - used),
+            "seconds_between_requests": round(
+                _burst_floor() if used < hourly_limit() - _reserve() else _interval(), 2),
+            "sustained_seconds": round(_interval(), 2),
             "pages_for_full_walk": 3325,
             "hours_for_full_walk": round(3325 * _interval() / 3600.0, 2),
             "product_codes": config.get_bool("mobygames_product_codes", False)}
@@ -418,7 +508,8 @@ def main(argv):
     if not argv or argv[0] == "--status":
         s = status()
         print("mobygames: key %s" % ("configured" if s["configured"] else "NOT SET"))
-        for k in ("enabled", "hourly_limit", "seconds_between_requests",
+        for k in ("enabled", "hourly_limit", "used_last_hour", "burst_headroom",
+                  "seconds_between_requests", "sustained_seconds",
                   "pages_for_full_walk", "hours_for_full_walk", "product_codes"):
             print("  %-26s %s" % (k, s[k]))
         return 0

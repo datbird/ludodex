@@ -107,10 +107,47 @@ def main():
     check("which is 5.0 s between requests", abs(MG._interval() - 5.0) < 0.01)
     config.set_("mobygames_hourly_limit", "360")
     check("a legacy key paces at 10 s", abs(MG._interval() - 10.0) < 0.01)
+    # _interval() is now the SUSTAINED spacing only; the floor lives in _burst_floor()
+    # and is what _pace() actually enforces. Splitting them is what lets a short job
+    # burst without a long one ever exceeding the hour.
     config.set_("mobygames_hourly_limit", "36000")
-    check("and the burst FLOOR still holds at 1 s, whatever the hourly says",
-          abs(MG._interval() - 1.0) < 0.01)
+    check("an absurd hourly limit implies a sub-second sustained spacing",
+          MG._interval() < 1.0)
+    check("...but the BURST FLOOR still refuses to go under 1 s",
+          abs(MG._burst_floor() - 1.0) < 0.01)
+    MG.STATE_DB = os.path.join(os.environ["LUDODEX_DATA"], "floor.sqlite")
+    t0 = time.time()
+    MG._pace(); MG._pace()
+    check("so two real calls are never closer than the floor: %.2fs"
+          % (time.time() - t0), (time.time() - t0) >= 0.95)
     config.set_("mobygames_hourly_limit", "720")
+
+    print()
+    print("1b. BURST WHEN THE HOUR ALLOWS IT — a short job has no reason to crawl")
+    # Even 5s pacing is right for a 3,325-page walk and five times too slow for a
+    # 100-game enrichment that fits inside the hour with room to spare.
+    MG.STATE_DB = os.path.join(os.environ["LUDODEX_DATA"], "burst.sqlite")
+    config.set_("mobygames_burst_reserve", "0")
+    t0 = time.time()
+    for _ in range(3):
+        MG._pace()
+    check("3 calls into an empty hour take ~2s, not ~10s: %.1fs" % (time.time() - t0),
+          time.time() - t0 < 4.0)
+    check("and the window is PERSISTED — a restarted walk has not forgotten",
+          MG._spend_window()[0] == 3)
+    con = MG._state()
+    con.execute("DELETE FROM req")
+    con.executemany("INSERT INTO req(at) VALUES(?)",
+                    [(time.time(),)] * (MG.hourly_limit() + 5))
+    con.commit(); con.close()
+    check("with the hour spent, it falls back to sustained spacing",
+          MG.status()["seconds_between_requests"] >= MG.status()["sustained_seconds"])
+    check("and reports the headroom honestly", MG.status()["burst_headroom"] == 0)
+    con = MG._state(); con.execute("DELETE FROM req"); con.commit(); con.close()
+    config.set_("mobygames_burst_reserve", "")
+    check("the default reserve keeps some hour back for interactive use",
+          MG._reserve() == 72)
+    MG._pace = lambda: None
 
     print()
     print("2. what a full walk costs — in hours, because that is the real currency")
@@ -125,7 +162,6 @@ def main():
     print()
     print("3. paging is 100, and the walk is RESUMABLE from an offset")
     calls.clear()
-    MG._pace = lambda: None                          # do not actually sleep in a test
     seen, offsets = [], []
     for off, rows in MG.walk_ids(fmt="id"):
         offsets.append(off)
