@@ -657,19 +657,40 @@ def finding_for(norm_key):
     return _finding_row(r) if r else None
 
 
-def accepted_supplements():
+def accepted_supplements(with_origin=False):
     """All accepted supplement attributes as {norm_key: {kind: value}} for the
-    build_library fill-gaps merge."""
+    build_library fill-gaps merge.
+
+    `with_origin=True` returns {norm_key: (attrs, origin)} instead, where origin is
+    `ai_web` when the finding came from a WEB-ENABLED run and `ai` when it did not.
+
+    WHY THE DISTINCTION IS WORTH CARRYING: "AI" as a single origin conflates two very
+    different claims. A value the model recalled from its own training is a guess with no
+    citation behind it. A value it went and READ — a web run stores its `sources` — is
+    sourced, just not by a provider we speak to. Crediting both as "AI" tells the user
+    the weaker thing about the stronger one, and gives them no way to tell which rows
+    have a trail they could follow.
+
+    Note this is only about attributes AI ITSELF produced. When AI merely matched a game
+    to IGDB or ScreenScraper, the values come from that provider and build_library
+    credits the provider — the AI did the matching, not the knowing."""
     con = _con()
     out = {}
     for r in con.execute("SELECT norm_key, payload_json, selection_json FROM "
                          "findings WHERE status IN ('accepted','applied')"):
-        attrs = (json.loads(r["payload_json"] or "{}").get("attributes") or {})
+        payload = json.loads(r["payload_json"] or "{}")
+        attrs = (payload.get("attributes") or {})
         sel = json.loads(r["selection_json"] or "null")
         if sel and sel.get("attributes") is not None:   # only the ticked kinds
             attrs = {k: v for k, v in attrs.items() if k in sel["attributes"]}
         if attrs:
-            out[r["norm_key"]] = attrs
+            if with_origin:
+                # A run flagged `web`, or one that recorded sources, went and read
+                # something. Either is enough to say so.
+                sourced = bool(payload.get("web")) or bool(payload.get("sources"))
+                out[r["norm_key"]] = (attrs, "ai_web" if sourced else "ai")
+            else:
+                out[r["norm_key"]] = attrs
     con.close()
     return out
 

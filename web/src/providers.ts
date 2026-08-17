@@ -24,6 +24,9 @@ export const PROVIDER_COLORS: Record<string, string> = {
   archive: '#5eead4',
   // ownership / origin markers
   ai: '#c084fc',
+  // A distinct colour on purpose: 'AI knew this' and 'AI went and read this' are
+  // different strengths of claim, and one badge for both hides which is which.
+  ai_web: '#38bdf8',
   manual: '#94a3b8',
   import: '#94a3b8',
   physical: '#d4a95e',       // disc gold
@@ -38,6 +41,7 @@ export function providerColor(id: string): string {
 
 const LABELS: Record<string, string> = {
   igdb: 'IGDB', screenscraper: 'ScreenScraper', gog: 'GOG', psn: 'PSN',
+  ai_web: 'AI Web Search',
   ea: 'EA', ai: 'AI', xbox: 'Xbox', itch: 'itch.io',
   // steamgrid is the LOCAL Steam grid folder, a different provider from SteamGridDB —
   // 'Steamgrid' beside 'SteamGridDB' read as the same thing.
@@ -54,7 +58,7 @@ export function providerLabel(id: string): string {
 const MARKS: Record<string, string> = {
   igdb: 'IG', screenscraper: 'SS', steam: 'S', gog: 'GG', epic: 'E', xbox: 'X',
   psn: 'PS', ea: 'EA', itch: 'i', ubisoft: 'U', battlenet: 'B',
-  steamgriddb: 'SG', steamgrid: 'SGr', thegamesdb: 'TG',
+  steamgriddb: 'SG', steamgrid: 'SGr', thegamesdb: 'TG', ai_web: 'AIW',
 }
 export function providerMark(id: string): string {
   const k = (id || '').toLowerCase()

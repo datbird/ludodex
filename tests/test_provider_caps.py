@@ -168,6 +168,39 @@ def main():
           "steamspy" in PC.CAPS.get("tags", {}))
 
     print()
+    print("3d. AI IS TWO ORIGINS, and an AI-assisted MATCH is neither of them")
+    # The point the split exists to make: when AI matches a game to IGDB, the VALUES are
+    # IGDB's. AI did the matching, not the knowing, and an attribute records where the
+    # data came from. Crediting AI there would erase the provider from its own facts.
+    bl = open(os.path.join(root, "ludodex", "build_library.py"), encoding="utf-8").read()
+    check("an AI-scored IGDB match still writes its attributes with origin 'igdb'",
+          '_accum(gid, kind, val, "igdb")' in bl)
+    check("...and the AI's part is recorded as the match REASON, not as the source",
+          '"AI-scored"' in bl)
+    check("the supplement merge no longer hardcodes a flat 'ai' origin",
+          'new_rows.append((gid, kind, str(v), "ai"))' not in bl)
+    check("it takes the origin the finding earned", "_ai_origin" in bl)
+
+    import aimeta
+    import inspect
+    src_am = inspect.getsource(aimeta.accepted_supplements)
+    check("a web-enabled run is credited ai_web", '"ai_web"' in src_am)
+    check("and sources alone are enough to count as having read something",
+          'payload.get("sources")' in src_am)
+
+    ai_kinds = {k for k, v in PC.CAPS.items() if "ai" in v}
+    web_kinds = {k for k, v in PC.CAPS.items() if "ai_web" in v}
+    check("both AI origins can fill the same kinds, by different means",
+          ai_kinds == web_kinds and ai_kinds)
+    check("their labels say which is which: %r vs %r"
+          % (PC.LABEL["ai"], PC.LABEL["ai_web"]),
+          "Web Search" in PC.LABEL["ai_web"] and "Web" not in PC.LABEL["ai"])
+    ui = open(os.path.join(root, "web", "src", "providers.ts"), encoding="utf-8").read()
+    check("the UI labels it too", "'AI Web Search'" in ui)
+    check("and colours it apart from plain AI",
+          "ai_web: '#" in ui and ui.count("ai: '#c084fc'") == 1)
+
+    print()
     print("4. nothing is claimed for a media-only provider")
     check("steamgriddb supplies no attributes",
           not any("steamgriddb" in v for v in PC.CAPS.values()))

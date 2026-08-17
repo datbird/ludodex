@@ -1510,7 +1510,12 @@ if _prov_all:
 ai_attr = 0
 try:
     import aimeta
-    for nk, attrs in aimeta.accepted_supplements().items():
+    # with_origin: an AI value the model RECALLED and one it went and READ are
+    # different claims, and flattening both to "ai" tells the user the weaker thing
+    # about the stronger one. NB this is only for attributes AI itself produced — an
+    # AI-assisted MATCH credits the provider, a few blocks up, because the values are
+    # the provider's and only the matching was AI's.
+    for nk, (attrs, _ai_origin) in aimeta.accepted_supplements(with_origin=True).items():
         for gid in base_to_gids.get(nk, ()):   # title-level → every platform entry
             existing = have.setdefault(gid, set())
             new_rows = []
@@ -1519,7 +1524,7 @@ try:
                     continue
                 for v in (val if isinstance(val, list) else [val]):
                     if v not in (None, ""):
-                        new_rows.append((gid, kind, str(v), "ai"))
+                        new_rows.append((gid, kind, str(v), _ai_origin))
                 existing.add(kind)
             if new_rows:
                 cur.executemany("INSERT INTO game_attributes(game_id,kind,value,origin) "

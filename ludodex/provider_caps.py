@@ -50,7 +50,16 @@ LABEL = {
     "steam": "Steam",
     "steamspy": "SteamSpy",
     "thegamesdb": "TheGamesDB",
-    "ai": "AI (the wand)",
+    # Two AI origins, not one. `ai` is the model answering from what it already knew —
+    # a guess with no citation. `ai_web` is the model having gone and READ something,
+    # with sources recorded against the finding. Crediting both as "AI" tells the user
+    # the weaker thing about the stronger one.
+    #
+    # NEITHER of them appears when AI merely MATCHED a game to a provider: those values
+    # are IGDB's or ScreenScraper's and are credited to them. The AI did the matching,
+    # not the knowing, and the attribute is a fact about where the DATA came from.
+    "ai": "AI (from what it knew)",
+    "ai_web": "AI Web Search",
     # Not remote providers, but they DO fill attributes, and a tooltip that omits them
     # tells the user nothing can.
     "rom": "the ROM filename",
@@ -88,7 +97,8 @@ CAPS = {
         "igdb": "first release year", "screenscraper": "release year",
         "steam": "from the store release date" + STEAM_NOTE,
         "thegamesdb": "year of THIS regional release",
-        "ai": "inferred from the title and whatever context the file gives"},
+        "ai": "inferred from the title and whatever context the file gives",
+        "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "release_date": {
         "igdb": "exact first release date",
         "steam": "store release date" + STEAM_NOTE,
@@ -98,30 +108,37 @@ CAPS = {
         "steam": "store genres" + STEAM_NOTE,
         "thegamesdb": "30-genre list; its non-genre entries (Demo, Unofficial, "
                       "Virtual Console\u2026) are split off as flags, never filed here",
-        "ai": "inferred when no provider has the game"},
+        "ai": "inferred when no provider has the game",
+        "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "themes": {"igdb": "themes (horror, sci-fi, comedy\u2026)",
-               "ai": "inferred when no provider has the game"},
+               "ai": "inferred when no provider has the game",
+               "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "game_modes": {
         "igdb": "single player / co-op / multiplayer",
         "thegamesdb": "derived from its player count + explicit co-op yes/no",
-        "ai": "inferred when no provider has the game"},
+        "ai": "inferred when no provider has the game",
+        "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "player_perspectives": {"igdb": "first person, third person, isometric\u2026",
-                            "ai": "inferred when no provider has the game"},
+                            "ai": "inferred when no provider has the game",
+                            "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "developers": {
         "igdb": "developer companies", "screenscraper": "developer",
         "steam": "store developers" + STEAM_NOTE,
-        "thegamesdb": "developer companies", "ai": "inferred when no provider has the game"},
+        "thegamesdb": "developer companies",
+        "ai": "inferred when no provider has the game", "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "publishers": {
         "igdb": "publisher companies", "screenscraper": "publisher",
         "steam": "store publishers" + STEAM_NOTE,
-        "thegamesdb": "publisher companies", "ai": "inferred when no provider has the game"},
+        "thegamesdb": "publisher companies",
+        "ai": "inferred when no provider has the game", "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "series": {"igdb": "franchise / collection"},
     "description": {
         "igdb": "the IGDB summary paragraph",
         "screenscraper": "the community-written synopsis",
         "steam": "the store short description" + STEAM_NOTE,
         "thegamesdb": "its overview paragraph",
-        "ai": "written from what is known about the title"},
+        "ai": "written from what is known about the title",
+        "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "categories": {
         "steam": "store categories (achievements, cloud saves, controller support\u2026)"
                  + STEAM_NOTE},

@@ -9576,6 +9576,7 @@ function providerMatches(p: AiFindingPayload): ProviderMatch[] {
 
 const PROVIDER_LABEL: Record<string, string> = {
   igdb: 'IGDB', screenscraper: 'ScreenScraper', thegamesdb: 'TheGamesDB',
+  ai_web: 'AI Web Search',
 }
 
 function pmLabel(m: ProviderMatch): string {
