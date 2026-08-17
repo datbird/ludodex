@@ -20,6 +20,19 @@ back as "GoldenEye 007" and "007: The World Is Not Enough", both on platform 3 =
 Joined against this deployment's ScreenScraper catalog on 2026-08-16: 23,650 of 724,487
 SHA1s hit, resolving 10,701 distinct games. Ten thousand ids for zero requests.
 
+DO NOT MISTAKE THIS MAP FOR THE DATABASE. It covers 10,688 games; TheGamesDB itself holds
+roughly 123,000. Measured 2026-08-17 by batched id sampling (20 ids per request, 20
+requests): the id space is ~90% populated up to a ceiling between 135,000 and 138,000,
+and stone dead from 138,000 on. So this file is about 9% of the catalog — unsurprising,
+since it is a ROM-hash map for 31 emulated console platforms and can never cover the PC
+and modern-console bulk. For scale: IGDB's mirror here holds 371,978 games, roughly three
+times TheGamesDB.
+
+The corollary that matters for planning: 99.1% of the ids this map contains are ALREADY
+used by this library, so there is almost nothing left in it to gain. Everything beyond it
+costs API requests — ByPlatformID at 20 games per request, which is ~6,150 requests for
+the whole catalog, or far fewer if scoped to the platforms actually owned.
+
 THE ONE RULE HERE: A HASH IS EVIDENCE, A NAME IS NOT. This file also carries ROM names,
 and they are tempting — matching on them would multiply the hit rate. They are used only
 to LABEL an identity the hash created, never to find one. A hash collision is a
