@@ -2459,6 +2459,18 @@ def attribute_capabilities():
             "unsupplied_note": provider_caps.UNSUPPLIED_NOTE}
 
 
+@app.get("/api/services/mobygames/status")
+def mobygames_status():
+    """Pacing and what a full walk would cost, from the CONFIGURED limit.
+
+    Shows hours rather than requests on purpose: MobyGames rations by the hour, so the
+    question a user actually has is "how long", not "how much budget is left"."""
+    import mobygames
+    if not mobygames.api_key():
+        return {"configured": False}
+    return {"configured": True, "period": "hour", **mobygames.status()}
+
+
 @app.get("/api/services/thegamesdb/limit")
 def thegamesdb_limit(refresh: bool = False):
     """What is left of this month, as the SERVER reports it.
@@ -9944,6 +9956,24 @@ SERVICES = [
           "label": "Held back for interactive lookups (blank = 5%)", "secret": False}],
      "tier": "/api/services/thegamesdb/limit",
      "limits": _limits("thegamesdb", cooldown="250")},
+    {"id": "mobygames", "name": "MobyGames", "role": "provider",
+     "hint": "mobygames.com/info/api — $9.99/mo Hobbyist, NON-COMMERCIAL ONLY. The "
+             "cheapest id space here: its limit is 720 requests an HOUR rather than a "
+             "monthly budget, and /games pages 100 at a time, so all 332,414 games are "
+             "3,325 requests — about 4.5 hours. format=normal costs the same as ids, so "
+             "the walk takes the metadata too. Product codes (disc serials) are a "
+             "SEPARATE request per game per platform — ~25 days — and are off by "
+             "default for that reason.",
+     "creds": [
+         {"key": "mobygames_api_key", "label": "API key", "secret": True},
+         {"key": "mobygames_hourly_limit",
+          "label": "Requests per hour (720 = non-commercial; 360 = legacy key)",
+          "secret": False},
+         {"key": "mobygames_walk_format",
+          "label": "Walk format (id / brief / normal — all cost the same)",
+          "secret": False}],
+     "tier": "/api/services/mobygames/status",
+     "limits": _limits("mobygames", cooldown="5000", per_day="17280")},
     {"id": "arcadedb", "name": "ArcadeDB", "role": "provider",
      "hint": "adb.arcadeitalia.net — arcade only, no key, no account, no quota. Built "
              "on the official MAME files and keyed on the SET NAME, so there is no name "

@@ -547,7 +547,7 @@ def steamgrid_kind(filename):
 # --------------------------------------------------------------------------- #
 LOCAL_PROVIDERS = ("esde", "steamgrid", "playnite", "launchbox")
 REMOTE_PROVIDERS = ("steam", "igdb", "steamgriddb", "thegamesdb",
-                    "arcadedb", "zxinfo")
+                    "arcadedb", "zxinfo", "mobygames")
 MEDIA_PROVIDERS = LOCAL_PROVIDERS + REMOTE_PROVIDERS
 
 # Per-kind provider priority for choosing the ONE best asset (first available
@@ -569,7 +569,7 @@ MEDIA_PROVIDERS = LOCAL_PROVIDERS + REMOTE_PROVIDERS
 # has no rows for, because a name in a priority list that never matches makes the term
 # constant, and a constant term decides nothing.
 PRIORITY = {
-    "cover":        ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb", "steamgriddb", "thegamesdb", "playnite", "launchbox"],
+    "cover":        ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb", "steamgriddb", "mobygames", "thegamesdb", "playnite", "launchbox"],
     "background":   ["steamgrid", "steam", "screenscraper", "igdb", "steamgriddb", "thegamesdb", "esde", "gamelist", "playnite", "launchbox"],
     "hero":         ["steamgrid", "steam", "steamgriddb", "igdb", "screenscraper", "launchbox"],
     # ScreenScraper already sat LAST here — it has essentially no capsule art — so
@@ -590,12 +590,12 @@ PRIORITY = {
     # ScreenScraper is deliberate: IGDB's shots are curated per game, SS's are community
     # uploads that may be from a different system entirely. Frontends last — they are
     # scraped copies of these same sources.
-    "screenshot":   ["steam", "igdb", "screenscraper", "arcadedb", "zxinfo", "thegamesdb", "gamelist", "esde", "launchbox"],
+    "screenshot":   ["steam", "igdb", "screenscraper", "arcadedb", "zxinfo", "mobygames", "thegamesdb", "gamelist", "esde", "launchbox"],
     "title_screen": ["esde", "screenscraper", "arcadedb", "zxinfo", "thegamesdb", "launchbox"],
     "box_3d":       ["esde", "screenscraper", "steamgriddb", "launchbox"],
-    "box_back":     ["esde", "screenscraper", "thegamesdb", "launchbox"],
-    "box_spine":    ["screenscraper", "launchbox"],
-    "physical_media": ["esde", "screenscraper", "launchbox"],
+    "box_back":     ["esde", "screenscraper", "mobygames", "thegamesdb", "launchbox"],
+    "box_spine":    ["screenscraper", "mobygames", "launchbox"],
+    "physical_media": ["esde", "screenscraper", "mobygames", "launchbox"],
     "marquee":      ["arcadedb", "esde", "screenscraper", "launchbox"],
     "bezel":        ["screenscraper"],
     "arcade_cabinet":  ["arcadedb", "launchbox", "screenscraper"],

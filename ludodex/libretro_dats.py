@@ -43,10 +43,24 @@ TREE = ("https://api.github.com/repos/libretro/libretro-database/git/trees/"
         "master?recursive=1")
 
 # Redump first: it is the collection that carries serials, and it is a quarter the size.
-COLLECTIONS = ("redump", "no-intro")
+DEFAULT_COLLECTIONS = ("redump", "no-intro")
+CACHE_TTL_DAYS = 30                # the DATs change when a dump is added or corrected
 
-# The DATs change when a dump is added or corrected — real, but not weekly.
-CACHE_TTL = 30 * 24 * 3600
+
+def wanted_collections():
+    """Which collections to fold in, in order. Configurable because the repo carries
+    noisier ones (tosec, hacks, homebrew) that some libraries want and most do not."""
+    raw = (config.get("libretro_dats_collections") or "").strip()
+    got = tuple(x.strip() for x in raw.split(",") if x.strip())
+    return got or DEFAULT_COLLECTIONS
+
+
+def cache_ttl():
+    try:
+        d = int((config.get("libretro_dats_cache_days") or "").strip())
+    except (TypeError, ValueError):
+        d = 0
+    return max(1, d or CACHE_TTL_DAYS) * 24 * 3600
 
 SOURCE = {
     "name": "libretro-database (No-Intro / Redump DATs)",
@@ -96,7 +110,7 @@ def systems(collection, timeout=60):
 def fetch(collection, name, timeout=120):
     """One DAT, cached. Returns its path, or None. Never raises."""
     p = _cache_path(collection, name)
-    if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < CACHE_TTL:
+    if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < cache_ttl():
         return p
     url = RAW % (collection, urllib.parse.quote(name))
     try:
@@ -155,9 +169,9 @@ def parse(path):
                 game[m.group(1).lower()] = m.group(2)
 
 
-def all_rows(collections=COLLECTIONS, refresh=False, progress=False):
+def all_rows(collections=None, refresh=False, progress=False):
     """Every dump across every cached system. Fetches what is missing."""
-    for coll in collections:
+    for coll in (collections or wanted_collections()):
         names = systems(coll) if refresh or not os.path.isdir(
             os.path.join(CACHE_DIR, coll)) else sorted(
                 os.listdir(os.path.join(CACHE_DIR, coll)))
@@ -192,7 +206,7 @@ def stats():
 def main(argv):
     refresh = "--refresh" in argv
     if "--fetch" in argv or refresh:
-        for coll in COLLECTIONS:
+        for coll in wanted_collections():
             names = systems(coll)
             print("libretro_dats: %s — %d systems" % (coll, len(names)), file=sys.stderr)
             for name in names:

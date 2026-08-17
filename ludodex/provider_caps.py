@@ -62,6 +62,7 @@ LABEL = {
     "ai_web": "AI Web Search",
     # Not remote providers, but they DO fill attributes, and a tooltip that omits them
     # tells the user nothing can.
+    "mobygames": "MobyGames",
     "arcadedb": "ArcadeDB",
     "zxinfo": "ZXInfo",
     "rom": "the ROM filename",
@@ -76,6 +77,7 @@ ENABLED_KEY = {
     "screenscraper": "metadata_screenscraper_enabled",
     "steamspy": "metadata_steamspy_enabled",
     "thegamesdb": "metadata_thegamesdb_enabled",
+    "mobygames": "metadata_mobygames_enabled",
     "arcadedb": "metadata_arcadedb_enabled",
     "zxinfo": "metadata_zxinfo_enabled",
 }
@@ -101,6 +103,7 @@ CAPS = {
         "igdb": "first release year", "screenscraper": "release year",
         "steam": "from the store release date" + STEAM_NOTE,
         "thegamesdb": "year of THIS regional release",
+        "mobygames": "the earliest release year across every platform it lists",
         "arcadedb": "for MAME sets: from the official MAME files, keyed on the set name",
         "zxinfo": "for ZX Spectrum titles, from the World of Spectrum archive",
         "ai": "inferred from the title and whatever context the file gives",
@@ -115,10 +118,14 @@ CAPS = {
         "thegamesdb": "30-genre list; its non-genre entries (Demo, Unofficial, "
                       "Virtual Console\u2026) are split off as flags, never filed here",
         "arcadedb": "MAME's own genre for the set (Maze / Collect, Shooter\u2026)",
+        "mobygames": "its 'Basic Genres' only \u2014 the Perspective and Setting categories "
+                     "in the same flat list are filed as perspectives and themes "
+                     "instead, so 'Adventure' is not buried among '1st-person'",
         "zxinfo": "for ZX Spectrum titles, from the World of Spectrum archive",
         "ai": "inferred when no provider has the game",
         "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "themes": {"igdb": "themes (horror, sci-fi, comedy\u2026)",
+               "mobygames": "its Setting and Narrative Theme genre categories",
                "ai": "inferred when no provider has the game",
                "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "game_modes": {
@@ -129,6 +136,7 @@ CAPS = {
         "ai": "inferred when no provider has the game",
         "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "player_perspectives": {"igdb": "first person, third person, isometric\u2026",
+                            "mobygames": "its Perspective genre category",
                             "ai": "inferred when no provider has the game",
                             "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "developers": {
@@ -150,6 +158,7 @@ CAPS = {
         "screenscraper": "the community-written synopsis",
         "steam": "the store short description" + STEAM_NOTE,
         "thegamesdb": "its overview paragraph",
+        "mobygames": "its editorial description",
         "arcadedb": "the MAME history.dat entry for the set",
         "ai": "written from what is known about the title",
         "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
@@ -162,7 +171,8 @@ CAPS = {
     "community_score": {
         "igdb": "IGDB user rating, 0-100",
         "screenscraper": "community rating, rescaled to 0-100",
-        "thegamesdb": "community rating, rescaled to 0-100"},
+        "thegamesdb": "community rating, rescaled to 0-100",
+        "mobygames": "Moby Score, rescaled from 0-10 to 0-100"},
     "esrb_rating": {
         "igdb": "the ESRB badge, as its own value rather than parsed back out of a "
                 "combined string",

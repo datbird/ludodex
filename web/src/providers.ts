@@ -7,6 +7,7 @@ export const PROVIDER_COLORS: Record<string, string> = {
   screenscraper: '#f59e0b',  // amber
   steamgriddb: '#5eb3ef',    // the accent band of its own logo
   thegamesdb: '#7ab648',     // the green of its own wordmark
+  mobygames: '#c9472f',      // the red of its own wordmark
   arcadedb: '#e8503a',       // arcade cabinet red
   zxinfo: '#d6d02b',         // the Spectrum's yellow stripe
   // stores
@@ -49,6 +50,7 @@ const LABELS: Record<string, string> = {
   // 'Steamgrid' beside 'SteamGridDB' read as the same thing.
   steamgriddb: 'SteamGridDB', steamgrid: 'Steam grid',
   thegamesdb: 'TheGamesDB', arcadedb: 'ArcadeDB', zxinfo: 'ZXInfo',
+  mobygames: 'MobyGames',
 }
 export function providerLabel(id: string): string {
   const k = (id || '').toLowerCase()
@@ -60,7 +62,7 @@ export function providerLabel(id: string): string {
 const MARKS: Record<string, string> = {
   igdb: 'IG', screenscraper: 'SS', steam: 'S', gog: 'GG', epic: 'E', xbox: 'X',
   psn: 'PS', ea: 'EA', itch: 'i', ubisoft: 'U', battlenet: 'B',
-  steamgriddb: 'SG', steamgrid: 'SGr', thegamesdb: 'TG', ai_web: 'AIW', arcadedb: 'ADB', zxinfo: 'ZX',
+  steamgriddb: 'SG', steamgrid: 'SGr', thegamesdb: 'TG', ai_web: 'AIW', arcadedb: 'ADB', zxinfo: 'ZX', mobygames: 'MG',
 }
 export function providerMark(id: string): string {
   const k = (id || '').toLowerCase()

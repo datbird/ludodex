@@ -186,6 +186,37 @@ SCHEMA = [
     ("thegamesdb_reserve", "",
      "Requests held back from bulk sweeps so interactive lookups still work. Blank = "
      "5% of the monthly limit (minimum 10), so it scales if you buy a bigger tier."),
+    # --- MobyGames (api.mobygames.com) — the cheapest id space in the stack. Its limit
+    #     is 720 requests an HOUR, not a monthly budget, so the only cost of a request
+    #     is time: 332,414 games at 100 per page is 3,325 pages, about 4.5 hours. ---
+    ("metadata_mobygames_enabled", "0",
+     "[metadata] Consult MobyGames for metadata + sample art. Off by default: it needs "
+     "your own paid key ($9.99/mo Hobbyist, non-commercial only)."),
+    ("mobygames_api_key", "",
+     "Your MobyGames API key, from your MobyPro API page. Env: MOBYGAMES_API_KEY."),
+    ("mobygames_hourly_limit", "720",
+     "Requests per hour. 720 is the documented non-commercial ceiling ('one every five "
+     "seconds'); legacy keys get 360, a commercial agreement may get more. Pacing is "
+     "derived from this — lower it to be gentler, never raise it past what you have."),
+    ("mobygames_min_interval_ms", "1000",
+     "Never send two requests closer together than this, whatever the hourly limit "
+     "works out to. 1000ms is their own 429 advice ('wait at least 1 seconds')."),
+    ("mobygames_walk_format", "normal",
+     "What the catalogue walk asks for: 'id', 'brief' or 'normal'. All three page at "
+     "100 and cost ONE request, so 'normal' is free — it brings genres, platforms, "
+     "release dates, alternate titles, score and sample art for the same 3,325 pages."),
+    ("mobygames_media", "1",
+     "[media] Ingest the sample cover and screenshots that ride along with each game "
+     "record (no extra requests; they arrive with width/height already)."),
+    ("mobygames_product_codes", "0",
+     "Fetch DISC SERIALS / product codes. OFF, and think before turning it on: these "
+     "live at /games/{id}/platforms/{pid}, ONE REQUEST PER GAME PER PLATFORM with no "
+     "batching — roughly 430,000 requests, about 25 DAYS at 720/hour. Scope it to the "
+     "platforms you own rather than running it across the catalogue."),
+    ("mobygames_full_covers", "0",
+     "[media] Fetch the COMPLETE cover set per game/platform (front, back, media, "
+     "spine, per country) instead of the single sample cover. Same cost shape as "
+     "product codes — one request per game per platform. Off by default."),
     # --- free, no-key specialists. Each covers a platform family the big providers
     #     serve badly: arcade (Steam and IGDB know nothing about a cabinet) and the
     #     ZX Spectrum (13,859 hashed titles here, zero covered by TheGamesDB's map). ---
@@ -197,6 +228,18 @@ SCHEMA = [
     ("metadata_zxinfo_enabled", "1",
      "[metadata] Consult ZXInfo (api.zxinfo.dk) for ZX Spectrum titles — machine "
      "variant, authors with roles, publisher, loading screens. No key, no quota."),
+    ("arcadedb_media", "1",
+     "[media] Ingest ArcadeDB's marquee, cabinet, control-panel, flyer and short-play "
+     "video URLs alongside its metadata (they come in the same response)."),
+    ("zxinfo_media", "1",
+     "[media] Ingest ZXInfo's loading and in-game screens alongside its metadata."),
+    ("libretro_dats_collections", "redump,no-intro",
+     "Which DAT collections to fold into the match index, in order. 'redump' is the "
+     "one carrying disc serials and is a quarter the size, so it leads. Others in the "
+     "repo (tosec, hacks, homebrew) are available but noisier."),
+    ("libretro_dats_cache_days", "30",
+     "How long a downloaded DAT is trusted before it is re-fetched. They change when a "
+     "dump is added or corrected — real, but not weekly."),
     ("matchindex_libretro_dats", "1",
      "Fold the No-Intro and Redump dump databases (via libretro-database, CC BY-SA) "
      "into the match index when it is rebuilt. This is where DISC SERIALS come from — "
@@ -404,7 +447,7 @@ BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "ea", "emulation", "playnite"
 # Metadata providers are CONSULTED to enrich attributes — they are NOT sources
 # (they add no ownership). Toggled like sources but tracked separately.
 METADATA_PROVIDERS = ("igdb", "screenscraper", "steamspy", "thegamesdb",
-                      "arcadedb", "zxinfo")
+                      "arcadedb", "zxinfo", "mobygames")
 
 
 def metadata_enabled(name):
@@ -842,6 +885,33 @@ INTEGRATIONS = [
                      "thegamesdb_reserve"],
      "env": ["TGDB_API_KEY"],
      "verify": "python3 ludodex/thegamesdb.py --status"},
+
+    {"id": "mobygames", "name": "MobyGames (metadata + art)",
+     "kind": "metadata",
+     "purpose": "332,414 games — the largest curated catalogue here after IGDB, and the "
+                "cheapest id space. Its limit is 720 requests an HOUR rather than a "
+                "monthly budget, and /games pages 100 at a time, so the WHOLE id space "
+                "is 3,325 requests (~4.5 hours). Editorial descriptions, Moby Score, "
+                "genre categories that split cleanly into genres/themes/perspectives, "
+                "and 260,337 product codes (disc serials) if you want them.",
+     "url": "https://www.mobygames.com/info/api/",
+     "steps": [
+         "Subscribe on their API page — $9.99/mo Hobbyist. NON-COMMERCIAL ONLY: this "
+         "data can never end up in anything sold, and that restriction travels with it.",
+         "Store it: config.py set mobygames_api_key <key>, then: config.py enable "
+         "mobygames.",
+         "Pacing comes from mobygames_hourly_limit (720 documented; legacy keys 360). "
+         "Lower it to be gentler; never raise it past what your key has.",
+         "Leave mobygames_walk_format on 'normal' — id, brief and normal all page at "
+         "100 and cost one request each, so the metadata is free.",
+         "PRODUCT CODES ARE OFF ON PURPOSE. They live at /games/{id}/platforms/{pid}, "
+         "one request per game per platform, ~430,000 requests / ~25 days. Turn "
+         "mobygames_product_codes on only after scoping it to platforms you own."],
+     "config_keys": ["mobygames_api_key", "mobygames_hourly_limit",
+                     "mobygames_walk_format", "mobygames_product_codes",
+                     "mobygames_full_covers"],
+     "env": ["MOBYGAMES_API_KEY"],
+     "verify": "python3 ludodex/mobygames.py --status"},
 
     {"id": "arcadedb", "name": "ArcadeDB (arcade metadata + media)",
      "kind": "metadata",
