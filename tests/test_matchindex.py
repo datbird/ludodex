@@ -29,7 +29,16 @@ def main():
     import test_support
     test_support.isolate("ludodex-matchindex-")
     import sqlite3
+    import config
     import matchindex as M
+
+    # This file tests the IGDB spine and the ScreenScraper merge against hand-built
+    # fixtures, so the identity counts below are exact. The TheGamesDB free-map layer
+    # would DOWNLOAD a 4.9 MB third-party file and mint ~10,000 identities from it —
+    # real behaviour, covered by test_tgdb_freemap.py, and nothing to do with what is
+    # asserted here. Switched off deliberately rather than left to whether the machine
+    # running the suite happens to have network.
+    config.set_("matchindex_tgdb_freemap", "0")
 
     # ---- fake mirrors ------------------------------------------------------- #
     ig = sqlite3.connect(M.IGDB_DB)

@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""The free SHA1 -> TheGamesDB-id map, so ids cost nothing instead of costing the month.
+
+A TheGamesDB key is 1,000 requests PER MONTH and name search cannot be batched — one
+request per title. Resolving a library the obvious way is therefore measured in YEARS,
+which is the same as saying it cannot be done.
+
+It does not have to be done. `sselph/scraper` — the classic RetroPie scraper — ships a
+prebuilt `hash.csv` under the MIT licence: 58,843 SHA1 hashes mapped to 11,008 distinct
+TheGamesDB game ids across 34 platforms. Verified against the live API rather than taken
+on trust: the file's ids 160 and 238 come back as "GoldenEye 007" and "007: The World Is
+Not Enough", both on platform 3 = Nintendo 64, exactly as claimed.
+
+Joined against this deployment's ScreenScraper catalog on 2026-08-16: 23,649 of 720,097
+SHA1s hit, resolving 10,700 distinct games. Ten thousand ids for zero requests.
+
+THE ONE RULE HERE: A HASH IS EVIDENCE, A NAME IS NOT. This file also carries ROM names,
+and they are tempting — matching on them would multiply the hit rate. They are used only
+to LABEL an identity the hash created, never to find one. A hash collision is a
+cryptographic event; a name collision is Tuesday, and name-matching out of a file with no
+platform gate is the fail-open shape this codebase keeps getting bitten by.
+
+LICENCE: sselph's repository is MIT, but the DATA is derived from TheGamesDB, whose own
+redistribution terms are unresolved. So the file is DOWNLOADED ON THE USER'S MACHINE at
+build time and never vendored into this repo or into a published supplement — fetching
+something onto your own computer is a different act from redistributing it.
+"""
+import csv
+import io
+import os
+import sys
+import time
+import urllib.request
+
+DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, DIR)
+import config                       # noqa: E402
+
+DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+CACHE = os.path.join(DATA, "tgdb-freemap.csv")
+DEFAULT_URL = "https://raw.githubusercontent.com/sselph/scraper/master/hash.csv"
+
+# The file changes about never (sselph's last release predates most of this catalog), so
+# a long cache is right — and it means a rebuild does not depend on GitHub being up.
+CACHE_TTL = 30 * 24 * 3600
+
+SOURCE = {
+    "name": "sselph/scraper hash.csv",
+    "url": "https://github.com/sselph/scraper",
+    "license": "MIT (code); the data it carries is derived from TheGamesDB",
+    "license_url": "https://github.com/sselph/scraper/blob/master/LICENSE",
+    "provides": "SHA1 -> TheGamesDB game id, for ROM hashes",
+}
+
+
+def enabled():
+    return config.get_bool("matchindex_tgdb_freemap", True)
+
+
+def url():
+    return (config.get("matchindex_tgdb_freemap_url") or "").strip() or DEFAULT_URL
+
+
+def fetch(force=False, timeout=120):
+    """Ensure the cached copy exists and is fresh enough. Returns its path, or None.
+
+    NEVER RAISES on a network failure. This is an optional enrichment of an optional
+    index; a rebuild that dies because GitHub was slow would be a worse outcome than a
+    rebuild without it, and the previous cached copy is still perfectly good."""
+    if os.path.exists(CACHE) and not force:
+        if (time.time() - os.path.getmtime(CACHE)) < CACHE_TTL:
+            return CACHE
+    tmp = CACHE + ".part"
+    try:
+        req = urllib.request.Request(url(), headers={"User-Agent": "ludodex"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read()
+        if len(body) < 100_000:                    # a truncated or error body
+            raise ValueError("suspiciously small (%d bytes)" % len(body))
+        with open(tmp, "wb") as fh:
+            fh.write(body)
+        os.replace(tmp, CACHE)
+        return CACHE
+    except Exception as e:                          # noqa: BLE001
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        print("tgdb_freemap: fetch failed (%s)" % str(e)[:120], file=sys.stderr)
+        # A stale copy beats no copy: the mapping is historical data, not a live feed.
+        return CACHE if os.path.exists(CACHE) else None
+
+
+def rows(path=None):
+    """Yield (sha1, tgdb_id, tgdb_platform_id, name). Malformed lines are skipped.
+
+    Skipped rather than raised on: this is a third-party file we do not control, and one
+    bad line must not cost the other fifty-eight thousand."""
+    p = path or CACHE
+    if not p or not os.path.exists(p):
+        return
+    with io.open(p, encoding="utf-8", errors="replace", newline="") as fh:
+        for rec in csv.reader(fh):
+            if len(rec) < 4:
+                continue
+            sha1 = (rec[0] or "").strip().lower()
+            gid, plat, name = rec[1].strip(), rec[2].strip(), rec[3].strip()
+            if len(sha1) != 40 or not gid.isdigit():
+                continue
+            yield sha1, int(gid), (int(plat) if plat.isdigit() else None), name
+
+
+def stats(path=None):
+    n = 0
+    ids, plats = set(), set()
+    for _sha, gid, plat, _nm in rows(path):
+        n += 1
+        ids.add(gid)
+        if plat:
+            plats.add(plat)
+    return {"rows": n, "games": len(ids), "platforms": len(plats),
+            "cached": os.path.exists(CACHE),
+            "cached_at": int(os.path.getmtime(CACHE)) if os.path.exists(CACHE) else 0}
+
+
+def main(argv):
+    if "--fetch" in argv:
+        p = fetch(force="--force" in argv)
+        print("tgdb_freemap: %s" % (p or "unavailable"))
+    s = stats()
+    print("rows      : %s" % "{:,}".format(s["rows"]))
+    print("games     : %s" % "{:,}".format(s["games"]))
+    print("platforms : %s" % s["platforms"])
+    print("cached    : %s" % (time.strftime("%Y-%m-%d", time.localtime(s["cached_at"]))
+                              if s["cached_at"] else "no"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -74,6 +74,10 @@ SS_DB = os.path.join(DATA, "ss-catalog.sqlite")
 
 SS_ID_BASE = 100_000_000
 LEARNED_ID_BASE = 200_000_000    # a game neither mirror knows, found by live search
+# A ROM the free TheGamesDB hash map knows and NEITHER mirror does. Its own range so a
+# later rebuild can drop the whole layer without touching anything else, and so a stray
+# id can always be traced back to the source that minted it.
+TGDB_ID_BASE = 300_000_000
 YEAR_SLACK = 1                   # a year that disagrees by more than this is a refusal
 
 # Which ROM hashes earn their place. CRC32 is what No-Intro, TOSEC and every frontend
@@ -106,9 +110,14 @@ PATH_KEY = "matchindex.path"
 LICENSE = "CC BY-NC-SA 4.0"
 LICENSE_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/"
 ATTRIBUTION = ("Game data from ScreenScraper.fr (CC BY-NC-SA 4.0) and its contributors, "
-               "and from IGDB.com. Built by ludodex. Non-commercial use only; "
-               "derivative works must carry the same licence.")
+               "from IGDB.com, and TheGamesDB ids via sselph/scraper's hash.csv (MIT). "
+               "Built by ludodex. Non-commercial use only; derivative works must carry "
+               "the same licence.")
 SOURCES = [
+    {"name": "sselph/scraper hash.csv", "url": "https://github.com/sselph/scraper",
+     "license": "MIT (code); the data it carries is derived from TheGamesDB",
+     "license_url": "https://github.com/sselph/scraper/blob/master/LICENSE",
+     "provides": "SHA1 -> TheGamesDB game id, for ROM hashes"},
     {"name": "ScreenScraper.fr", "url": "https://www.screenscraper.fr",
      "license": "CC BY-NC-SA 4.0", "license_url": LICENSE_URL,
      "provides": "game identities, regional names, ROM hashes"},
@@ -532,9 +541,14 @@ def build(progress=True):
                       file=sys.stderr)
     con.commit()
 
+    # 5. TheGamesDB ids, for free — see _merge_tgdb_freemap.
+    tgdb_linked, tgdb_new = _merge_tgdb_freemap(con, now, progress, t0)
+
     st = status(con)
     st.update({"ss_merged": ss_merged, "ss_own_identity": ss_own,
-               "ss_hash_keys": ss_roms, "elapsed": round(time.time() - t0, 1)})
+               "ss_hash_keys": ss_roms, "tgdb_linked": tgdb_linked,
+               "tgdb_new_identities": tgdb_new,
+               "elapsed": round(time.time() - t0, 1)})
     # PROVENANCE TRAVELS WITH THE FILE, not with the release page it was downloaded
     # from. A published sqlite gets copied to a NAS, handed to a friend, restored from
     # a backup — and every one of those separates it from the notes that said who made
@@ -549,6 +563,60 @@ def build(progress=True):
     con.commit()
     con.close()
     return st
+
+
+def _merge_tgdb_freemap(con, now, progress=True, t0=None):
+    """Fold the free SHA1 -> TheGamesDB-id map in. -> (linked, newly_minted).
+
+    A TheGamesDB key is 1,000 requests A MONTH and name search does not batch — one
+    request per title — so resolving a library through the API is measured in years. The
+    free sselph/scraper hash.csv carries 58,843 SHA1 hashes against 11,008 game ids, and
+    every one it hits is an id we never had to ask for. Measured on this deployment:
+    23,649 of 720,097 ScreenScraper hashes hit, resolving 10,700 distinct games.
+
+    A HASH IS EVIDENCE; THE NAMES IN THAT FILE ARE NOT. The file carries ROM names too,
+    and using them would multiply the hit rate. They are used only to LABEL an identity
+    the hash created, never to find one — a SHA1 collision is a cryptographic event, a
+    name collision is Tuesday, and name-matching out of a file with no platform gate is
+    exactly the fail-open shape this codebase keeps paying for.
+
+    Never raises. This is an optional layer of an optional index; a rebuild that dies
+    because GitHub was slow is a worse outcome than one that finishes without it."""
+    linked = new = 0
+    t0 = t0 or time.time()
+    try:
+        import tgdb_freemap
+        if not (tgdb_freemap.enabled() and tgdb_freemap.fetch()):
+            return 0, 0
+        for sha1, gid, _plat, nm in tgdb_freemap.rows():
+            r = con.execute("SELECT identity_id FROM identity_key WHERE ns='sha1' "
+                            "AND val=? LIMIT 1", (sha1,)).fetchone()
+            if r is not None:
+                ident = r["identity_id"]
+                linked += 1
+            else:
+                # Neither mirror knows this dump. Mint an identity of its own rather
+                # than attaching the hash to a plausible neighbour — the miss IS the
+                # answer, and a new identity is what a miss means here.
+                ident = TGDB_ID_BASE + gid
+                con.execute(
+                    "INSERT OR IGNORE INTO identity(id,name,norm_key,year,"
+                    "first_release_date,built_at) VALUES(?,?,?,NULL,NULL,?)",
+                    (ident, nm, norm(nm), now))
+                con.execute(
+                    "INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
+                    "VALUES('sha1',?,?,'exact')", (sha1, ident))
+                new += 1
+            con.execute("INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
+                        "VALUES('thegamesdb',?,?,'exact')", (str(gid), ident))
+        con.commit()
+        if progress:
+            print("matchindex: thegamesdb freemap — %d ids onto known identities, "
+                  "%d new, %.0fs" % (linked, new, time.time() - t0), file=sys.stderr)
+    except Exception as e:                          # noqa: BLE001
+        print("matchindex: thegamesdb freemap skipped (%s)" % str(e)[:120],
+              file=sys.stderr)
+    return linked, new
 
 
 def _merge_ss(con, g, sysmap):

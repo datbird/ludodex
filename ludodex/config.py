@@ -186,6 +186,15 @@ SCHEMA = [
     ("thegamesdb_reserve", "",
      "Requests held back from bulk sweeps so interactive lookups still work. Blank = "
      "5% of the monthly limit (minimum 10), so it scales if you buy a bigger tier."),
+    ("matchindex_tgdb_freemap", "1",
+     "Fold the free SHA1->TheGamesDB-id map (sselph/scraper hash.csv, MIT) into the "
+     "match index when it is rebuilt. 58,843 hashes covering 11,008 games — ids that "
+     "would otherwise cost one API request each against a 1,000/MONTH budget. "
+     "Downloaded to your machine and cached for 30 days; a failed download is skipped, "
+     "never fatal."),
+    ("matchindex_tgdb_freemap_url", "",
+     "Where to fetch that map from. Blank = sselph/scraper's hash.csv on GitHub. Point "
+     "it at a local copy or your own mirror if you prefer."),
     ("thegamesdb_media", "1",
      "[media] Ingest the boxart TheGamesDB returns alongside metadata (no extra "
      "requests — it rides on the same call)."),
