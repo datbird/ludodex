@@ -34,7 +34,39 @@ PROVIDERS = {
     "screenscraper": ("ss_resolution", "ss_id"),
     "steamgriddb": ("sgdb_resolution", "sgdb_id"),
     "thegamesdb": ("tgdb_resolution", "tgdb_id"),
+    # MobyGames and ArcadeDB are keyed by STRING, not integer — a Moby id is a slug
+    # (`bulletstorm`) and an ArcadeDB id is a MAME set name (`pacman`). The shared layer
+    # stores whatever the provider's own identifier is; forcing them to integers would
+    # mean inventing a second id space and a mapping to maintain.
+    "mobygames": ("moby_resolution", "moby_id"),
+    "arcadedb": ("arcadedb_resolution", "arcadedb_id"),
+    "zxinfo": ("zxinfo_resolution", "zxinfo_id"),
 }
+
+# Providers whose identifier is a STRING, not an integer. A MobyGames id is a slug
+# (`bulletstorm`), an ArcadeDB id is a MAME set name (`pacman`), a ZXInfo id is a
+# zero-padded string (`0002259` — and `int()` would eat the padding). This layer was
+# built when every provider ided by number, and adding these three without saying so
+# broke them SILENTLY: `record()` coerced the slug with `int(...)` , caught the
+# ValueError, and wrote a MISS. A perfectly good id became "we looked and found
+# nothing", which is the worst possible failure because it looks like an answer.
+STRING_ID_PROVIDERS = {"mobygames", "arcadedb", "zxinfo"}
+
+
+def _is_string_id(provider):
+    return provider in STRING_ID_PROVIDERS
+
+
+def _coerce(provider, provider_id):
+    """The id as this provider expresses it, or a falsy value meaning MISS."""
+    if _is_string_id(provider):
+        return str(provider_id or "").strip()
+    try:
+        n = int(provider_id or 0)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
 
 # Columns a specific provider needs that the shared layer does not. This is the uniform
 # -provider rule in miniature: everything common lives above, and a provider declares
@@ -61,8 +93,9 @@ def ensure_tables(con):
     """Create the identity caches. Safe to call on every open."""
     for prov, (table, idcol) in PROVIDERS.items():
         con.execute(
-            "CREATE TABLE IF NOT EXISTS %s(norm_key TEXT PRIMARY KEY, %s INTEGER, "
-            "name TEXT, matched_by TEXT, resolved_at INTEGER)" % (table, idcol))
+            "CREATE TABLE IF NOT EXISTS %s(norm_key TEXT PRIMARY KEY, %s %s, "
+            "name TEXT, matched_by TEXT, resolved_at INTEGER)"
+            % (table, idcol, "TEXT" if _is_string_id(prov) else "INTEGER"))
         # The matched record's YEAR. Without it a wrong-era match is undetectable after
         # the fact: Resident Evil 4 (2023) held ScreenScraper 4750, the 2005 game, and
         # the only way to find others like it was a norm_key heuristic that needed the
@@ -96,7 +129,9 @@ def cached(con, provider, norm_key):
     table, idcol = _spec(provider)
     r = con.execute("SELECT %s, matched_by, resolved_at FROM %s WHERE norm_key=?"
                     % (idcol, table), (norm_key,)).fetchone()
-    return (r[0] or 0, r[1] or "", r[2] or 0) if r else None
+    if not r:
+        return None
+    return (r[0] or ("" if _is_string_id(provider) else 0), r[1] or "", r[2] or 0)
 
 
 def is_identified(con, provider, norm_key):
@@ -104,18 +139,19 @@ def is_identified(con, provider, norm_key):
     the igdb:0 incident is that a falsy id used as a key makes every entry carrying it
     share one identity."""
     row = cached(con, provider, norm_key)
-    return bool(row and row[0] > 0)
+    if not row:
+        return False
+    # A string id is identified when it is non-empty; a numeric one when it is positive.
+    # `row[0] > 0` on a slug raises TypeError, which is how this went unnoticed.
+    return bool(str(row[0]).strip()) if _is_string_id(provider) else bool(row[0] > 0)
 
 
 def holder(con, provider, provider_id, norm_key=None):
     """The norm_key already holding `provider_id` on this provider, if it is another
     game. None when the id is free or already ours."""
     table, idcol = _spec(provider)
-    try:
-        pid = int(provider_id or 0)
-    except (TypeError, ValueError):
-        return None
-    if pid <= 0:
+    pid = _coerce(provider, provider_id)
+    if not pid:
         return None
     try:
         r = con.execute("SELECT norm_key FROM %s WHERE %s=? AND norm_key<>? LIMIT 1"
@@ -147,11 +183,8 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
     than being remembered as having no match.
     """
     table, idcol = _spec(provider)
-    try:
-        pid = int(provider_id or 0)
-    except (TypeError, ValueError):
-        pid = 0
-    if pid > 0 and matched_by not in ("manual", "steam_appid"):
+    pid = _coerce(provider, provider_id)
+    if pid and matched_by not in ("manual", "steam_appid"):
         other = holder(con, provider, pid, norm_key)
         if other:
             # Record it as a MISS tagged `collision`, not as nothing. A refusal is an
@@ -160,7 +193,7 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
             # never-attempted, which is a different fact and one I7 rightly complains
             # about. As a miss it carries MISS_TTL, so it is re-asked once the provider
             # has had time to add a record of its own.
-            pid, matched_by = 0, "collision"
+            pid, matched_by = ("" if _is_string_id(provider) else 0), "collision"
     try:
         yr = int(year) if str(year or "").strip().isdigit() else None
     except (TypeError, ValueError):

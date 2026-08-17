@@ -33,6 +33,13 @@ def check(l, c):
         sys.exit("FAILED: " + l)
 
 
+def _all_providers():
+    """Every provider the review page will ask about — derived from the registry so a
+    new one shows up here without an edit."""
+    import provider_ids
+    return sorted(set(provider_ids.PROVIDERS) | {"igdb"})
+
+
 def main():
     d = test_support.isolate("ludodex-revprov-")
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -52,6 +59,10 @@ def main():
     mc.execute("INSERT INTO ss_resolution VALUES('evga', 0)")
     mc.execute("INSERT INTO igdb_resolution VALUES('evga', 0)")
     mc.execute("INSERT INTO tgdb_resolution VALUES('evga', 0)")
+    for _t, _c in (("moby_resolution", "moby_id"), ("arcadedb_resolution", "arcadedb_id"),
+                   ("zxinfo_resolution", "zxinfo_id")):
+        mc.execute("CREATE TABLE %s(norm_key TEXT PRIMARY KEY, %s TEXT)" % (_t, _c))
+        mc.execute("INSERT INTO %s VALUES('evga', '')" % _t)
     # a game nobody has been asked about yet
     mc.execute("INSERT INTO ss_resolution VALUES('fresh', 0)")
     mc.commit(); mc.close()
@@ -61,8 +72,9 @@ def main():
           [m["provider"] for m in st["matched"]] == ["steamgriddb"])
     check("its id comes with it, so the card can link out",
           st["matched"][0]["id"] == "3580")
-    check("providers that were asked and found nothing are listed apart",
-          sorted(st["missed"]) == ["igdb", "screenscraper", "thegamesdb"])
+    check("providers that were asked and found nothing are listed apart: %s"
+          % sorted(st["missed"]),
+          sorted(st["missed"]) == sorted(set(_all_providers()) - {"steamgriddb"}))
     # Deliberately derived from provider_ids rather than written out: this assertion is
     # the one that catches a NEW provider being registered without the review page
     # learning to ask about it, and a hardcoded list would stop catching that the moment
@@ -71,8 +83,13 @@ def main():
           [p for p in st["unattempted"] if p != "steam"] == [])
 
     st = srv._provider_match_state("fresh")
+    # Derived, not written out: this is the assertion that catches a NEW provider being
+    # registered without the review page learning to ask about it, and a hardcoded list
+    # stops catching that the moment someone edits it to make the suite green.
+    import provider_ids as _pi
+    _all = sorted(set(_pi.PROVIDERS) | {"igdb"})
     check("a provider with NO row is unattempted, not a miss",
-          sorted(st["unattempted"]) == ["igdb", "steamgriddb", "thegamesdb"]
+          sorted(st["unattempted"]) == [p for p in _all if p != "screenscraper"]
           and st["missed"] == ["screenscraper"])
 
     # STEAM is a provider as well as a source — it supplies the appid, the store

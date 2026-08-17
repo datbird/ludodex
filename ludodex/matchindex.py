@@ -124,6 +124,10 @@ ATTRIBUTION = ("Game data from ScreenScraper.fr (CC BY-NC-SA 4.0) and its contri
                "Built by ludodex. Non-commercial use only; derivative works must carry "
                "the same licence.")
 SOURCES = [
+    {"name": "Wikidata", "url": "https://www.wikidata.org",
+     "license": "CC0 1.0", "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+     "provides": "cross-database identifiers (MobyGames, TheGamesDB, Redump), "
+                 "joined on the IGDB slug"},
     {"name": "libretro-database (No-Intro / Redump DATs)",
      "url": "https://github.com/libretro/libretro-database",
      "license": "CC BY-SA 4.0",
@@ -562,11 +566,14 @@ def build(progress=True):
     # 6. Disc serials from the No-Intro/Redump DATs — see _merge_libretro_dats.
     dat_serials, dat_hashes = _merge_libretro_dats(con, progress, t0)
 
+    # 7. Free cross-database pointers from Wikidata — see _merge_wikidata_ids.
+    wd_keys = _merge_wikidata_ids(con, progress, t0)
+
     st = status(con)
     st.update({"ss_merged": ss_merged, "ss_own_identity": ss_own,
                "ss_hash_keys": ss_roms, "tgdb_linked": tgdb_linked,
                "tgdb_new_identities": tgdb_new, "dat_serials": dat_serials,
-               "dat_hash_keys": dat_hashes,
+               "dat_hash_keys": dat_hashes, "wikidata_keys": wd_keys,
                "elapsed": round(time.time() - t0, 1)})
     # PROVENANCE TRAVELS WITH THE FILE, not with the release page it was downloaded
     # from. A published sqlite gets copied to a NAS, handed to a friend, restored from
@@ -582,6 +589,50 @@ def build(progress=True):
     con.commit()
     con.close()
     return st
+
+
+def _merge_wikidata_ids(con, progress=True, t0=None):
+    """Attach free cross-database pointers, joined on the IGDB SLUG. -> keys written.
+
+    THE SLUG IS AN EXACT KEY, which is the only reason this is allowed to run at all.
+    Wikidata stores IGDB's slug rather than its numeric id, and the mirror carries both —
+    so `bulletstorm` resolves locally and unambiguously, the same way a hash does. Nothing
+    here matches on a title and nothing here mints an identity: an unrecognised slug is
+    skipped, because a pointer anchored to a game we do not have points at nothing.
+
+    One IGDB game legitimately carries several pointers — `bulletstorm` maps to both
+    `bulletstorm` and `bulletstorm-full-clip-edition` on MobyGames. All are attached;
+    choosing between them would be inventing an opinion about someone else's catalogue.
+
+    Never raises."""
+    n = 0
+    t0 = t0 or time.time()
+    try:
+        import wikidata_ids
+        if not (wikidata_ids.enabled() and wikidata_ids.fetch()):
+            return 0
+        if not _has_table(con, "ig", "games"):
+            return 0
+        slugs = {r["slug"]: r["id"] for r in
+                 con.execute("SELECT id, slug FROM ig.games WHERE slug IS NOT NULL "
+                             "AND slug != ''")}
+        unknown = 0
+        for ns, slug, val in wikidata_ids.rows():
+            ident = slugs.get(slug)
+            if ident is None:
+                unknown += 1
+                continue
+            cur = con.execute(
+                "INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
+                "VALUES(?,?,?,'exact')", (ns, val, ident))
+            n += cur.rowcount if cur.rowcount > 0 else 0
+        con.commit()
+        if progress:
+            print("matchindex: wikidata — %d pointer keys (%d slugs we do not have), "
+                  "%.0fs" % (n, unknown, time.time() - t0), file=sys.stderr)
+    except Exception as e:                          # noqa: BLE001
+        print("matchindex: wikidata ids skipped (%s)" % str(e)[:120], file=sys.stderr)
+    return n
 
 
 def _merge_libretro_dats(con, progress=True, t0=None):

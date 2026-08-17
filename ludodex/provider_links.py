@@ -29,7 +29,9 @@ which is expressible as "the cache said N". Owning it here would mean re-derivin
 judgement a second time, which is the exact mistake this module exists to end.
 """
 import os
+import re
 import sqlite3
+import urllib.parse
 
 # provider -> page URL template. Adding a provider to `provider_ids.PROVIDERS` without
 # adding it here would record identities that never become visible, so
@@ -39,7 +41,17 @@ PAGE_URL = {
     "steamgriddb": "https://www.steamgriddb.com/game/%s",
     # Verified against the live site: /game.php?id=N serves the page, /game/N is a 404.
     "thegamesdb": "https://thegamesdb.net/game.php?id=%s",
+    "mobygames": "https://www.mobygames.com/game/%s/",
+    "arcadedb": "https://adb.arcadeitalia.net/?mame=%s",
+    "zxinfo": "https://zxinfo.dk/details/%s",
 }
+
+
+# Providers whose identifier is a string. Anything outside this set must be numeric.
+STRING_ID_PROVIDERS = {"mobygames", "arcadedb", "zxinfo"}
+# Conservative on purpose: a provider id goes straight into a URL we hand the user, so
+# anything that is not a plain slug is refused rather than escaped and hoped for.
+_SLUG_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
 
 
 def page_url(provider, provider_id):
@@ -49,7 +61,15 @@ def page_url(provider, provider_id):
     providers rather than keeping a second copy of the templates.
     """
     t = PAGE_URL.get((provider or "").lower())
-    return t % provider_id if t and str(provider_id or "").isdigit() else None
+    v = str(provider_id or "").strip()
+    if not (t and v):
+        return None
+    # Not every provider ids by integer. A MobyGames id is a slug and an ArcadeDB id is a
+    # MAME set name, so an isdigit() gate would silently drop every link for both — the
+    # rule is that the id must be SAFE in a URL, not that it must be a number.
+    if provider in STRING_ID_PROVIDERS:
+        return t % urllib.parse.quote(v, safe="") if _SLUG_OK.match(v) else None
+    return t % v if v.isdigit() else None
 
 
 def sync(lib_con, cache_path, blocked_gids=(), only=None):

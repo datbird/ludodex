@@ -245,6 +245,18 @@ SCHEMA = [
      "into the match index when it is rebuilt. This is where DISC SERIALS come from — "
      "the only identifier that survives conversion to CHD or RVZ, which every hash "
      "does not. ~174,000 canonical dumps, free, cached 30 days."),
+    ("matchindex_wikidata_ids", "1",
+     "Fold Wikidata's cross-database ids into the match index. FREE and CC0: 33,956 "
+     "MobyGames pointers, 60,376 Redump, 1,460 TheGamesDB, joined to the IGDB slug the "
+     "mirror already carries. A cross-reference is a POINTER, not content — it is the "
+     "coordinate you use to go and ask a provider, and it carries none of their data."),
+    ("wikidata_ids_namespaces", "mobygames,thegamesdb,redump",
+     "Which id namespaces to pull. Steam and GOG are available but left out by default: "
+     "IGDB already publishes 666,417 store ids of its own and those are authoritative, "
+     "so re-importing them from a third party adds rows without adding knowledge."),
+    ("wikidata_ids_cache_days", "30",
+     "How long the pulled id set is trusted before it is re-queried. Wikidata edits "
+     "continuously, but cross-database identifiers are stable once added."),
     ("matchindex_tgdb_freemap", "1",
      "Fold the free SHA1->TheGamesDB-id map (sselph/scraper hash.csv, MIT) into the "
      "match index when it is rebuilt. 32,045 hashes covering 10,688 games — ids that "
