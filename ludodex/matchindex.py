@@ -86,6 +86,15 @@ YEAR_SLACK = 1                   # a year that disagrees by more than this is a 
 # deliberately, not overlooked, and cheap to reinstate since this is all rebuilt.
 HASH_NS = ("crc", "sha1")
 
+# A SERIAL IS NOT A HASH, and that is exactly why it earns its own namespace. crc and sha1
+# describe the FILE; the moment a disc is re-encoded to CHD or RVZ they match nothing in
+# any dump database. `SLUS-00594` is printed on the disc and written inside the image, so
+# it survives every re-encode — it is a property of the game rather than of the bytes we
+# happen to be holding. publish() converts to CHD on purpose, and most PlayStation and
+# GameCube collections are already stored that way, so without this the library's discs
+# are unresolvable by hash by construction.
+SERIAL_NS = "serial"
+
 # Which of the two lower layers is asked first when BOTH have an answer for a handle.
 # Defaults to the user's own data: it was obtained on this library, about these files,
 # and a shipped supplement is by definition someone else's conclusion. Flippable because
@@ -110,10 +119,16 @@ PATH_KEY = "matchindex.path"
 LICENSE = "CC BY-NC-SA 4.0"
 LICENSE_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/"
 ATTRIBUTION = ("Game data from ScreenScraper.fr (CC BY-NC-SA 4.0) and its contributors, "
-               "from IGDB.com, and TheGamesDB ids via sselph/scraper's hash.csv (MIT). "
+               "from IGDB.com, TheGamesDB ids via sselph/scraper's hash.csv (MIT), and "
+               "No-Intro/Redump dump data via libretro-database (CC BY-SA 4.0). "
                "Built by ludodex. Non-commercial use only; derivative works must carry "
                "the same licence.")
 SOURCES = [
+    {"name": "libretro-database (No-Intro / Redump DATs)",
+     "url": "https://github.com/libretro/libretro-database",
+     "license": "CC BY-SA 4.0",
+     "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+     "provides": "canonical ROM/disc dumps: crc/md5/sha1, region, and disc serials"},
     {"name": "sselph/scraper hash.csv", "url": "https://github.com/sselph/scraper",
      "license": "MIT (code); the data it carries is derived from TheGamesDB",
      "license_url": "https://github.com/sselph/scraper/blob/master/LICENSE",
@@ -544,10 +559,14 @@ def build(progress=True):
     # 5. TheGamesDB ids, for free — see _merge_tgdb_freemap.
     tgdb_linked, tgdb_new = _merge_tgdb_freemap(con, now, progress, t0)
 
+    # 6. Disc serials from the No-Intro/Redump DATs — see _merge_libretro_dats.
+    dat_serials, dat_hashes = _merge_libretro_dats(con, progress, t0)
+
     st = status(con)
     st.update({"ss_merged": ss_merged, "ss_own_identity": ss_own,
                "ss_hash_keys": ss_roms, "tgdb_linked": tgdb_linked,
-               "tgdb_new_identities": tgdb_new,
+               "tgdb_new_identities": tgdb_new, "dat_serials": dat_serials,
+               "dat_hash_keys": dat_hashes,
                "elapsed": round(time.time() - t0, 1)})
     # PROVENANCE TRAVELS WITH THE FILE, not with the release page it was downloaded
     # from. A published sqlite gets copied to a NAS, handed to a friend, restored from
@@ -563,6 +582,71 @@ def build(progress=True):
     con.commit()
     con.close()
     return st
+
+
+def _merge_libretro_dats(con, progress=True, t0=None):
+    """Attach canonical dump hashes and DISC SERIALS to identities. -> (serials, hashes).
+
+    A DAT ENRICHES AN IDENTITY, IT NEVER INVENTS ONE. These files are keyed by ROM
+    filename; minting an identity per dump would add a hundred thousand entries named
+    after files rather than games, and every one of them would be a plausible-looking
+    wrong answer for a name search. So a dump finds the identity that already owns one of
+    its hashes, and a dump nobody recognises is skipped — it will still be here next
+    rebuild, when the mirrors may know more.
+
+    The serial is the point. crc and sha1 describe the file, so a CHD or RVZ matches
+    nothing anywhere; the serial is stamped inside the image and survives the re-encode.
+
+    Never raises: an optional layer must not kill a rebuild."""
+    serials = hashes = 0
+    t0 = t0 or time.time()
+    try:
+        import libretro_dats
+        if not libretro_dats.enabled():
+            return 0, 0
+        seen = 0
+        for row in libretro_dats.all_rows(progress=False):
+            seen += 1
+            ident = None
+            for ns in ("sha1", "crc"):
+                v = row.get(ns)
+                if not v:
+                    continue
+                r = con.execute("SELECT identity_id FROM identity_key WHERE ns=? AND "
+                                "val=? LIMIT 1", (ns, v)).fetchone()
+                if r is not None:
+                    ident = r["identity_id"]
+                    break
+            if ident is None:
+                continue
+            # Both hashes go on, not just the one that matched: No-Intro and Redump are
+            # the canonical dumps, and a user's file may carry whichever the mirrors
+            # happened not to record.
+            for ns in HASH_NS:
+                v = row.get(ns)
+                if v:
+                    cur = con.execute(
+                        "INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
+                        "VALUES(?,?,?,'exact')", (ns, v, ident))
+                    hashes += cur.rowcount if cur.rowcount > 0 else 0
+            ser = (row.get("serial") or "").strip()
+            if ser:
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
+                    "VALUES(?,?,?,'exact')", (SERIAL_NS, ser.upper(), ident))
+                serials += cur.rowcount if cur.rowcount > 0 else 0
+            if seen % 20000 == 0:
+                con.commit()
+                if progress:
+                    print("matchindex: dats %d dumps, %d serials, %.0fs"
+                          % (seen, serials, time.time() - t0), file=sys.stderr)
+        con.commit()
+        if progress:
+            print("matchindex: libretro dats — %d serial keys, %d hash keys, %.0fs"
+                  % (serials, hashes, time.time() - t0), file=sys.stderr)
+    except Exception as e:                          # noqa: BLE001
+        print("matchindex: libretro dats skipped (%s)" % str(e)[:120], file=sys.stderr)
+    return serials, hashes
 
 
 def _merge_tgdb_freemap(con, now, progress=True, t0=None):

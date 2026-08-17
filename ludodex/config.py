@@ -186,6 +186,22 @@ SCHEMA = [
     ("thegamesdb_reserve", "",
      "Requests held back from bulk sweeps so interactive lookups still work. Blank = "
      "5% of the monthly limit (minimum 10), so it scales if you buy a bigger tier."),
+    # --- free, no-key specialists. Each covers a platform family the big providers
+    #     serve badly: arcade (Steam and IGDB know nothing about a cabinet) and the
+    #     ZX Spectrum (13,859 hashed titles here, zero covered by TheGamesDB's map). ---
+    ("metadata_arcadedb_enabled", "1",
+     "[metadata] Consult ArcadeDB (adb.arcadeitalia.net) for MAME sets — year, "
+     "manufacturer, genre, players, controls, screen orientation, plus marquee, "
+     "cabinet, flyer and short-play video. No key, no quota; keyed on the MAME set "
+     "name, so there is no name matching to get wrong."),
+    ("metadata_zxinfo_enabled", "1",
+     "[metadata] Consult ZXInfo (api.zxinfo.dk) for ZX Spectrum titles — machine "
+     "variant, authors with roles, publisher, loading screens. No key, no quota."),
+    ("matchindex_libretro_dats", "1",
+     "Fold the No-Intro and Redump dump databases (via libretro-database, CC BY-SA) "
+     "into the match index when it is rebuilt. This is where DISC SERIALS come from — "
+     "the only identifier that survives conversion to CHD or RVZ, which every hash "
+     "does not. ~174,000 canonical dumps, free, cached 30 days."),
     ("matchindex_tgdb_freemap", "1",
      "Fold the free SHA1->TheGamesDB-id map (sselph/scraper hash.csv, MIT) into the "
      "match index when it is rebuilt. 32,045 hashes covering 10,688 games — ids that "
@@ -387,7 +403,8 @@ BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "ea", "emulation", "playnite"
 
 # Metadata providers are CONSULTED to enrich attributes — they are NOT sources
 # (they add no ownership). Toggled like sources but tracked separately.
-METADATA_PROVIDERS = ("igdb", "screenscraper", "steamspy", "thegamesdb")
+METADATA_PROVIDERS = ("igdb", "screenscraper", "steamspy", "thegamesdb",
+                      "arcadedb", "zxinfo")
 
 
 def metadata_enabled(name):
@@ -825,6 +842,57 @@ INTEGRATIONS = [
                      "thegamesdb_reserve"],
      "env": ["TGDB_API_KEY"],
      "verify": "python3 ludodex/thegamesdb.py --status"},
+
+    {"id": "arcadedb", "name": "ArcadeDB (arcade metadata + media)",
+     "kind": "metadata",
+     "purpose": "Arcade only, and the best thing available for it. Built on the official "
+                "MAME files, keyed on the SET NAME (pacman, mslug3) so there is no name "
+                "matching to get wrong. Supplies year/manufacturer/genre/players plus "
+                "marquee, cabinet, control panel, flyer and short-play video — and "
+                "cabinet facts nothing else has (screen orientation, input controls).",
+     "url": "https://adb.arcadeitalia.net",
+     "steps": [
+         "Nothing to sign up for — no key, no account, no quota.",
+         "It is on by default. To turn it off: config.py disable arcadedb.",
+         "Be polite: it is a volunteer-run preservation site. The default 700ms "
+         "cooldown is deliberate; raise it, do not lower it "
+         "(Settings > Services > Limits, service 'arcadedb')."],
+     "config_keys": ["metadata_arcadedb_enabled"],
+     "env": [],
+     "verify": "python3 ludodex/arcadedb.py pacman"},
+
+    {"id": "zxinfo", "name": "ZXInfo (ZX Spectrum)",
+     "kind": "metadata",
+     "purpose": "The World of Spectrum archive. Narrow and deep: exact machine variant "
+                "(48K / 128K / +2), authors named individually with their roles, "
+                "publisher, original price, loading screens. Covers a corner of an "
+                "emulation library that IGDB and TheGamesDB barely touch.",
+     "url": "https://zxinfo.dk",
+     "steps": [
+         "Nothing to sign up for — no key, no account, no quota.",
+         "On by default; config.py disable zxinfo to stop consulting it.",
+         "NB the live API is /v3. Skyscraper's documentation points at an older path "
+         "that now 404s."],
+     "config_keys": ["metadata_zxinfo_enabled"],
+     "env": [],
+     "verify": "python3 ludodex/zxinfo.py manic miner"},
+
+    {"id": "libretro-dats", "name": "No-Intro / Redump DATs (disc serials)",
+     "kind": "metadata",
+     "purpose": "The canonical dump databases, via libretro-database (CC BY-SA). This "
+                "is where DISC SERIALS come from — the only identifier that survives "
+                "conversion to CHD or RVZ, which every hash does not. ~174,000 dumps "
+                "with crc/md5/sha1, region and serial. Folded into the match index.",
+     "url": "https://github.com/libretro/libretro-database",
+     "steps": [
+         "Nothing to sign up for — no key, no account, no quota.",
+         "Fetch the DATs: python3 ludodex/libretro_dats.py --fetch  (cached 30 days).",
+         "They fold in on the next match-index build: "
+         "python3 ludodex/matchindex.py --build.",
+         "To skip the layer: config.py set matchindex_libretro_dats 0."],
+     "config_keys": ["matchindex_libretro_dats"],
+     "env": [],
+     "verify": "python3 ludodex/libretro_dats.py"},
 
     {"id": "steamgriddb", "name": "SteamGridDB (media)", "kind": "media",
      "purpose": "Community grids/heroes/logos/icons — a media gap-filler.",

@@ -62,6 +62,8 @@ LABEL = {
     "ai_web": "AI Web Search",
     # Not remote providers, but they DO fill attributes, and a tooltip that omits them
     # tells the user nothing can.
+    "arcadedb": "ArcadeDB",
+    "zxinfo": "ZXInfo",
     "rom": "the ROM filename",
     "xbox": "Xbox",
     "ludodex": "you",
@@ -74,6 +76,8 @@ ENABLED_KEY = {
     "screenscraper": "metadata_screenscraper_enabled",
     "steamspy": "metadata_steamspy_enabled",
     "thegamesdb": "metadata_thegamesdb_enabled",
+    "arcadedb": "metadata_arcadedb_enabled",
+    "zxinfo": "metadata_zxinfo_enabled",
 }
 
 # Steam is the odd one out and the tooltip has to say so: it is BOTH an ownership source
@@ -97,6 +101,8 @@ CAPS = {
         "igdb": "first release year", "screenscraper": "release year",
         "steam": "from the store release date" + STEAM_NOTE,
         "thegamesdb": "year of THIS regional release",
+        "arcadedb": "for MAME sets: from the official MAME files, keyed on the set name",
+        "zxinfo": "for ZX Spectrum titles, from the World of Spectrum archive",
         "ai": "inferred from the title and whatever context the file gives",
         "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "release_date": {
@@ -108,6 +114,8 @@ CAPS = {
         "steam": "store genres" + STEAM_NOTE,
         "thegamesdb": "30-genre list; its non-genre entries (Demo, Unofficial, "
                       "Virtual Console\u2026) are split off as flags, never filed here",
+        "arcadedb": "MAME's own genre for the set (Maze / Collect, Shooter\u2026)",
+        "zxinfo": "for ZX Spectrum titles, from the World of Spectrum archive",
         "ai": "inferred when no provider has the game",
         "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "themes": {"igdb": "themes (horror, sci-fi, comedy\u2026)",
@@ -116,6 +124,8 @@ CAPS = {
     "game_modes": {
         "igdb": "single player / co-op / multiplayer",
         "thegamesdb": "derived from its player count + explicit co-op yes/no",
+        "arcadedb": "from the cabinet's player count",
+        "zxinfo": "from the archive's max-players field",
         "ai": "inferred when no provider has the game",
         "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "player_perspectives": {"igdb": "first person, third person, isometric\u2026",
@@ -125,11 +135,14 @@ CAPS = {
         "igdb": "developer companies", "screenscraper": "developer",
         "steam": "store developers" + STEAM_NOTE,
         "thegamesdb": "developer companies",
+        "arcadedb": "the arcade manufacturer",
+        "zxinfo": "the individual authors, named",
         "ai": "inferred when no provider has the game", "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "publishers": {
         "igdb": "publisher companies", "screenscraper": "publisher",
         "steam": "store publishers" + STEAM_NOTE,
         "thegamesdb": "publisher companies",
+        "zxinfo": "the publishing label",
         "ai": "inferred when no provider has the game", "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "series": {"igdb": "franchise / collection"},
     "description": {
@@ -137,6 +150,7 @@ CAPS = {
         "screenscraper": "the community-written synopsis",
         "steam": "the store short description" + STEAM_NOTE,
         "thegamesdb": "its overview paragraph",
+        "arcadedb": "the MAME history.dat entry for the set",
         "ai": "written from what is known about the title",
         "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
     "categories": {
@@ -165,7 +179,9 @@ CAPS = {
     # someone to switch on a provider that will not help; this one sent them looking for
     # a provider that was never the answer.
     "release_type": {"rom": "read from the filename tags (Proto, Beta, Demo, Hack\u2026)"},
-    "language": {"rom": "read from the filename tags (En, Fr, Ja\u2026) and patch info"},
+    "language": {"rom": "read from the filename tags (En, Fr, Ja\u2026) and patch info",
+                 "arcadedb": "the language the cabinet shipped in",
+                 "zxinfo": "the release language"},
     "version": {"rom": "read from the filename tags (v1.1, Rev A\u2026)"},
     "regions": {
         "thegamesdb": "BOTH axes: the TV standard (NTSC-U / PAL / NTSC-J\u2026) and the "
@@ -173,7 +189,9 @@ CAPS = {
     "os": {
         "xbox": "the platforms an Xbox store entry lists",
         "thegamesdb": "for PC titles: the OS its minimum spec names"},
-    "device": {"xbox": "the devices an Xbox store entry lists"},
+    "device": {"xbox": "the devices an Xbox store entry lists",
+               "zxinfo": "the exact Spectrum variant (48K / 128K / +2) — a 128K-only "
+                         "title will not run on a 48K"},
 }
 
 # Kinds the vocabulary offers that NOTHING can currently fill. Listed explicitly rather

@@ -9944,6 +9944,22 @@ SERVICES = [
           "label": "Held back for interactive lookups (blank = 5%)", "secret": False}],
      "tier": "/api/services/thegamesdb/limit",
      "limits": _limits("thegamesdb", cooldown="250")},
+    {"id": "arcadedb", "name": "ArcadeDB", "role": "provider",
+     "hint": "adb.arcadeitalia.net — arcade only, no key, no account, no quota. Built "
+             "on the official MAME files and keyed on the SET NAME, so there is no name "
+             "matching to get wrong. Gives marquee, cabinet, control panel, flyer and "
+             "short-play video, plus cabinet facts nothing else has (screen "
+             "orientation, input controls). It is a volunteer-run preservation site — "
+             "the default cooldown is deliberately polite; raise it, don't lower it.",
+     "creds": [],
+     "limits": _limits("arcadedb", cooldown="700")},
+    {"id": "zxinfo", "name": "ZXInfo", "role": "provider",
+     "hint": "zxinfo.dk — the World of Spectrum archive. No key, no quota. Machine "
+             "variant (48K/128K/+2), authors named individually, publisher, loading "
+             "screens. Covers a corner of an emulation library IGDB and TheGamesDB "
+             "barely touch.",
+     "creds": [],
+     "limits": _limits("zxinfo", cooldown="500")},
     {"id": "steamgriddb", "name": "SteamGridDB", "role": "provider",
      "hint": "steamgriddb.com/profile/preferences/api",
      "creds": [{"key": "steamgriddb_api_key", "label": "API key", "secret": True}],

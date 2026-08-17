@@ -546,13 +546,20 @@ def steamgrid_kind(filename):
 #  provider registry — local (mount-based) + remote (fetched by id)
 # --------------------------------------------------------------------------- #
 LOCAL_PROVIDERS = ("esde", "steamgrid", "playnite", "launchbox")
-REMOTE_PROVIDERS = ("steam", "igdb", "steamgriddb", "thegamesdb")
+REMOTE_PROVIDERS = ("steam", "igdb", "steamgriddb", "thegamesdb",
+                    "arcadedb", "zxinfo")
 MEDIA_PROVIDERS = LOCAL_PROVIDERS + REMOTE_PROVIDERS
 
 # Per-kind provider priority for choosing the ONE best asset (first available
 # wins). Curated/owned local art (your Steam custom grid, your ES-DE scrapes)
 # beats official store art, which beats IGDB, which beats SteamGridDB community
 # art. ES-DE has no real backgrounds, so it sinks for that kind.
+# ArcadeDB LEADS the arcade-only kinds — marquee, cabinet, control panel, PCB, flyer —
+# because it is built on the official MAME files and those kinds are its entire subject.
+# It is not a general provider promoted above better ones; it simply has no competition
+# where it appears. ZXInfo the same for Spectrum screens. Both are absent from every kind
+# they have no rows for, so neither ever makes a term constant.
+#
 # TheGamesDB sits below IGDB and ScreenScraper wherever it appears, and that is a
 # deliberate ranking rather than an oversight: its catalogue is genuinely smaller and its
 # art is community scans. It is here because it is one of only two scrapers ES-DE ships,
@@ -583,18 +590,18 @@ PRIORITY = {
     # ScreenScraper is deliberate: IGDB's shots are curated per game, SS's are community
     # uploads that may be from a different system entirely. Frontends last — they are
     # scraped copies of these same sources.
-    "screenshot":   ["steam", "igdb", "screenscraper", "thegamesdb", "gamelist", "esde", "launchbox"],
-    "title_screen": ["esde", "screenscraper", "thegamesdb", "launchbox"],
+    "screenshot":   ["steam", "igdb", "screenscraper", "arcadedb", "zxinfo", "thegamesdb", "gamelist", "esde", "launchbox"],
+    "title_screen": ["esde", "screenscraper", "arcadedb", "zxinfo", "thegamesdb", "launchbox"],
     "box_3d":       ["esde", "screenscraper", "steamgriddb", "launchbox"],
     "box_back":     ["esde", "screenscraper", "thegamesdb", "launchbox"],
     "box_spine":    ["screenscraper", "launchbox"],
     "physical_media": ["esde", "screenscraper", "launchbox"],
-    "marquee":      ["esde", "screenscraper", "launchbox"],
+    "marquee":      ["arcadedb", "esde", "screenscraper", "launchbox"],
     "bezel":        ["screenscraper"],
-    "arcade_cabinet":  ["launchbox", "screenscraper"],
-    "arcade_controls": ["launchbox", "screenscraper"],
-    "pcb":          ["launchbox", "screenscraper"],
-    "flyer":        ["screenscraper", "launchbox"],
+    "arcade_cabinet":  ["arcadedb", "launchbox", "screenscraper"],
+    "arcade_controls": ["arcadedb", "launchbox", "screenscraper"],
+    "pcb":          ["arcadedb", "launchbox", "screenscraper"],
+    "flyer":        ["arcadedb", "screenscraper", "launchbox"],
     "map":          ["screenscraper"],
     "mix":          ["esde", "screenscraper"],
 }

@@ -449,7 +449,8 @@ const NON_ID_SOURCES = new Set(['emulation', 'archive', 'physical', 'rom', 'digi
 
 // Metadata-PROVIDER identities (editable/disable-able badges), as opposed to
 // store-ownership badges which are immutable facts.
-const META_PROVIDERS = new Set(['igdb', 'screenscraper', 'steamgriddb', 'thegamesdb'])
+const META_PROVIDERS = new Set(['igdb', 'screenscraper', 'steamgriddb', 'thegamesdb',
+  'arcadedb', 'zxinfo'])
 
 // Deep link to a store's page for this game, where the id maps to a stable public URL.
 // Stores whose ids don't (GOG product ids, Epic/Xbox/PSN catalogue ids) still get a chip —
@@ -9576,7 +9577,7 @@ function providerMatches(p: AiFindingPayload): ProviderMatch[] {
 
 const PROVIDER_LABEL: Record<string, string> = {
   igdb: 'IGDB', screenscraper: 'ScreenScraper', thegamesdb: 'TheGamesDB',
-  ai_web: 'AI Web Search',
+  ai_web: 'AI Web Search', arcadedb: 'ArcadeDB', zxinfo: 'ZXInfo',
 }
 
 function pmLabel(m: ProviderMatch): string {
