@@ -72,6 +72,7 @@ MAIN_DB = os.path.join(DATA, "metadata-cache.sqlite")  # where it used to live
 IGDB_DB = os.path.join(DATA, "igdb-catalog.sqlite")
 SS_DB = os.path.join(DATA, "ss-catalog.sqlite")
 MOBY_DB = os.path.join(DATA, "moby-catalog.sqlite")
+TGDB_DB = os.path.join(DATA, "tgdb-catalog.sqlite")
 
 SS_ID_BASE = 100_000_000
 LEARNED_ID_BASE = 200_000_000    # a game neither mirror knows, found by live search
@@ -83,6 +84,8 @@ TGDB_ID_BASE = 300_000_000
 # layer can be dropped without touching anything else and a stray id is always traceable
 # to what minted it.
 MOBY_ID_BASE = 400_000_000
+# A TheGamesDB game neither mirror knows. Its own range, above MobyGames.
+TGDB_CAT_ID_BASE = 500_000_000
 YEAR_SLACK = 1                   # a year that disagrees by more than this is a refusal
 
 # Which ROM hashes earn their place. CRC32 is what No-Intro, TOSEC and every frontend
@@ -477,7 +480,8 @@ def resolve_name(con, title, year=None):
 
 # --- building -------------------------------------------------------------- #
 def _attach(con):
-    for path, alias in ((IGDB_DB, "ig"), (SS_DB, "ss"), (MOBY_DB, "mb")):
+    for path, alias in ((IGDB_DB, "ig"), (SS_DB, "ss"), (MOBY_DB, "mb"),
+                        (TGDB_DB, "tg")):
         if os.path.exists(path):
             con.execute("ATTACH DATABASE ? AS %s" % alias,
                         ("file:%s?mode=ro" % path,))
@@ -581,12 +585,16 @@ def build(progress=True):
     # 8. The MobyGames catalogue — see _merge_moby.
     moby_linked, moby_new = _merge_moby(con, have, now, progress, t0)
 
+    # 9. The TheGamesDB catalogue — see _merge_tgdb_catalog.
+    tg_linked, tg_new = _merge_tgdb_catalog(con, have, now, progress, t0)
+
     st = status(con)
     st.update({"ss_merged": ss_merged, "ss_own_identity": ss_own,
                "ss_hash_keys": ss_roms, "tgdb_linked": tgdb_linked,
                "tgdb_new_identities": tgdb_new, "dat_serials": dat_serials,
                "dat_hash_keys": dat_hashes, "wikidata_keys": wd_keys,
                "moby_linked": moby_linked, "moby_new_identities": moby_new,
+               "tgdb_cat_linked": tg_linked, "tgdb_cat_new": tg_new,
                "elapsed": round(time.time() - t0, 1)})
     # PROVENANCE TRAVELS WITH THE FILE, not with the release page it was downloaded
     # from. A published sqlite gets copied to a NAS, handed to a friend, restored from
@@ -602,6 +610,78 @@ def build(progress=True):
     con.commit()
     con.close()
     return st
+
+
+def _merge_tgdb_catalog(con, have, now, progress=True, t0=None):
+    """Attach TheGamesDB ids from the local catalogue. -> (linked, newly_minted).
+
+    ITS GRAIN IS FINER THAN OURS. A TheGamesDB row is one per (title, platform, REGION),
+    so Sonic 2 has separate NTSC-U and PAL Genesis rows. Both are legitimate coordinates
+    for the same ludodex identity, so BOTH are attached — choosing between them here
+    would be answering a question the caller has better information about, since
+    `tgdb_normalize.pick_release` decides it against the actual filename.
+
+    The free hash map and Wikidata already anchored ~13,400 of these ids; those are
+    skipped, because a curated cross-reference beats anything re-derived from a name.
+
+    Never raises: the catalogue is optional and a rebuild must not die without it."""
+    linked = new = 0
+    t0 = t0 or time.time()
+    if "tg" not in have or not _has_table(con, "tg", "tgdb_games"):
+        return 0, 0
+    try:
+        known = {r["val"] for r in
+                 con.execute("SELECT val FROM identity_key WHERE ns='thegamesdb'")}
+        for g in con.execute("SELECT id,name,norm_key,year,platform FROM tg.tgdb_games"):
+            gid = str(g["id"])
+            if gid in known:
+                continue
+            ident = _match_tgdb(con, g)
+            if ident is None:
+                ident = TGDB_CAT_ID_BASE + int(g["id"])
+                con.execute(
+                    "INSERT OR IGNORE INTO identity(id,name,norm_key,year,built_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (ident, g["name"], g["norm_key"], g["year"], now))
+                if g["norm_key"]:
+                    con.execute(
+                        "INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
+                        "VALUES('name',?,?,'derived')", (g["norm_key"], ident))
+                new += 1
+            else:
+                linked += 1
+            con.execute("INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
+                        "VALUES('thegamesdb',?,?,'exact')", (gid, ident))
+            if (linked + new) % 20000 == 0:
+                con.commit()
+                if progress:
+                    print("matchindex: tgdb %d linked, %d new, %.0fs"
+                          % (linked, new, time.time() - t0), file=sys.stderr)
+        con.commit()
+        if progress:
+            print("matchindex: thegamesdb catalogue — %d linked, %d new, %.0fs"
+                  % (linked, new, time.time() - t0), file=sys.stderr)
+    except Exception as e:                          # noqa: BLE001
+        print("matchindex: tgdb catalogue skipped (%s)" % str(e)[:120], file=sys.stderr)
+    return linked, new
+
+
+def _match_tgdb(con, g):
+    """The identity this TheGamesDB row already is, or None. Same gate as everything else."""
+    nk = g["norm_key"]
+    if not nk:
+        return None
+    cands = con.execute(
+        "SELECT DISTINCT k.identity_id, i.name, i.year FROM identity_key k "
+        "JOIN identity i ON i.id=k.identity_id "
+        "WHERE k.ns IN ('name','alias') AND k.val=? AND k.identity_id < ?",
+        (nk, SS_ID_BASE)).fetchall()
+    best, best_sc = None, 0.0
+    for c in cands:
+        ok, sc = matchgate.score([g["name"] or ""], c["name"], g["year"], c["year"])
+        if ok and sc > best_sc:
+            best, best_sc = c["identity_id"], sc
+    return best
 
 
 def _merge_moby(con, have, now, progress=True, t0=None):
