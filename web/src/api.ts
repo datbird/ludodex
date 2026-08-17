@@ -462,6 +462,14 @@ export interface SsTier {
   level?: string
 }
 
+export interface AttrCapProvider {
+  id: string; label: string; note: string; enabled: boolean; configured: boolean
+}
+export interface AttrCapabilities {
+  kinds: Record<string, { providers: AttrCapProvider[]; unsupplied: boolean; tooltip: string }>
+  unsupplied_note: string
+}
+
 export interface TgdbLimit {
   configured: boolean
   error?: string | null
@@ -1266,6 +1274,7 @@ export const api = {
       '/api/backingstore/restore', { dry_run }),
   // --- Publish -------------------------------------------------------------
   ssTier: () => get<SsTier>('/api/services/screenscraper/tier'),
+  attrCapabilities: () => get<AttrCapabilities>('/api/attributes/capabilities'),
   tgdbLimit: (refresh = false) =>
     get<TgdbLimit>(`/api/services/thegamesdb/limit${refresh ? '?refresh=true' : ''}`),
   publishStatus: () => get<PublishStatus>('/api/publish/status'),

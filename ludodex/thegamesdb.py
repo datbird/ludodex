@@ -405,6 +405,93 @@ def platforms(key=None):
     return list(data.values()) if isinstance(data, dict) else list(data)
 
 
+def by_platform(platform_ids, page=1, key=None):
+    """Every game on a platform. Paginated at 20 by the server, so a whole platform is
+    a long walk — the caller decides how far to go, this only fetches a page."""
+    _spend()
+    p = _request("/v1/Games/ByPlatformID",
+                 {"id": ",".join(str(x) for x in platform_ids), "fields": FIELDS,
+                  "include": "boxart,platform", "page": page}, key=key)
+    return _games(p), _boxart(p), (p.get("pages") or {})
+
+
+def videos(game_ids, key=None):
+    """Trailers/clips, batched. Separate from images because the API keeps them apart —
+    and unlike boxart they do NOT ride along on a metadata call."""
+    out = {}
+    for chunk in _chunks(game_ids):
+        _spend()
+        p = _request("/v1/Games/Videos",
+                     {"games_id": ",".join(str(x) for x in chunk)}, key=key)
+        d = p.get("data") or {}
+        base = d.get("base_url") or ""
+        for gid, rows in (d.get("videos") or {}).items():
+            out[str(gid)] = [{"type": (r.get("type") or ""),
+                              "url": (base + (r.get("filename") or ""))
+                              if r.get("filename") else ""}
+                             for r in rows or []]
+    return out
+
+
+# The five lookup tables. A game row carries IDS — `genres: [15]`, `developers: [7574,
+# 7979]`, `region_id: 2` — so without these the pull is unreadable. They are small,
+# essentially static, and cost five requests ONCE; caching them is not an optimisation,
+# it is the difference between five requests and five per sweep.
+VOCAB_ENDPOINTS = {
+    "genres": ("/v1/Genres", "genres"),
+    "developers": ("/v1/Developers", "developers"),
+    "publishers": ("/v1/Publishers", "publishers"),
+    "regions": ("/v1/Regions", "regions"),
+    "countries": ("/v1/Countries", "countries"),
+}
+VOCAB_TTL = 90 * 24 * 3600          # re-fetch quarterly; new studios do get added
+
+
+def vocabulary(force=False, key=None):
+    """{table: {id: name}} for all five lookup tables, cached in the state db."""
+    con = _state()
+    try:
+        raw = _get(con, "vocab")
+        age = time.time() - float(_get(con, "vocab_at", 0) or 0)
+        if raw and not force and age < VOCAB_TTL:
+            try:
+                return json.loads(raw)
+            except ValueError:
+                pass
+    finally:
+        con.close()
+
+    out = {}
+    for name, (path, root) in VOCAB_ENDPOINTS.items():
+        _spend()
+        p = _request(path, key=key)
+        data = (p.get("data") or {}).get(root) or {}
+        if isinstance(data, dict):
+            out[name] = {str(k): (v.get("name") if isinstance(v, dict) else v)
+                         for k, v in data.items()}
+        else:
+            out[name] = {str(v.get("id")): v.get("name") for v in data}
+    con = _state()
+    try:
+        _put(con, "vocab", json.dumps(out))
+        _put(con, "vocab_at", int(time.time()))
+        con.commit()
+    finally:
+        con.close()
+    return out
+
+
+def resolve_names(row, vocab):
+    """A game row's id lists -> names. Unknown ids are DROPPED, not rendered as ids:
+    a genre facet reading "15" is worse than one missing an entry."""
+    def names(field, table):
+        t = vocab.get(table) or {}
+        return [t[str(i)] for i in (row.get(field) or []) if str(i) in t]
+    return {"genres": names("genres", "genres"),
+            "developers": names("developers", "developers"),
+            "publishers": names("publishers", "publishers")}
+
+
 def updates(last_edit_id=0, time_minutes=None, key=None):
     """The edit log, for incremental refresh instead of re-scraping.
 

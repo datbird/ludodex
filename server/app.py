@@ -2439,6 +2439,26 @@ def screenscraper_tier():
             "used_today": q.get("requeststoday"), "level": q.get("level")}
 
 
+@app.get("/api/attributes/capabilities")
+def attribute_capabilities():
+    """Which provider can fill which attribute, with live enabled/configured state.
+
+    Static enough to fetch once per session, so it is its own endpoint rather than more
+    weight on every game-detail response. It exists because a blank attribute row was
+    reporting three different situations identically — nobody asked yet, no provider can
+    supply it at all, or the one that could is switched off — and only the first of those
+    is worth the user waiting for."""
+    import provider_caps
+    kinds = list(_EDITABLE_ATTR_KINDS)
+    for k in sorted(provider_caps.CAPS):
+        if k not in kinds:
+            kinds.append(k)
+    m = provider_caps.matrix(kinds)
+    return {"kinds": {k: {**v, "tooltip": provider_caps.tooltip(k)}
+                      for k, v in m.items()},
+            "unsupplied_note": provider_caps.UNSUPPLIED_NOTE}
+
+
 @app.get("/api/services/thegamesdb/limit")
 def thegamesdb_limit(refresh: bool = False):
     """What is left of this month, as the SERVER reports it.

@@ -261,6 +261,57 @@ def main():
                                            "thegamesdb_monthly_limit"})
 
     print()
+    print("14. THE LOOKUP TABLES — without them a pull is unreadable")
+    # A game row carries IDS, not names: genres [15], developers [7574, 7979],
+    # region_id 2. Shipping the normalizer without these would have meant a genre facet
+    # full of integers.
+    def vocab_fake(path, params=None, timeout=30, attempts=3, key=None):
+        calls.append((path, dict(params or {})))
+        root = {"/v1/Genres": ("genres", {"15": {"id": 15, "name": "Platform"}}),
+                "/v1/Developers": ("developers", {"7574": {"id": 7574, "name": "Sonic Team"}}),
+                "/v1/Publishers": ("publishers", {"346": {"id": 346, "name": "Sega"}}),
+                "/v1/Regions": ("regions", {"2": {"id": 2, "name": "NTSC-U"}}),
+                "/v1/Countries": ("countries", {"50": {"id": 50, "name": "United States"}})}[path]
+        return {"code": 200, "data": {root[0]: root[1]},
+                "remaining_monthly_allowance": 800}
+    T._request = vocab_fake
+    calls.clear()
+    v = T.vocabulary(force=True)
+    check("all five tables fetched: %s" % sorted(v), len(calls) == 5)
+    check("keyed by id -> name", v["genres"]["15"] == "Platform")
+    calls.clear()
+    T.vocabulary()
+    check("and CACHED — a second call costs nothing", calls == [])
+    T._request = fake
+
+    print()
+    print("15. ids resolve to names, and unknown ids are dropped not rendered")
+    names = T.resolve_names(
+        {"genres": [15, 999], "developers": [7574], "publishers": [346]}, v)
+    check("known ids become names", names["genres"] == ["Platform"])
+    check("an unknown id is DROPPED — a genre reading '999' is worse than a gap",
+          "999" not in names["genres"] and len(names["genres"]) == 1)
+    check("developers and publishers resolve too",
+          names["developers"] == ["Sonic Team"] and names["publishers"] == ["Sega"])
+
+    print()
+    print("16. the endpoints we implement are the documented ones")
+    # Read off api.thegamesdb.net/spec.yaml, their own OpenAPI document (the root page is
+    # a SwaggerUI shell that loads it). Listed here so a rename upstream is caught rather
+    # than discovered as a 404 mid-sweep.
+    documented = {
+        "/v1.1/Games/ByGameName", "/v1/Games/ByGameID", "/v1/Games/ByPlatformID",
+        "/v1/Games/ByGameUniqueID", "/v1/Games/ByGameHash", "/v1/Games/Images",
+        "/v1/Games/Videos", "/v1/Games/Updates", "/v1/Platforms", "/v1/Genres",
+        "/v1/Developers", "/v1/Publishers", "/v1/Regions", "/v1/Countries",
+        "/v1/API/Limit"}
+    src = open(os.path.join(root, "ludodex", "thegamesdb.py"), encoding="utf-8").read()
+    missing = sorted(p for p in documented if '"%s"' % p not in src)
+    check("every endpoint we rely on is spelled exactly as documented: %s"
+          % (missing or "all present"), not missing)
+    check("the five lookup tables are all wired", len(T.VOCAB_ENDPOINTS) == 5)
+
+    print()
     print("%d checks, all passed" % len(PASS))
 
 

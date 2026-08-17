@@ -4511,3 +4511,24 @@ img.ms-icon { display: block; object-fit: contain; flex: 0 0 auto; }
 .prov-hint.ss-tier { display: block; margin-top: 6px; line-height: 1.5; }
 .prov-hint.ss-tier b { color: var(--text-h); }
 .prov-hint.err { color: var(--danger, #e5534b); }
+
+/* Attribute capability marks. A blank attribute row used to report three different
+   situations identically — nobody asked yet, no provider can supply it, or the one that
+   could is switched off. These name the last two so the row stops looking like work
+   outstanding when it is not. */
+.ap-cap {
+  margin-left: .5rem;
+  font-size: .72rem;
+  line-height: 1.4;
+  padding: .05rem .35rem;
+  border-radius: .35rem;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.ap-cap.none { color: var(--muted, #94a3b8); border: 1px solid currentColor; opacity: .65; }
+.ap-cap.off  { color: #d9a441; border: 1px solid currentColor; opacity: .9; }
+@media (max-width: 640px) {
+  /* On a phone the label column is already tight; the mark wraps under it rather than
+     pushing the value off screen. */
+  .ap-cap { display: block; margin-left: 0; margin-top: .15rem; white-space: normal; }
+}

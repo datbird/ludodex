@@ -8,7 +8,7 @@ import type {
   MediaLibrary, MediaAsset, MediaKind, MatchedProvider, ProviderScopeState, BannedMedia, BackupsState, BackupJob,
   MatchIndexState, MatchIndexRelease,
   PublishEffective, PublishEntry, PublishPlan, PublishPlanItem, PublishJob, SsTier,
-  TgdbLimit,
+  TgdbLimit, AttrCapabilities,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device, LibraryManager, ImportMode, ImportEstimate, ResetScope, ResetPlan,
@@ -6046,8 +6046,21 @@ const ESRB_MEANING: Record<string, string> = {
 const CONTENT_TYPES = ['Game', 'Application', 'Tool', 'Soundtrack', 'Video', 'Mod', 'Other']
 const attrLabel = (kind: string) => kind === 'content_type' ? 'Type' : kind.replace(/_/g, ' ')
 
+// Fetched once per session, not per game — the matrix is a fact about the providers,
+// not about the title being viewed.
+let _capsCache: AttrCapabilities | null = null
+function useAttrCapabilities() {
+  const [caps, setCaps] = useState<AttrCapabilities | null>(_capsCache)
+  useEffect(() => {
+    if (_capsCache) return
+    api.attrCapabilities().then((c) => { _capsCache = c; setCaps(c) }).catch(() => {})
+  }, [])
+  return caps
+}
+
 function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () => void }) {
   const prov = d.attribute_provenance || {}
+  const caps = useAttrCapabilities()
   const overrides = d.attribute_overrides || {}
   const [editing, setEditing] = useState<string | null>(null)
   const [manual, setManual] = useState('')
@@ -6106,8 +6119,24 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
           const blank = !vals.length && !ov
           return (
             <div key={kind} className={'ap-row' + (open ? ' open' : '') + (blank ? ' blank' : '')}>
-              <button className="ap-kind" onClick={() => { setEditing(open ? null : kind); setManual('') }}>
+              <button className="ap-kind" onClick={() => { setEditing(open ? null : kind); setManual('') }}
+                      title={caps?.kinds?.[kind]?.tooltip || undefined}>
                 <span className="ap-kname">{attrLabel(kind)}</span>
+                {/* A blank row said nothing about WHY it was blank. These two marks
+                    separate "no provider can supply this" from "one could, if you
+                    turned it on" — different problems with different fixes. */}
+                {blank && caps?.kinds?.[kind]?.unsupplied && (
+                  <span className="ap-cap none" title={caps.unsupplied_note}>manual only</span>
+                )}
+                {blank && !caps?.kinds?.[kind]?.unsupplied
+                  && caps?.kinds?.[kind]?.providers?.length
+                  && !caps.kinds[kind].providers.some((p) => p.enabled && p.configured) && (
+                  <span className="ap-cap off"
+                        title={caps.kinds[kind].providers
+                          .map((p) => `${p.label} — ${p.note}`).join('; ')}>
+                    {caps.kinds[kind].providers.map((p) => p.label).join(', ')} can fill this
+                  </span>
+                )}
                 <span className="ap-vals">
                   {ov ? (
                     <span className="ap-chip ap-chosen prov-badge" style={attrBadgeStyle([ov.origin])}>
