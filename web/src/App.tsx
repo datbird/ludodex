@@ -8,6 +8,7 @@ import type {
   MediaLibrary, MediaAsset, MediaKind, MatchedProvider, ProviderScopeState, BannedMedia, BackupsState, BackupJob,
   MatchIndexState, MatchIndexRelease,
   PublishEffective, PublishEntry, PublishPlan, PublishPlanItem, PublishJob, SsTier,
+  TgdbLimit,
   OpsStatus, OpsDatabase, SyncService, SyncJob, RomLocation, RomJob, TagRef, Scores,
   Spotlight as SpotlightData, IdentifyCandidate, RecognizedGame,
   Device, LibraryManager, ImportMode, ImportEstimate, ResetScope, ResetPlan,
@@ -448,7 +449,7 @@ const NON_ID_SOURCES = new Set(['emulation', 'archive', 'physical', 'rom', 'digi
 
 // Metadata-PROVIDER identities (editable/disable-able badges), as opposed to
 // store-ownership badges which are immutable facts.
-const META_PROVIDERS = new Set(['igdb', 'screenscraper', 'steamgriddb'])
+const META_PROVIDERS = new Set(['igdb', 'screenscraper', 'steamgriddb', 'thegamesdb'])
 
 // Deep link to a store's page for this game, where the id maps to a stable public URL.
 // Stores whose ids don't (GOG product ids, Epic/Xbox/PSN catalogue ids) still get a chip —
@@ -4752,6 +4753,40 @@ function ScreenScraperTier() {
   )
 }
 
+// TheGamesDB meters by the MONTH, so the number that matters is not "requests today"
+// but "requests left until the reset" — and a scrape that stops has no other explanation
+// available to the user. `underconfigured` is called out loudly because it means a tier
+// was paid for and is not being used; silence there costs the user money.
+function TheGamesDbQuota() {
+  const [t, setT] = useState<TgdbLimit | null>(null)
+  const [busy, setBusy] = useState(false)
+  const load = (refresh = false) => {
+    setBusy(true)
+    api.tgdbLimit(refresh).then(setT).catch(() => {}).finally(() => setBusy(false))
+  }
+  useEffect(() => { load() }, [])
+  if (!t || !t.configured) return null
+  if (t.error) return <span className="prov-hint err">Could not read your allowance: {t.error}</span>
+  const cap = t.configured_limit ?? 0
+  const rem = t.remaining_reported
+  return (
+    <span className="prov-hint ss-tier">
+      Budgeted at <b>{cap.toLocaleString()}</b>/month
+      {rem != null && <> · <b>{rem.toLocaleString()}</b> left this month</>}
+      {t.reserve ? <> · holding <b>{t.reserve.toLocaleString()}</b> back for interactive lookups</> : null}
+      {' '}· <b>{(t.budget ?? 0).toLocaleString()}</b> spendable now.
+      {t.underconfigured && (
+        <> <b className="err">Your key grants more than {cap.toLocaleString()}</b> — raise the
+        monthly limit to use what you are paying for.</>
+      )}
+      {' '}
+      <button className="btn" disabled={busy} onClick={() => load(true)}>
+        {busy ? 'Checking…' : 'Re-check'}
+      </button>
+    </span>
+  )
+}
+
 function Credentials() {
   const [data, setData] = useState<Service[] | null>(null)
   const [vals, setVals] = useState<Record<string, string>>({})
@@ -4827,6 +4862,7 @@ function Credentials() {
                   <div className="svc-body">
                     {s.hint && <span className="prov-hint">{s.hint}</span>}
                     {s.id === 'screenscraper' && <ScreenScraperTier />}
+                    {s.id === 'thegamesdb' && <TheGamesDbQuota />}
                     {s.doc && <a className="prov-doc" href={s.doc.url} target="_blank" rel="noreferrer noopener">{s.doc.label}</a>}
                     {s.fields.map((f) => (
                       <div key={f.key} className="svc-field">
@@ -7365,7 +7401,7 @@ function MediaWand({ nk, kinds, label, onDone }: {
     try {
       let added = 0
       const changed = new Set<string>()
-      for (const p of ['igdb', 'screenscraper', 'steamgriddb', ...(alsoWeb ? ['web'] : [])]) {
+      for (const p of ['igdb', 'screenscraper', 'steamgriddb', 'thegamesdb', ...(alsoWeb ? ['web'] : [])]) {
         try {
           const r = await api.mediaFetch(nk, p, kinds ?? undefined)
           added += r.added; r.chosen_changed.forEach((c) => changed.add(c))
@@ -9510,7 +9546,7 @@ function providerMatches(p: AiFindingPayload): ProviderMatch[] {
 }
 
 const PROVIDER_LABEL: Record<string, string> = {
-  igdb: 'IGDB', screenscraper: 'ScreenScraper',
+  igdb: 'IGDB', screenscraper: 'ScreenScraper', thegamesdb: 'TheGamesDB',
 }
 
 function pmLabel(m: ProviderMatch): string {

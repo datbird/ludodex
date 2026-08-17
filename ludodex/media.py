@@ -546,19 +546,31 @@ def steamgrid_kind(filename):
 #  provider registry — local (mount-based) + remote (fetched by id)
 # --------------------------------------------------------------------------- #
 LOCAL_PROVIDERS = ("esde", "steamgrid", "playnite", "launchbox")
-REMOTE_PROVIDERS = ("steam", "igdb", "steamgriddb")
+REMOTE_PROVIDERS = ("steam", "igdb", "steamgriddb", "thegamesdb")
 MEDIA_PROVIDERS = LOCAL_PROVIDERS + REMOTE_PROVIDERS
 
 # Per-kind provider priority for choosing the ONE best asset (first available
 # wins). Curated/owned local art (your Steam custom grid, your ES-DE scrapes)
 # beats official store art, which beats IGDB, which beats SteamGridDB community
 # art. ES-DE has no real backgrounds, so it sinks for that kind.
+# TheGamesDB sits below IGDB and ScreenScraper wherever it appears, and that is a
+# deliberate ranking rather than an oversight: its catalogue is genuinely smaller and its
+# art is community scans. It is here because it is one of only two scrapers ES-DE ships,
+# so users arrive expecting it — offering it and ranking it honestly are different
+# decisions, and this is the second one. It supplies exactly seven kinds (boxart front /
+# back, fanart, banner, screenshot, clearlogo, titlescreen); it is not listed for kinds it
+# has no rows for, because a name in a priority list that never matches makes the term
+# constant, and a constant term decides nothing.
 PRIORITY = {
-    "cover":        ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb", "steamgriddb", "playnite", "launchbox"],
-    "background":   ["steamgrid", "steam", "screenscraper", "igdb", "steamgriddb", "esde", "gamelist", "playnite", "launchbox"],
+    "cover":        ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb", "steamgriddb", "thegamesdb", "playnite", "launchbox"],
+    "background":   ["steamgrid", "steam", "screenscraper", "igdb", "steamgriddb", "thegamesdb", "esde", "gamelist", "playnite", "launchbox"],
     "hero":         ["steamgrid", "steam", "steamgriddb", "igdb", "screenscraper", "launchbox"],
-    "header":       ["steamgrid", "steam", "steamgriddb", "launchbox", "screenscraper"],
-    "logo":         ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb", "steamgriddb", "launchbox"],
+    # ScreenScraper already sat LAST here — it has essentially no capsule art — so
+    # "thegamesdb below screenscraper" puts it at the very end. Left that way on purpose:
+    # one rule with no exceptions is worth more than winning this one kind, and last in a
+    # ranked list still beats the unranked default.
+    "header":       ["steamgrid", "steam", "steamgriddb", "launchbox", "screenscraper", "thegamesdb"],
+    "logo":         ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb", "steamgriddb", "thegamesdb", "launchbox"],
     "icon":         ["steamgrid", "steamgriddb", "igdb", "screenscraper", "playnite"],
     # Steam and IGDB supply 99.8% of screenshots (24,867 and 16,858 rows against
     # ScreenScraper's 64) and NEITHER was named here, so both fell to the unranked
@@ -571,10 +583,10 @@ PRIORITY = {
     # ScreenScraper is deliberate: IGDB's shots are curated per game, SS's are community
     # uploads that may be from a different system entirely. Frontends last — they are
     # scraped copies of these same sources.
-    "screenshot":   ["steam", "igdb", "screenscraper", "gamelist", "esde", "launchbox"],
-    "title_screen": ["esde", "screenscraper", "launchbox"],
+    "screenshot":   ["steam", "igdb", "screenscraper", "thegamesdb", "gamelist", "esde", "launchbox"],
+    "title_screen": ["esde", "screenscraper", "thegamesdb", "launchbox"],
     "box_3d":       ["esde", "screenscraper", "steamgriddb", "launchbox"],
-    "box_back":     ["esde", "screenscraper", "launchbox"],
+    "box_back":     ["esde", "screenscraper", "thegamesdb", "launchbox"],
     "box_spine":    ["screenscraper", "launchbox"],
     "physical_media": ["esde", "screenscraper", "launchbox"],
     "marquee":      ["esde", "screenscraper", "launchbox"],
@@ -587,7 +599,7 @@ PRIORITY = {
     "mix":          ["esde", "screenscraper"],
 }
 DEFAULT_PRIORITY = ["steamgrid", "esde", "gamelist", "screenscraper", "steam", "igdb",
-                    "steamgriddb", "playnite", "launchbox"]
+                    "steamgriddb", "thegamesdb", "playnite", "launchbox"]
 
 
 def priority(kind):

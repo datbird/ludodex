@@ -45,11 +45,13 @@ def main():
     CREATE TABLE ss_resolution(norm_key TEXT PRIMARY KEY, ss_id INT);
     CREATE TABLE sgdb_resolution(norm_key TEXT PRIMARY KEY, sgdb_id INT);
     CREATE TABLE igdb_resolution(norm_key TEXT PRIMARY KEY, igdb_id INT);
+    CREATE TABLE tgdb_resolution(norm_key TEXT PRIMARY KEY, tgdb_id INT);
     """)
     # the live EVGA shape: SGDB has it, the two game databases correctly do not
     mc.execute("INSERT INTO sgdb_resolution VALUES('evga', 3580)")
     mc.execute("INSERT INTO ss_resolution VALUES('evga', 0)")
     mc.execute("INSERT INTO igdb_resolution VALUES('evga', 0)")
+    mc.execute("INSERT INTO tgdb_resolution VALUES('evga', 0)")
     # a game nobody has been asked about yet
     mc.execute("INSERT INTO ss_resolution VALUES('fresh', 0)")
     mc.commit(); mc.close()
@@ -60,13 +62,17 @@ def main():
     check("its id comes with it, so the card can link out",
           st["matched"][0]["id"] == "3580")
     check("providers that were asked and found nothing are listed apart",
-          sorted(st["missed"]) == ["igdb", "screenscraper"])
-    check("no game DATABASE is claimed unattempted when all three were asked",
+          sorted(st["missed"]) == ["igdb", "screenscraper", "thegamesdb"])
+    # Deliberately derived from provider_ids rather than written out: this assertion is
+    # the one that catches a NEW provider being registered without the review page
+    # learning to ask about it, and a hardcoded list would stop catching that the moment
+    # someone updated it to make the suite green.
+    check("no game DATABASE is claimed unattempted when every one was asked",
           [p for p in st["unattempted"] if p != "steam"] == [])
 
     st = srv._provider_match_state("fresh")
     check("a provider with NO row is unattempted, not a miss",
-          sorted(st["unattempted"]) == ["igdb", "steamgriddb"]
+          sorted(st["unattempted"]) == ["igdb", "steamgriddb", "thegamesdb"]
           and st["missed"] == ["screenscraper"])
 
     # STEAM is a provider as well as a source — it supplies the appid, the store
@@ -104,8 +110,10 @@ def main():
           and "not owned" in st["ineligible"][0]["why"])
 
     st = srv._provider_match_state("never-heard-of-it")
+    import provider_ids
+    everyone = sorted(set(provider_ids.PROVIDERS) | {"igdb"})
     check("an unknown game is unattempted everywhere, never 'no match'",
-          sorted(st["unattempted"]) == ["igdb", "screenscraper", "steamgriddb"]
+          sorted(st["unattempted"]) == everyone
           and not st["matched"] and not st["missed"])
     check("...and Steam is ineligible for it rather than pending",
           [x["provider"] for x in st["ineligible"]] == ["steam"])

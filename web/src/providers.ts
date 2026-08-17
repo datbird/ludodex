@@ -6,6 +6,7 @@ export const PROVIDER_COLORS: Record<string, string> = {
   igdb: '#8b5cf6',           // violet
   screenscraper: '#f59e0b',  // amber
   steamgriddb: '#5eb3ef',    // the accent band of its own logo
+  thegamesdb: '#7ab648',     // the green of its own wordmark
   // stores
   steam: '#3ba7e0',
   gog: '#a855f7',
@@ -41,6 +42,7 @@ const LABELS: Record<string, string> = {
   // steamgrid is the LOCAL Steam grid folder, a different provider from SteamGridDB —
   // 'Steamgrid' beside 'SteamGridDB' read as the same thing.
   steamgriddb: 'SteamGridDB', steamgrid: 'Steam grid',
+  thegamesdb: 'TheGamesDB',
 }
 export function providerLabel(id: string): string {
   const k = (id || '').toLowerCase()
@@ -52,7 +54,7 @@ export function providerLabel(id: string): string {
 const MARKS: Record<string, string> = {
   igdb: 'IG', screenscraper: 'SS', steam: 'S', gog: 'GG', epic: 'E', xbox: 'X',
   psn: 'PS', ea: 'EA', itch: 'i', ubisoft: 'U', battlenet: 'B',
-  steamgriddb: 'SG', steamgrid: 'SGr',
+  steamgriddb: 'SG', steamgrid: 'SGr', thegamesdb: 'TG',
 }
 export function providerMark(id: string): string {
   const k = (id || '').toLowerCase()

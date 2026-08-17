@@ -462,6 +462,20 @@ export interface SsTier {
   level?: string
 }
 
+export interface TgdbLimit {
+  configured: boolean
+  error?: string | null
+  period?: string
+  configured_limit?: number
+  reserve?: number
+  remaining_reported?: number | null
+  extra_allowance?: number
+  budget?: number
+  // The key grants more than the configured limit — i.e. a tier was bought and is
+  // sitting unused. Worth surfacing rather than quietly leaving on the table.
+  underconfigured?: boolean
+}
+
 export interface PublishJob {
   running: boolean; device_id: number; done: number; total: number
   current: string | null; error: string
@@ -1252,6 +1266,8 @@ export const api = {
       '/api/backingstore/restore', { dry_run }),
   // --- Publish -------------------------------------------------------------
   ssTier: () => get<SsTier>('/api/services/screenscraper/tier'),
+  tgdbLimit: (refresh = false) =>
+    get<TgdbLimit>(`/api/services/thegamesdb/limit${refresh ? '?refresh=true' : ''}`),
   publishStatus: () => get<PublishStatus>('/api/publish/status'),
   publishEffective: (dev: number) =>
     get<PublishEffective>(`/api/devices/${dev}/publish/effective`),

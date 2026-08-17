@@ -33,6 +33,7 @@ PROVIDERS = {
     "igdb": ("igdb_resolution", "igdb_id"),
     "screenscraper": ("ss_resolution", "ss_id"),
     "steamgriddb": ("sgdb_resolution", "sgdb_id"),
+    "thegamesdb": ("tgdb_resolution", "tgdb_id"),
 }
 
 # Columns a specific provider needs that the shared layer does not. This is the uniform

@@ -37,6 +37,8 @@ import sqlite3
 PAGE_URL = {
     "screenscraper": "https://www.screenscraper.fr/gameinfos.php?gameid=%s",
     "steamgriddb": "https://www.steamgriddb.com/game/%s",
+    # Verified against the live site: /game.php?id=N serves the page, /game/N is a 404.
+    "thegamesdb": "https://thegamesdb.net/game.php?id=%s",
 }
 
 

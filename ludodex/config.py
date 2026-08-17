@@ -166,6 +166,29 @@ SCHEMA = [
     ("screenscraper_daily_margin", "200",
      "Stop scraping when within this many requests of the daily cap "
      "(maxrequestsperday), leaving headroom. Free tier cap is ~20,000/day."),
+    # --- TheGamesDB (api.thegamesdb.net) — the OTHER scraper this audience knows
+    #     (ES-DE ships exactly two: ScreenScraper and this one). Bring-your-own-key.
+    #     Budgeted PER MONTH, not per day, which is why the numbers below look tiny
+    #     next to ScreenScraper's — a free key is 1,000 requests for the whole month. ---
+    ("metadata_thegamesdb_enabled", "0",
+     "[metadata] Consult TheGamesDB for game metadata + boxart. Off by default: it "
+     "needs your own API key, and its monthly allowance is small enough that turning "
+     "it on should be a choice rather than something that happens to you."),
+    ("thegamesdb_api_key", "",
+     "Your TheGamesDB API key. Request one free at "
+     "https://api.thegamesdb.net/key.php (approval averages about an hour). "
+     "Env: TGDB_API_KEY."),
+    ("thegamesdb_monthly_limit", "1000",
+     "Requests ludodex will spend per month. 1000 is what a free key grants. Raise it "
+     "ONLY if you have bought a higher tier (increases are sold via "
+     "patreon.com/thegamesdb, not granted on request) — the live allowance reported by "
+     "the API always wins, so a value above your real key is ignored, never applied."),
+    ("thegamesdb_reserve", "",
+     "Requests held back from bulk sweeps so interactive lookups still work. Blank = "
+     "5% of the monthly limit (minimum 10), so it scales if you buy a bigger tier."),
+    ("thegamesdb_media", "1",
+     "[media] Ingest the boxart TheGamesDB returns alongside metadata (no extra "
+     "requests — it rides on the same call)."),
     # --- media providers: image/video assets indexed by REFERENCE, keyed by
     #     norm_key. Local providers read registered media mounts; remote ones
     #     fetch by id. Indexed by media_index.py into media-index.sqlite. ---
@@ -355,7 +378,7 @@ BUILTIN_SOURCES = ("steam", "epic", "gog", "itch", "ea", "emulation", "playnite"
 
 # Metadata providers are CONSULTED to enrich attributes — they are NOT sources
 # (they add no ownership). Toggled like sources but tracked separately.
-METADATA_PROVIDERS = ("igdb", "screenscraper", "steamspy")
+METADATA_PROVIDERS = ("igdb", "screenscraper", "steamspy", "thegamesdb")
 
 
 def metadata_enabled(name):
@@ -766,6 +789,33 @@ INTEGRATIONS = [
                      "screenscraper_softname"],
      "env": ["SS_DEVID", "SS_DEVPASSWORD", "SS_SSID", "SS_SSPASSWORD"],
      "verify": "python3 ludodex/ss_scrape.py --status"},
+
+    {"id": "thegamesdb", "name": "TheGamesDB (metadata + boxart)",
+     "kind": "metadata",
+     "purpose": "The other scraper the emulation world knows — ES-DE ships exactly "
+                "two built-in scrapers and this is one of them, alongside "
+                "ScreenScraper. Smaller coverage than IGDB or ScreenScraper, so it "
+                "sits below both, but it needs no account beyond a key and is the "
+                "usual fallback when ScreenScraper is throttled or down.",
+     "url": "https://api.thegamesdb.net/key.php",
+     "steps": [
+         "Request a key at https://api.thegamesdb.net/key.php — application name, a "
+         "sentence on how you will use it, and an application URL if you have a "
+         "public one. Approval averages about an hour.",
+         "Store it: config.py set thegamesdb_api_key <key> (or paste it in the web "
+         "UI), then: config.py enable thegamesdb.",
+         "A free key is 1,000 requests PER MONTH — not per day. ludodex batches 20 "
+         "games per request and takes boxart on the same call, which is what makes "
+         "that budget workable; leave it batching.",
+         "Increases are BOUGHT, not requested: patreon.com/thegamesdb (Bronze $1 / "
+         "Silver $5 / Gold $15). The tiers do not publish what limit each grants — "
+         "ask support@thegamesdb.net or their Discord before paying. If you buy one, "
+         "raise thegamesdb_monthly_limit to match; the live allowance the API reports "
+         "always wins, so setting it too high is ignored rather than overspent."],
+     "config_keys": ["thegamesdb_api_key", "thegamesdb_monthly_limit",
+                     "thegamesdb_reserve"],
+     "env": ["TGDB_API_KEY"],
+     "verify": "python3 ludodex/thegamesdb.py --status"},
 
     {"id": "steamgriddb", "name": "SteamGridDB (media)", "kind": "media",
      "purpose": "Community grids/heroes/logos/icons — a media gap-filler.",

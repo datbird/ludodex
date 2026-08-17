@@ -2439,6 +2439,22 @@ def screenscraper_tier():
             "used_today": q.get("requeststoday"), "level": q.get("level")}
 
 
+@app.get("/api/services/thegamesdb/limit")
+def thegamesdb_limit(refresh: bool = False):
+    """What is left of this month, as the SERVER reports it.
+
+    Same reasoning as the ScreenScraper tier endpoint: 'why did my scrape stop' is
+    unanswerable without showing the number. The one thing this adds is
+    `underconfigured` — a key that grants more than the configured limit means the user
+    bought a tier and is not getting it, which is worth saying rather than quietly
+    leaving on the table."""
+    import thegamesdb as tgdb
+    if not tgdb.api_key():
+        return {"configured": False}
+    s = tgdb.limit_status(force=refresh)
+    return {"configured": True, "period": "month", **s}
+
+
 @app.get("/api/publish/status")
 def publish_status():
     import publish
@@ -9892,6 +9908,22 @@ SERVICES = [
           "secret": False}],
      "tier": "/api/services/screenscraper/tier",
      "limits": _limits("screenscraper", cooldown="1000")},
+    {"id": "thegamesdb", "name": "TheGamesDB", "role": "provider",
+     "hint": "api.thegamesdb.net/key.php — free key, approval averages about an hour. "
+             "One of only two scrapers ES-DE ships built in, so it is here for the "
+             "people who already use it. Budgeted PER MONTH, not per day: a free key "
+             "is 1,000 requests for the whole month, which is why ludodex batches 20 "
+             "games per request and takes the boxart on the same call. Increases are "
+             "bought through their Patreon rather than granted on request — if you buy "
+             "one, raise the monthly limit below to match.",
+     "creds": [
+         {"key": "thegamesdb_api_key", "label": "API key", "secret": True},
+         {"key": "thegamesdb_monthly_limit",
+          "label": "Requests per month (1000 = a free key)", "secret": False},
+         {"key": "thegamesdb_reserve",
+          "label": "Held back for interactive lookups (blank = 5%)", "secret": False}],
+     "tier": "/api/services/thegamesdb/limit",
+     "limits": _limits("thegamesdb", cooldown="250")},
     {"id": "steamgriddb", "name": "SteamGridDB", "role": "provider",
      "hint": "steamgriddb.com/profile/preferences/api",
      "creds": [{"key": "steamgriddb_api_key", "label": "API key", "secret": True}],
