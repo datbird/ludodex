@@ -86,10 +86,17 @@ def main():
     # ss_mirror's bug: dead_run persists past the stop line, so a re-run walks one block
     # and stops again, creeping forward forever without finding what was added since.
     calls.clear()
+    # Enough budget to actually prove the end: DEAD_RUN_STOP is now 500 blocks, so
+    # "the catalogue has ended" costs 500 requests to establish. That is the price of
+    # the threshold being large enough to clear a real 3,000-id gap.
+    T.budget = lambda key=None: 10000
     r3 = TM.walk(progress=False)          # no until_id: it must probe ABOVE the cursor
     check("a fresh run probes above the old cursor rather than exiting immediately",
           len(calls) > 1 and calls[0][0] == 61)
     check("and stops again once the dead run proves the end", r3["stopped"] == "complete")
+    check("having spent DEAD_RUN_STOP requests to prove it, not one",
+          r3["requests"] >= TM.DEAD_RUN_STOP)
+    T.budget = lambda key=None: 100
 
     print()
     print("5. a budget stop resumes from the cursor")
@@ -111,6 +118,30 @@ def main():
     check("in its own range", M.TGDB_CAT_ID_BASE > M.MOBY_ID_BASE)
     gate = src[src.index("def _match_tgdb"):src.index("def _merge_moby")]
     check("and it uses the same acceptance gate", "matchgate.score" in gate)
+
+    print()
+    print("7. THE DEAD-RUN THRESHOLD MUST SURVIVE A REAL GAP")
+    # Shipped at 40 blocks (800 ids) on an unmeasured claim. Live, TheGamesDB has a
+    # ~3,000-id dead run from ~56,980 to 60,000 and then resumes at 20/20 alive; the
+    # walk stopped inside it, said COMPLETE, and left 73,000 ids unwalked.
+    check("the threshold clears the largest gap actually observed, with margin",
+          TM.DEAD_RUN_STOP * TM.BLOCK >= 9000)
+    check("and the incident is recorded so it is not tuned back down",
+          "56,980" in open(os.path.join(root, "ludodex", "tgdb_mirror.py"),
+                           encoding="utf-8").read())
+    calls.clear()
+    con = TM.con_db(); con.execute("DELETE FROM state"); con.commit(); con.close()
+    def gapped(ids, key=None):
+        calls.append(list(ids))
+        # alive, then a 2,000-id hole, then alive again — the real shape
+        return ([dict(GEN_US, id=i, game_name="G%d" % i)
+                 for i in ids if i <= 100 or i > 2100], {})
+    T.by_ids = gapped
+    T.budget = lambda key=None: 10000     # enough to cross the hole and out the far side
+    r = TM.walk(progress=False, until_id=2200)
+    check("it walked THROUGH the hole rather than stopping in it: %d games"
+          % r["games"], r["games"] > 100)
+    check("and reached the far side", r["cursor"] == 2200)
 
     print()
     print("%d checks, all passed" % len(PASS))

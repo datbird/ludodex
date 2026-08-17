@@ -43,9 +43,18 @@ DB = os.path.join(DATA, "tgdb-catalog.sqlite")
 # it with a margin; DEAD_RUN below stops earlier if the catalogue ends sooner.
 CEILING = 138000
 BLOCK = 20                          # their page size, and the ByGameID batch size
-# Consecutive empty blocks before we accept the catalogue has ended. 40 blocks = 800 ids;
-# the sampled space has no gap anywhere near that wide, so this cannot end a walk early.
-DEAD_RUN_STOP = 40
+# Consecutive empty blocks before we accept the catalogue has ended.
+#
+# THIS WAS 40 (800 ids) AND IT WAS WRONG, on a claim I had not measured: "the sampled
+# space has no gap anywhere near that wide". Live, there is a dead run of roughly 3,000
+# consecutive ids from ~56,980 to 60,000 — and then the catalogue resumes at 20/20 alive.
+# The walk stopped in that gap, declared itself COMPLETE, and left 73,000 ids unwalked
+# while reporting success. An absence read as an answer, from a threshold I invented.
+#
+# 500 blocks = 10,000 consecutive dead ids, three times the largest gap actually
+# observed. Overshooting costs at most 500 requests once, at the true end of the
+# catalogue; undershooting costs most of the catalogue and says nothing.
+DEAD_RUN_STOP = 500
 
 
 def con_db():
