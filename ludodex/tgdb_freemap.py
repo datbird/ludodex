@@ -6,13 +6,19 @@ request per title. Resolving a library the obvious way is therefore measured in 
 which is the same as saying it cannot be done.
 
 It does not have to be done. `sselph/scraper` — the classic RetroPie scraper — ships a
-prebuilt `hash.csv` under the MIT licence: 58,843 SHA1 hashes mapped to 11,008 distinct
-TheGamesDB game ids across 34 platforms. Verified against the live API rather than taken
-on trust: the file's ids 160 and 238 come back as "GoldenEye 007" and "007: The World Is
-Not Enough", both on platform 3 = Nintendo 64, exactly as claimed.
+prebuilt `hash.csv` under the MIT licence. It has 58,843 lines, but only 32,045 of them
+carry a TheGamesDB id: 26,383 rows have a hash and a name and an EMPTY id column, and 415
+are keyed by a MAME/ScummVM/Daphne set name rather than a hash. Counting lines instead of
+usable rows overstates this file by 45%, which is exactly the mistake made when it was
+first measured here. The real figures are 32,045 hashes -> 10,688 distinct game ids across
+31 platforms.
 
-Joined against this deployment's ScreenScraper catalog on 2026-08-16: 23,649 of 720,097
-SHA1s hit, resolving 10,700 distinct games. Ten thousand ids for zero requests.
+Verified against the live API rather than taken on trust: the file's ids 160 and 238 come
+back as "GoldenEye 007" and "007: The World Is Not Enough", both on platform 3 = Nintendo
+64, exactly as claimed.
+
+Joined against this deployment's ScreenScraper catalog on 2026-08-16: 23,650 of 724,487
+SHA1s hit, resolving 10,701 distinct games. Ten thousand ids for zero requests.
 
 THE ONE RULE HERE: A HASH IS EVIDENCE, A NAME IS NOT. This file also carries ROM names,
 and they are tempting — matching on them would multiply the hit rate. They are used only
@@ -94,8 +100,12 @@ def fetch(force=False, timeout=120):
 def rows(path=None):
     """Yield (sha1, tgdb_id, tgdb_platform_id, name). Malformed lines are skipped.
 
+    A row with an EMPTY id column is skipped too, and that is most of what gets skipped:
+    26,383 of the file's 58,843 lines carry a hash and a name but no TheGamesDB id. They
+    are not malformed — they are simply not what this map is for.
+
     Skipped rather than raised on: this is a third-party file we do not control, and one
-    bad line must not cost the other fifty-eight thousand."""
+    bad line must not cost the other thirty-two thousand."""
     p = path or CACHE
     if not p or not os.path.exists(p):
         return

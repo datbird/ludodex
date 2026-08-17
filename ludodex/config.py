@@ -188,7 +188,7 @@ SCHEMA = [
      "5% of the monthly limit (minimum 10), so it scales if you buy a bigger tier."),
     ("matchindex_tgdb_freemap", "1",
      "Fold the free SHA1->TheGamesDB-id map (sselph/scraper hash.csv, MIT) into the "
-     "match index when it is rebuilt. 58,843 hashes covering 11,008 games — ids that "
+     "match index when it is rebuilt. 32,045 hashes covering 10,688 games — ids that "
      "would otherwise cost one API request each against a 1,000/MONTH budget. "
      "Downloaded to your machine and cached for 30 days; a failed download is skipped, "
      "never fatal."),

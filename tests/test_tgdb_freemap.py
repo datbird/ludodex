@@ -3,9 +3,9 @@
 
 A TheGamesDB key is 1,000 requests A MONTH, and name search does not batch: one request
 per title. Resolving a library through the API is therefore measured in years. The free
-`sselph/scraper` hash.csv short-circuits that entirely — 58,843 SHA1 hashes carrying
-11,008 TheGamesDB game ids — and against this deployment's ScreenScraper catalog it
-resolved 10,700 distinct games without a single request.
+`sselph/scraper` hash.csv short-circuits that entirely — 32,045 SHA1 hashes carrying
+10,688 TheGamesDB game ids — and against this deployment's ScreenScraper catalog it
+resolved 10,701 distinct games without a single request.
 
 THE RULE, and everything here exists to enforce it: A HASH IS EVIDENCE, A NAME IS NOT.
 The file also carries ROM names, and using them would multiply the hit rate. They are

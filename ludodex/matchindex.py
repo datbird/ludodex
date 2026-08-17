@@ -570,9 +570,9 @@ def _merge_tgdb_freemap(con, now, progress=True, t0=None):
 
     A TheGamesDB key is 1,000 requests A MONTH and name search does not batch — one
     request per title — so resolving a library through the API is measured in years. The
-    free sselph/scraper hash.csv carries 58,843 SHA1 hashes against 11,008 game ids, and
+    free sselph/scraper hash.csv carries 32,045 SHA1 hashes against 10,688 game ids, and
     every one it hits is an id we never had to ask for. Measured on this deployment:
-    23,649 of 720,097 ScreenScraper hashes hit, resolving 10,700 distinct games.
+    23,650 of 724,487 ScreenScraper hashes hit, resolving 10,701 distinct games.
 
     A HASH IS EVIDENCE; THE NAMES IN THAT FILE ARE NOT. The file carries ROM names too,
     and using them would multiply the hit rate. They are used only to LABEL an identity
