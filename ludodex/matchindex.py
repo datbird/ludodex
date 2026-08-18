@@ -479,13 +479,25 @@ def resolve_name(con, title, year=None):
 
 
 # --- building -------------------------------------------------------------- #
+MIRRORS = ((IGDB_DB, "ig"), (SS_DB, "ss"), (MOBY_DB, "mb"), (TGDB_DB, "tg"))
+
+
 def _attach(con):
-    for path, alias in ((IGDB_DB, "ig"), (SS_DB, "ss"), (MOBY_DB, "mb"),
-                        (TGDB_DB, "tg")):
+    """Attach every mirror that exists -> the set of aliases actually usable.
+
+    ATTACHING A MIRROR AND REPORTING IT MUST COME FROM ONE LIST. They did not: the
+    attach loop covered four mirrors while the report was hand-written as ("ig", "ss").
+    So `mb` and `tg` were opened read-only, populated and queryable — and never named,
+    which made `if "mb" not in have: return 0, 0` in steps 8 and 9 unconditionally true.
+    Both catalogues merged NOTHING into a build that reported success. Deriving the
+    report from MIRRORS is the fix: a fifth mirror cannot be added to one and forgotten
+    in the other.
+    """
+    for path, alias in MIRRORS:
         if os.path.exists(path):
             con.execute("ATTACH DATABASE ? AS %s" % alias,
                         ("file:%s?mode=ro" % path,))
-    return {a for a in ("ig", "ss")
+    return {a for _path, a in MIRRORS
             if con.execute("SELECT COUNT(*) FROM pragma_database_list "
                            "WHERE name=?", (a,)).fetchone()[0]}
 

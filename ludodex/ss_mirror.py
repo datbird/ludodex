@@ -32,6 +32,7 @@ works while a multi-day walk is in progress.
   python3 ludodex/ss_mirror.py --walk                  # resume; stops at the daily quota
   python3 ludodex/ss_mirror.py --walk --max-requests N # bounded chunk
   python3 ludodex/ss_mirror.py --walk --until-id N     # phase 1 = the dense half
+  python3 ludodex/ss_mirror.py --ids missing.json   # fetch an explicit id list
   python3 ludodex/ss_mirror.py --status
   python3 ludodex/ss_mirror.py --systems               # (re)build the SS->IGDB platform map
 """
@@ -55,10 +56,30 @@ from titlenorm import norm  # noqa: E402
 DB = os.path.join(DATA, "ss-catalog.sqlite")
 IGDB_DB = os.path.join(DATA, "igdb-catalog.sqlite")
 
-# Measured, not guessed: the highest live id seen via search was 535,220 and 75 samples
-# above it were all dead. Kept as a floor for the dead-run stop, not as a hard end.
+# Measured, not guessed — and then RE-measured, because the first measurement was wrong.
+#
+# 535,220 came from a search probe with 75 dead samples above it. The walk has since
+# pulled live games up to 558,851, so that "ceiling" was 23,631 ids short of reality. A
+# handful of dead samples cannot establish an end; only the walk can. Kept solely as the
+# point where the dead-run stop ARMS, never as a hard end.
 TOP_ID_SEEN = 535220
-DEAD_RUN_STOP = 4000        # consecutive dead ids past TOP_ID_SEEN that mean "done"
+
+# THE STOP MUST BE BIGGER THAN THE BIGGEST HOLE, and the holes here are enormous.
+# Measured 2026-08-18 across all 242,089 mirrored games: the id space contains dead runs
+# of 12,785 (434,990..447,774) and 12,163 (369,673..381,835), plus 3,208 and 2,498. At
+# the old DEAD_RUN_STOP of 4,000 any one of those would have been read as the end of the
+# catalogue — and the cursor had ALREADY passed TOP_ID_SEEN, so the guard was armed and
+# the next such hole would have written walk_complete over a walk that was 40% done.
+#
+# This is exactly what tgdb_mirror did: a threshold set on my guess, a real ~3,000-id
+# hole inside it, COMPLETE declared at 50,268 of 121,454 games. Same bug, same author,
+# second provider. So this number is now derived from measurement with a wide margin —
+# ~4x the largest hole ever observed — rather than from what felt like enough.
+#
+# The cost is bounded and paid ONCE: proving genuine exhaustion burns DEAD_RUN_STOP
+# requests, about half a daily quota, on the single run that actually reaches the end.
+# That is the correct price for not silently truncating the catalogue.
+DEAD_RUN_STOP = 50000       # consecutive dead ids past TOP_ID_SEEN that mean "done"
 BLOCK = 60                  # ids dispatched per round; cursor advances a whole block
 CLOSED_STRIKES = 8          # consecutive "api closed" rounds that mean stop for now
 
@@ -438,7 +459,24 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
             "tier": tier}
 
 
-def refresh_stale(days=90, max_requests=None, progress=True):
+def fetch_ids(ids, max_requests=None, progress=True):
+    """Fetch an EXPLICIT list of game ids. -> the refresh_stale result shape.
+
+    WHY THIS EXISTS. The walk finds an id by arriving at it, so it can only ever fix
+    what lies ahead of the cursor. Measured 2026-08-18 against ScreenScraper's own
+    published per-system counts: 368 games sat BELOW the cursor and were absent from the
+    mirror. The walk had already passed them and recorded nothing, and walking to
+    exhaustion would have declared the catalogue complete without them.
+
+    Those ids are recoverable for free from the WEB UI, which is not the API and costs
+    nothing against the daily quota. Discovery is therefore free and only the fetch is
+    paid — 739 requests against a 100,000/day allowance, rather than the 50,000 dead
+    ids the exhaustion proof costs.
+    """
+    return refresh_stale(max_requests=max_requests, progress=progress, ids=ids)
+
+
+def refresh_stale(days=90, max_requests=None, progress=True, ids=None):
     """Re-fetch games not seen for `days`, oldest first.
 
     The id walk finds games that are NEW. It can never find what changed about a game
@@ -465,13 +503,25 @@ def refresh_stale(days=90, max_requests=None, progress=True):
         con.close()
         return {"skipped": "quota"}
 
-    cutoff = time.time() - days * 86400
-    rows = [r["id"] for r in con.execute(
-        "SELECT id FROM ss_games WHERE COALESCE(seen_at,0) < ? ORDER BY seen_at LIMIT ?",
-        (cutoff, budget))]
-    if not rows:
-        con.close()
-        return {"stale": 0, "note": "nothing older than %d days" % days}
+    if ids is not None:
+        # An explicit list is a decision already made by the caller. Only the budget
+        # narrows it, and what does not fit is reported so the remainder can be run
+        # against the next day's quota rather than silently dropped.
+        rows = sorted({int(i) for i in ids})
+        deferred = max(0, len(rows) - budget)
+        rows = rows[:budget]
+        if not rows:
+            con.close()
+            return {"requested": 0, "note": "empty id list"}
+    else:
+        cutoff = time.time() - days * 86400
+        deferred = 0
+        rows = [r["id"] for r in con.execute(
+            "SELECT id FROM ss_games WHERE COALESCE(seen_at,0) < ? ORDER BY seen_at "
+            "LIMIT ?", (cutoff, budget))]
+        if not rows:
+            con.close()
+            return {"stale": 0, "note": "nothing older than %d days" % days}
 
     nthreads = tier["threads"]
     now = int(time.time())
@@ -505,9 +555,14 @@ def refresh_stale(days=90, max_requests=None, progress=True):
                       file=sys.stderr)
     roms_after = con.execute("SELECT COUNT(*) FROM ss_roms").fetchone()[0]
     con.close()
-    return {"stale_examined": len(rows), "refreshed": done,
-            "new_rom_rows": roms_after - roms_before,
-            "elapsed": round(time.time() - t0, 1)}
+    out = {"stale_examined": len(rows), "refreshed": done,
+           "new_rom_rows": roms_after - roms_before,
+           "elapsed": round(time.time() - t0, 1)}
+    if deferred:
+        # Not an error: the quota ran out before the list did. Saying so is what lets
+        # the rest be run tomorrow instead of being mistaken for "all done".
+        out["deferred_to_next_quota"] = deferred
+    return out
 
 
 def _Pacer_cooling(con):
@@ -572,6 +627,15 @@ def main(argv):
     mx = None
     if "--max-requests" in argv:
         mx = int(argv[argv.index("--max-requests") + 1])
+    if "--ids" in argv:
+        # A JSON array of game ids, usually produced by reconciling the mirror against
+        # ScreenScraper's published per-system counts.
+        path = argv[argv.index("--ids") + 1]
+        with open(path) as fh:
+            want = json.load(fh)
+        print("ss_mirror: " + json.dumps(fetch_ids(want, max_requests=mx)),
+              file=sys.stderr)
+        return 0
     if "--refresh-stale" in argv:
         i = argv.index("--refresh-stale")
         days = int(argv[i + 1]) if len(argv) > i + 1 and argv[i + 1].isdigit() else 90
