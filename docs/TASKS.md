@@ -820,3 +820,48 @@ Media `ref` URLs for ScreenScraper embed the account's **devid, devpassword, ssi
 sspassword in plaintext**, and those refs are stored in `media.ref`, in `pins.sqlite`, and
 are rendered into the media panel. Anything that exports or shares a pin or an asset
 reference leaks the ScreenScraper credentials with it. Not touched here.
+
+## Five new id sources — SHIPPED, one rebuild still owed (2026-08-16/17)
+
+**Goal, stated:** *"my main priority is populating the ludodex matching database with IDs."*
+So everything here buys **identifiers**, not enrichment — a pointer is not content, which is
+also what settles the redistribution question for ids specifically.
+
+| source | module | what landed |
+|---|---|---|
+| TheGamesDB | `thegamesdb.py`, `tgdb_normalize.py`, `tgdb_mirror.py` | full API client, region-aware normalizer, id-space walk → **121,454 games**, 147,314 art refs |
+| MobyGames | `mobygames.py`, `moby_mirror.py` | client with persisted rolling-hour pacing, per-platform walk → **206,218 games**, 424,384 game-platform rows |
+| Wikidata | `wikidata_ids.py` | CC0 cross-ids joined on the IGDB **slug** — 95,281 pointers for zero requests |
+| libretro DATs | `libretro_dats.py` | No-Intro/Redump clrmamepro parser — 188,753 dumps, 84,812 serials, 113 systems |
+| sselph free map | `tgdb_freemap.py` | MIT SHA1→TGDB id — 32,045 usable rows, 10,688 distinct ids |
+| ArcadeDB / ZXInfo | `arcadedb.py`, `zxinfo.py` | free no-key clients (ZXInfo's live endpoint is `/v3`, not the documented path) |
+
+Plus `provider_caps.py` — the attribute tooltip matrix, stating what each provider **can**
+supply rather than what it happened to return, with Steam as a first-class provider.
+
+**Three fail-open bugs found, all of the same shape — an absence read as an answer:**
+
+- **MobyGames unfiltered paging** returns `[]` past offset ~205,000 with no error and no 429.
+  A global walk would have stopped 124,000 games short *reporting success*. `walk_all()` now
+  refuses the global form and walks per platform.
+- **`tgdb_mirror.DEAD_RUN_STOP` was 40 blocks on an unmeasured claim of mine** — there is a
+  real ~3,000-id hole at 56,980→60,000, so the walk stopped inside it and declared COMPLETE at
+  50,268 of 121,454 games. Now 500 blocks, with the incident recorded in the comment.
+- **`provider_ids.record()` wrote a silent MISS for every string id** — `int('bulletstorm')`
+  raised, was caught, and became `matched_by='none'`, which `MISS_TTL` then suppressed
+  re-searching for thirty days. Fixed with `STRING_ID_PROVIDERS` and TEXT columns.
+
+**Also settled:** an AI-*assisted* match credits the **database**, not the AI — the model
+supplied the matching, not the knowing. Only a web-enabled run (or one that recorded
+`sources`) is credited as **AI Web Search**. Locked in by test, because a later refactor would
+tidy it the wrong way.
+
+### Still owed
+
+1. **One `matchindex --build`** once the ScreenScraper walk finishes — build steps 8 and 9
+   attach the MobyGames and TheGamesDB ids, including both regional rows per game. The live
+   index (492,099 identities / 3,619,084 keys) predates both catalogues.
+2. **Per-game enrichment** for ArcadeDB, ZXInfo, MobyGames and TheGamesDB. Clients and mirrors
+   exist; there is no scrape-script → cache-table → `build_library` merge path yet. It must go
+   through the ONE chain, not a new onramp.
+3. **MobyGames product codes** — 260,337 disc serials, ~25 days of requests. Gated off.
