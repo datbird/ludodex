@@ -12180,13 +12180,28 @@ def matchindex_download(body: dict = Body(...)):
                         break
                     f.write(chunk)
                     st["got"] += len(chunk)
+            # PRESENT IS NOT POPULATED. Checking only that identity_key EXISTS accepts
+            # a structurally valid but EMPTY index, which then attaches happily and
+            # answers every lookup with "not known here" — the miss-read-as-answer shape
+            # this codebase keeps paying for. Count the rows.
             t = sqlite3.connect("file:%s?mode=ro" % part, uri=True)
             ok = t.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                            "AND name='identity_key'").fetchone()[0]
+            rows = t.execute("SELECT COUNT(*) FROM identity_key").fetchone()[0] if ok else 0
             t.close()
             if not ok:
                 raise ValueError("downloaded file has no identity_key table")
+            if not rows:
+                raise ValueError("downloaded index is empty (0 keys)")
+            # Keep the outgoing index. It is the pipeline's identity source, and a bad
+            # release must be revertible without a multi-hour rebuild.
+            if os.path.exists(dest):
+                try:
+                    os.replace(dest, dest + ".prev")
+                except OSError:
+                    pass
             os.replace(part, dest)
+            st["keys"] = rows
             st["state"] = "done"
         except Exception as e:                   # noqa: BLE001
             st["state"], st["error"] = "error", str(e)[:300]

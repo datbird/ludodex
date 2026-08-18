@@ -184,7 +184,12 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
     """
     table, idcol = _spec(provider)
     pid = _coerce(provider, provider_id)
-    if pid and matched_by not in ("manual", "steam_appid"):
+    # 'hash' joins 'manual' and 'steam_appid' as EXACT evidence. A crc or sha1 match is
+    # not a search: the dump database published that pairing, and the collision guard
+    # below exists to catch a search's nearest-record guess. Two games sharing a hash
+    # would mean the dump database is wrong, which is a different problem and not one
+    # this guard can fix by discarding the match.
+    if pid and matched_by not in ("manual", "steam_appid", "hash"):
         other = holder(con, provider, pid, norm_key)
         if other:
             # Record it as a MISS tagged `collision`, not as nothing. A refusal is an
