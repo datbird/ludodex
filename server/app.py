@@ -12049,6 +12049,30 @@ threading.Thread(target=_backingstore_scheduler, daemon=True).start()
 # about telling the user what they have and letting them point at a different copy.
 _INDEX_DL = {"job": None}
 
+# How the installed supplement GOT HERE — downloaded, or built on this machine. Stored in
+# config rather than stamped into the file, because the file's own identity_state records
+# who BUILT it, which is a different question: a downloaded index truthfully says it was
+# built by whoever published it, and that tells the user nothing about their own install.
+ORIGIN_KEY = "matchindex.origin"
+
+
+def _set_origin(kind, url=""):
+    try:
+        config.set_(ORIGIN_KEY, json.dumps(
+            {"kind": kind, "url": url, "at": int(time.time())}))
+    except Exception:                            # noqa: BLE001
+        pass
+
+
+def _read_origin():
+    """-> {kind, url, at} or None. None means "this file predates the record", which is
+    an honest answer and not the same as "built locally"."""
+    try:
+        raw = config.get(ORIGIN_KEY, "") or ""
+        return json.loads(raw) if raw else None
+    except Exception:                            # noqa: BLE001
+        return None
+
 
 @app.get("/api/matchindex")
 def matchindex_status():
@@ -12061,6 +12085,7 @@ def matchindex_status():
            "size": os.path.getsize(path) if os.path.exists(path) else 0,
            "prefer": config.get(matchindex.PREFER_KEY, matchindex.PREFER_DYNAMIC),
            "release_url": config.get(matchindex.RELEASE_KEY, "") or "",
+           "origin": _read_origin(),
            "job": _INDEX_DL["job"]}
     con = matchindex.connect()
     try:
@@ -12121,11 +12146,14 @@ def matchindex_settings(body: dict = Body(...)):
 
 
 @app.get("/api/matchindex/release")
-def matchindex_release():
-    """Ask the configured URL what build is published. The manifest is expected to be
-    JSON with version/url/size/sha256; anything else is reported, not guessed at."""
+def matchindex_release(url: str = ""):
+    """Ask a URL what build is published. The manifest is expected to be JSON with
+    version/url/size/sha256; anything else is reported, not guessed at.
+
+    Takes an explicit `url` so the UI can TEST what the user typed before saving it.
+    Reading only the stored key made Check useless in the one moment it matters."""
     import matchindex
-    url = (config.get(matchindex.RELEASE_KEY, "") or "").strip()
+    url = (url or config.get(matchindex.RELEASE_KEY, "") or "").strip()
     if not url:
         return {"configured": False}
     try:
@@ -12202,6 +12230,7 @@ def matchindex_download(body: dict = Body(...)):
                     pass
             os.replace(part, dest)
             st["keys"] = rows
+            _set_origin("downloaded", url)
             st["state"] = "done"
         except Exception as e:                   # noqa: BLE001
             st["state"], st["error"] = "error", str(e)[:300]
@@ -12229,6 +12258,7 @@ def matchindex_rebuild():
     def _run():
         try:
             res = matchindex.build(progress=False)
+            _set_origin("built")
             st["state"], st["result"] = "done", res
         except Exception as e:                   # noqa: BLE001
             st["state"], st["error"] = "error", str(e)[:300]

@@ -1991,7 +1991,7 @@ function MatchIndexPanel() {
   }
   const checkRelease = async () => {
     setBusy('rel'); setMsg('')
-    try { setRel(await api.matchIndexRelease()) }
+    try { setRel(await api.matchIndexRelease(url.trim())) }
     catch (e) { setMsg(String((e as Error).message || e)) }
     finally { setBusy('') }
   }
@@ -2030,6 +2030,30 @@ function MatchIndexPanel() {
             ? <span className="hint">built {new Date(st.built_at * 1000).toLocaleString()}</span>
             : null}
         </div>
+        {/* WHERE THIS FILE CAME FROM. The panel showed size, counts and a build date and
+            never said whether the user was running a published build or their own — the
+            one thing they need to be sure of before trusting a lookup. built_at answers
+            "when was it built", by whoever built it, which is a different question. */}
+        {st.has_index ? (
+          <div className="row">
+            <span>Source</span>
+            {st.origin?.kind === 'downloaded'
+              ? <b>Published build</b>
+              : st.origin?.kind === 'built'
+                ? <b>Built on this machine</b>
+                : <b className="muted">Unknown</b>}
+            <span className="hint">
+              {st.origin?.kind === 'downloaded'
+                ? <>downloaded{st.origin.url ? <> from <code>{st.origin.url}</code></> : null}
+                    {st.origin.at ? ` on ${new Date(st.origin.at * 1000).toLocaleString()}` : ''}</>
+                : st.origin?.kind === 'built'
+                  ? <>rebuilt from the local mirrors
+                      {st.origin.at ? ` on ${new Date(st.origin.at * 1000).toLocaleString()}` : ''}</>
+                  : <>installed before ludodex began recording this — use Check and
+                      Download, or Rebuild, to establish it</>}
+            </span>
+          </div>
+        ) : null}
       </div>
 
       <label className="field">
@@ -2061,7 +2085,10 @@ function MatchIndexPanel() {
           title="A JSON endpoint describing the published build. A GitHub releases API URL works as-is." />
         <button className="btn" disabled={busy === 'save' || url === st.release_url}
           onClick={() => save({ release_url: url })}>Save</button>
-        <button className="btn" disabled={!st.release_url || busy === 'rel'}
+        {/* Enabled on the TYPED url, not the saved one. Checking is how you find out
+            whether a url is worth saving, so requiring the save first inverted the
+            order the user actually works in. */}
+        <button className="btn" disabled={!url.trim() || busy === 'rel'}
           onClick={checkRelease}>{busy === 'rel' ? 'Checking…' : 'Check'}</button>
       </label>
 

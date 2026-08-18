@@ -508,6 +508,9 @@ export interface MatchIndexState {
   size: number
   prefer: 'dynamic' | 'supplement'
   release_url: string
+  // How this copy of the file GOT HERE. null means it predates the record, which is an
+  // honest answer and not the same as "built locally".
+  origin?: { kind: 'downloaded' | 'built'; url?: string; at?: number } | null
   learned_keys: number
   overrides: number
   identities?: number
@@ -1308,7 +1311,9 @@ export const api = {
   matchIndex: () => get<MatchIndexState>('/api/matchindex'),
   setMatchIndex: (b: { prefer?: string; path?: string; release_url?: string }) =>
     postJson<MatchIndexState>('/api/matchindex/settings', b),
-  matchIndexRelease: () => get<MatchIndexRelease>('/api/matchindex/release'),
+  // Takes the url so the UI can TEST what was typed, before it is saved.
+  matchIndexRelease: (url?: string) =>
+    get<MatchIndexRelease>('/api/matchindex/release' + (url ? `?url=${encodeURIComponent(url)}` : '')),
   matchIndexDownload: (b: { url: string; size?: number }) =>
     postJson<{ ok: boolean }>('/api/matchindex/download', b),
   matchIndexRebuild: () => postJson<{ ok: boolean }>('/api/matchindex/rebuild', {}),
