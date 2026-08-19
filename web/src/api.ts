@@ -513,6 +513,8 @@ export interface MatchIndexState {
   origin?: { kind: 'downloaded' | 'built'; url?: string; at?: number } | null
   // Whether a token is stored, never the token itself.
   release_token_set?: boolean
+  // sha256 and size of the file actually in use, so the UI can compare it to the release.
+  installed?: { sha256: string; size: number } | null
   learned_keys: number
   overrides: number
   identities?: number
@@ -532,6 +534,9 @@ export interface MatchIndexRelease {
   published_at?: string
   notes?: string
   asset?: { url?: string; size?: number; name?: string; sha256?: string }
+  installed?: { sha256: string; size: number } | null
+  // True ONLY on a digest match. Equal sizes are not equal files.
+  installed_is_release?: boolean
 }
 
 export interface BackupsState {

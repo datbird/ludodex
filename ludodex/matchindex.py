@@ -170,6 +170,47 @@ DEFAULT_RELEASE_URL = ("https://api.github.com/repos/datbird/ludodex-match-index
                        "/releases/latest")
 
 
+# The installed file's own sha256, cached against its identity. Hashing 0.46 GB takes
+# seconds, and the status endpoint is polled once a second while a download runs — so it
+# is computed once and re-used until the file changes. Size and mtime together are a
+# sufficient identity here: the file is only ever REPLACED wholesale, never edited.
+DIGEST_KEY = "matchindex.digest"
+
+
+def installed_digest(path=None):
+    """-> {'sha256': str, 'size': int} for the installed supplement, or None.
+
+    Lets the UI say whether what is IN USE is the published build, rather than leaving
+    the user to compare a size by eye and guess."""
+    import hashlib
+    p = path or index_path()
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    ident = "%d:%d" % (st.st_size, int(st.st_mtime))
+    try:
+        raw = config.get(DIGEST_KEY, "") or ""
+        cached = json.loads(raw) if raw else None
+        if cached and cached.get("ident") == ident:
+            return {"sha256": cached["sha256"], "size": st.st_size}
+    except Exception:                            # noqa: BLE001
+        pass
+    h = hashlib.sha256()
+    try:
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(4 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    out = h.hexdigest()
+    try:
+        config.set_(DIGEST_KEY, json.dumps({"ident": ident, "sha256": out}))
+    except Exception:                            # noqa: BLE001
+        pass
+    return {"sha256": out, "size": st.st_size}
+
+
 def release_url():
     """The configured release url, else the default. -> str
 

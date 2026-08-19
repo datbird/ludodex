@@ -1459,7 +1459,7 @@ const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
   // Two ways to protect the same data, each with its own backup AND restore:
   // Database = a live external copy, continuously reconciled.
   // Snapshot = point-in-time zips you can roll back to.
-  backup: [{ id: 'matchdb', name: 'Settings' },
+  backup: [{ id: 'matchdb', name: 'Match DB' },
            { id: 'dbstore', name: 'Backup & Restore' },
            { id: 'snapshot', name: 'Snapshot' }],
   library: [{ id: 'preferences', name: 'Preferences' }, { id: 'banned', name: 'Banned media' }],
@@ -1481,9 +1481,9 @@ const SETTINGS_KEYWORDS: Record<string, string> = {
   credentials: 'stores providers steam gog epic itch screenscraper igdb ea login accounts credentials',
   // Old names ("backing store", "database sync") stay as search terms so anyone who
   // learned them still lands on the right panel.
+  matchdb: 'match index supplement identity resolve store id rom hash crc sha1 offline release download path prefer dynamic supplement setting database',
   dbstore: 'backup restore backing store two-way sync database postgres supabase mysql pocketbase firebase backend durable migrate another machine pull',
   snapshot: 'snapshot zip archive schedule retention encrypt passphrase restore rollback backup device folder',
-  matchdb: 'match index supplement identity resolve store id rom hash crc sha1 offline release download path prefer dynamic supplement setting database',
   limits: 'rate limit api throttle quota cooldown per minute per day',
   preferences: 'media language ban file operations browse commander manifests apply mode preferences distribution',
   banned: 'banned media unban hidden',
@@ -2116,13 +2116,32 @@ function MatchIndexPanel() {
             <span>Available</span>
             <b>{rel.version || rel.asset.name}</b>
             {rel.asset.size
-              ? <span className="hint">{(rel.asset.size / 1e9).toFixed(2)} GB</span> : null}
+              ? <span className="hint">{(rel.asset.size / 1e9).toFixed(2)} GB
+                  {rel.asset.sha256 ? <> · <code>{rel.asset.sha256.slice(0, 12)}…</code></> : null}
+                </span> : null}
             <button className="btn primary" disabled={job?.state === 'running'}
               onClick={() => api.matchIndexDownload({
                 url: rel.asset!.url!, size: rel.asset!.size,
               }).then(load).catch((e) => setMsg(String(e)))}>
               ⬇ Download{st.has_index ? ' & replace' : ''}
             </button>
+          </div>
+          {/* SAME OR DIFFERENT, stated. Showing two sizes and leaving the reader to
+              compare them by eye is how "0.46 GB" and "0.46 GB" get taken for identical
+              files. The verdict is a DIGEST match or nothing. */}
+          <div className="row">
+            <span>In use</span>
+            {rel.installed_is_release
+              ? <b>Same as this release</b>
+              : rel.installed
+                ? <b className="muted">Differs from this release</b>
+                : <b className="muted">Nothing installed</b>}
+            <span className="hint">
+              {rel.installed
+                ? <>installed {(rel.installed.size / 1e9).toFixed(2)} GB ·{' '}
+                    <code>{rel.installed.sha256.slice(0, 12)}…</code></>
+                : <>download it to install one</>}
+            </span>
           </div>
         </div>
       ) : null}

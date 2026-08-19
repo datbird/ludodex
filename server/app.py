@@ -12101,6 +12101,7 @@ def matchindex_status():
            "prefer": config.get(matchindex.PREFER_KEY, matchindex.PREFER_DYNAMIC),
            "release_url": matchindex.release_url(),
            "origin": _read_origin(),
+           "installed": matchindex.installed_digest(),
            "release_token_set": bool((config.get(RELEASE_TOKEN_KEY, "") or "").strip()),
            "job": _INDEX_DL["job"]}
     con = matchindex.connect()
@@ -12191,11 +12192,24 @@ def matchindex_release(url: str = ""):
             # A PRIVATE asset is only reachable through the asset API url. Handing back
             # browser_download_url there yields a login page that saves cleanly and is
             # not a database — a download that reports success and installs nothing.
+            # GitHub publishes the asset digest as "sha256:<hex>". Carrying it lets the
+            # UI state plainly whether the file in use IS the published build, instead
+            # of showing two sizes and leaving the user to guess.
+            dig = (a.get("digest") or "")
             asset = {"url": (a.get("url") if private else a.get("browser_download_url")),
                      "size": a.get("size"), "name": a.get("name"),
+                     "sha256": dig.split(":", 1)[1] if dig.startswith("sha256:") else None,
                      "private": private}
             break
+    inst = matchindex.installed_digest()
+    same = bool(inst and asset and asset.get("sha256")
+                and inst["sha256"] == asset["sha256"])
     return {"configured": True, "url": url,
+            "installed": inst,
+            # Only ever true on a DIGEST match. Equal sizes are not equal files, and a
+            # panel that says "up to date" on a size comparison is worse than one that
+            # says nothing.
+            "installed_is_release": same,
             "version": data.get("tag_name") or data.get("version"),
             "published_at": data.get("published_at"),
             "notes": (data.get("body") or "")[:2000],
