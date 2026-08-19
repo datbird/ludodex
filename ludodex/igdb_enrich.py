@@ -802,6 +802,40 @@ def main(argv):
         if a:
             appid_map.setdefault(a, nk)
     appids = list(appid_map)
+
+    # ---- pass 0: answer from the match index, for free ----
+    # The index carries IGDB's OWN external_games pairings — 173,641 Steam handles among
+    # them. Every appid it knows is an appid this pass does not have to ask IGDB about,
+    # and the answer is identical because it came from the same table. matched_by stays
+    # 'steam_appid': the pairing is the same published fact whichever way it arrived.
+    #
+    # Optional and fail-open. No index, or an appid it does not know, simply falls
+    # through to the network batch below.
+    _ix_hits = 0
+    try:
+        import matchindex
+        _ix = matchindex.connect()
+        if matchindex.has_index(_ix):
+            for a in list(appids):
+                got = matchindex.resolve(_ix, "steam", str(a))
+                gid = (got.get("igdb") or [None])[0] if got else None
+                nk = appid_map.get(str(a))
+                if gid and nk:
+                    con.execute(
+                        "INSERT OR REPLACE INTO igdb_resolution"
+                        "(norm_key,igdb_id,slug,matched_by,resolved_at) "
+                        "VALUES(?,?,?,?,?)", (nk, int(gid), None, "steam_appid", now))
+                    resolved[nk] = int(gid)
+                    appids.remove(a)
+                    _ix_hits += 1
+        _ix.close()
+        if _ix_hits:
+            _commit(con)
+            print("igdb: %d appids resolved from the match index, %d left to ask IGDB"
+                  % (_ix_hits, len(appids)), file=sys.stderr)
+    except Exception as e:                       # noqa: BLE001 — the index is optional
+        print("igdb: match index unavailable (%s)" % str(e)[:80], file=sys.stderr)
+
     for i in range(0, len(appids), 200):
         batch = appids[i:i + 200]
         uids = ",".join('"%s"' % a for a in batch)

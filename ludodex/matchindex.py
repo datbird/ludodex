@@ -177,6 +177,44 @@ DEFAULT_RELEASE_URL = ("https://api.github.com/repos/datbird/ludodex-match-index
 DIGEST_KEY = "matchindex.digest"
 
 
+# Counting 4.2 million keys costs 1.35 s, and the status endpoint runs it on every open
+# and once a second while a download is in flight. The file is only ever REPLACED
+# wholesale, so its size and mtime identify its contents exactly.
+COUNTS_KEY = "matchindex.counts"
+
+
+def index_counts(path=None):
+    """-> {'identities': int, 'keys': int} for the installed supplement, or None.
+
+    Cached against the file's identity. The first call after a replacement pays the
+    count; every call after it is free."""
+    p = path or index_path()
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    ident = "%d:%d" % (st.st_size, int(st.st_mtime))
+    try:
+        raw = config.get(COUNTS_KEY, "") or ""
+        cached = json.loads(raw) if raw else None
+        if cached and cached.get("ident") == ident:
+            return {"identities": cached["identities"], "keys": cached["keys"]}
+    except Exception:                            # noqa: BLE001
+        pass
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % p, uri=True)
+        out = {"identities": con.execute("SELECT COUNT(*) FROM identity").fetchone()[0],
+               "keys": con.execute("SELECT COUNT(*) FROM identity_key").fetchone()[0]}
+        con.close()
+    except sqlite3.Error:
+        return None
+    try:
+        config.set_(COUNTS_KEY, json.dumps(dict(out, ident=ident)))
+    except Exception:                            # noqa: BLE001
+        pass
+    return out
+
+
 def installed_digest(path=None):
     """-> {'sha256': str, 'size': int} for the installed supplement, or None.
 
@@ -366,6 +404,100 @@ def learn(con, pairs, name=None, year=None, provider=None, identity_id=None):
                     "VALUES(?,?,?,'learned',?,?)", (ns, val, identity_id, provider, now))
     con.commit()
     return identity_id
+
+
+def learned_stats(con):
+    """What the user's own layer actually contains. -> dict
+
+    Counted per NAMESPACE, because "4,000 learned" says nothing about whether the thing
+    you are missing is in there. Which providers it covers is the useful shape."""
+    out = {"identities": con.execute(
+        "SELECT COUNT(*) FROM learned_identity").fetchone()[0],
+        "keys": con.execute("SELECT COUNT(*) FROM learned_key").fetchone()[0],
+        "overrides": con.execute("SELECT COUNT(*) FROM override_key").fetchone()[0],
+        "by_ns": {}}
+    for ns, n in con.execute(
+            "SELECT ns, COUNT(*) FROM learned_key GROUP BY ns ORDER BY COUNT(*) DESC"):
+        out["by_ns"][ns] = n
+    return out
+
+
+def export_learned(con):
+    """Everything the user's layer holds, as plain data. -> dict
+
+    THIS IS THE ONLY IRREPLACEABLE PART OF THE SYSTEM. The supplement is rebuildable from
+    mirrors and re-downloadable from a release; these rows cost rate-limited round trips
+    and an acceptance gate to obtain, and an override is a human decision that exists
+    nowhere else. So it must be possible to take them somewhere else."""
+    return {
+        "format": "ludodex-learned-1",
+        "exported_at": int(time.time()),
+        "identities": [dict(r) for r in con.execute(
+            "SELECT id, name, norm_key, year, learned_at FROM learned_identity")],
+        "keys": [dict(r) for r in con.execute(
+            "SELECT ns, val, identity_id, kind, provider, learned_at FROM learned_key")],
+        "overrides": [dict(r) for r in con.execute(
+            "SELECT ns, val, identity_id, action, note, created_at FROM override_key")],
+    }
+
+
+def import_learned(con, data, replace=False):
+    """Merge an export back in. -> counts of what was written.
+
+    MERGE, NOT REPLACE, by default. An import is normally a user carrying their work to
+    a second install, and silently discarding what is already there would lose exactly
+    the data this feature exists to protect. `replace` is available and is a deliberate
+    act, never the default."""
+    if not isinstance(data, dict) or data.get("format") != "ludodex-learned-1":
+        raise ValueError("not a ludodex learned export")
+    if replace:
+        con.execute("DELETE FROM learned_key")
+        con.execute("DELETE FROM learned_identity")
+        con.execute("DELETE FROM override_key")
+    n = {"identities": 0, "keys": 0, "overrides": 0}
+    for r in data.get("identities") or []:
+        con.execute("INSERT OR IGNORE INTO learned_identity(id,name,norm_key,year,"
+                    "learned_at) VALUES(?,?,?,?,?)",
+                    (r.get("id"), r.get("name"), r.get("norm_key"), r.get("year"),
+                     r.get("learned_at")))
+        n["identities"] += 1
+    for r in data.get("keys") or []:
+        con.execute("INSERT OR IGNORE INTO learned_key(ns,val,identity_id,kind,provider,"
+                    "learned_at) VALUES(?,?,?,?,?,?)",
+                    (r.get("ns"), r.get("val"), r.get("identity_id"), r.get("kind"),
+                     r.get("provider"), r.get("learned_at")))
+        n["keys"] += 1
+    # Overrides REPLACE on conflict. An override is the user's word about one handle, and
+    # the copy being imported is the one they chose to carry here.
+    for r in data.get("overrides") or []:
+        con.execute("INSERT OR REPLACE INTO override_key(ns,val,identity_id,action,note,"
+                    "created_at) VALUES(?,?,?,?,?,?)",
+                    (r.get("ns"), r.get("val"), r.get("identity_id"), r.get("action"),
+                     r.get("note"), r.get("created_at")))
+        n["overrides"] += 1
+    con.commit()
+    return n
+
+
+def clear_learned(con, what="learned"):
+    """Delete the user's own layer. -> counts removed.
+
+    'learned' and 'overrides' are SEPARATE on purpose. Learned rows are conclusions the
+    scraper reached and can be reached again by scraping. An override is a human saying
+    "this is not that game", which nothing can reconstruct. Offering one button for both
+    would make the recoverable and the irreplaceable equally easy to destroy."""
+    n = {}
+    if what in ("learned", "all"):
+        n["keys"] = con.execute("SELECT COUNT(*) FROM learned_key").fetchone()[0]
+        n["identities"] = con.execute(
+            "SELECT COUNT(*) FROM learned_identity").fetchone()[0]
+        con.execute("DELETE FROM learned_key")
+        con.execute("DELETE FROM learned_identity")
+    if what in ("overrides", "all"):
+        n["overrides"] = con.execute("SELECT COUNT(*) FROM override_key").fetchone()[0]
+        con.execute("DELETE FROM override_key")
+    con.commit()
+    return n
 
 
 def _lookup_identity(con, ns, val):

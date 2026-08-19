@@ -4532,3 +4532,41 @@ img.ms-icon { display: block; object-fit: contain; flex: 0 0 auto; }
      pushing the value off screen. */
   .ap-cap { display: block; margin-left: 0; margin-top: .15rem; white-space: normal; }
 }
+
+/* ---- Match Database ------------------------------------------------------
+   Built from the vocabulary the other settings pages already use: .bs-row for a
+   label/control pair, .bs-actions for a row of buttons, .restore-box for a bordered
+   sub-card. The first version of this panel invented .rows/.row/.field, which had no
+   styles at all here, so labels ran into their values and three fields collapsed onto
+   one line. */
+
+/* An explanation next to the thing it explains, out of the way until asked for. */
+.info-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; margin-left: 6px;
+  border-radius: 50%; border: 1px solid var(--accent);
+  color: var(--accent); font-size: 10px; font-style: italic; font-weight: 700;
+  line-height: 1; cursor: help; vertical-align: middle; user-select: none; flex: 0 0 auto;
+}
+
+.mdb-sec { margin: 26px 0 10px; display: flex; align-items: center;
+  font-size: 15px; font-weight: 700; color: var(--text-h); }
+
+/* A stat line: fixed-width label, then the figures. Same 190px gutter as .bs-row so the
+   labels down the whole page line up. */
+.mdb-stat { display: flex; align-items: baseline; gap: 12px; margin: 8px 0; }
+.mdb-stat > .mdb-label { width: 190px; flex: 0 0 auto; font-size: 13px; color: var(--text-h); }
+.mdb-stat > b { font-size: 13px; color: var(--text-h); }
+.mdb-stat > .mdb-sub { font-size: 12px; color: var(--text); opacity: .75; }
+.mdb-stat code { font-size: 11px; opacity: .8; }
+
+/* Destructive actions must not look like the others. */
+.bs-actions .danger { border-color: rgba(230,90,90,0.55); color: #e65a5a; }
+.bs-actions .danger:hover:not(:disabled) { background: rgba(230,90,90,0.12); }
+
+/* The gear's panel, indented so it reads as belonging to the row above. */
+.mdb-sub-row { margin-left: 202px; }
+.mdb-gear.on { border-color: var(--accent); color: var(--accent); }
+
+/* Rebuild acts on the whole Published section, not on the field beside it. */
+.mdb-wide { width: 100%; margin-top: 18px; }

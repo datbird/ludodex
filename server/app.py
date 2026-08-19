@@ -7181,6 +7181,13 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
             _plat = plats[0] if plats else None
             found = {}
             searched = False
+            # EXACT handles on this game, for the match index. A store id is a pairing
+            # the provider published, so an id taken from the index under it is exact and
+            # needs no search. The set grows as providers resolve: the first exact handle
+            # unlocks every other provider for free.
+            _anchors = {"steam": appid} if appid else {}
+            _ix_ns = {"igdb": "igdb", "screenscraper": "ss",
+                      "mobygames": "mobygames", "thegamesdb": "thegamesdb"}
             # Alternate names, fetched at most ONCE per game and shared by every
             # provider that misses. Lazy: nothing is paid for unless a search actually
             # fails, which is the whole point of a last resort.
@@ -7218,10 +7225,11 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
                     mc, "screenscraper", nk, title, plats,
                     lambda t, s: _search_with_aliases(
                         lambda q: _ss_match([q], s, year)),
-                    force=force)
+                    force=force, anchors=_anchors)
                 searched = searched or _before is None or force
                 if pid:
                     found["screenscraper"] = pid
+                    _anchors[_ix_ns["screenscraper"]] = pid
                     out["screenscraper"] += 1
             if sgdb_key and config.provider_allowed("steamgriddb", _plat, _srcs):
                 _before = provider_ids.cached(mc, "steamgriddb", nk)
@@ -12101,7 +12109,6 @@ def matchindex_status():
            "prefer": config.get(matchindex.PREFER_KEY, matchindex.PREFER_DYNAMIC),
            "release_url": matchindex.release_url(),
            "origin": _read_origin(),
-           "installed": matchindex.installed_digest(),
            "release_token_set": bool((config.get(RELEASE_TOKEN_KEY, "") or "").strip()),
            "job": _INDEX_DL["job"]}
     con = matchindex.connect()
@@ -12110,12 +12117,14 @@ def matchindex_status():
             "SELECT COUNT(*) FROM learned_key").fetchone()[0]
         out["overrides"] = con.execute(
             "SELECT COUNT(*) FROM override_key").fetchone()[0]
+        out["learned"] = matchindex.learned_stats(con)
         out["has_index"] = matchindex.has_index(con)
         if out["has_index"]:
-            out["identities"] = con.execute(
-                "SELECT COUNT(*) FROM ix.identity").fetchone()[0]
-            out["keys"] = con.execute(
-                "SELECT COUNT(*) FROM ix.identity_key").fetchone()[0]
+            # Cached against the file's identity. Counting 4.2 million keys took 1.35 s
+            # on every open of this panel, and once a second while a download ran.
+            counts = matchindex.index_counts() or {}
+            out["identities"] = counts.get("identities")
+            out["keys"] = counts.get("keys")
             meta = {r[0]: r[1] for r in con.execute(
                 "SELECT k,v FROM ix.identity_state")}
             out["built_at"] = int(meta["built_at"]) if meta.get("built_at") else None
@@ -12128,6 +12137,54 @@ def matchindex_status():
     finally:
         con.close()
     return out
+
+
+@app.get("/api/matchindex/learned/export")
+def matchindex_learned_export():
+    """The user's own layer, as a downloadable file. The supplement is replaceable; this
+    is not, so it must be possible to take it elsewhere."""
+    import matchindex
+    con = matchindex.connect()
+    try:
+        data = matchindex.export_learned(con)
+    finally:
+        con.close()
+    return Response(
+        content=json.dumps(data, indent=1),
+        media_type="application/json",
+        headers={"Content-Disposition":
+                 'attachment; filename="ludodex-learned.json"'})
+
+
+@app.post("/api/matchindex/learned/import")
+def matchindex_learned_import(body: dict = Body(...)):
+    """Merge an export back in. Replace only when explicitly asked."""
+    import matchindex
+    b = body or {}
+    con = matchindex.connect()
+    try:
+        n = matchindex.import_learned(con, b.get("data") or {},
+                                      replace=bool(b.get("replace")))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        con.close()
+    return {"ok": True, "imported": n}
+
+
+@app.post("/api/matchindex/learned/clear")
+def matchindex_learned_clear(body: dict = Body(...)):
+    """Delete learned rows, overrides, or both. Never one button for both by accident."""
+    what = ((body or {}).get("what") or "").strip()
+    if what not in ("learned", "overrides", "all"):
+        raise HTTPException(400, "what must be learned, overrides or all")
+    import matchindex
+    con = matchindex.connect()
+    try:
+        n = matchindex.clear_learned(con, what)
+    finally:
+        con.close()
+    return {"ok": True, "cleared": n}
 
 
 @app.post("/api/matchindex/settings")

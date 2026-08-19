@@ -516,6 +516,9 @@ export interface MatchIndexState {
   // sha256 and size of the file actually in use, so the UI can compare it to the release.
   installed?: { sha256: string; size: number } | null
   learned_keys: number
+  // The user's own layer, broken down by namespace: "4,000 learned" does not say whether
+  // the thing you are missing is in there.
+  learned?: { identities: number; keys: number; overrides: number; by_ns: Record<string, number> }
   overrides: number
   identities?: number
   keys?: number
@@ -1324,6 +1327,12 @@ export const api = {
   matchIndexDownload: (b: { url: string; size?: number }) =>
     postJson<{ ok: boolean }>('/api/matchindex/download', b),
   matchIndexRebuild: () => postJson<{ ok: boolean }>('/api/matchindex/rebuild', {}),
+  matchIndexClearLearned: (what: 'learned' | 'overrides' | 'all') =>
+    postJson<{ ok: boolean; cleared: Record<string, number> }>(
+      '/api/matchindex/learned/clear', { what }),
+  matchIndexImportLearned: (data: unknown, replace = false) =>
+    postJson<{ ok: boolean; imported: { identities: number; keys: number; overrides: number } }>(
+      '/api/matchindex/learned/import', { data, replace }),
   backups: () => get<BackupsState>('/api/backups/jobs'),
   backupStatus: () => get<{ job: BackupRun | null; jobs: BackupJob[] }>('/api/backups/status'),
   setBackupJob: (j: Partial<BackupJob> & { passphrase?: string | null }) =>

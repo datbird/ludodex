@@ -189,7 +189,7 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
     # below exists to catch a search's nearest-record guess. Two games sharing a hash
     # would mean the dump database is wrong, which is a different problem and not one
     # this guard can fix by discarding the match.
-    if pid and matched_by not in ("manual", "steam_appid", "hash"):
+    if pid and matched_by not in ("manual", "steam_appid", "hash", "index"):
         other = holder(con, provider, pid, norm_key)
         if other:
             # Record it as a MISS tagged `collision`, not as nothing. A refusal is an
@@ -217,7 +217,58 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
     return pid
 
 
-def resolve(con, provider, norm_key, title, systems, search, force=False):
+# provider_ids provider -> the namespace the match index files it under. `ss` is the
+# index's name for ScreenScraper; this layer calls the same thing `screenscraper`. Two
+# names for one thing is how a namespace query returns 0 and gets believed.
+INDEX_NS = {"igdb": "igdb", "screenscraper": "ss",
+            "mobygames": "mobygames", "thegamesdb": "thegamesdb"}
+
+
+def index_lookup(provider, anchors):
+    """A provider id taken from the match index, or None.
+
+    ONLY EXACT ANCHORS. A store id or another provider's id is a pairing somebody
+    PUBLISHED; a name is a conclusion we reached. Anchoring on a name would let an index
+    collision hand back a confidently wrong id with no gate in front of it, which is the
+    fail-open shape this codebase keeps paying for. So a name is never used here, and a
+    miss simply falls through to the normal search.
+
+    This is the whole point of holding an index: once any exact handle on a game is
+    known, every other provider's id for that game is free and needs no request.
+    """
+    ns = INDEX_NS.get(provider)
+    if not ns or not anchors:
+        return None
+    try:
+        import matchindex
+    except Exception:                            # noqa: BLE001 — the index is optional
+        return None
+    con = None
+    try:
+        con = matchindex.connect()
+        for a_ns, a_val in anchors.items():
+            if not a_val:
+                continue
+            hit = matchindex.resolve(con, a_ns, str(a_val))
+            if not hit:
+                continue
+            vals = hit.get(ns) or []
+            # One id per provider. Several means the index merged something it should
+            # not have, and picking one would be a guess.
+            if len(vals) == 1:
+                return vals[0]
+    except Exception:                            # noqa: BLE001
+        return None
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:                    # noqa: BLE001
+                pass
+    return None
+
+
+def resolve(con, provider, norm_key, title, systems, search, force=False, anchors=None):
     """The id for this game on this provider, searching only when we have to.
 
     `search(title, systems)` returns the provider's own match dict (whatever key the
@@ -236,6 +287,14 @@ def resolve(con, provider, norm_key, title, systems, search, force=False):
             return 0                        # a fresh miss — don't hammer the provider
         # a STALE miss falls through and is retried: a recorded miss is the absence of a
         # decision, not a permanent verdict (#25).
+    # THE INDEX BEFORE THE NETWORK. If any exact handle we already hold identifies this
+    # game, the index already knows every other provider's id for it. That costs one
+    # local lookup instead of a rate-limited round trip and an acceptance gate, and it
+    # cannot be a wrong bind because the pairing was published, not concluded.
+    from_ix = index_lookup(provider, anchors)
+    if from_ix:
+        return record(con, provider, norm_key, from_ix, None, "index", system=None)
+
     try:
         hit = search(title, systems)
     except Exception:                       # noqa: BLE001 — see docstring

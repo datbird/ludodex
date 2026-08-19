@@ -1955,21 +1955,33 @@ const SCHEDULES = [
 
 // Point-in-time archives, as opposed to the live mirror above. Several independent jobs:
 // each picks its own contents, destination, timing and retention.
-/** The supplemental match index.
+/** A small "i" that carries an explanation.
  *
- *  Three layers answer an identity question — your corrections, what ludodex learned
- *  while scraping, and this file — and the only one that is optional is this one. So the
- *  panel's job is to make the difference between "no supplement installed" and "the
- *  supplement has no row for that game" visible, because they are not the same and the
- *  matching code is not allowed to confuse them either. */
+ *  The panel's problem was never missing information, it was information with no home:
+ *  paragraphs of prose above the controls, and controls whose names did not say what
+ *  they did. An explanation belongs next to the thing it explains, and out of the way
+ *  until asked for. */
+function Info({ text }: { text: string }) {
+  return <span className="info-dot" title={text} aria-label={text} role="img">i</span>
+}
+
+/** The match database.
+ *
+ *  TWO LAYERS, NAMED AFTER WHERE THEY CAME FROM. Learned is what this install worked out
+ *  and what you corrected by hand. Published is a prebuilt file anyone can download. They
+ *  have opposite lifecycles: one is irreplaceable and backed up, the other is thrown away
+ *  and replaced wholesale. Every earlier version of this panel mixed them together, which
+ *  is why nobody could tell which one an action was about to affect. */
 function MatchIndexPanel() {
   const [st, setSt] = useState<MatchIndexState | null>(null)
   const [rel, setRel] = useState<MatchIndexRelease | null>(null)
   const [path, setPath] = useState('')
   const [url, setUrl] = useState('')
   const [token, setToken] = useState('')
+  const [showToken, setShowToken] = useState(false)
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
+  const fileRef = useRef<HTMLInputElement | null>(null)
 
   const load = useCallback(() => {
     api.matchIndex().then((r) => {
@@ -1977,7 +1989,6 @@ function MatchIndexPanel() {
     }).catch(() => {})
   }, [])
   useEffect(() => { load() }, [load])
-  // Poll only while a download or rebuild is actually in flight.
   useEffect(() => {
     if (st?.job?.state !== 'running') return
     const t = setInterval(() => api.matchIndex().then(setSt).catch(() => {}), 1000)
@@ -1986,10 +1997,11 @@ function MatchIndexPanel() {
 
   const save = async (b: { prefer?: string; path?: string; release_url?: string; release_token?: string }) => {
     setBusy('save'); setMsg('')
-    try { setSt(await api.setMatchIndex(b)); setMsg('Saved ✓') }
+    try { setSt(await api.setMatchIndex(b)); setMsg('Saved') }
     catch (e) { setMsg(String((e as Error).message || e)) }
     finally { setBusy('') }
   }
+
   const checkRelease = async () => {
     setBusy('rel'); setMsg('')
     try { setRel(await api.matchIndexRelease(url.trim())) }
@@ -1997,202 +2009,230 @@ function MatchIndexPanel() {
     finally { setBusy('') }
   }
 
-  if (!st) return <div className="loading">Loading…</div>
+  const clearLearned = async (what: 'learned' | 'overrides') => {
+    const n = what === 'learned' ? st?.learned?.keys : st?.learned?.overrides
+    // Overrides are human decisions that nothing can reconstruct. Learned rows can be
+    // reached again by scraping. The warning says which of the two you are about to lose.
+    const warn = what === 'overrides'
+      ? `Delete ${n ?? 0} corrections you made by hand? Nothing can rebuild these.`
+      : `Delete ${n ?? 0} learned handles? Scraping can find them again, slowly.`
+    if (!window.confirm(warn)) return
+    setBusy('clear'); setMsg('')
+    try { await api.matchIndexClearLearned(what); setMsg('Cleared'); load() }
+    catch (e) { setMsg(String((e as Error).message || e)) }
+    finally { setBusy('') }
+  }
+
+  const exportLearned = async () => {
+    setBusy('export'); setMsg('')
+    try {
+      const r = await fetch('/api/matchindex/learned/export', { credentials: 'same-origin' })
+      if (!r.ok) throw new Error(`export failed (${r.status})`)
+      const blob = await r.blob()
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = 'ludodex-learned.json'
+      a.click()
+      URL.revokeObjectURL(a.href)
+      setMsg('Exported')
+    } catch (e) { setMsg(String((e as Error).message || e)) }
+    finally { setBusy('') }
+  }
+
+  const importLearned = async (f: File) => {
+    setBusy('import'); setMsg('')
+    try {
+      const data = JSON.parse(await f.text())
+      const r = await api.matchIndexImportLearned(data)
+      setMsg(`Imported ${r.imported.keys} handles and ${r.imported.overrides} corrections`)
+      load()
+    } catch (e) { setMsg(String((e as Error).message || e)) }
+    finally { setBusy('') }
+  }
+
+  if (!st) return <p className="hint">Loading…</p>
   const job = st.job
   const pct = job && job.total ? Math.round((job.got / job.total) * 100) : 0
+  const learned = st.learned
 
   return (
-    <div className="panel">
-      <h3>Match database</h3>
-      <p className="hint">
-        Resolves a game from any handle to every other one — a store id, a normalized
-        title, or a ROM hash — without a network round trip. The supplement is optional;
-        ludodex works without it and simply falls back to searching providers, learning
-        what it finds as it goes.
-      </p>
+    <>
+      <h2>Match Database<Info text={
+        'One place that says which game a thing is. Give it a store id, a title or a ROM '
+        + 'hash and it gives back every other id for that same game, without asking anyone '
+        + 'over the network. It is optional. Without it ludodex searches the providers '
+        + 'instead, which works but is slower and gets things wrong more often.'} /></h2>
+      <p className="dim">Two layers answer the same question. What this install worked out,
+        and a prebuilt database anyone can download. Your own always wins by default, and a
+        published database never overwrites it.</p>
 
-      <div className="rows">
-        <div className="row">
-          <span>Your own data</span>
-          <b>{st.learned_keys.toLocaleString()} learned</b>
-          <span className="hint">
-            {st.overrides.toLocaleString()} override{st.overrides === 1 ? '' : 's'} ·
-            {' '}backed up, never overwritten by a supplement
-          </span>
-        </div>
-        <div className="row">
-          <span>Supplement</span>
-          {st.has_index
-            ? <b>{(st.identities ?? 0).toLocaleString()} games ·{' '}
-                {(st.keys ?? 0).toLocaleString()} handles ·{' '}
-                {(st.size / 1e9).toFixed(2)} GB</b>
-            : <b className="muted">Not installed</b>}
-          {st.built_at
-            ? <span className="hint">built {new Date(st.built_at * 1000).toLocaleString()}</span>
-            : null}
-        </div>
-        {/* WHERE THIS FILE CAME FROM. The panel showed size, counts and a build date and
-            never said whether the user was running a published build or their own — the
-            one thing they need to be sure of before trusting a lookup. built_at answers
-            "when was it built", by whoever built it, which is a different question. */}
-        {st.has_index ? (
-          <div className="row">
-            <span>Source</span>
-            {st.origin?.kind === 'downloaded'
-              ? <b>Published build</b>
-              : st.origin?.kind === 'built'
-                ? <b>Built on this machine</b>
-                : <b className="muted">Unknown</b>}
-            <span className="hint">
-              {st.origin?.kind === 'downloaded'
-                ? <>downloaded{st.origin.url ? <> from <code>{st.origin.url}</code></> : null}
-                    {st.origin.at ? ` on ${new Date(st.origin.at * 1000).toLocaleString()}` : ''}</>
-                : st.origin?.kind === 'built'
-                  ? <>rebuilt from the local mirrors
-                      {st.origin.at ? ` on ${new Date(st.origin.at * 1000).toLocaleString()}` : ''}</>
-                  : <>installed before ludodex began recording this — use Check and
-                      Download, or Rebuild, to establish it</>}
-            </span>
-          </div>
-        ) : null}
+      <div className="mdb-sec">Learned<Info text={
+        'What this install worked out on its own, plus any match you corrected by hand. '
+        + 'Every row cost a real lookup, and your corrections exist nowhere else. This is '
+        + 'the part worth backing up.'} /></div>
+
+      <div className="mdb-stat">
+        <span className="mdb-label">Contents</span>
+        <b>{(learned?.keys ?? 0).toLocaleString()} handles</b>
+        <span className="mdb-sub">
+          {(learned?.identities ?? 0).toLocaleString()} games ·{' '}
+          {(learned?.overrides ?? 0).toLocaleString()} correction
+          {learned?.overrides === 1 ? '' : 's'}
+          {learned && Object.keys(learned.by_ns || {}).length
+            ? ` · ${Object.entries(learned.by_ns).slice(0, 4)
+              .map(([ns, n]) => `${ns} ${n.toLocaleString()}`).join(' · ')}`
+            : ''}
+        </span>
       </div>
 
-      <label className="field">
-        <span>Supplement file</span>
-        <input value={path} onChange={(e) => setPath(e.target.value)}
-          placeholder={st.default_path}
-          title="Point at a match index anywhere ludodex can read — a NAS share or an external drive is fine. It is only ever read, never written." />
-        <button className="btn" disabled={busy === 'save' || path === st.path}
-          onClick={() => save({ path })}>Use this file</button>
-      </label>
+      <div className="bs-actions">
+        <button className="go" disabled={!!busy}
+          title="Save everything in this section to a file you can keep or move to another install."
+          onClick={exportLearned}>
+          {busy === 'export' ? 'Exporting…' : 'Export'}</button>
+        <button className="go" disabled={!!busy}
+          title="Merge a file exported from here. Nothing already present is removed."
+          onClick={() => fileRef.current?.click()}>
+          {busy === 'import' ? 'Importing…' : 'Import'}</button>
+        <input ref={fileRef} type="file" accept="application/json" hidden
+          onChange={(e) => { const f = e.target.files?.[0]; if (f) importLearned(f); e.target.value = '' }} />
+        <button className="go danger" disabled={!!busy || !learned?.keys}
+          title="Delete what this install worked out. Your hand corrections are kept."
+          onClick={() => clearLearned('learned')}>Clear learned</button>
+        <button className="go danger" disabled={!!busy || !learned?.overrides}
+          title="Delete your hand corrections. Nothing can rebuild these."
+          onClick={() => clearLearned('overrides')}>Clear corrections</button>
+      </div>
 
-      <label className="field">
-        <span>When both have an answer</span>
-        <select value={st.prefer} onChange={(e) => save({ prefer: e.target.value })}
-          title="Which layer decides when your own data and the supplement disagree about the same handle. Your corrections outrank both either way.">
-          <option value="dynamic">Prefer my own data (default)</option>
-          <option value="supplement">Prefer the supplement</option>
-        </select>
-        <span className="hint">
-          The other is still used whenever the preferred one has nothing.
+      <div className="mdb-sec">Published<Info text={
+        'A prebuilt SQLite database, covering far more games than one install could learn '
+        + 'on its own. About half a gigabyte. Download the current one, point at a copy you '
+        + 'already have, or build your own. Replacing it is safe: nothing you learned or '
+        + 'corrected is stored in it.'} /></div>
+
+      <div className="mdb-stat">
+        <span className="mdb-label">Contents</span>
+        {st.has_index
+          ? <b>{(st.keys ?? 0).toLocaleString()} handles</b>
+          : <b>Not installed</b>}
+        <span className="mdb-sub">
+          {st.has_index ? <>
+            {(st.identities ?? 0).toLocaleString()} games · {(st.size / 1e9).toFixed(2)} GB
+            {st.built_at ? ` · built ${new Date(st.built_at * 1000).toLocaleDateString()}` : ''}
+            {st.installed ? <> · <code>{st.installed.sha256.slice(0, 12)}</code></> : null}
+          </> : 'download one below, or point at a file you have'}
         </span>
-      </label>
+      </div>
 
-      <h4>Published build</h4>
-      <label className="field">
-        <span>Release URL</span>
+      <div className="mdb-stat">
+        <span className="mdb-label">Source</span>
+        <b>{st.origin?.kind === 'downloaded' ? 'Downloaded'
+          : st.origin?.kind === 'built' ? 'Built here' : 'Unknown'}</b>
+        <span className="mdb-sub">
+          {st.origin?.kind === 'downloaded'
+            ? `from the publish url${st.origin.at ? ` on ${new Date(st.origin.at * 1000).toLocaleDateString()}` : ''}`
+            : st.origin?.kind === 'built'
+              ? `from local mirrors${st.origin.at ? ` on ${new Date(st.origin.at * 1000).toLocaleDateString()}` : ''}`
+              : 'this file was here before ludodex started keeping track'}
+        </span>
+      </div>
+
+      <div className="bs-row">
+        <label>Published file</label>
+        <input value={path} onChange={(e) => setPath(e.target.value)}
+          title="Where the file lives. It can sit on a NAS or an external drive. It is only ever read." />
+        <button className="go" disabled={busy === 'save' || path === st.path}
+          onClick={() => save({ path })}>Use this file</button>
+      </div>
+
+      <div className="bs-row">
+        <label>Conflicts<Info text={
+          'When both layers know the same thing and disagree, this picks the winner. Your '
+          + 'own data wins by default, because it was worked out on this library. The other '
+          + 'layer is still used whenever the winner has no answer.'} /></label>
+        <select value={st.prefer} onChange={(e) => save({ prefer: e.target.value })}>
+          <option value="dynamic">My own data wins</option>
+          <option value="supplement">The published file wins</option>
+        </select>
+      </div>
+
+      <div className="bs-row">
+        <label>Publish url</label>
         <input value={url} onChange={(e) => setUrl(e.target.value)}
           placeholder="using the default published build"
-          title="A JSON endpoint describing the published build. A GitHub releases API URL works as-is. Leave empty to use the default." />
-        <button className="btn" disabled={busy === 'save' || url === st.release_url}
+          title="Where to look for a published build. Leave empty to use the default." />
+        <button className="go" disabled={busy === 'save' || url === st.release_url}
           onClick={() => save({ release_url: url })}>Save</button>
-        {/* Enabled on the TYPED url, not the saved one. Checking is how you find out
-            whether a url is worth saving, so requiring the save first inverted the
-            order the user actually works in. */}
-        <button className="btn" disabled={!url.trim() || busy === 'rel'}
+        <button className="go" disabled={!url.trim() || busy === 'rel'}
           onClick={checkRelease}>{busy === 'rel' ? 'Checking…' : 'Check'}</button>
-      </label>
+        <button className={'go mdb-gear' + (showToken ? ' on' : '')}
+          title="Extra settings for the publish url"
+          onClick={() => setShowToken((v) => !v)}>⚙</button>
+      </div>
 
-      {/* A PRIVATE release needs a token. GitHub serves a private asset only to an
-          authenticated caller; without one the download saves the login page — a few
-          kilobytes that install cleanly and are not a database. */}
-      <label className="field">
-        <span>Access token</span>
-        <input type="password" value={token} onChange={(e) => setToken(e.target.value)}
-          placeholder={st.release_token_set ? '•••••••• (stored) — type to replace' : 'only needed for a private repository'}
-          autoComplete="off"
-          title="A GitHub token with read access to the repository holding the release. Needed only when the repository is private. Stored on the server and never sent back." />
-        <button className="btn" disabled={busy === 'save'}
-          onClick={() => { save({ release_token: token }); setToken('') }}>
-          {st.release_token_set && !token.trim() ? 'Clear' : 'Save token'}</button>
-      </label>
+      {showToken ? (
+        <div className="bs-row mdb-sub-row">
+          <label>Access token</label>
+          <input type="password" value={token} onChange={(e) => setToken(e.target.value)}
+            placeholder={st.release_token_set ? 'saved — blank keeps it' : 'only for a private repository'}
+            autoComplete="off"
+            title="Only needed when the publish url points at a private repository. Stored here and never shown again." />
+          <button className="go" disabled={busy === 'save'}
+            onClick={() => { save({ release_token: token }); setToken('') }}>
+            {st.release_token_set && !token.trim() ? 'Clear' : 'Save'}</button>
+        </div>
+      ) : null}
 
-      {/* "Not configured" cannot happen now — an empty field falls back to the
-          published build — so the hint that used to say so is gone. */}
-      {rel?.error ? <p className="err">Could not read the release: {rel.error}</p> : null}
+      {rel?.error ? <div className="bs-test bad">Could not read the publish url: {rel.error}</div> : null}
+
       {rel?.asset?.url ? (
-        <div className="rows">
-          <div className="row">
-            <span>Available</span>
-            <b>{rel.version || rel.asset.name}</b>
-            {rel.asset.size
-              ? <span className="hint">{(rel.asset.size / 1e9).toFixed(2)} GB
-                  {rel.asset.sha256 ? <> · <code>{rel.asset.sha256.slice(0, 12)}…</code></> : null}
-                </span> : null}
-            <button className="btn primary" disabled={job?.state === 'running'}
+        <div className="restore-box">
+          <div className="pref-name">{rel.version || rel.asset.name}</div>
+          <span className="pref-hint">
+            {rel.asset.size ? `${(rel.asset.size / 1e9).toFixed(2)} GB` : ''}
+            {rel.asset.sha256 ? <> · <code>{rel.asset.sha256.slice(0, 12)}</code></> : null}
+            {' · '}
+            {rel.installed_is_release ? 'the same file you are already using'
+              : rel.installed ? 'different from the file you are using'
+                : 'you have nothing installed'}
+          </span>
+          <div className="bs-actions">
+            <button className="go primary" disabled={job?.state === 'running'}
               onClick={() => api.matchIndexDownload({
                 url: rel.asset!.url!, size: rel.asset!.size,
               }).then(load).catch((e) => setMsg(String(e)))}>
-              ⬇ Download{st.has_index ? ' & replace' : ''}
+              {st.has_index ? 'Download and replace' : 'Download'}
             </button>
-          </div>
-          {/* SAME OR DIFFERENT, stated. Showing two sizes and leaving the reader to
-              compare them by eye is how "0.46 GB" and "0.46 GB" get taken for identical
-              files. The verdict is a DIGEST match or nothing. */}
-          <div className="row">
-            <span>In use</span>
-            {rel.installed_is_release
-              ? <b>Same as this release</b>
-              : rel.installed
-                ? <b className="muted">Differs from this release</b>
-                : <b className="muted">Nothing installed</b>}
-            <span className="hint">
-              {rel.installed
-                ? <>installed {(rel.installed.size / 1e9).toFixed(2)} GB ·{' '}
-                    <code>{rel.installed.sha256.slice(0, 12)}…</code></>
-                : <>download it to install one</>}
-            </span>
           </div>
         </div>
       ) : null}
 
       {job ? (
-        <div className="rows">
-          <div className="row">
-            <span>{job.mode === 'rebuild' ? 'Rebuilding' : 'Downloading'}</span>
-            {job.state === 'running'
-              ? <b>{job.total ? `${pct}%` : `${(job.got / 1e6).toFixed(0)} MB`}</b>
-              : job.state === 'error' ? <b className="err">Failed</b>
-              : <b>Done ✓</b>}
-            {job.error ? <span className="hint err">{job.error}</span> : null}
-          </div>
+        <div className={'bs-test' + (job.state === 'error' ? ' bad' : job.state === 'done' ? ' ok' : '')}>
+          {job.state === 'running'
+            ? (job.mode === 'rebuild'
+              ? 'Rebuilding from local mirrors…'
+              : `Downloading… ${(job.got / 1e9).toFixed(2)} GB${job.total ? ` of ${(job.total / 1e9).toFixed(2)} GB (${pct}%)` : ''}`)
+            : job.state === 'error' ? `Failed: ${job.error}` : 'Finished'}
         </div>
       ) : null}
 
-      {st.attribution ? (
-        <p className="hint">
-          <b>{st.license}</b> — {st.attribution}
-          {(st.sources || []).map((x) => (
-            <span key={x.name}>{' '}
-              <a href={x.url} target="_blank" rel="noreferrer">{x.name}</a>
-            </span>
-          ))}
-        </p>
-      ) : null}
-
-      <p className="hint">
-        A download lands in a temporary file and is only swapped in once it is complete
-        and verified — a half-written index would attach cleanly and then miss every
-        lookup made against it.
-      </p>
-
-      <button className="btn" disabled={job?.state === 'running'}
-        onClick={() => api.matchIndexRebuild().then(load).catch((e) => setMsg(String(e)))}
-        title="Rebuild the supplement from the local IGDB and ScreenScraper mirrors, if this machine has them.">
+      <button className="go primary mdb-wide" disabled={job?.state === 'running'}
+        title="Build the published file yourself from the provider catalogues on this machine. Only affects this section. Takes a while and needs those catalogues present."
+        onClick={() => api.matchIndexRebuild().then(load).catch((e) => setMsg(String(e)))}>
         Rebuild from local mirrors
       </button>
-      {msg ? <p className="hint">{msg}</p> : null}
-    </div>
+
+      <p className="dim bs-hint" style={{ marginLeft: 0, marginTop: 18 }}>
+        Credit and terms: {st.license || 'CC BY-NC-SA 4.0'}
+        <Info text={st.attribution || 'Built from several game databases, each with its own terms.'} />
+      </p>
+
+      {msg ? <div className="bs-test">{msg}</div> : null}
+    </>
   )
 }
 
-
-/** Publish — pick a target, decide what belongs on it, see exactly what would change.
- *
- *  The panel is deliberately plan-first. Publishing writes to someone else's disk, so
- *  the thing on screen is a DIFF you review, not a button you press and hope about;
- *  Apply does not exist yet, and when it does it consumes this plan rather than
- *  recomputing one. Everything here reads. */
 function PublishPanel({ onBrowse }: { onBrowse: () => void }) {
   const [devices, setDevices] = useState<Device[] | null>(null)
   const [dev, setDev] = useState<number | null>(null)
@@ -4088,6 +4128,13 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
         works over your catalog &amp; text. A function that does both shows both.
       </p>
 
+      {/* The page held two kinds of setting with nothing saying so: the two that apply
+          everywhere, and the per-function overrides below. Naming them is the difference
+          between reading a list and understanding a hierarchy. */}
+      <div className="mdb-sec">Global<Info text={
+        'These apply to every AI function that has not been given its own model. Change '
+        + 'one here and everything inheriting it follows.'} /></div>
+
       <div className="default-row">
         <span className="dr-label">Global default <span className="dr-paren">(<DataBadge />)</span></span>
         <select value={cfg.default.provider ?? ''} onChange={(e) => setDefaultProvider(e.target.value)}>
@@ -4134,6 +4181,9 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
           : cfg.areas
         return (
       <>
+      <div className="mdb-sec">Per-task<Info text={
+        'One row per AI function. Leave a row on Default and it follows the global '
+        + 'setting above. Give it a provider or a model and only that function changes.'} /></div>
       <div className="area-search">
         <input type="search" placeholder="🔍 Search AI functions…" value={areaQuery}
           onChange={(e) => setAreaQuery(e.target.value)} />
