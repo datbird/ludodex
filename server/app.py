@@ -12055,6 +12055,21 @@ _INDEX_DL = {"job": None}
 # built by whoever published it, and that tells the user nothing about their own install.
 ORIGIN_KEY = "matchindex.origin"
 
+# A token for a PRIVATE release. GitHub serves a private asset only to an authenticated
+# caller, and only from the ASSET API url with Accept: application/octet-stream —
+# browser_download_url returns HTML for a login page, which downloads "successfully" as a
+# few kilobytes and is not a database. Kept out of the status payload like every other
+# secret; the UI reports whether one is set, never what it is.
+RELEASE_TOKEN_KEY = "matchindex.release_token"
+
+
+def _release_headers():
+    h = {"User-Agent": "ludodex", "Accept": "application/json"}
+    tok = (config.get(RELEASE_TOKEN_KEY, "") or "").strip()
+    if tok:
+        h["Authorization"] = "Bearer " + tok
+    return h
+
 
 def _set_origin(kind, url=""):
     try:
@@ -12086,6 +12101,7 @@ def matchindex_status():
            "prefer": config.get(matchindex.PREFER_KEY, matchindex.PREFER_DYNAMIC),
            "release_url": config.get(matchindex.RELEASE_KEY, "") or "",
            "origin": _read_origin(),
+           "release_token_set": bool((config.get(RELEASE_TOKEN_KEY, "") or "").strip()),
            "job": _INDEX_DL["job"]}
     con = matchindex.connect()
     try:
@@ -12126,6 +12142,10 @@ def matchindex_settings(body: dict = Body(...)):
         matchindex.set_preference(b["prefer"])
     if "release_url" in b:
         config.set_(matchindex.RELEASE_KEY, (b["release_url"] or "").strip())
+    if "release_token" in b:
+        # Type-to-replace, blank-to-clear. The token is never returned by any endpoint,
+        # so the UI cannot round-trip it and must not try.
+        config.set_(RELEASE_TOKEN_KEY, (b["release_token"] or "").strip())
     if "path" in b:
         p = (b["path"] or "").strip()
         if p:
@@ -12157,8 +12177,7 @@ def matchindex_release(url: str = ""):
     if not url:
         return {"configured": False}
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "ludodex",
-                                                   "Accept": "application/json"})
+        req = urllib.request.Request(url, headers=_release_headers())
         with urllib.request.urlopen(req, timeout=30) as r:
             data = json.load(r)
     except Exception as e:                       # noqa: BLE001
@@ -12166,10 +12185,15 @@ def matchindex_release(url: str = ""):
     # A GitHub release payload names its assets; a hand-rolled manifest may just be the
     # fields directly. Accept both rather than dictating one.
     asset = None
+    private = bool((config.get(RELEASE_TOKEN_KEY, "") or "").strip())
     for a in (data.get("assets") or []):
         if str(a.get("name", "")).endswith(".sqlite") or "match-index" in str(a.get("name", "")):
-            asset = {"url": a.get("browser_download_url"), "size": a.get("size"),
-                     "name": a.get("name")}
+            # A PRIVATE asset is only reachable through the asset API url. Handing back
+            # browser_download_url there yields a login page that saves cleanly and is
+            # not a database — a download that reports success and installs nothing.
+            asset = {"url": (a.get("url") if private else a.get("browser_download_url")),
+                     "size": a.get("size"), "name": a.get("name"),
+                     "private": private}
             break
     return {"configured": True, "url": url,
             "version": data.get("tag_name") or data.get("version"),
@@ -12199,7 +12223,12 @@ def matchindex_download(body: dict = Body(...)):
         part = dest + ".part"
         try:
             os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-            req = urllib.request.Request(url, headers={"User-Agent": "ludodex"})
+            h = _release_headers()
+            # The asset API returns metadata for Accept: application/json and the FILE
+            # for octet-stream. Asking for the wrong one downloads a JSON description of
+            # the database instead of the database.
+            h["Accept"] = "application/octet-stream"
+            req = urllib.request.Request(url, headers=h)
             with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
                 st["total"] = st["total"] or int(r.headers.get("Content-Length") or 0)
                 while True:

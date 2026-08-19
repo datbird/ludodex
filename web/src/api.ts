@@ -511,6 +511,8 @@ export interface MatchIndexState {
   // How this copy of the file GOT HERE. null means it predates the record, which is an
   // honest answer and not the same as "built locally".
   origin?: { kind: 'downloaded' | 'built'; url?: string; at?: number } | null
+  // Whether a token is stored, never the token itself.
+  release_token_set?: boolean
   learned_keys: number
   overrides: number
   identities?: number
@@ -1309,7 +1311,7 @@ export const api = {
     get<{ placed: Record<string, unknown> }>(`/api/devices/${dev}/publish/ledger`),
 
   matchIndex: () => get<MatchIndexState>('/api/matchindex'),
-  setMatchIndex: (b: { prefer?: string; path?: string; release_url?: string }) =>
+  setMatchIndex: (b: { prefer?: string; path?: string; release_url?: string; release_token?: string }) =>
     postJson<MatchIndexState>('/api/matchindex/settings', b),
   // Takes the url so the UI can TEST what was typed, before it is saved.
   matchIndexRelease: (url?: string) =>

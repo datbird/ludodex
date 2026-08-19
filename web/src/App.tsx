@@ -1967,6 +1967,7 @@ function MatchIndexPanel() {
   const [rel, setRel] = useState<MatchIndexRelease | null>(null)
   const [path, setPath] = useState('')
   const [url, setUrl] = useState('')
+  const [token, setToken] = useState('')
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
 
@@ -1983,7 +1984,7 @@ function MatchIndexPanel() {
     return () => clearInterval(t)
   }, [st?.job?.state])
 
-  const save = async (b: { prefer?: string; path?: string; release_url?: string }) => {
+  const save = async (b: { prefer?: string; path?: string; release_url?: string; release_token?: string }) => {
     setBusy('save'); setMsg('')
     try { setSt(await api.setMatchIndex(b)); setMsg('Saved ✓') }
     catch (e) { setMsg(String((e as Error).message || e)) }
@@ -2090,6 +2091,20 @@ function MatchIndexPanel() {
             order the user actually works in. */}
         <button className="btn" disabled={!url.trim() || busy === 'rel'}
           onClick={checkRelease}>{busy === 'rel' ? 'Checking…' : 'Check'}</button>
+      </label>
+
+      {/* A PRIVATE release needs a token. GitHub serves a private asset only to an
+          authenticated caller; without one the download saves the login page — a few
+          kilobytes that install cleanly and are not a database. */}
+      <label className="field">
+        <span>Access token</span>
+        <input type="password" value={token} onChange={(e) => setToken(e.target.value)}
+          placeholder={st.release_token_set ? '•••••••• (stored) — type to replace' : 'only needed for a private repository'}
+          autoComplete="off"
+          title="A GitHub token with read access to the repository holding the release. Needed only when the repository is private. Stored on the server and never sent back." />
+        <button className="btn" disabled={busy === 'save'}
+          onClick={() => { save({ release_token: token }); setToken('') }}>
+          {st.release_token_set && !token.trim() ? 'Clear' : 'Save token'}</button>
       </label>
 
       {rel && !rel.configured ? <p className="hint">No release URL set.</p> : null}
