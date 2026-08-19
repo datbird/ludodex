@@ -2082,8 +2082,8 @@ function MatchIndexPanel() {
       <label className="field">
         <span>Release URL</span>
         <input value={url} onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://api.github.com/repos/…/releases/latest"
-          title="A JSON endpoint describing the published build. A GitHub releases API URL works as-is." />
+          placeholder="using the default published build"
+          title="A JSON endpoint describing the published build. A GitHub releases API URL works as-is. Leave empty to use the default." />
         <button className="btn" disabled={busy === 'save' || url === st.release_url}
           onClick={() => save({ release_url: url })}>Save</button>
         {/* Enabled on the TYPED url, not the saved one. Checking is how you find out
@@ -2107,7 +2107,8 @@ function MatchIndexPanel() {
           {st.release_token_set && !token.trim() ? 'Clear' : 'Save token'}</button>
       </label>
 
-      {rel && !rel.configured ? <p className="hint">No release URL set.</p> : null}
+      {/* "Not configured" cannot happen now — an empty field falls back to the
+          published build — so the hint that used to say so is gone. */}
       {rel?.error ? <p className="err">Could not read the release: {rel.error}</p> : null}
       {rel?.asset?.url ? (
         <div className="rows">

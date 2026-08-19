@@ -161,6 +161,26 @@ SOURCES = [
 # catalogs is theirs to distribute or not.
 RELEASE_KEY = "matchindex.release_url"
 
+# The published build, pointed at by default so a fresh install can just press Check.
+# A separate PUBLIC repository, holding releases only: ludodex's own repo is private, and
+# GitHub serves a private release asset only to an authenticated caller — which defeats
+# the point of shipping a prebuilt index. Overridable, because whoever runs this may
+# publish their own.
+DEFAULT_RELEASE_URL = ("https://api.github.com/repos/datbird/ludodex-match-index"
+                       "/releases/latest")
+
+
+def release_url():
+    """The configured release url, else the default. -> str
+
+    ONE place decides this. The status endpoint, the check and the download all need the
+    same answer, and three copies of `config.get(RELEASE_KEY, "")` is how a default ends
+    up applying in two of them and not the third."""
+    try:
+        return (config.get(RELEASE_KEY, "") or "").strip() or DEFAULT_RELEASE_URL
+    except Exception:                            # noqa: BLE001
+        return DEFAULT_RELEASE_URL
+
 
 def index_path():
     """Where the supplement lives — the configured path, else beside the other dbs."""

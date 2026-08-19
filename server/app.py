@@ -12099,7 +12099,7 @@ def matchindex_status():
            "present": os.path.exists(path),
            "size": os.path.getsize(path) if os.path.exists(path) else 0,
            "prefer": config.get(matchindex.PREFER_KEY, matchindex.PREFER_DYNAMIC),
-           "release_url": config.get(matchindex.RELEASE_KEY, "") or "",
+           "release_url": matchindex.release_url(),
            "origin": _read_origin(),
            "release_token_set": bool((config.get(RELEASE_TOKEN_KEY, "") or "").strip()),
            "job": _INDEX_DL["job"]}
@@ -12173,9 +12173,9 @@ def matchindex_release(url: str = ""):
     Takes an explicit `url` so the UI can TEST what the user typed before saving it.
     Reading only the stored key made Check useless in the one moment it matters."""
     import matchindex
-    url = (url or config.get(matchindex.RELEASE_KEY, "") or "").strip()
-    if not url:
-        return {"configured": False}
+    # No "not configured" branch any more: release_url() always answers, falling back to
+    # the published build. An empty field now means "use the default", not "do nothing".
+    url = (url or "").strip() or matchindex.release_url()
     try:
         req = urllib.request.Request(url, headers=_release_headers())
         with urllib.request.urlopen(req, timeout=30) as r:
