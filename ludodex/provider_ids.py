@@ -220,8 +220,19 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
 # provider_ids provider -> the namespace the match index files it under. `ss` is the
 # index's name for ScreenScraper; this layer calls the same thing `screenscraper`. Two
 # names for one thing is how a namespace query returns 0 and gets believed.
-INDEX_NS = {"igdb": "igdb", "screenscraper": "ss",
-            "mobygames": "mobygames", "thegamesdb": "thegamesdb"}
+# provider -> the index namespace holding THAT PROVIDER'S OWN identifier, in the form
+# this layer stores. A namespace is listed only when both are true; being able to look a
+# thing up is not the same as being able to USE what comes back.
+#
+# MOBYGAMES IS DELIBERATELY ABSENT, and the reason is the whole point of this map. The
+# index namespace `mobygames` carries TWO different handle forms for the same game:
+# `_merge_moby` writes the numeric catalogue id (29845) and the Wikidata cross-reference
+# writes the URL slug (`bioshock`). Both are real MobyGames handles, and BioShock live
+# carries four of them. This layer stores one string, so answering from that namespace
+# would hand back whichever form the index happened to list first — an id the caller
+# cannot use, written down as a decision. Splitting the namespace at build time is the
+# fix; until then Moby is searched normally and nothing is guessed.
+INDEX_NS = {"igdb": "igdb", "screenscraper": "ss", "thegamesdb": "thegamesdb"}
 
 
 def index_lookup(provider, anchors):
@@ -235,6 +246,15 @@ def index_lookup(provider, anchors):
 
     This is the whole point of holding an index: once any exact handle on a game is
     known, every other provider's id for that game is free and needs no request.
+
+    ONE CANDIDATE, OR NOTHING. Several ids under one namespace is NORMAL and intended,
+    not a merge fault: ScreenScraper keeps a separate record per system, TheGamesDB keeps
+    one per (title, platform, region), and the build attaches every one of them on
+    purpose, because choosing between them needs the platform and filename the CALLER
+    holds. Measured on this library, that is 45% of ScreenScraper hits and 51% of
+    TheGamesDB hits. Those fall through and are searched exactly as before — the index
+    declining to answer costs a request, and answering wrongly costs a wrong bind that
+    nothing downstream would question.
     """
     ns = INDEX_NS.get(provider)
     if not ns or not anchors:
@@ -252,9 +272,7 @@ def index_lookup(provider, anchors):
             hit = matchindex.resolve(con, a_ns, str(a_val))
             if not hit:
                 continue
-            vals = hit.get(ns) or []
-            # One id per provider. Several means the index merged something it should
-            # not have, and picking one would be a guess.
+            vals = [v for v in (hit.get(ns) or []) if _usable_id(provider, v)]
             if len(vals) == 1:
                 return vals[0]
     except Exception:                            # noqa: BLE001
@@ -266,6 +284,19 @@ def index_lookup(provider, anchors):
             except Exception:                    # noqa: BLE001
                 pass
     return None
+
+
+def _usable_id(provider, val):
+    """Is this index value an identifier THIS provider would accept?
+
+    A namespace is a bag of handles, not a typed column, so a value that reads fine as
+    text can still be the wrong KIND of handle. Every provider here ids by integer, so a
+    non-integer under one of these namespaces is a slug or a URL fragment that arrived
+    from a cross-reference, and passing it on would write a lookup key no request can
+    ever use. Refuse it and search instead."""
+    if _is_string_id(provider):
+        return bool(str(val or "").strip())
+    return str(val or "").strip().isdigit()
 
 
 def resolve(con, provider, norm_key, title, systems, search, force=False, anchors=None):

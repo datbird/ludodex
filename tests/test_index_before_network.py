@@ -11,6 +11,12 @@
     an answer, never "this game has no match".
   * FAIL-OPEN ON ABSENCE. No index at all must behave exactly like an index that has
     never heard of the game.
+  * ONLY A USABLE HANDLE. A namespace is a bag of handles, not a typed column. Every
+    provider answered from here ids by integer, so a slug sitting under one of those
+    namespaces must be refused, not passed on as a lookup key no request can use.
+  * SEVERAL IDS IS NOT AN ANSWER. ScreenScraper keeps a record per system and TheGamesDB
+    one per region; the build attaches all of them deliberately. Choosing needs the
+    platform the CALLER holds, so the index declines and the provider is searched.
 """
 import os
 import sys
@@ -125,6 +131,31 @@ def main():
     psrc = open(os.path.join(here, "provider_ids.py")).read()
     check("exempt from the search-collision guard",
           '"manual", "steam_appid", "hash", "index"' in psrc)
+
+    print()
+    print("7. a non-integer handle is refused for an integer-id provider")
+    # Wikidata contributes MobyGames URL SLUGS while the catalogue merge contributes
+    # numeric ids, and both land under one namespace. A slug returned as a ScreenScraper
+    # or TheGamesDB id is a lookup key no request can ever use.
+    check("a slug is not a usable screenscraper id",
+          not provider_ids._usable_id("screenscraper", "bioshock"))
+    check("a number is", provider_ids._usable_id("screenscraper", "9911"))
+    check("a slug IS usable for a string-id provider",
+          provider_ids._usable_id("mobygames", "bioshock"))
+    check("mobygames is not answered from the index at all",
+          "mobygames" not in provider_ids.INDEX_NS)
+
+    print()
+    print("8. several candidates is a fall-through, not a pick")
+    ix2 = sqlite3.connect(matchindex.DB)
+    # A second ScreenScraper record for the same game, which is what SS having one row
+    # per system actually looks like.
+    ix2.execute("INSERT INTO identity_key VALUES('ss','30001',20,'exact')")
+    ix2.commit(); ix2.close()
+    check("two ss ids resolve to nothing",
+          provider_ids.index_lookup("screenscraper", {"steam": "7670"}) is None)
+    check("while the unambiguous igdb id still answers",
+          provider_ids.index_lookup("igdb", {"steam": "7670"}) == "20")
 
     print()
     print("%d checks, all passed" % len(PASS))
