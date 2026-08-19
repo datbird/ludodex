@@ -674,6 +674,18 @@ def resolve_name(con, title, year=None):
 # --- building -------------------------------------------------------------- #
 MIRRORS = ((IGDB_DB, "ig"), (SS_DB, "ss"), (MOBY_DB, "mb"), (TGDB_DB, "tg"))
 
+# A ludodex source -> the index namespace holding that store's own product id. Every one
+# of these is an EXACT anchor: the store published the id and IGDB's external_games table
+# published the pairing, so a lookup under it needs no acceptance gate.
+#
+# Only Steam was ever used as an anchor, which meant a GOG-only or Xbox-only game entered
+# the pipeline with no handle at all and was searched by name like a stranger — while the
+# index held 9,340 GOG, 15,547 Xbox, 15,292 PSN, 10,145 Epic and 25,013 itch keys that
+# would have answered outright. Stated here once, because the same map guessed a second
+# time in a call site is how a namespace query returns nothing and gets believed.
+STORE_NS = {"steam": "steam", "gog": "gog", "epic": "epic", "xbox": "xbox",
+            "psn": "psn", "itch": "itch"}
+
 
 def _attach(con):
     """Attach every mirror that exists -> the set of aliases actually usable.

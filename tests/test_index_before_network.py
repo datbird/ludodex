@@ -17,6 +17,11 @@
   * SEVERAL IDS IS NOT AN ANSWER. ScreenScraper keeps a record per system and TheGamesDB
     one per region; the build attaches all of them deliberately. Choosing needs the
     platform the CALLER holds, so the index declines and the provider is searched.
+  * EVERY STORE IS AN ANCHOR, NOT JUST STEAM. A GOG-only or Xbox-only game used to enter
+    the pipeline with no handle and get searched by name like a stranger, while the index
+    held 9,340 GOG and 15,547 Xbox keys that answered outright.
+  * THE PROVIDER MAP HAS ONE HOME. It was written out by hand in three places. A provider
+    ruled unusable in provider_ids stayed answerable in the other two.
 """
 import os
 import sys
@@ -156,6 +161,40 @@ def main():
           provider_ids.index_lookup("screenscraper", {"steam": "7670"}) is None)
     check("while the unambiguous igdb id still answers",
           provider_ids.index_lookup("igdb", {"steam": "7670"}) == "20")
+
+    print()
+    print("9. every store id is an anchor, not just Steam")
+    for store, ns in (("gog", "gog"), ("xbox", "xbox"), ("epic", "epic"),
+                      ("psn", "psn"), ("itch", "itch"), ("steam", "steam")):
+        check("%s maps to the index namespace %r" % (store, ns),
+              matchindex.STORE_NS.get(store) == ns)
+    ix3 = sqlite3.connect(matchindex.DB)
+    ix3.execute("INSERT OR IGNORE INTO identity_key VALUES('gog','2022341186',20,'exact')")
+    ix3.commit(); ix3.close()
+    check("a GOG id alone resolves the igdb id",
+          provider_ids.index_lookup("igdb", {"gog": "2022341186"}) == "20")
+
+    src_app = open(os.path.join(os.path.dirname(here), "server", "app.py")).read()
+    check("app.py builds anchors from the store ids it read",
+          "_anchors = {k: v for k, v in _store_ids.items() if v}" in src_app)
+    check("and reads source_id on the same query it already made",
+          "SELECT DISTINCT s.source, s.source_id" in src_app)
+    # `appid` is a LIMIT 1 pick, so on a base-game/GOTY pair it is arbitrary. An exact
+    # handle is the one kind of evidence no acceptance gate ever re-examines.
+    check("an arbitrary LIMIT 1 appid is never used as an exact anchor",
+          '_anchors.setdefault("steam"' not in src_app)
+    check("two ids for one store cancel instead of picking one",
+          "None if _ns in _store_ids else str(_sid)" in src_app)
+
+    print()
+    print("10. the provider namespace map is written ONCE")
+    check("app.py derives it from provider_ids",
+          "_ix_ns = dict(provider_ids.INDEX_NS)" in src_app)
+    check("app.py does not restate it",
+          '"screenscraper": "ss"' not in src_app)
+    rsrc = open(os.path.join(here, "romhash.py")).read()
+    check("romhash inverts it rather than restating it",
+          "NS_TO_PROVIDER = {" not in rsrc and "provider_ids.INDEX_NS" in rsrc)
 
     print()
     print("%d checks, all passed" % len(PASS))

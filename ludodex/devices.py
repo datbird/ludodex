@@ -737,6 +737,12 @@ def fs_stat(dev_id, path):
     return info
 
 
+# A zip CRC is one seek per file, so this is generous rather than tight: a 573,000-file
+# library reads its central directories in minutes, and a device that needs longer should
+# report that in the log rather than fail a pull that already succeeded.
+ROMHASH_REMOTE_TIMEOUT = 1800
+
+
 def _rom_index_path(lm):
     return os.path.join(DATA, "roms-index-mgr%d.sqlite" % lm["id"])
 
@@ -769,7 +775,8 @@ def pull_roms(dev, lm):
         tgt = _target(dev)
         sopts = _scp_opts(dev)
         scp = _wrap_pw(dev, ["scp"] + sopts + [os.path.join(DIR, "build_romdb.py"),
-                       os.path.join(DIR, "romtags.py"), tgt + ":/tmp/"])
+                       os.path.join(DIR, "romtags.py"),
+                       os.path.join(DIR, "romhash.py"), tgt + ":/tmp/"])
         r = _run(scp, timeout=60)
         if r.returncode != 0:
             raise RuntimeError("scp builder failed: " + (r.stderr or "")[:160])
@@ -780,6 +787,25 @@ def pull_roms(dev, lm):
         r = _ssh(dev, remote, timeout=300)
         if r.returncode != 0:
             raise RuntimeError("remote scan failed: " + (r.stderr or r.stdout or "")[:200])
+
+        # THE HASH IS COMPUTED WHERE THE FILES ARE. The index is built on the device and
+        # copied back, so every `fullpath` in it names a path on the DEVICE — hashing it
+        # from the server would open nothing. Doing it here means the hashes travel back
+        # inside the same file, at no extra transfer.
+        #
+        # ITS OWN CALL, ITS OWN TIMEOUT, AND ITS RESULT IGNORED. Appended to the command
+        # above it would have shared that 300s budget, so a large library could time the
+        # SSH out and raise "remote scan failed" for a pull whose index had already been
+        # built successfully. Hashing is an optimisation; it must not be able to fail a
+        # ROM pull that worked, whether it errors, is missing, or simply runs long.
+        try:
+            hr = _ssh(dev, "python3 /tmp/romhash.py --db /tmp/ldx-roms-index.sqlite"
+                           " --scan", timeout=ROMHASH_REMOTE_TIMEOUT)
+            if hr.returncode != 0:
+                print("romhash on device: %s" % (hr.stderr or hr.stdout or "")[:160],
+                      file=sys.stderr)
+        except Exception as e:                   # noqa: BLE001
+            print("romhash on device skipped: %s" % str(e)[:160], file=sys.stderr)
         back = _wrap_pw(dev, ["scp"] + sopts + [tgt + ":/tmp/ldx-roms-index.sqlite",
                         out])
         r = _run(back, timeout=120)
@@ -790,6 +816,22 @@ def pull_roms(dev, lm):
         n = con.execute("SELECT COUNT(*) FROM roms").fetchone()[0]
     finally:
         con.close()
+
+    # A CRC HIT IS AN EXACT JOIN — no title normalisation, no acceptance gate, no
+    # provider request, no AI call — and it arrives carrying every other provider's id
+    # for the same game. The match index holds 829,779 CRC and 769,759 SHA1 keys that
+    # had nothing to match against until the ingest computed a hash.
+    #
+    # Local roms are hashed here; remote ones were already hashed on the device above,
+    # and this call finds those rows present and goes straight to recording the ids.
+    # It cannot raise: hash_and_enrich reports its reason instead, because a missing
+    # optimisation must never fail a ROM pull that worked.
+    try:
+        import romhash
+        _h = romhash.hash_and_enrich(out, progress=True)
+        print("romhash %s: %s" % (os.path.basename(out), _h), file=sys.stderr)
+    except Exception as e:                       # noqa: BLE001
+        print("romhash skipped: %s" % str(e)[:160], file=sys.stderr)
     return n
 
 

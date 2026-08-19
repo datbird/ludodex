@@ -7118,6 +7118,7 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
 
     Returns {provider: matched_count}.
     """
+    import matchindex
     import media_fetch as _mf
     import provider_ids
     keys = [k for k in (keys or []) if k]
@@ -7168,12 +7169,25 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
             # consoles, because SS has no `pc` system id and falls to the slow
             # cross-system search.
             _srcs = set()
+            _store_ids = {}
             try:
                 _lc2 = ro(LIBRARY_DB)
                 try:
-                    _srcs = {r[0] for r in _lc2.execute(
-                        "SELECT DISTINCT s.source FROM games g JOIN sources s "
-                        "ON s.game_id=g.id WHERE g.norm_key=?", (nk,)) if r[0]}
+                    # source_id comes back on the SAME read: it is the store's own
+                    # product id, which is an exact anchor for the match index.
+                    for _sr, _sid in _lc2.execute(
+                            "SELECT DISTINCT s.source, s.source_id FROM games g "
+                            "JOIN sources s ON s.game_id=g.id WHERE g.norm_key=?",
+                            (nk,)):
+                        if not _sr:
+                            continue
+                        _srcs.add(_sr)
+                        _ns = matchindex.STORE_NS.get(_sr)
+                        # One id per store. Two entries of the same store under one
+                        # norm_key is a base game and its edition, and picking either
+                        # would be a guess presented as an exact handle.
+                        if _ns and _sid:
+                            _store_ids[_ns] = None if _ns in _store_ids else str(_sid)
                 finally:
                     _lc2.close()
             except sqlite3.OperationalError:
@@ -7185,9 +7199,16 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
             # the provider published, so an id taken from the index under it is exact and
             # needs no search. The set grows as providers resolve: the first exact handle
             # unlocks every other provider for free.
-            _anchors = {"steam": appid} if appid else {}
-            _ix_ns = {"igdb": "igdb", "screenscraper": "ss",
-                      "mobygames": "mobygames", "thegamesdb": "thegamesdb"}
+            # `appid` is deliberately NOT used here. It comes from a LIMIT 1 query, so
+            # when a norm_key carries two Steam products — a base game and its GOTY
+            # edition — it is an arbitrary pick. Feeding it in as an EXACT handle would
+            # reinstate exactly the guess _store_ids refuses, and an exact handle is the
+            # one kind of evidence no acceptance gate ever re-examines.
+            _anchors = {k: v for k, v in _store_ids.items() if v}
+            # NOT a fourth copy of this map. provider_ids decides which namespaces carry
+            # a usable id form, and restating it here is how MobyGames stayed answerable
+            # in one call site after being ruled out in another.
+            _ix_ns = dict(provider_ids.INDEX_NS)
             # Alternate names, fetched at most ONCE per game and shared by every
             # provider that misses. Lazy: nothing is paid for unless a search actually
             # fails, which is the whole point of a last resort.

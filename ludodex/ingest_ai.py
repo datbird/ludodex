@@ -98,23 +98,111 @@ def targets(mgr=None, take_all=False, limit=0, skip_hinted=True):
     for db in _rom_indexes(mgr):
         con = sqlite3.connect(db)
         try:
-            rows = con.execute(
-                "SELECT system, game, MIN(relpath) FROM roms WHERE ext IN (%s) "
-                "AND game<>'' GROUP BY system, game" % ph, exts)
-            for system, game, path in rows:
+            # The hash rides along, so identify_from_index() can answer for free. It is
+            # only carried here — targets() stays read-only, because --estimate calls it
+            # and an estimate that writes hints is not an estimate.
+            #
+            # MAX(h.crc) IS NOT THE ARBITRARY PICK IT RESEMBLES, and it is deliberately
+            # not tied to the MIN(relpath) row. A group is one game's files — regions,
+            # revisions, discs — and the index maps every one of their hashes to the SAME
+            # identity, so any member is an equally valid witness to what the game is.
+            # Taking the hash of the alphabetically-first file instead would throw away
+            # a real answer whenever that particular file happens to be unhashed.
+            has_h = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                "AND name='rom_hashes'").fetchone()
+            sel = ("SELECT r.system, r.game, MIN(r.relpath), MAX(h.crc), MAX(h.sha1) "
+                   "FROM roms r LEFT JOIN rom_hashes h ON h.relpath = r.relpath "
+                   "WHERE r.ext IN (%s) AND r.game<>'' GROUP BY r.system, r.game" % ph
+                   ) if has_h else (
+                   "SELECT system, game, MIN(relpath), NULL, NULL FROM roms "
+                   "WHERE ext IN (%s) AND game<>'' GROUP BY system, game" % ph)
+            rows = con.execute(sel, exts)
+            for system, game, path, crc, sha1 in rows:
                 k = (system, game)
                 if k in seen or k in have:
                     continue
                 if not take_all and not _suspect(game):
                     continue
                 seen.add(k)
-                out.append({"system": system, "game": game, "path": path or game})
+                out.append({"system": system, "game": game, "path": path or game,
+                            "crc": crc, "sha1": sha1})
         except sqlite3.OperationalError:
             pass
         con.close()
         if limit and len(out) >= limit:
             break
     return out[:limit] if limit else out
+
+
+def identify_from_index(items, write=True):
+    """Answer what the match index already knows, and return what is left to ask a model.
+
+    -> (records_written, remaining_items)
+
+    A CRC HIT ENDS THE QUESTION. The index holds 829,779 CRC and 769,759 SHA1 keys taken
+    from ScreenScraper and the No-Intro/Redump DATs. Those dumps state what a file IS.
+    Paying a model to read the same filename and guess is strictly worse: slower, priced
+    per token, and less certain than the answer already sitting in a local table.
+
+    THIS IS THE AI-SPEND RULE IN ITS MOST LITERAL FORM. The one thing that must never
+    happen is a paid call firing when the answer was free. Every item this removes is a
+    call not made — and the selection heuristic makes it likely, because `_suspect`
+    targets mangled filenames, which is exactly what a dump-verified hash is for.
+
+    Confidence is 1.0 and the model field reads `match-index`, so the provenance of a
+    hint is never mistaken for something a model said.
+
+    FAIL-OPEN. No index, no hashes, or a bad lookup all leave the item in the list to be
+    asked about normally. The index not knowing a rom is the absence of an answer."""
+    if not items:
+        return 0, items
+    try:
+        import matchindex
+        import romhash
+    except Exception:                            # noqa: BLE001 — the index is optional
+        return 0, items
+    con = None
+    written, rest = 0, []
+    try:
+        con = matchindex.connect()
+        if not matchindex.has_index(con):
+            return 0, items
+        for it in items:
+            got = {}
+            if it.get("crc") or it.get("sha1"):
+                try:
+                    got = romhash.identify(con, crc=it.get("crc"),
+                                           sha1=it.get("sha1"))
+                except Exception:                # noqa: BLE001
+                    got = {}
+            name = (got or {}).get("_name")
+            if not name:
+                rest.append(it)                  # no answer here — ask normally
+                continue
+            if not write:
+                written += 1
+                continue
+            try:
+                # put() refuses a hint that asserts nothing. Dropping the item on that
+                # refusal would remove it from the model's list AND leave no hint — the
+                # game would simply be forgotten, which is worse than paying for it.
+                if ingesthints.put(it["system"], it["game"], to_title=name,
+                                   year=(got or {}).get("_year"), confidence=1.0,
+                                   model="match-index", sample_path=it["path"]):
+                    written += 1
+                else:
+                    rest.append(it)
+            except Exception:                    # noqa: BLE001
+                rest.append(it)
+    except Exception:                            # noqa: BLE001
+        return 0, items
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:                    # noqa: BLE001
+                pass
+    return written, rest
 
 
 def _estimate(n):
@@ -136,9 +224,13 @@ def _estimate(n):
 def run(mgr=None, take_all=False, limit=0, min_conf=0.5, progress=False):
     import ai
     items = targets(mgr, take_all, limit)
+    # THE INDEX BEFORE THE MODEL. Anything a dump-verified hash already identifies is
+    # answered here, for nothing, and never reaches a priced call.
+    from_index, items = identify_from_index(items)
     total = len(items)
     if not total:
-        return {"targets": 0, "hinted": 0, "batches": 0}
+        return {"targets": 0, "hinted": from_index, "batches": 0,
+                "from_index": from_index}
     model = ai.model_for_area("ingest") or ""
     hinted = done = batches = 0
     for i in range(0, total, BATCH):
@@ -170,7 +262,8 @@ def run(mgr=None, take_all=False, limit=0, min_conf=0.5, progress=False):
         if progress:
             print("PROG\t%d\t%d\t%s\tingest" % (done, total, chunk[-1]["game"][:60]),
                   flush=True)
-    return {"targets": total, "hinted": hinted, "batches": batches, "done": done}
+    return {"targets": total, "hinted": hinted + from_index, "batches": batches,
+            "done": done, "from_index": from_index}
 
 
 def main():
@@ -187,15 +280,23 @@ def main():
     ap.add_argument("--progress", action="store_true", help="emit PROG lines")
     a = ap.parse_args()
     if a.estimate:
-        est = _estimate(len(targets(a.mgr, a.all, a.limit)))
+        # write=False: an estimate that records hints is not an estimate. The count is
+        # still reported, because a projection that ignores the free answers overstates
+        # the bill and would push someone away from a run that costs almost nothing.
+        _items = targets(a.mgr, a.all, a.limit)
+        free, _rest = identify_from_index(_items, write=False)
+        est = _estimate(len(_rest))
+        print("free_from_index=%d (of %d found)" % (free, len(_items)))
         print("targets=%(targets)d calls=%(calls)d in=%(in_tokens)d out=%(out_tokens)d "
               "provider=%(provider)s model=%(model)s" % est)
         print("cost_usd=%s" % ("%.2f" % est["cost_usd"] if est["cost_usd"] is not None
                                else "unknown (model not priced)"))
         return 0
     r = run(a.mgr, a.all, a.limit, a.min_confidence, a.progress)
-    print("ingest_ai: %d target(s), %d hint(s) recorded in %d batch(es)"
-          % (r["targets"], r.get("hinted", 0), r.get("batches", 0)))
+    print("ingest_ai: %d target(s), %d hint(s) recorded in %d batch(es); "
+          "%d answered free by the match index"
+          % (r["targets"], r.get("hinted", 0), r.get("batches", 0),
+             r.get("from_index", 0)))
     return 0
 
 

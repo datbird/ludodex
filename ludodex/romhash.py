@@ -28,6 +28,10 @@ import zipfile
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
+# Same derivation every other module uses: DIR is this package, DATA is the repo root
+# above it, where the databases live. Deriving DATA from DIR instead would silently
+# relocate an existing checkout's data.
+DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 
 # Recompressed disc formats. Their bytes are not the bytes any DAT hashed, so a hash of
 # one identifies nothing and computing it is pure waste.
@@ -132,18 +136,39 @@ def hash_one(fullpath, loose=False, loose_max=DEFAULT_LOOSE_MAX):
     return None, None, "skipped"
 
 
+# Sources that record a DECISION NOT TO LOOK rather than an answer about the file.
+# `skipped` is a loose file passed over because loose hashing was off; `too_big` is one
+# over the size cap; `zip_unreadable` is an archive that would not open. None of them
+# says the file has no usable hash — they say we did not compute one.
+UNANSWERED = ("skipped", "too_big", "zip_unreadable")
+
+
 def scan(con, limit=None, loose=False, loose_max=DEFAULT_LOOSE_MAX, progress=True):
     """Hash every rom not hashed yet. -> counts by source.
 
-    Resumable by construction: a row already in rom_hashes is skipped, so a scan that is
-    interrupted at 400,000 files resumes rather than restarting."""
+    Resumable by construction: a row already answered is skipped, so a scan interrupted
+    at 400,000 files resumes rather than restarting.
+
+    A DECISION NOT TO LOOK IS NOT AN ANSWER, and treating it as one is this codebase's
+    signature defect wearing a new hat. The first scan runs with loose hashing off and
+    writes `skipped` for every loose file. Those rows are rows, so a later scan with
+    --loose found them present and examined NOTHING — turning the setting on could never
+    take effect, in silence, forever. Measured on a four-file fixture: the second run
+    reported `examined: 0`.
+
+    So rows carrying an UNANSWERED source are re-examined whenever the current settings
+    could produce a different result. A real answer — a CRC, a multi-member archive, a
+    recompressed disc image — is never recomputed."""
     import time
     ensure_schema(con)
-    rows = con.execute(
-        "SELECT r.relpath, r.fullpath, r.size_bytes FROM roms r "
-        "LEFT JOIN rom_hashes h ON h.relpath = r.relpath "
-        "WHERE h.relpath IS NULL" + (" LIMIT %d" % int(limit) if limit else "")
-    ).fetchall()
+    # Retry what we declined to compute; keep what we actually determined.
+    retry = list(UNANSWERED) if loose else ["zip_unreadable"]
+    q = ("SELECT r.relpath, r.fullpath, r.size_bytes FROM roms r "
+         "LEFT JOIN rom_hashes h ON h.relpath = r.relpath "
+         "WHERE h.relpath IS NULL OR h.source IN (%s)"
+         % ",".join("?" * len(retry)))
+    rows = con.execute(q + (" LIMIT %d" % int(limit) if limit else ""),
+                       retry).fetchall()
 
     now = int(time.time())
     counts = {}
@@ -203,7 +228,17 @@ def coverage(con):
 
 def main(argv):
     import json
-    import config                                  # noqa: F401  (path side effects)
+    # config IS NOT REQUIRED HERE, and requiring it broke the case this CLI exists for.
+    # devices.pull_roms copies build_romdb.py, romtags.py and this file to a remote
+    # device and runs them there, with nothing else of ludodex present. A hard `import
+    # config` made the scan die on every remote device — and because the hash is
+    # deliberately allowed to fail without failing the sync, it would have died
+    # silently, forever. Hashing needs no configuration; only hash_and_enrich does,
+    # and that never runs on a device.
+    try:
+        import config                              # noqa: F401  (path side effects)
+    except Exception:                              # noqa: BLE001
+        pass
     path = None
     for i, a in enumerate(argv):
         if a == "--db" and i + 1 < len(argv):
@@ -230,16 +265,16 @@ if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 
 
-# The index namespaces that map onto a ludodex provider identity cache. `ss` is the
-# ScreenScraper namespace inside the index; provider_ids calls the same provider
-# `screenscraper`. Names that differ for the same thing is exactly how a namespace query
-# returns 0 and gets believed, so the mapping is stated once, here.
-NS_TO_PROVIDER = {
-    "igdb": "igdb",
-    "ss": "screenscraper",
-    "mobygames": "mobygames",
-    "thegamesdb": "thegamesdb",
-}
+def _ns_to_provider():
+    """index namespace -> ludodex provider, INVERTED FROM provider_ids.
+
+    This module used to state the mapping itself, and the copy went stale the moment
+    provider_ids dropped MobyGames — leaving the hash path writing a Moby handle whose
+    form the provider layer had already ruled unusable. One derivation per fact is the
+    rule this codebase keeps relearning, so there is now exactly one map and it lives
+    where the id form is decided."""
+    import provider_ids
+    return {ns: provider for provider, ns in provider_ids.INDEX_NS.items()}
 
 
 def enrich_from_hashes(rom_con, cat_con, limit=None, progress=True):
@@ -264,6 +299,7 @@ def enrich_from_hashes(rom_con, cat_con, limit=None, progress=True):
     import provider_ids
 
     mi = matchindex.connect()
+    ns_map = _ns_to_provider()
     rows = rom_con.execute(
         "SELECT r.relpath, r.game, r.system, h.crc, h.sha1 "
         "FROM rom_hashes h JOIN roms r ON r.relpath = h.relpath "
@@ -282,14 +318,15 @@ def enrich_from_hashes(rom_con, cat_con, limit=None, progress=True):
         if not nk or nk in seen_keys:
             continue
         seen_keys.add(nk)
-        for ns, provider in NS_TO_PROVIDER.items():
-            vals = got.get(ns) or []
-            if not vals:
-                continue
-            # One id per provider. A handle resolving to several ids for one provider
-            # means the index merged something it should not have; take none rather
-            # than pick arbitrarily.
-            if len(vals) > 1:
+        for ns, provider in ns_map.items():
+            vals = [v for v in (got.get(ns) or [])
+                    if provider_ids._usable_id(provider, v)]
+            # ONE CANDIDATE, OR NOTHING. Several ids is normal and intended, not a merge
+            # fault: ScreenScraper keeps a record per system and TheGamesDB one per
+            # region, and the build attaches all of them because choosing needs the
+            # platform the caller holds. Taking one here would be a guess recorded as
+            # exact evidence, which nothing downstream would ever question.
+            if len(vals) != 1:
                 continue
             try:
                 provider_ids.record(cat_con, provider, nk, vals[0],
@@ -304,3 +341,72 @@ def enrich_from_hashes(rom_con, cat_con, limit=None, progress=True):
     mi.close()
     return {"examined": len(rows), "hash_hits": hits, "ids_recorded": recorded,
             "distinct_games": len(seen_keys), "at": int(time.time())}
+
+
+# --- the pipeline entry point ---------------------------------------------- #
+# How many `roms.fullpath` values to stat before deciding the files are reachable from
+# here. One is not enough: a single missing file is a deleted rom, not a wrong mount.
+REACH_SAMPLE = 25
+
+
+def files_reachable(con, sample=REACH_SAMPLE):
+    """Can THIS machine open the files this index describes?
+
+    A remote device builds its index on the device and ships the file back, so every
+    `fullpath` in it names a path on the DEVICE. Hashing those from here opens nothing
+    and writes a `too_big`/`skipped` row for every rom — a permanent negative record
+    that makes a later, correctly-placed scan skip the file for good. So the paths are
+    PROBED rather than assumed, and a scan that cannot see its files does not run."""
+    rows = con.execute("SELECT fullpath FROM roms WHERE fullpath IS NOT NULL "
+                       "LIMIT %d" % int(sample)).fetchall()
+    if not rows:
+        return False
+    return any(os.path.exists(r[0]) for r in rows)
+
+
+def hash_and_enrich(rom_db, progress=True):
+    """Hash a rom index, then record every provider id its hashes identify. -> report.
+
+    NEVER RAISES. This runs inside a device sync, where one manager's failure is already
+    reported per manager and must not abort the others. A hash is an optimisation: it
+    saves requests that the name path would otherwise make, so failing to compute one
+    costs time and nothing else. Reporting the reason keeps a silent no-op from looking
+    like a clean run.
+
+    Loose-file hashing stays OFF unless asked for. A zip's CRC is free — one seek to the
+    central directory, the rom is never decompressed — and emulation collections are
+    overwhelmingly zipped. Reading loose files end to end is real I/O against DAT
+    coverage that may not exist, so it is a deliberate choice, not a default."""
+    import config
+    out = {"db": os.path.basename(rom_db)}
+    con = None
+    try:
+        if not os.path.exists(rom_db):
+            return dict(out, skipped="no rom index")
+        con = sqlite3.connect(rom_db, timeout=60)
+        con.row_factory = sqlite3.Row
+        ensure_schema(con)
+        if not files_reachable(con):
+            # Expected for every remote device, so it is a plain fact, not an error.
+            return dict(out, skipped="rom files are not reachable from this host")
+        loose = config.get_bool("romhash_loose", False)
+        try:
+            loose_max = int(config.get("romhash_loose_max_mb") or 64) * 1024 * 1024
+        except (TypeError, ValueError):
+            loose_max = DEFAULT_LOOSE_MAX
+        out["scan"] = scan(con, loose=loose, loose_max=loose_max, progress=progress)
+        cat = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"), timeout=60)
+        try:
+            out["enrich"] = enrich_from_hashes(con, cat, progress=progress)
+        finally:
+            cat.close()
+        out["coverage"] = coverage(con)
+        return out
+    except Exception as e:                       # noqa: BLE001 — an optimisation, not a step
+        return dict(out, error=str(e)[:200])
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:                    # noqa: BLE001
+                pass

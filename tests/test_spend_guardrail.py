@@ -12,6 +12,7 @@ Five properties, from the inventory's H section:
   H3  a configured cap actually stops a loop
   H4  Algo makes ZERO model calls — by definition, never verified
   H5  Lite judges covers only; Heavy judges every kind
+  H6  an answer the match index already holds NEVER becomes a paid call
 
 Offline. Nothing here may reach a provider — a test of the spend guardrail that spends
 money would be its own counterexample, so `ai` is stubbed and any real call raises.
@@ -127,6 +128,64 @@ def main():
     ap_call = src[src.index("_phase(\"supplement\""):][:2000]
     check("the import only reaches the AI supplement for lite/heavy sources",
           'in ("lite", "heavy")' in ap_call or "ai_srcs" in ap_call)
+
+    # ---- H6: the free answer beats the paid one -----------------------------
+    # `_suspect` sends MANGLED filenames to a model, which is exactly the population a
+    # dump-verified hash exists to identify. Asking a model to guess what a CRC already
+    # states is the most literal form of paying for what was free.
+    import ingest_ai
+    import matchindex
+    import ingesthints
+
+    ix = sqlite3.connect(matchindex.DB)
+    ix.executescript("""
+    CREATE TABLE IF NOT EXISTS identity(id INTEGER PRIMARY KEY, name TEXT,
+      norm_key TEXT, year INTEGER, first_release_date INTEGER, built_at INTEGER);
+    CREATE TABLE IF NOT EXISTS identity_key(ns TEXT, val TEXT, identity_id INTEGER,
+      kind TEXT, PRIMARY KEY(ns, val, identity_id));
+    CREATE TABLE IF NOT EXISTS identity_state(k TEXT PRIMARY KEY, v TEXT);
+    """)
+    ix.execute("INSERT OR REPLACE INTO identity VALUES(31,'Chrono Trigger',"
+               "'chrono trigger',1995,NULL,0)")
+    ix.execute("INSERT OR IGNORE INTO identity_key VALUES('crc','aabbccdd',31,'exact')")
+    ix.commit(); ix.close()
+
+    known = {"system": "snes", "game": "CT_(U)_[!]", "path": "CT.zip",
+             "crc": "aabbccdd", "sha1": None}
+    unknown = {"system": "snes", "game": "ZZ_(U)_[!]", "path": "ZZ.zip",
+               "crc": "00000000", "sha1": None}
+
+    free, rest = ingest_ai.identify_from_index([known, unknown])
+    check("the hash-identified rom is answered for free", free == 1)
+    check("and is REMOVED from what a model is asked", rest == [unknown])
+
+    rows = {(r[0], r[1]): r for r in sqlite3.connect(ingesthints.DB).execute(
+        "SELECT system,game,to_title,confidence,model FROM hints")}
+    row = rows.get((known["system"], known["game"]))
+    check("the hint carries the index's title: %r" % (row and row[2]),
+          row and row[2] == "Chrono Trigger")
+    check("at confidence 1.0 — a dump is not a guess", row and row[3] == 1.0)
+    check("and is attributed to the index, not a model: %r" % (row and row[4]),
+          row and row[4] == "match-index")
+
+    # An estimate that writes hints is not an estimate.
+    before = sqlite3.connect(ingesthints.DB).execute(
+        "SELECT COUNT(*) FROM hints").fetchone()[0]
+    ingest_ai.identify_from_index([unknown, dict(known, game="Other_(U)")], write=False)
+    after = sqlite3.connect(ingesthints.DB).execute(
+        "SELECT COUNT(*) FROM hints").fetchone()[0]
+    check("write=False records nothing", before == after)
+
+    # Fail-open: no hash, no index, or a broken lookup must never drop a target.
+    nohash = {"system": "snes", "game": "Q", "path": "q.zip", "crc": None, "sha1": None}
+    n, left = ingest_ai.identify_from_index([nohash])
+    check("a rom with no hash is still asked about", n == 0 and left == [nohash])
+    check("an empty list is handled", ingest_ai.identify_from_index([])[0] == 0)
+
+    isrc = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "ludodex", "ingest_ai.py")).read()
+    check("run() asks the index BEFORE the model loop",
+          0 < isrc.find("identify_from_index(items)") < isrc.find("ai.identify_roms"))
 
     print("\n%d/%d passed" % (sum(PASS), len(PASS)))
 
