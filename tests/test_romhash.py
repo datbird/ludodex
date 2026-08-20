@@ -122,11 +122,13 @@ def main():
                      os.path.splitext(p)[1].lstrip(".").lower()))
     con.commit()
 
-    out = romhash.scan(con, progress=False)
+    # loose=False explicitly: this section is about resumability, and section 9 needs a
+    # 'skipped' row to prove that turning loose ON picks it back up.
+    out = romhash.scan(con, loose=False, progress=False)
     check("all four files examined", out["examined"] == 4)
     check("exactly one produced a zip crc", out.get("zip") == 1)
 
-    again = romhash.scan(con, progress=False)
+    again = romhash.scan(con, loose=False, progress=False)
     check("a second scan re-examines nothing", again["examined"] == 0)
 
     cov = romhash.coverage(con)
@@ -151,14 +153,19 @@ def main():
           '"manual", "steam_appid", "hash"' in src)
 
     print()
-    print("9. turning loose hashing ON re-examines what was passed over")
+    print("9. loose hashing is ON by default, and turning it on re-examines")
+    check("the default reads loose files", romhash.DEFAULT_LOOSE is True)
+    # The cap, not a switch, is what bounds the cost. Measured on a real library: of
+    # 1,399.6 GB of loose ROMs, 1,341.6 GB sat in 736 files above the cap.
+    _c, _s1, _src = romhash.hash_one(loose, loose_max=8)
+    check("a file over the cap is still refused: %r" % _src, _src == "too_big")
     # The first scan wrote source='skipped' for the loose file. Rows are rows, so a
     # later --loose scan found it present and examined nothing at all.
     row = con.execute("SELECT source FROM rom_hashes WHERE relpath=?",
                       (os.path.basename(loose),)).fetchone()
     check("the loose file was recorded as 'skipped': %r" % (row and row[0]),
           row and row[0] == "skipped")
-    lo = romhash.scan(con, loose=True, progress=False)
+    lo = romhash.scan(con, progress=False)          # the default is now loose
     check("a loose scan re-examines it: %d" % lo["examined"], lo["examined"] == 1)
     check("and it now has a real read hash", lo.get("read") == 1)
     row = con.execute("SELECT crc, sha1, source FROM rom_hashes WHERE relpath=?",

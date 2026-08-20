@@ -13,8 +13,12 @@ ROM data is never decompressed and never read. A 573,000-file library is therefo
 free to hash, because emulation collections are overwhelmingly zipped, and the DATs hash
 the DECOMPRESSED rom, which is exactly what the zip already recorded.
 
-Loose files have no such record and must be read in full. That is real I/O, so it is
-bounded by size and off by default.
+Loose files have no such record and must be read in full. THE SIZE CAP IS THE GUARD, NOT
+A SWITCH. Measured on a real 42,536-file loose set totalling 1,399.6 GB, the 736 files
+above the cap held 1,341.6 GB of it — 96% of the bytes, and almost all disc images. What
+is left under the cap is 41,800 files and 58.0 GB, read once, in exchange for identifying
+tens of thousands of games exactly. So loose hashing is ON, and the cap does the work the
+switch used to be asked to do.
 
 WHAT CANNOT BE HASHED USEFULLY. CHD and RVZ are recompressions: converting a disc image
 changes every byte, so its CRC and SHA1 no longer match anything a DAT recorded. That is
@@ -53,6 +57,13 @@ UNREADABLE_ARCHIVES = {".7z", ".rar", ".rar5", ".tar", ".gz", ".bz2", ".xz"}
 # DAT coverage is; a 4 GB disc image read for a hash the DATs may not even hold is a bad
 # trade, so the cap is a default rather than a limit of the code.
 DEFAULT_LOOSE_MAX = 64 * 1024 * 1024
+
+# Read loose files unless told otherwise. This was off, and defending that took an
+# argument nobody should have to hear: a bare .smc has no other way to be identified, and
+# refusing to read it means guessing at its filename instead. The fear was I/O, and the
+# cap above already answers it — 96% of the bytes on a real library sit in 736 disc
+# images the cap refuses anyway.
+DEFAULT_LOOSE = True
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS rom_hashes(
@@ -123,7 +134,7 @@ def hash_loose(path, max_bytes=DEFAULT_LOOSE_MAX):
     return "%08x" % (crc & 0xFFFFFFFF), sha.hexdigest()
 
 
-def hash_one(fullpath, loose=False, loose_max=DEFAULT_LOOSE_MAX):
+def hash_one(fullpath, loose=DEFAULT_LOOSE, loose_max=DEFAULT_LOOSE_MAX):
     """-> (crc, sha1, source) for one file. crc may be None; that is a normal answer.
 
     A single-member zip is the common emulation case and its member CRC IS the rom's.
@@ -164,7 +175,8 @@ def hash_one(fullpath, loose=False, loose_max=DEFAULT_LOOSE_MAX):
 UNANSWERED = ("skipped", "too_big", "zip_unreadable", "missing")
 
 
-def scan(con, limit=None, loose=False, loose_max=DEFAULT_LOOSE_MAX, progress=True):
+def scan(con, limit=None, loose=DEFAULT_LOOSE, loose_max=DEFAULT_LOOSE_MAX,
+         progress=True):
     """Hash every rom not hashed yet. -> counts by source.
 
     Resumable by construction: a row already answered is skipped, so a scan interrupted
@@ -274,7 +286,7 @@ def main(argv):
         if a == "--db" and i + 1 < len(argv):
             path = argv[i + 1]
     if not path:
-        print("usage: romhash.py --db <roms-index.sqlite> [--scan] [--loose] "
+        print("usage: romhash.py --db <roms-index.sqlite> [--scan] [--no-loose] "
               "[--limit N]", file=sys.stderr)
         return 2
     con = sqlite3.connect(path)
@@ -283,7 +295,9 @@ def main(argv):
         limit = None
         if "--limit" in argv:
             limit = int(argv[argv.index("--limit") + 1])
-        out = scan(con, limit=limit, loose=("--loose" in argv))
+        # --no-loose exists for the rare case of a device whose storage makes the read
+        # genuinely expensive. --loose is kept so older callers do not break.
+        out = scan(con, limit=limit, loose="--no-loose" not in argv)
         print(json.dumps(out, indent=2))
     else:
         print(json.dumps(coverage(con), indent=2))
@@ -403,10 +417,10 @@ def hash_and_enrich(rom_db, progress=True):
     costs time and nothing else. Reporting the reason keeps a silent no-op from looking
     like a clean run.
 
-    Loose-file hashing stays OFF unless asked for. A zip's CRC is free — one seek to the
-    central directory, the rom is never decompressed — and emulation collections are
-    overwhelmingly zipped. Reading loose files end to end is real I/O against DAT
-    coverage that may not exist, so it is a deliberate choice, not a default."""
+    Loose files are read unless `romhash_loose` says otherwise. A zip needs no read at
+    all — its central directory already records the CRC of the file inside, which IS the
+    rom's fingerprint — so this only ever costs anything for bare files, and only for
+    those under the size cap."""
     import config
     out = {"db": os.path.basename(rom_db)}
     con = None
@@ -419,7 +433,7 @@ def hash_and_enrich(rom_db, progress=True):
         if not files_reachable(con):
             # Expected for every remote device, so it is a plain fact, not an error.
             return dict(out, skipped="rom files are not reachable from this host")
-        loose = config.get_bool("romhash_loose", False)
+        loose = config.get_bool("romhash_loose", DEFAULT_LOOSE)
         try:
             loose_max = int(config.get("romhash_loose_max_mb") or 64) * 1024 * 1024
         except (TypeError, ValueError):
