@@ -286,6 +286,25 @@ def main():
     ixc.close()
 
     print()
+    print("14. a DOWNLOADED index gets stamped too")
+    # A published file built before the column has it empty, so a download would be
+    # strictly worse than a local build until the next rebuild.
+    check("the download path backfills platforms",
+          "backfill_platforms" in src_app
+          and src_app.index('_set_origin("downloaded"')
+          < src_app.index("st[\"platform_keys\"] = _mi.backfill_platforms"))
+    check("and it cannot fail the download",
+          "platforms not stamped after download" in src_app)
+    msrc = open(os.path.join(here, "matchindex.py")).read()
+    check("the column is added in place on an older index",
+          "ALTER TABLE identity_key ADD COLUMN platform" in msrc)
+    check("_attach is idempotent, so a second attach cannot kill a step",
+          "live = {r[1] for r in con.execute(\"PRAGMA database_list\")}" in msrc)
+    check("systeme_id is NOT changed — it feeds the search api",
+          "SS_PLATFORM_OVERRIDE" not in open(os.path.join(here,
+              "screenscraper.py")).read())
+
+    print()
     print("%d checks, all passed" % len(PASS))
 
 

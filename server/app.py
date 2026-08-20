@@ -12352,6 +12352,25 @@ def matchindex_download(body: dict = Body(...)):
             os.replace(part, dest)
             st["keys"] = rows
             _set_origin("downloaded", url)
+            # A DOWNLOADED INDEX ARRIVES UNSTAMPED. The platform column is what lets a
+            # caller pick between the several ScreenScraper ids one game legitimately
+            # holds — worth 24 points of ScreenScraper coverage on this library, measured
+            # — and a published file built before the column has it empty. Fill it here,
+            # from the local mirrors, so a download is as useful as a build.
+            #
+            # Never fails the download. An instance with no ScreenScraper mirror simply
+            # has no platforms to stamp; the column stays NULL, which every reader
+            # already treats as unknown, and every lookup behaves as it did before.
+            try:
+                import matchindex as _mi
+                _c = _mi.con_db()
+                try:
+                    st["platform_keys"] = _mi.backfill_platforms(_c)
+                finally:
+                    _c.close()
+            except Exception as e:               # noqa: BLE001
+                print("matchindex: platforms not stamped after download (%s)"
+                      % str(e)[:160], file=sys.stderr)
             st["state"] = "done"
         except Exception as e:                   # noqa: BLE001
             st["state"], st["error"] = "error", str(e)[:300]
