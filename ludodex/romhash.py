@@ -32,6 +32,9 @@ sys.path.insert(0, DIR)
 # above it, where the databases live. Deriving DATA from DIR instead would silently
 # relocate an existing checkout's data.
 DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+# The one list of what counts as a ROM. romtags owns it; restating it here is how a
+# format gets added in one place and silently ignored in the other.
+import romtags                                   # noqa: E402
 
 # Recompressed disc formats. Their bytes are not the bytes any DAT hashed, so a hash of
 # one identifies nothing and computing it is pure waste.
@@ -39,6 +42,12 @@ RECOMPRESSED = {".chd", ".rvz", ".wux", ".wud", ".nkit", ".cso", ".zso", ".rpx"}
 
 # Archives whose central directory records the member CRC32, so the hash is free.
 ZIP_LIKE = {".zip"}
+
+# Archives this cannot read a member CRC out of. THEY MUST BE REFUSED, NOT READ. Reading
+# a .7z end to end hashes the COMPRESSED CONTAINER, and no DAT ever recorded that number,
+# so the result is a hash that identifies nothing while looking exactly like a real one.
+# Measured on this library: 5,060 .7z and 3,678 .rar files.
+UNREADABLE_ARCHIVES = {".7z", ".rar", ".rar5", ".tar", ".gz", ".bz2", ".xz"}
 
 # Loose files are read end to end. 64 MB covers cartridge-era ROMs, which is where the
 # DAT coverage is; a 4 GB disc image read for a hash the DATs may not even hold is a bad
@@ -121,8 +130,18 @@ def hash_one(fullpath, loose=False, loose_max=DEFAULT_LOOSE_MAX):
     A multi-member zip has no single answer, so it reports none rather than guessing
     which member the game is."""
     ext = os.path.splitext(fullpath)[1].lower()
+    # A FILE THAT IS NOT THERE IS NOT AN UNREADABLE ARCHIVE. Both used to report
+    # `zip_unreadable`, and the two mean opposite things: one says this archive is
+    # damaged, the other says the index is describing a file this machine cannot see —
+    # a wrong root, a missing mount, an index built elsewhere. 9,078 files reported
+    # themselves as corrupt zips when every one of them opened perfectly at its real
+    # path. A diagnosis that names the wrong fault is worse than none.
+    if not os.path.exists(fullpath):
+        return None, None, "missing"
     if ext in RECOMPRESSED:
         return None, None, "recompressed"
+    if ext in UNREADABLE_ARCHIVES:
+        return None, None, "archive_unsupported"
     if ext in ZIP_LIKE:
         members = zip_crcs(fullpath)
         if len(members) == 1:
@@ -138,9 +157,11 @@ def hash_one(fullpath, loose=False, loose_max=DEFAULT_LOOSE_MAX):
 
 # Sources that record a DECISION NOT TO LOOK rather than an answer about the file.
 # `skipped` is a loose file passed over because loose hashing was off; `too_big` is one
-# over the size cap; `zip_unreadable` is an archive that would not open. None of them
-# says the file has no usable hash — they say we did not compute one.
-UNANSWERED = ("skipped", "too_big", "zip_unreadable")
+# over the size cap; `zip_unreadable` is an archive that would not open; `missing` is a
+# file this machine could not see at all. None of them says the file has no usable hash —
+# they say we did not compute one. `missing` especially: a remounted share or a corrected
+# root makes the file readable again, and a permanent row would keep it skipped forever.
+UNANSWERED = ("skipped", "too_big", "zip_unreadable", "missing")
 
 
 def scan(con, limit=None, loose=False, loose_max=DEFAULT_LOOSE_MAX, progress=True):
@@ -161,14 +182,21 @@ def scan(con, limit=None, loose=False, loose_max=DEFAULT_LOOSE_MAX, progress=Tru
     recompressed disc image — is never recomputed."""
     import time
     ensure_schema(con)
+    # ONLY FILES THAT ARE ROMS. `roms` holds every file under the rom path, and on a
+    # real library most of them are not games: measured on 572,951 rows, 16.1% carried a
+    # ROM extension and the rest were artwork, audio and extracted game internals —
+    # 79,983 .png alone. Hashing those wrote half a million rows that could never match
+    # anything, and with loose hashing on it would have READ every one of them end to
+    # end. The size cap does not stop that; only asking what the file is does.
+    exts = ["." + e.lower().lstrip(".") for e in romtags.ROM_EXTS]
     # Retry what we declined to compute; keep what we actually determined.
-    retry = list(UNANSWERED) if loose else ["zip_unreadable"]
+    retry = list(UNANSWERED) if loose else ["zip_unreadable", "missing"]
     q = ("SELECT r.relpath, r.fullpath, r.size_bytes FROM roms r "
          "LEFT JOIN rom_hashes h ON h.relpath = r.relpath "
-         "WHERE h.relpath IS NULL OR h.source IN (%s)"
-         % ",".join("?" * len(retry)))
+         "WHERE LOWER(r.ext) IN (%s) AND (h.relpath IS NULL OR h.source IN (%s))"
+         % (",".join("?" * len(exts)), ",".join("?" * len(retry))))
     rows = con.execute(q + (" LIMIT %d" % int(limit) if limit else ""),
-                       retry).fetchall()
+                       [e.lstrip(".") for e in exts] + retry).fetchall()
 
     now = int(time.time())
     counts = {}
@@ -218,8 +246,10 @@ def coverage(con):
     """How much of the library can be identified by hash, without asking anyone."""
     ensure_schema(con)
     q = lambda s: con.execute(s).fetchone()[0]      # noqa: E731
+    exts = ",".join("'%s'" % e.lower().lstrip(".") for e in romtags.ROM_EXTS)
     return {
-        "roms": q("SELECT COUNT(*) FROM roms"),
+        "files": q("SELECT COUNT(*) FROM roms"),
+        "roms": q("SELECT COUNT(*) FROM roms WHERE LOWER(ext) IN (%s)" % exts),
         "hashed": q("SELECT COUNT(*) FROM rom_hashes WHERE crc IS NOT NULL"),
         "by_source": dict(con.execute(
             "SELECT source, COUNT(*) FROM rom_hashes GROUP BY source").fetchall()),

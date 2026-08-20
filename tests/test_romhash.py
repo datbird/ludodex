@@ -22,6 +22,12 @@
     runs it with nothing else of ludodex present. A hard import of config would kill
     every remote scan, and silently, because the hash is allowed to fail.
   * HASHING NEVER FAILS A SYNC. It saves requests; it is not a step of the pull.
+  * ONLY FILES THAT ARE ROMS. `roms` holds every file under the rom path. Measured on a
+    real 572,951-row index, 16.1% carried a ROM extension; the rest were artwork, audio
+    and extracted game internals, including 79,983 .png. With loose hashing on, scanning
+    those would read every one of them end to end for a hash no DAT ever recorded.
+  * AN ARCHIVE WE CANNOT OPEN IS REFUSED, NOT READ. Reading a .7z hashes the compressed
+    container, which matches nothing while looking exactly like a real answer.
 """
 import os
 import sys
@@ -109,10 +115,11 @@ def main():
     con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
     con.executescript("""CREATE TABLE roms(id INTEGER PRIMARY KEY, system TEXT,
-        game TEXT, relpath TEXT, fullpath TEXT, size_bytes INTEGER)""")
+        game TEXT, relpath TEXT, fullpath TEXT, size_bytes INTEGER, ext TEXT)""")
     for i, p in enumerate((single, multi, loose, chd), 1):
-        con.execute("INSERT INTO roms VALUES(?,?,?,?,?,?)",
-                    (i, "nes", "Game", os.path.basename(p), p, os.path.getsize(p)))
+        con.execute("INSERT INTO roms VALUES(?,?,?,?,?,?,?)",
+                    (i, "nes", "Game", os.path.basename(p), p, os.path.getsize(p),
+                     os.path.splitext(p)[1].lstrip(".").lower()))
     con.commit()
 
     out = romhash.scan(con, progress=False)
@@ -125,6 +132,8 @@ def main():
     cov = romhash.coverage(con)
     check("coverage counts only rows with a crc: %d" % cov["hashed"],
           cov["hashed"] == 1)
+    check("and separates FILES from roms: %d files, %d roms"
+          % (cov["files"], cov["roms"]), cov["files"] >= cov["roms"])
 
     print()
     print("7. a hash the index does not know returns {} — a real answer")
@@ -214,8 +223,9 @@ def main():
     far = os.path.join(os.environ["LUDODEX_DATA"], "far.sqlite")
     fc = sqlite3.connect(far)
     fc.executescript("CREATE TABLE roms(id INTEGER PRIMARY KEY, system TEXT, game TEXT,"
-                     " relpath TEXT, fullpath TEXT, size_bytes INTEGER)")
-    fc.execute("INSERT INTO roms VALUES(1,'nes','X','x.zip','/nowhere/on/this/host/x.zip',1)")
+                     " relpath TEXT, fullpath TEXT, size_bytes INTEGER, ext TEXT)")
+    fc.execute("INSERT INTO roms VALUES(1,'nes','X','x.zip',"
+               "'/nowhere/on/this/host/x.zip',1,'zip')")
     fc.commit()
     check("files on another machine are seen as unreachable",
           not romhash.files_reachable(fc))
@@ -248,6 +258,71 @@ def main():
 
     cat.close()
     con.close()
+
+    print()
+    print("15. a file that is not there reports MISSING, not a corrupt archive")
+    # Measured on the real library: 28,921 files reported themselves as unreadable zips
+    # while every one of them opened perfectly at its real path. The index had been built
+    # against a different root. "This archive is damaged" and "I cannot see this file"
+    # are opposite faults, and naming the wrong one sends the reader to the wrong place.
+    gone = os.path.join(tmp, "Not There.zip")
+    crc, sha1, source = romhash.hash_one(gone)
+    check("source is 'missing': %r" % source, source == "missing")
+    check("no hash is invented for it", crc is None and sha1 is None)
+    check("and it is retried later, not settled",
+          "missing" in romhash.UNANSWERED)
+    # A path that reappears — a remounted share, a corrected root — must be picked up.
+    fresh = os.path.join(os.environ["LUDODEX_DATA"], "reappear.sqlite")
+    fc = sqlite3.connect(fresh)
+    fc.row_factory = sqlite3.Row
+    fc.executescript("CREATE TABLE roms(id INTEGER PRIMARY KEY, system TEXT, game TEXT,"
+                     " relpath TEXT, fullpath TEXT, size_bytes INTEGER, ext TEXT)")
+    fc.execute("INSERT INTO roms VALUES(1,'nes','Later','later.zip',?,1,'zip')", (gone,))
+    fc.commit()
+    r1 = romhash.scan(fc, progress=False)
+    check("first scan records it as missing", r1.get("missing") == 1)
+    with zipfile.ZipFile(gone, "w") as z:
+        z.writestr("Later.nes", payload)
+    r2 = romhash.scan(fc, progress=False)
+    check("once the file exists the scan retries it: %d" % r2["examined"],
+          r2["examined"] == 1 and r2.get("zip") == 1)
+    row = fc.execute("SELECT crc, source FROM rom_hashes WHERE relpath='later.zip'"
+                     ).fetchone()
+    check("and it now carries a real crc: %r" % (row and row["crc"]),
+          row and row["crc"] == want_crc and row["source"] == "zip")
+    fc.close()
+
+    print()
+    print("16. a file that is not a ROM is never hashed")
+    art = os.path.join(tmp, "boxart.png")
+    with open(art, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n" + b"x" * 400)
+    sevenz = os.path.join(tmp, "Bundle.7z")
+    with open(sevenz, "wb") as fh:
+        fh.write(b"7z\xbc\xaf\x27\x1c" + b"y" * 400)
+    ac = sqlite3.connect(os.path.join(os.environ["LUDODEX_DATA"], "assets.sqlite"))
+    ac.row_factory = sqlite3.Row
+    ac.executescript("CREATE TABLE roms(id INTEGER PRIMARY KEY, system TEXT, game TEXT,"
+                     " relpath TEXT, fullpath TEXT, size_bytes INTEGER, ext TEXT)")
+    for i, (pth, e) in enumerate(((art, "png"), (sevenz, "7z"), (single, "zip")), 1):
+        ac.execute("INSERT INTO roms VALUES(?,'nes','G',?,?,?,?)",
+                   (i, os.path.basename(pth), pth, os.path.getsize(pth), e))
+    ac.commit()
+    out = romhash.scan(ac, loose=True, progress=False)
+    seen = {r[0] for r in ac.execute("SELECT relpath FROM rom_hashes")}
+    check("the png was not examined at all: %d examined" % out["examined"],
+          "boxart.png" not in seen)
+    # Loose hashing was ON. Without the extension filter this would have READ the png.
+    check("and no row was written for it", out["examined"] <= 2)
+    check("the .7z is refused, not read: %r" % out.get("archive_unsupported"),
+          out.get("archive_unsupported") == 1)
+    row = ac.execute("SELECT crc FROM rom_hashes WHERE relpath='Bundle.7z'").fetchone()
+    check("so no container hash is recorded for it", row is None or row["crc"] is None)
+    check("while the real rom still got its free crc", out.get("zip") == 1)
+    cov = romhash.coverage(ac)
+    check("coverage separates files from roms: %d files, %d roms"
+          % (cov["files"], cov["roms"]), cov["files"] == 3 and cov["roms"] == 2)
+    ac.close()
 
     print()
     print("%d checks, all passed" % len(PASS))
