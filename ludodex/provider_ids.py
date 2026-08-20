@@ -235,7 +235,7 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
 INDEX_NS = {"igdb": "igdb", "screenscraper": "ss", "thegamesdb": "thegamesdb"}
 
 
-def index_lookup(provider, anchors):
+def index_lookup(provider, anchors, systems=None):
     """A provider id taken from the match index, or None.
 
     ONLY EXACT ANCHORS. A store id or another provider's id is a pairing somebody
@@ -252,9 +252,20 @@ def index_lookup(provider, anchors):
     one per (title, platform, region), and the build attaches every one of them on
     purpose, because choosing between them needs the platform and filename the CALLER
     holds. Measured on this library, that is 45% of ScreenScraper hits and 51% of
-    TheGamesDB hits. Those fall through and are searched exactly as before — the index
-    declining to answer costs a request, and answering wrongly costs a wrong bind that
-    nothing downstream would question.
+    TheGamesDB hits.
+
+    SO THE CALLER'S PLATFORM IS USED, because it is the missing half of that sentence.
+    `systems` is what the game actually runs on, and matchindex stamps each ScreenScraper
+    key with the platform its record describes. Filtering by it is not a guess: it
+    removes records for OTHER hardware, which are different products. Measured on 696
+    ambiguous ScreenScraper answers, 418 (60%) hold exactly one record for the platform
+    asked about. What is left over is editions of one game on one platform — "Alan Wake",
+    "Alan Wake: Standard Edition", "Alan Wake (Collector's Edition)" — and no platform
+    separates those, so they still fall through to a search.
+
+    Anything the filter cannot settle is searched exactly as before. The index declining
+    to answer costs one request; answering wrongly costs a wrong bind recorded as exact
+    evidence, which nothing downstream would ever question.
     """
     ns = INDEX_NS.get(provider)
     if not ns or not anchors:
@@ -273,6 +284,8 @@ def index_lookup(provider, anchors):
             if not hit:
                 continue
             vals = [v for v in (hit.get(ns) or []) if _usable_id(provider, v)]
+            if len(vals) > 1:
+                vals = _on_platform(con, ns, vals, systems) or vals
             if len(vals) == 1:
                 return vals[0]
     except Exception:                            # noqa: BLE001
@@ -284,6 +297,37 @@ def index_lookup(provider, anchors):
             except Exception:                    # noqa: BLE001
                 pass
     return None
+
+
+def _on_platform(con, ns, vals, systems):
+    """Those of `vals` whose index platform matches one the game runs on, or [].
+
+    A NULL platform is UNKNOWN, NEVER "no platform". An index built before the column
+    existed has every row NULL, and a downloaded one may not have been stamped yet.
+    Reading NULL as a mismatch would drop every candidate and turn a working lookup into
+    a permanent miss — the fail-open failure this codebase keeps paying for. So a row
+    with no platform is kept, and an empty result means the filter had nothing to say,
+    which the caller treats as "use the unfiltered list"."""
+    if not systems:
+        return []
+    try:
+        import platmap
+        # Same rule on both sides: an unrecognised label canonicalises to itself, and
+        # comparing two unmapped tokens would be matching noise against noise.
+        want = {c for c in (platmap.canon(p) for p in systems if p)
+                if c in platmap.KNOWN}
+        if not want:
+            return []
+        rows = con.execute(
+            "SELECT val, platform FROM ix.identity_key WHERE ns=? AND val IN (%s)"
+            % ",".join("?" * len(vals)), [ns] + [str(v) for v in vals]).fetchall()
+        known = {str(r["val"]): r["platform"] for r in rows}
+        keep = [v for v in vals
+                if known.get(str(v)) is None or known.get(str(v)) in want]
+        # Every candidate kept means the filter separated nothing.
+        return keep if 0 < len(keep) < len(vals) else []
+    except Exception:                            # noqa: BLE001
+        return []
 
 
 def _usable_id(provider, val):
@@ -322,7 +366,7 @@ def resolve(con, provider, norm_key, title, systems, search, force=False, anchor
     # game, the index already knows every other provider's id for it. That costs one
     # local lookup instead of a rate-limited round trip and an acceptance gate, and it
     # cannot be a wrong bind because the pairing was published, not concluded.
-    from_ix = index_lookup(provider, anchors)
+    from_ix = index_lookup(provider, anchors, systems=systems)
     if from_ix:
         return record(con, provider, norm_key, from_ix, None, "index", system=None)
 

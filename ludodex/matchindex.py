@@ -547,11 +547,17 @@ def con_db():
       built_at INTEGER);
     CREATE INDEX IF NOT EXISTS ix_ident_norm ON identity(norm_key);
     CREATE TABLE IF NOT EXISTS identity_key(
-      ns TEXT, val TEXT, identity_id INTEGER, kind TEXT,
+      ns TEXT, val TEXT, identity_id INTEGER, kind TEXT, platform TEXT,
       PRIMARY KEY(ns, val, identity_id));
     CREATE INDEX IF NOT EXISTS ix_ik_ident ON identity_key(identity_id);
     CREATE TABLE IF NOT EXISTS identity_state(k TEXT PRIMARY KEY, v TEXT);
     """)
+    # An index built before `platform` existed is a FILE THE USER DOWNLOADED, not
+    # something they can be asked to rebuild. Add the column in place; it is nullable,
+    # so an index that has it empty behaves exactly like one that never had it.
+    if not any(r[1] == "platform" for r in
+               con.execute("PRAGMA table_info(identity_key)")):
+        con.execute("ALTER TABLE identity_key ADD COLUMN platform TEXT")
     con.commit()
     return con
 
@@ -698,8 +704,13 @@ def _attach(con):
     report from MIRRORS is the fix: a fifth mirror cannot be added to one and forgotten
     in the other.
     """
+    # IDEMPOTENT, because callers legitimately attach more than once on one connection:
+    # build() attaches and then backfill_platforms() attaches again. A second ATTACH of
+    # the same alias raises "database ss is already in use", which took down a step that
+    # had nothing wrong with it.
+    live = {r[1] for r in con.execute("PRAGMA database_list")}
     for path, alias in MIRRORS:
-        if os.path.exists(path):
+        if alias not in live and os.path.exists(path):
             con.execute("ATTACH DATABASE ? AS %s" % alias,
                         ("file:%s?mode=ro" % path,))
     return {a for _path, a in MIRRORS
@@ -805,8 +816,13 @@ def build(progress=True):
     # 9. The TheGamesDB catalogue — see _merge_tgdb_catalog.
     tg_linked, tg_new = _merge_tgdb_catalog(con, have, now, progress, t0)
 
+    # Which platform each ScreenScraper key describes, so a caller holding several can
+    # pick the one that matches the game it is asking about.
+    plat_keys = backfill_platforms(con, progress=progress)
+
     st = status(con)
-    st.update({"ss_merged": ss_merged, "ss_own_identity": ss_own,
+    st.update({"platform_keys": plat_keys,
+               "ss_merged": ss_merged, "ss_own_identity": ss_own,
                "ss_hash_keys": ss_roms, "tgdb_linked": tgdb_linked,
                "tgdb_new_identities": tgdb_new, "dat_serials": dat_serials,
                "dat_hash_keys": dat_hashes, "wikidata_keys": wd_keys,
@@ -827,6 +843,79 @@ def build(progress=True):
     con.commit()
     con.close()
     return st
+
+
+def backfill_platforms(con, progress=True):
+    """Record WHICH PLATFORM each ScreenScraper key describes. -> rows filled.
+
+    WHY THE INDEX HAS TO CARRY THIS. ScreenScraper keeps one record per system, so one
+    game legitimately holds several ss ids — Alien: Isolation has six. A caller asking
+    "the ScreenScraper id for this game" gets a list and cannot choose, because the thing
+    that separates them lives in the CATALOGUE, and a user who merely downloaded the
+    published index has no catalogue. Measured on a 1,547-entry Steam library: 696 of the
+    ss answers were ambiguous, and 418 of those hold exactly one PC Windows record. That
+    is 60% of the ambiguity, resolvable by one column.
+
+    THE PC HOLE THIS EXISTS TO CLOSE. `screenscraper.systeme_id('pc')` returns None and
+    its docstring says ScreenScraper has no system for PC. It does: system 138, "PC
+    Windows", present in the catalogue with `igdb_platform` NULL and `mapped_by` NULL —
+    the mapping was simply never made. That single gap is why a PC library, which is most
+    of this one, could not separate a single ambiguous answer.
+
+    NOT IGDB, AND THAT IS NOT AN OVERSIGHT. An IGDB game is ONE row covering every
+    platform it shipped on, so an igdb id is never ambiguous by platform — measured, 0 of
+    1,547. Stamping a platform on an igdb key and filtering by it would REMOVE correct
+    answers. TheGamesDB does need this, but its platform ids have no name map in any
+    local mirror, so there is nothing here to derive a label from yet.
+
+    Idempotent and safe to re-run: it only ever fills rows, and a row it cannot resolve
+    stays NULL, which every reader treats as "unknown", never as "no platform"."""
+    import platmap
+    filled = 0
+    t0 = time.time()
+    if "ss" not in _attach(con) or not _has_table(con, "ss", "ss_systems"):
+        if progress:
+            print("matchindex: no ScreenScraper mirror, platforms not backfilled",
+                  file=sys.stderr)
+        return 0
+    # systeme id -> canonical ludodex platform, resolved through the SAME ontology the
+    # contamination gate uses, so "Windows" and "pc" compare equal here too.
+    sysmap = {}
+    for r in con.execute("SELECT id, name, names FROM ss.ss_systems"):
+        cands = []
+        try:
+            cands = list(json.loads(r["names"] or "[]"))
+        except Exception:                        # noqa: BLE001
+            pass
+        cands.append(r["name"] or "")
+        for nm in cands:
+            # A ScreenScraper system name is often a comma-joined blob of every alias it
+            # answers to. Each piece is tried, because the canonical token may be in any
+            # of them and the blob as a whole matches nothing.
+            for piece in str(nm).split(","):
+                c = platmap.canon(piece.strip())
+                # ONLY A RECOGNISED TOKEN. canon() falls back to the bare normalised
+                # string for anything it does not know, so "PC Windows" yields
+                # `pcwindows` — which matches no ludodex platform and would stamp every
+                # PC record with a label that silently excludes it from every filter.
+                # KNOWN is the set platmap actually maps, and "Windows" in the same
+                # alias list resolves correctly to `pc`.
+                if c in platmap.KNOWN:
+                    sysmap[r["id"]] = c
+                    break
+            if r["id"] in sysmap:
+                break
+    for sid, canon in sysmap.items():
+        cur = con.execute(
+            "UPDATE identity_key SET platform=? WHERE ns='ss' AND platform IS NULL "
+            "AND val IN (SELECT CAST(id AS TEXT) FROM ss.ss_games WHERE systeme=?)",
+            (canon, sid))
+        filled += cur.rowcount or 0
+    con.commit()
+    if progress:
+        print("matchindex: platforms — %d ss keys stamped across %d systems, %.0fs"
+              % (filled, len(sysmap), time.time() - t0), file=sys.stderr)
+    return filled
 
 
 def _merge_tgdb_catalog(con, have, now, progress=True, t0=None):
@@ -1234,6 +1323,15 @@ def main(argv):
         con = con_db()
         print(json.dumps(resolve_name(con, title, yr), indent=2))
         con.close()
+        return 0
+    if "--platforms" in argv:
+        # Runs on an EXISTING index, without a rebuild. The column is added in place and
+        # only ever filled, so a live instance can gain the data in seconds rather than
+        # waiting on a full rebuild and a republish.
+        con = con_db()
+        n = backfill_platforms(con)
+        con.close()
+        print(json.dumps({"platform_keys": n}))
         return 0
     print("matchindex: " + json.dumps(build()), file=sys.stderr)
     return 0
