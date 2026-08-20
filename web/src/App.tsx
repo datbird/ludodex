@@ -527,8 +527,15 @@ export default function App() {
   if (!authState || !authState.authenticated) {
     return <AuthScreen needsSetup={!!authState?.needs_setup} onAuthed={refreshAuth} />
   }
-  return <LudodexApp user={authState.user}
-    onLogout={async () => { try { await api.authLogout() } finally { refreshAuth() } }} />
+  // Mounted ONCE, above everything. Every AI path calls ensureAiPricing() and the same
+  // dialog answers, wherever in the tree the request came from.
+  return (
+    <>
+      <AiPricingGate />
+      <LudodexApp user={authState.user}
+        onLogout={async () => { try { await api.authLogout() } finally { refreshAuth() } }} />
+    </>
+  )
 }
 
 // Offered at first setup. Ordered lists, because owning a US release usually means
@@ -848,6 +855,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
   async function runAi() {
     if (!q.trim()) return
+    if (!(await ensureAiPricing('search'))) return
     setLoading(true); setAiNote('')
     try {
       const res = await api.aiSearch(q)
@@ -5253,28 +5261,57 @@ function fmtUptime(s: number) {
 // Library sync: pull owned games per store, then rebuild the catalog. Stores that
 // need a browser sign-in (Epic/EA) surface their connect flow inline and sync the
 // moment auth completes.
-// A budget the app cannot MEASURE is worse than no budget, because it looks like
-// protection. This is where that gets caught — at the moment an import is about to
-// start, while it can still be fixed, rather than in a usage report afterwards.
+// ONE GATE, ASKED BY EVERY AI PATH, AND ONLY WHEN IT HAS SOMETHING TO SAY.
 //
-// It appears ONLY when a dollar budget is set AND the model has no price. With no
-// budget there is nothing to measure and nothing to warn about.
-function PricingGate({ onCleared }: { onCleared?: () => void }) {
-  type Chk = { ok: boolean; provider?: string; model?: string; budget_usd?: number
-    reason?: string }
-  type Sug = { provider: string; model: string; resolved: string | null
-    basis: 'exact' | 'alias' | 'family' | 'unknown'; price: number[] | null; like?: string }
-  const [chk, setChk] = useState<Chk | null>(null)
-  const [sug, setSug] = useState<Sug | null>(null)
+// The first version of this was a banner pinned to the top of the sync menu. It was
+// wrong in three ways at once: it appeared on merely OPENING the menu, it appeared even
+// when the chosen tier was Algorithmic and no AI would run at all, and being permanent
+// it read as a broken app rather than a question. A warning shown when nothing is about
+// to happen is one the user learns to scroll past.
+//
+// So it asks at the only honest moment — the instant an AI run is requested — and only
+// when a budget exists AND its price is missing or stale. Any caller awaits
+// ensureAiPricing(): true means go, false means the user backed out.
+type PricingChk = {
+  ok: boolean; provider?: string; model?: string; budget_usd?: number
+  state?: 'ok' | 'missing' | 'stale'; age_days?: number | null; reason?: string
+}
+// Set by the single mounted gate. Imperative on purpose: an AI action can live anywhere
+// in the tree, and threading a promise-returning callback through every one of them is
+// how some path ends up quietly skipping the check.
+let _askPricing: ((c: PricingChk) => Promise<boolean>) | null = null
+
+export async function ensureAiPricing(area = 'ingest'): Promise<boolean> {
+  let chk: PricingChk
+  try { chk = await api.aiPricingCheck(area) } catch { return true }
+  if (chk.ok) return true
+  // No gate mounted is not a reason to block work the user asked for.
+  if (!_askPricing) return true
+  return _askPricing(chk)
+}
+
+function AiPricingGate() {
+  const [chk, setChk] = useState<PricingChk | null>(null)
+  const resolveRef = useRef<((v: boolean) => void) | null>(null)
+  const [sug, setSug] = useState<{ resolved: string | null
+    basis: 'exact' | 'alias' | 'family' | 'unknown'; price: number[] | null
+    like?: string } | null>(null)
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
   const [inUsd, setInUsd] = useState('')
   const [outUsd, setOutUsd] = useState('')
 
-  const check = useCallback(async () => {
-    try { setChk(await api.aiPricingCheck('ingest')) } catch { /* offline */ }
+  useEffect(() => {
+    _askPricing = (c: PricingChk) => new Promise<boolean>((resolve) => {
+      setChk(c); setSug(null); setErr(''); setInUsd(''); setOutUsd('')
+      resolveRef.current = resolve
+    })
+    return () => { _askPricing = null }
   }, [])
-  useEffect(() => { check() }, [check])
+
+  const finish = (go: boolean) => {
+    resolveRef.current?.(go); resolveRef.current = null; setChk(null)
+  }
 
   const detect = async () => {
     setBusy('detect'); setErr('')
@@ -5282,54 +5319,65 @@ function PricingGate({ onCleared }: { onCleared?: () => void }) {
       const r = await api.aiPriceSuggest(chk?.provider, chk?.model)
       setSug(r)
       if (r.price) { setInUsd(String(r.price[0])); setOutUsd(String(r.price[1])) }
-      if (!r.price) setErr('Could not work out a price. Enter one below.')
+      else setErr('Could not work out a price. Enter one below.')
     } catch (e) { setErr(String(e)) } finally { setBusy('') }
   }
 
-  const save = async () => {
+  const saveAndRun = async () => {
     const i = parseFloat(inUsd), o = parseFloat(outUsd)
     if (!(i >= 0) || !(o >= 0)) { setErr('Enter both prices, per 1M tokens.'); return }
     setBusy('save'); setErr('')
     try {
-      // Saved against the name the app ACTUALLY calls, not the concrete model the
-      // probe found. Pricing `gemini-3.7-flash` would leave `gemini-flash-latest` —
-      // the name every usage row is written under — still unpriced, and the budget
-      // still unable to measure anything.
+      // Saved against the name the app CALLS, not the concrete model a probe found.
+      // Pricing `gemini-3.7-flash` would leave `gemini-flash-latest` — the name every
+      // usage row is written under — still unmeasurable.
       await api.setAiPrice(chk!.provider!, chk!.model!, i, o)
-      setSug(null); await check(); onCleared?.()
-    } catch (e) { setErr(String(e)) } finally { setBusy('') }
+      finish(true)
+    } catch (e) { setErr(String(e)); setBusy('') }
   }
 
-  if (!chk || chk.ok) return null
+  if (!chk) return null
+  const stale = chk.state === 'stale'
   const basisText = sug?.basis === 'alias'
-    ? `${chk.model} is really ${sug.resolved} — using that model's published price`
+    ? `${chk.model} is really ${sug.resolved}. This is that model's published price.`
     : sug?.basis === 'family'
-      ? `Nobody has published a price for ${sug.resolved || chk.model}. This is ${sug.like}'s price, the dearest in the same family — high on purpose, so the budget stops early rather than late.`
+      ? `Nobody publishes a price for ${sug.resolved || chk.model}. This is ${sug.like}'s rate — the dearest in the same family, high on purpose so the budget stops early rather than late.`
       : sug?.basis === 'exact' ? 'This model is already priced.' : ''
 
   return (
-    <div className="bs-test bad">
-      <div><b>The budget cannot measure this import.</b></div>
-      <div className="sync-note">{chk.reason}</div>
-      <div className="bs-actions" style={{ marginTop: 8 }}>
-        <button className="go" disabled={!!busy} onClick={detect}>
-          {busy === 'detect' ? 'Working it out…' : 'Work out the price'}</button>
-        {onCleared && <button className="go" disabled={!!busy}
-          onClick={() => { setChk({ ok: true }) }}
-          title="Run without a measurable budget. Nothing will stop the spend.">
-          Run anyway</button>}
+    <div className="overlay overlay-2" onClick={() => finish(false)}>
+      <div className="panel confirm-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={() => finish(false)}>×</button>
+        <h3>{stale ? 'This price may be out of date' : 'What does this model cost?'}</h3>
+        <p className="confirm-lede">
+          You set a ${chk.budget_usd?.toFixed(2)} monthly budget.{' '}
+          {stale
+            ? `The price for ${chk.model} is ${chk.age_days} days old, so the budget may be measuring against the wrong rate.`
+            : `${chk.model} has no price, so the budget cannot measure what this run spends.`}
+        </p>
+        <div className="bs-actions">
+          <button className="go" disabled={!!busy} onClick={detect}>
+            {busy === 'detect' ? 'Working it out…' : 'Work out the price'}</button>
+        </div>
+        {basisText ? <p className="confirm-lede dim">{basisText}</p> : null}
+        <div className="bs-row">
+          <label>Per 1M tokens</label>
+          <input value={inUsd} onChange={(e) => setInUsd(e.target.value)}
+            placeholder="input $" inputMode="decimal" />
+          <input value={outUsd} onChange={(e) => setOutUsd(e.target.value)}
+            placeholder="output $" inputMode="decimal" />
+        </div>
+        {err ? <p className="confirm-lede">{err}</p> : null}
+        <div className="confirm-actions">
+          <button className="go primary" disabled={!!busy} onClick={saveAndRun}>
+            {busy === 'save' ? 'Saving…' : 'Save price and run'}</button>
+          <button className="go" disabled={!!busy} onClick={() => finish(true)}
+            title="Run without a measurable budget. Nothing will stop the spend.">
+            Run without a budget check</button>
+          <button className="go" disabled={!!busy} onClick={() => finish(false)}>
+            Cancel</button>
+        </div>
       </div>
-      {basisText ? <div className="sync-note dim">{basisText}</div> : null}
-      <div className="bs-row" style={{ marginTop: 8 }}>
-        <label>Per 1M tokens</label>
-        <input value={inUsd} onChange={(e) => setInUsd(e.target.value)}
-          placeholder="input $" inputMode="decimal" />
-        <input value={outUsd} onChange={(e) => setOutUsd(e.target.value)}
-          placeholder="output $" inputMode="decimal" />
-        <button className="go primary" disabled={!!busy} onClick={save}>
-          {busy === 'save' ? 'Saving…' : 'Save price'}</button>
-      </div>
-      {err ? <div className="sync-note">{err}</div> : null}
     </div>
   )
 }
@@ -5388,15 +5436,24 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
   const toggleMedia = (id: string) =>
     setMedia((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n })
 
+  // Only a run that will ACTUALLY call a model has to answer for the budget. An
+  // Algorithmic import spends nothing, so asking about token prices before one is a
+  // question with no consequence — and those are the ones users learn to dismiss.
+  const willUseAi = (ids: string[]) =>
+    svcs.some((s) => s.ready && (ids.includes('all') || ids.includes(s.id))
+      && tierOf(s) !== 'algo')
+
   const runAll = async (fullMode: boolean) => {
     setMsg('')
     const readyIds = enabled.filter((s) => s.ready).map((s) => s.id)
+    if (willUseAi(['all']) && !(await ensureAiPricing())) return
     const mediaIds = readyIds.filter((id) => media.has(id))
     try { setJob(await api.syncRun(['all'], mediaIds, fullMode)) } catch (e) { setMsg((e as Error).message) }
     load()
   }
   const runOne = async (id: string, fullMode: boolean) => {
     setMsg('')
+    if (willUseAi([id]) && !(await ensureAiPricing())) return
     try { setJob(await api.syncRun([id], media.has(id) ? [id] : [], fullMode)) } catch (e) { setMsg((e as Error).message) }
     load()
   }
@@ -5475,7 +5532,6 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
             {running && job?.step && <span className="sync-step">{job.step}</span>}
             {romRunning && romJob?.step && <span className="sync-step">{romJob.step}</span>}
           </div>
-          <PricingGate onCleared={load} />
           <div className="sync-choice-q">Sync all configured:</div>
           <div className="sync-choice">
             <button className="sync-choice-opt" disabled={anyRunning || !anyReady}

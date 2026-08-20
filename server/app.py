@@ -9756,17 +9756,21 @@ def ai_pricing_check(area: str = Query("ingest")):
         return {"ok": True, "reason": "no model configured (%s)" % str(e)[:80]}
     caps = (ai.limits_map().get("global") or {}).get("all") or {}
     budget = float(caps.get("usd") or 0)
-    priced = ai.price_get(provider, model) is not None
-    if not budget:
-        return {"ok": True, "provider": provider, "model": model, "priced": priced,
-                "budget_usd": 0, "reason": "no budget set"}
-    if priced:
-        return {"ok": True, "provider": provider, "model": model, "priced": True,
-                "budget_usd": budget}
-    return {"ok": False, "provider": provider, "model": model, "priced": False,
-            "budget_usd": budget,
-            "reason": "%s has no price, so the $%.2f budget cannot measure it"
-                      % (model, budget)}
+    state, age = ai.price_state(provider, model)
+    base = {"provider": provider, "model": model, "state": state, "age_days": age,
+            "budget_usd": budget}
+    # NO BUDGET, NOTHING TO MEASURE, NOTHING TO ASK. An unpriced model only matters
+    # because a budget exists to be measured against it.
+    if not budget or state == "ok":
+        return dict(base, ok=True)
+    if state == "stale":
+        return dict(base, ok=False,
+                    reason="the price for %s is %d days old, so the $%.2f budget may "
+                           "be measuring against the wrong rate" % (model, age or 0,
+                                                                    budget))
+    return dict(base, ok=False,
+                reason="%s has no price, so the $%.2f budget cannot measure it"
+                       % (model, budget))
 
 
 @app.post("/api/ai/price/suggest")

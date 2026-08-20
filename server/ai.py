@@ -211,6 +211,47 @@ def _family_price(provider, model):
     return best_name, best
 
 
+# How old a price may be before it stops counting as an answer. A model's rate is not a
+# constant — providers reprice, and an alias silently starts pointing at a dearer model —
+# so a figure from a year ago is a guess wearing a number's clothes. Days.
+PRICE_STALE_DAYS = 120
+
+
+def price_state(provider, model):
+    """Can a budget be measured against this model right now?
+
+    -> ("ok" | "missing" | "stale", age_days or None)
+
+    THE TWO WAYS A PRICE FAILS ARE NOT THE SAME, and the user needs to be told which.
+    `missing` means nobody ever priced it — usually an alias like `gemini-flash-latest`,
+    which appears in no table because the model behind it keeps changing. `stale` means a
+    price exists but has aged past the point where it can be trusted to still be right.
+    Both make a dollar budget unmeasurable; only one of them looks like an answer."""
+    try:
+        con = _usage_con()
+        _seed_prices(con)
+        r = con.execute("SELECT in_usd, out_usd, updated FROM prices "
+                        "WHERE provider=? AND model=?", (provider, model)).fetchone()
+        con.close()
+    except Exception:                            # noqa: BLE001
+        return "missing", None
+    if not r or r["in_usd"] is None:
+        return "missing", None
+    upd = (r["updated"] or "").strip()
+    if not upd:
+        # A price with no date is a SEEDED DEFAULT, shipped with the release. It is a
+        # real published figure, not something that aged in this install, so it counts.
+        return "ok", None
+    try:
+        when = datetime.datetime.fromisoformat(upd.replace("Z", "+00:00"))
+        if when.tzinfo is not None:
+            when = when.replace(tzinfo=None)
+        age = (datetime.datetime.utcnow() - when).days
+    except Exception:                            # noqa: BLE001
+        return "ok", None
+    return ("stale" if age > PRICE_STALE_DAYS else "ok"), age
+
+
 def suggest_price(provider, model):
     """What this model should cost, and how sure we are. -> dict, saves nothing.
 

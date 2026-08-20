@@ -14,6 +14,8 @@ Five properties, from the inventory's H section:
   H5  Lite judges covers only; Heavy judges every kind
   H6  an answer the match index already holds NEVER becomes a paid call
   H7  a budget it cannot MEASURE stops, instead of quietly passing
+  H8  the price prompt appears ONLY when a budget exists AND the price is missing or
+      stale, and only when AI will actually run
 
 Offline. Nothing here may reach a provider — a test of the spend guardrail that spends
 money would be its own counterexample, so `ai` is stubbed and any real call raises.
@@ -244,6 +246,55 @@ def main():
     check("an already-priced model reports basis 'exact'", ex["basis"] == "exact")
     check("and suggest_price SAVES NOTHING",
           ai.price_get("gemini", "gemini-flash-latest") is None)
+
+    print()
+    # ---- H8: the prompt asks only when it has something to say ---------------
+    # The first version pinned a banner to the top of the sync menu: it showed on merely
+    # OPENING the menu, showed when the chosen tier was Algorithmic and no AI would run,
+    # and being permanent it read as a broken app rather than a question.
+    import datetime as _d
+    prov, mdl = "gemini", "unit-test-model"
+    ai.price_set(prov, mdl, 1.0, 2.0)
+    st, age = ai.price_state(prov, mdl)
+    check("a freshly set price reads 'ok': %r" % st, st == "ok")
+    check("a model nobody priced reads 'missing'",
+          ai.price_state(prov, "never-heard-of-it")[0] == "missing")
+    # A price is not a constant — providers reprice, and an alias starts pointing at a
+    # dearer model. A figure old enough stops being an answer.
+    con = ai._usage_con()
+    old_day = (_d.datetime.utcnow() - _d.timedelta(days=ai.PRICE_STALE_DAYS + 5)
+               ).isoformat()
+    con.execute("UPDATE prices SET updated=? WHERE provider=? AND model=?",
+                (old_day, prov, mdl))
+    con.commit(); con.close()
+    st2, age2 = ai.price_state(prov, mdl)
+    check("an aged price reads 'stale' (%s days)" % age2, st2 == "stale")
+    # A seeded default ships with the release and carries no local date. It is a real
+    # published figure, not something that aged here.
+    check("a seeded default is not treated as stale",
+          ai.price_state("gemini", "gemini-2.5-flash")[0] == "ok")
+
+    src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "server", "app.py")).read()
+    i_gate = src.index("def ai_pricing_check")
+    seg = src[i_gate:i_gate + 1800]
+    check("no budget means no question, whatever the price state",
+          'if not budget or state == "ok":' in seg)
+    check("and the two failures are reported apart",
+          'state == "stale"' in seg and '"missing"' in ai.price_state(
+              prov, "never-heard-of-it")[0] + '"missing"')
+
+    tsx = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "web", "src", "App.tsx")).read()
+    check("the gate is a dialog, asked at run time, not a banner",
+          "function AiPricingGate()" in tsx and "PricingGate onCleared" not in tsx)
+    check("every AI path awaits ONE shared gate",
+          "export async function ensureAiPricing" in tsx
+          and tsx.count("ensureAiPricing(") >= 3)
+    check("an algo-only run never asks",
+          "const willUseAi =" in tsx and "tierOf(s) !== 'algo'" in tsx)
+    check("and it is mounted once, above the app",
+          "<AiPricingGate />" in tsx and tsx.count("<AiPricingGate />") == 1)
 
     print("\n%d/%d passed" % (sum(PASS), len(PASS)))
 
