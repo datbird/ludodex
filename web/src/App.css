@@ -2800,6 +2800,14 @@ span.idchip { color: color-mix(in srgb, var(--chip, var(--text)) 80%, var(--text
 
 /* ========================= File-operations engine + jobs ========================= */
 .overlay.overlay-2 { z-index: 30; background: rgba(0,0,0,0.5); }
+/* ABOVE EVERY MENU THAT CAN LAUNCH AN AI RUN. This sat on .overlay-2 at z-index 30,
+   the same value as .filter-menu, so equal stacking fell through to DOM order and the
+   sync menu — the very menu whose button opened this dialog — painted over the top of
+   it, clipping the sentence that explains the charge. A dialog that blocks an action
+   has to outrank the control that started it. Below .app-toast (9999) so a toast can
+   still be seen over it. */
+.overlay.ai-price-overlay { z-index: 300; }
+.ai-price-overlay .confirm-panel { max-width: 620px; }
 
 /* form rows */
 .fo-form { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }

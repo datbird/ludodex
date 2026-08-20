@@ -5345,7 +5345,7 @@ function AiPricingGate() {
       : sug?.basis === 'exact' ? 'This model is already priced.' : ''
 
   return (
-    <div className="overlay overlay-2" onClick={() => finish(false)}>
+    <div className="overlay ai-price-overlay" onClick={() => finish(false)}>
       <div className="panel confirm-panel" onClick={(e) => e.stopPropagation()}>
         <button className="close" onClick={() => finish(false)}>×</button>
         <h3>{stale ? 'This price may be out of date' : 'What does this model cost?'}</h3>

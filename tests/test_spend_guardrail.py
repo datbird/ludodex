@@ -295,6 +295,22 @@ def main():
           "const willUseAi =" in tsx and "tierOf(s) !== 'algo'" in tsx)
     check("and it is mounted once, above the app",
           "<AiPricingGate />" in tsx and tsx.count("<AiPricingGate />") == 1)
+    # It shipped on .overlay-2, z-index 30 — the same value as .filter-menu. Equal
+    # stacking falls through to DOM order, so the sync menu whose button opened the
+    # dialog painted OVER it and clipped the sentence explaining the charge.
+    css = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "web", "src", "App.css")).read()
+    gate_src = tsx[tsx.index("function AiPricingGate()"):]
+    gate_src = gate_src[:gate_src.index("\nfunction ")]
+    check("the dialog carries its own stacking class, not the shared one",
+          "ai-price-overlay" in gate_src and "overlay-2" not in gate_src)
+    import re as _re
+    z_gate = int(_re.search(r"\.overlay\.ai-price-overlay \{ z-index: (\d+)",
+                            css).group(1))
+    z_menu = int(_re.search(r"\.filter-menu \{[^}]*?z-index: (\d+)", css,
+                            _re.S).group(1))
+    check("it outranks the control that opens it (%d > %d)" % (z_gate, z_menu),
+          z_gate > z_menu)
 
     print("\n%d/%d passed" % (sum(PASS), len(PASS)))
 
