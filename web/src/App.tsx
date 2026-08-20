@@ -5253,6 +5253,88 @@ function fmtUptime(s: number) {
 // Library sync: pull owned games per store, then rebuild the catalog. Stores that
 // need a browser sign-in (Epic/EA) surface their connect flow inline and sync the
 // moment auth completes.
+// A budget the app cannot MEASURE is worse than no budget, because it looks like
+// protection. This is where that gets caught — at the moment an import is about to
+// start, while it can still be fixed, rather than in a usage report afterwards.
+//
+// It appears ONLY when a dollar budget is set AND the model has no price. With no
+// budget there is nothing to measure and nothing to warn about.
+function PricingGate({ onCleared }: { onCleared?: () => void }) {
+  type Chk = { ok: boolean; provider?: string; model?: string; budget_usd?: number
+    reason?: string }
+  type Sug = { provider: string; model: string; resolved: string | null
+    basis: 'exact' | 'alias' | 'family' | 'unknown'; price: number[] | null; like?: string }
+  const [chk, setChk] = useState<Chk | null>(null)
+  const [sug, setSug] = useState<Sug | null>(null)
+  const [busy, setBusy] = useState('')
+  const [err, setErr] = useState('')
+  const [inUsd, setInUsd] = useState('')
+  const [outUsd, setOutUsd] = useState('')
+
+  const check = useCallback(async () => {
+    try { setChk(await api.aiPricingCheck('ingest')) } catch { /* offline */ }
+  }, [])
+  useEffect(() => { check() }, [check])
+
+  const detect = async () => {
+    setBusy('detect'); setErr('')
+    try {
+      const r = await api.aiPriceSuggest(chk?.provider, chk?.model)
+      setSug(r)
+      if (r.price) { setInUsd(String(r.price[0])); setOutUsd(String(r.price[1])) }
+      if (!r.price) setErr('Could not work out a price. Enter one below.')
+    } catch (e) { setErr(String(e)) } finally { setBusy('') }
+  }
+
+  const save = async () => {
+    const i = parseFloat(inUsd), o = parseFloat(outUsd)
+    if (!(i >= 0) || !(o >= 0)) { setErr('Enter both prices, per 1M tokens.'); return }
+    setBusy('save'); setErr('')
+    try {
+      // Saved against the name the app ACTUALLY calls, not the concrete model the
+      // probe found. Pricing `gemini-3.7-flash` would leave `gemini-flash-latest` —
+      // the name every usage row is written under — still unpriced, and the budget
+      // still unable to measure anything.
+      await api.setAiPrice(chk!.provider!, chk!.model!, i, o)
+      setSug(null); await check(); onCleared?.()
+    } catch (e) { setErr(String(e)) } finally { setBusy('') }
+  }
+
+  if (!chk || chk.ok) return null
+  const basisText = sug?.basis === 'alias'
+    ? `${chk.model} is really ${sug.resolved} — using that model's published price`
+    : sug?.basis === 'family'
+      ? `Nobody has published a price for ${sug.resolved || chk.model}. This is ${sug.like}'s price, the dearest in the same family — high on purpose, so the budget stops early rather than late.`
+      : sug?.basis === 'exact' ? 'This model is already priced.' : ''
+
+  return (
+    <div className="bs-test bad">
+      <div><b>The budget cannot measure this import.</b></div>
+      <div className="sync-note">{chk.reason}</div>
+      <div className="bs-actions" style={{ marginTop: 8 }}>
+        <button className="go" disabled={!!busy} onClick={detect}>
+          {busy === 'detect' ? 'Working it out…' : 'Work out the price'}</button>
+        {onCleared && <button className="go" disabled={!!busy}
+          onClick={() => { setChk({ ok: true }) }}
+          title="Run without a measurable budget. Nothing will stop the spend.">
+          Run anyway</button>}
+      </div>
+      {basisText ? <div className="sync-note dim">{basisText}</div> : null}
+      <div className="bs-row" style={{ marginTop: 8 }}>
+        <label>Per 1M tokens</label>
+        <input value={inUsd} onChange={(e) => setInUsd(e.target.value)}
+          placeholder="input $" inputMode="decimal" />
+        <input value={outUsd} onChange={(e) => setOutUsd(e.target.value)}
+          placeholder="output $" inputMode="decimal" />
+        <button className="go primary" disabled={!!busy} onClick={save}>
+          {busy === 'save' ? 'Saving…' : 'Save price'}</button>
+      </div>
+      {err ? <div className="sync-note">{err}</div> : null}
+    </div>
+  )
+}
+
+
 function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => void }) {
   const [open, setOpen] = useState(false)
   const [svcs, setSvcs] = useState<SyncService[]>([])
@@ -5393,6 +5475,7 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
             {running && job?.step && <span className="sync-step">{job.step}</span>}
             {romRunning && romJob?.step && <span className="sync-step">{romJob.step}</span>}
           </div>
+          <PricingGate onCleared={load} />
           <div className="sync-choice-q">Sync all configured:</div>
           <div className="sync-choice">
             <button className="sync-choice-opt" disabled={anyRunning || !anyReady}

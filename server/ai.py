@@ -145,6 +145,99 @@ def _seed_prices(con):
                     (prov, model, i, o, c, datetime.date.today().isoformat()))
 
 
+# provider -> how to ask it which model an alias really is. A name like
+# `gemini-flash-latest` is a POINTER, not a model: it never appears in any price table,
+# any pricing feed, or any docs page, because the thing it points at keeps changing.
+# Every lookup for it misses, and a miss is what made a configured budget disappear.
+ALIAS_HINTS = ("-latest", "latest", "-preview", ":latest")
+
+
+def looks_like_alias(model):
+    m = (model or "").lower()
+    return any(h in m for h in ALIAS_HINTS)
+
+
+def detect_model_version(provider, model, timeout=30):
+    """Ask the provider which concrete model an alias resolves to. -> name or None.
+
+    THE ONE PLACE THE TRUE NAME EXISTS IS A RESPONSE. Google's model-metadata endpoint
+    reports `gemini-flash-latest` as "Gemini Flash Latest" and nothing more, but a
+    generateContent response carries `modelVersion` — measured, it returned
+    `gemini-3.7-flash`. So the probe is a real call, deliberately made as small as one
+    can be: a single token in, a single token out.
+
+    Never raises. Detection failing must leave the caller exactly where it was."""
+    try:
+        if provider == "gemini":
+            import json as _json
+            import urllib.request
+            key = key_for("gemini")
+            if not key:
+                return None
+            url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+                   "%s:generateContent?key=%s" % (model, key))
+            body = _json.dumps({"contents": [{"parts": [{"text": "hi"}]}],
+                                "generationConfig": {"maxOutputTokens": 1}}).encode()
+            req = urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/json"})
+            d = _json.load(urllib.request.urlopen(req, timeout=timeout))
+            got = (d.get("modelVersion") or "").strip()
+            return got or None
+    except Exception:                            # noqa: BLE001
+        return None
+    return None
+
+
+def _family_price(provider, model):
+    """The dearest known price among same-family models. -> (name, price) or (None, None).
+
+    WHEN GUESSING A PRICE, GUESS HIGH. This is only ever used to keep a budget working
+    for a model nobody has priced yet, and the two ways to be wrong are not equal:
+    guessing low lets spending run past the cap the user set, guessing high trips it
+    early and they raise it. Only one of those can cost money it was meant to prevent."""
+    fam = [t for t in (model or "").lower().replace("_", "-").split("-")
+           if t and not t.replace(".", "").isdigit() and t not in ("latest", "preview")]
+    if not fam:
+        return None, None
+    best_name, best = None, None
+    for (prov, name), price in list(DEFAULT_PRICES.items()):
+        if prov != provider:
+            continue
+        low = name.lower()
+        if not all(t in low for t in fam):
+            continue
+        if best is None or (price[1] or 0) > (best[1] or 0):
+            best_name, best = name, price
+    return best_name, best
+
+
+def suggest_price(provider, model):
+    """What this model should cost, and how sure we are. -> dict, saves nothing.
+
+    Three steps, each weaker than the last, and the answer says which one produced it so
+    the UI can show a figure the user is able to judge rather than a bare number:
+      exact   the name is priced already
+      alias   the provider named a concrete model and THAT is priced
+      family  nothing is priced, so the dearest same-family model stands in
+    """
+    out = {"provider": provider, "model": model, "resolved": None,
+           "basis": "unknown", "price": None}
+    got = price_get(provider, model)
+    if got:
+        return dict(out, basis="exact", price=list(got), resolved=model)
+    if looks_like_alias(model):
+        real = detect_model_version(provider, model)
+        if real:
+            out["resolved"] = real
+            got = price_get(provider, real)
+            if got:
+                return dict(out, basis="alias", price=list(got))
+    name, price = _family_price(provider, out["resolved"] or model)
+    if price:
+        return dict(out, basis="family", price=list(price), like=name)
+    return out
+
+
 def price_get(provider, model):
     """(in_usd, out_usd, cached_usd) per 1M tokens for a model, or None if unknown."""
     try:
@@ -526,9 +619,22 @@ def _enforce(scope, key, tag):
     if caps["output"] and o >= caps["output"]:
         raise RuntimeError("monthly OUTPUT-token cap reached for %s (%d)%s"
                            % (tag, caps["output"], where))
-    if caps["usd"] and not unpriced and cost >= caps["usd"]:
-        raise RuntimeError("monthly budget reached for %s ($%.2f of $%.2f)%s"
-                           % (tag, cost, caps["usd"], where))
+    if caps["usd"]:
+        # A BUDGET THAT CANNOT BE MEASURED MUST STOP, NOT PASS. This used to skip the
+        # dollar cap whenever any model in the month was unpriced, on the reasoning that
+        # the cost was unknowable and the token caps were the fallback. Live, that made
+        # the guard vanish exactly when it mattered: `gemini-flash-latest` is an ALIAS
+        # and never appears in the price table, so a $20 cap sat in the database while
+        # 19,954,304 input tokens were recorded at $0.00 and nothing ever stopped.
+        # Unknowable cost is the strongest reason to stop, not a licence to continue.
+        if unpriced:
+            raise RuntimeError(
+                "%s is set to $%.2f but this month's usage includes a model with no "
+                "price, so the spend cannot be measured. Set a price for it, or clear "
+                "the budget%s" % (tag, caps["usd"], where))
+        if cost >= caps["usd"]:
+            raise RuntimeError("monthly budget reached for %s ($%.2f of $%.2f)%s"
+                               % (tag, cost, caps["usd"], where))
 
 
 def check_limit(provider, model):

@@ -1391,6 +1391,21 @@ export const api = {
     get<{ provider: string; model: string; days: AiUsageDay[] }>(
       `/api/ai/usage/series?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`),
   aiLimits: () => get<{ caps: AiCap[] }>('/api/ai/limits'),
+  // Asked at the moment work starts. A dollar budget on a model with no price cannot
+  // stop anything, and the only useful time to say so is before the first call.
+  aiPricingCheck: (area = 'ingest') =>
+    get<{ ok: boolean; provider?: string; model?: string; priced?: boolean;
+      budget_usd?: number; reason?: string }>(
+      `/api/ai/pricing-check?area=${encodeURIComponent(area)}`),
+  aiPriceSuggest: async (provider?: string, model?: string) => {
+    const r = await fetch('/api/ai/price/suggest', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider, model }),
+    })
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
+    return r.json() as Promise<{ provider: string; model: string; resolved: string | null;
+      basis: 'exact' | 'alias' | 'family' | 'unknown'; price: number[] | null; like?: string }>
+  },
   setAiLimit: async (scope: 'global' | 'provider' | 'model', key: string, caps: Partial<Caps>) => {
     const r = await fetch('/api/ai/limit', {
       method: 'POST', headers: { 'content-type': 'application/json' },

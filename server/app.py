@@ -9740,6 +9740,49 @@ def _price_scheduler():
 threading.Thread(target=_price_scheduler, daemon=True).start()
 
 
+@app.get("/api/ai/pricing-check")
+def ai_pricing_check(area: str = Query("ingest")):
+    """Can the budget actually measure what this area is about to spend?
+
+    A BUDGET IS NOT A SETTING, IT IS A PROMISE, and this is where the promise is checked
+    while it can still be kept. Asked at the moment work starts, not after: a dollar cap
+    on a model with no price cannot stop anything, and the only useful time to say so is
+    before the first call rather than in a report afterwards.
+    """
+    try:
+        provider = ai.provider_for_area(area)
+        model = ai.model_for_area(area)
+    except Exception as e:                       # noqa: BLE001
+        return {"ok": True, "reason": "no model configured (%s)" % str(e)[:80]}
+    caps = (ai.limits_map().get("global") or {}).get("all") or {}
+    budget = float(caps.get("usd") or 0)
+    priced = ai.price_get(provider, model) is not None
+    if not budget:
+        return {"ok": True, "provider": provider, "model": model, "priced": priced,
+                "budget_usd": 0, "reason": "no budget set"}
+    if priced:
+        return {"ok": True, "provider": provider, "model": model, "priced": True,
+                "budget_usd": budget}
+    return {"ok": False, "provider": provider, "model": model, "priced": False,
+            "budget_usd": budget,
+            "reason": "%s has no price, so the $%.2f budget cannot measure it"
+                      % (model, budget)}
+
+
+@app.post("/api/ai/price/suggest")
+def ai_price_suggest(body: dict = Body(default={})):
+    """What should this model cost? Proposes, saves NOTHING.
+
+    `basis` says how the figure was reached — exact, alias (the provider named the
+    concrete model behind a `-latest` pointer), or family (the dearest same-family
+    model, standing in). The caller shows it, because a price the user cannot judge is
+    a number they will accept without reading."""
+    body = body or {}
+    provider = (body.get("provider") or "").strip() or ai.provider_for_area("ingest")
+    model = (body.get("model") or "").strip() or ai.model_for_area("ingest")
+    return ai.suggest_price(provider, model)
+
+
 @app.post("/api/ai/price")
 def ai_price_set(body: dict = Body(...)):
     """Set a model's price (USD/1M). Body: {provider, model, in_usd, out_usd, cached_usd?}."""

@@ -13,6 +13,7 @@ Five properties, from the inventory's H section:
   H4  Algo makes ZERO model calls — by definition, never verified
   H5  Lite judges covers only; Heavy judges every kind
   H6  an answer the match index already holds NEVER becomes a paid call
+  H7  a budget it cannot MEASURE stops, instead of quietly passing
 
 Offline. Nothing here may reach a provider — a test of the spend guardrail that spends
 money would be its own counterexample, so `ai` is stubbed and any real call raises.
@@ -186,6 +187,63 @@ def main():
         os.path.abspath(__file__))), "ludodex", "ingest_ai.py")).read()
     check("run() asks the index BEFORE the model loop",
           0 < isrc.find("identify_from_index(items)") < isrc.find("ai.identify_roms"))
+
+    # ---- H7: an unmeasurable budget is a stop, not a pass ------------------
+    # Live, this was not theoretical. `gemini-flash-latest` is an ALIAS and never
+    # appears in any price table, so cost_usd() returned None, `unpriced` went True, and
+    # _enforce SKIPPED the dollar cap entirely. A $20 budget sat in the database while
+    # 19,954,304 input tokens were recorded at $0.00 and nothing ever stopped.
+    real_lim, real_usage = ai.limits_map, ai._month_usage
+    try:
+        ai.limits_map = lambda: {"global": {"all": {"total": 0, "usd": 20.0,
+                                                    "input": 0, "output": 0}},
+                                 "provider": {}, "model": {}}
+        # Priced and under budget: work proceeds.
+        ai._month_usage = lambda scope, key: (1000, 900, 100, 1.0, False)
+        ai.check_limit("gemini", "gemini-2.5-flash")
+        check("a measurable budget under the cap allows the call", True)
+
+        # Priced and over budget: the ordinary stop.
+        ai._month_usage = lambda scope, key: (1000, 900, 100, 25.0, False)
+        try:
+            ai.check_limit("gemini", "gemini-2.5-flash")
+            check("an exceeded budget stops the call", False)
+        except RuntimeError as e:
+            check("an exceeded budget stops the call: %s" % str(e)[:40], True)
+
+        # UNPRICED: the case that used to sail straight through.
+        ai._month_usage = lambda scope, key: (19954304, 19954304, 391287, 0.0, True)
+        try:
+            ai.check_limit("gemini", "gemini-flash-latest")
+            check("an UNMEASURABLE budget must not pass", False)
+        except RuntimeError as e:
+            check("an unmeasurable budget stops the call", True)
+            check("and says why, naming the fix: %r" % str(e)[:48],
+                  "cannot be measured" in str(e) and "Set a price" in str(e))
+
+        # No budget configured is not the same as a budget that cannot be read.
+        ai.limits_map = lambda: {"global": {}, "provider": {}, "model": {}}
+        ai.check_limit("gemini", "gemini-flash-latest")
+        check("with NO budget set, an unpriced model is free to run", True)
+    finally:
+        ai.limits_map, ai._month_usage = real_lim, real_usage
+
+    print()
+    # ---- H7b: the alias can be resolved, so the budget can be repaired ------
+    check("a -latest name is recognised as a pointer, not a model",
+          ai.looks_like_alias("gemini-flash-latest")
+          and not ai.looks_like_alias("gemini-2.5-flash"))
+    # WHEN GUESSING A PRICE, GUESS HIGH. Guessing low lets spend run past the cap;
+    # guessing high trips it early and the user raises it. Only one costs money.
+    name, price = ai._family_price("gemini", "gemini-3.7-flash")
+    check("an unknown model borrows the DEAREST same-family price: %r %r"
+          % (name, price), price and price[1] == max(
+              p[1] for (pr, n), p in ai.DEFAULT_PRICES.items()
+              if pr == "gemini" and "flash" in n))
+    ex = ai.suggest_price("gemini", "gemini-2.5-flash")
+    check("an already-priced model reports basis 'exact'", ex["basis"] == "exact")
+    check("and suggest_price SAVES NOTHING",
+          ai.price_get("gemini", "gemini-flash-latest") is None)
 
     print("\n%d/%d passed" % (sum(PASS), len(PASS)))
 
