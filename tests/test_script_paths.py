@@ -36,12 +36,12 @@ def main():
 
     print()
     print("1. every script named in the server exists in the package")
-    named = set(re.findall(r'_run_script\(\s*"([a-z_]+\.py)"', app))
-    named |= set(re.findall(r'os\.path\.join\(PKG,\s*"([a-z_]+\.py)"', app))
-    named |= {m for m in re.findall(r'SYNC_SPECS\s*=\s*\{(.*?)\}', app, re.S)
-              for m in re.findall(r'"([a-z_]+\.py)"', m)}
-    named |= {m for m in re.findall(r'WISHLIST_SPECS\s*=\s*\{(.*?)\}', app, re.S)
-              for m in re.findall(r'"([a-z_]+\.py)"', m)}
+    # EVERY .py LITERAL, not the ones a pattern happened to know about. The first
+    # version of this test matched `_run_script("x.py")` and PKG joins, and passed
+    # while _run_streaming — a SECOND runner, joining against the repo root — still
+    # produced "can't open file '/app/build_library.py'". A test that only looks where
+    # the last bug was found cannot catch the next one.
+    named = set(re.findall(r'"([a-z_][a-z0-9_]*\.py)"', app))
     check("the server names some scripts to run: %d" % len(named), len(named) >= 10)
     missing = sorted(n for n in named if not os.path.exists(os.path.join(pkg, n)))
     check("all %d resolve inside ludodex/ (missing: %s)" % (len(named), missing or "none"),
@@ -54,7 +54,32 @@ def main():
     stray = re.findall(r'os\.path\.join\(DIR,\s*"([a-z_]+\.py)"', app)
     check("no os.path.join(DIR, '*.py') remains: %s" % (stray or "none"), not stray)
     check("_run_script resolves through one helper",
-          "_script_path(script)" in app and "def _script_path(" in app)
+          "def _script_path(" in app)
+    # EVERY runner, found by shape rather than by name, so a third one cannot appear
+    # and quietly resolve paths its own way.
+    runners = re.findall(r'argv = \[sys\.executable, ([^\]]+)\]', app)
+    check("all %d runners resolve the same way: %s" % (len(runners), runners),
+          runners and all("_script_path(" in r for r in runners))
+
+    print()
+    print("2b. EVERY spawn resolves against the package, whatever its shape")
+    # Not just the two runners: eight direct subprocess.run calls build their own argv.
+    spawns = [ln.strip() for ln in app.splitlines() if "sys.executable" in ln]
+    bad = [ln for ln in spawns
+           if "_script_path(" not in ln and "os.path.join(PKG," not in ln]
+    check("all %d spawns in server/app.py (stray: %d)" % (len(spawns), len(bad)),
+          spawns and not bad)
+
+    # devices.py runs scripts too, from its OWN DIR — which is the package, not the
+    # repo root. Different constant, same requirement: the files must be there.
+    dev = open(os.path.join(pkg, "devices.py")).read()
+    check("devices.DIR is the package it lives in",
+          'DIR = os.path.dirname(os.path.abspath(__file__))' in dev)
+    dev_named = set(re.findall(r'os\.path\.join\(DIR,\s*"([a-z_]+\.py)"', dev))
+    dev_missing = sorted(n for n in dev_named
+                         if not os.path.exists(os.path.join(pkg, n)))
+    check("the %d scripts devices.py runs all exist (missing: %s)"
+          % (len(dev_named), dev_missing or "none"), not dev_missing)
 
     print()
     print("3. the helper prefers the package and never invents a path")

@@ -10682,7 +10682,11 @@ def _run_streaming(script, args, on_prog, timeout=3600, job=None):
     is given, the child is pause/stop-controllable (see _run_script)."""
     if job is not None and not _sync_gate(job):
         return False, "cancelled"
-    argv = [sys.executable, os.path.join(DIR, script)] + list(args)
+    # THE SECOND RUNNER, MISSED THE FIRST TIME. _run_script was fixed and this was not,
+    # so "catalog rebuild failed: can't open file '/app/build_library.py'" survived the
+    # fix that was supposed to end exactly that message. Two runners resolving paths two
+    # ways is the fault; both now go through _script_path.
+    argv = [sys.executable, _script_path(script)] + list(args)
     try:
         p = subprocess.Popen(argv, cwd=DIR, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, bufsize=1,
