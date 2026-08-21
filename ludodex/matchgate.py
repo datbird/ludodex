@@ -349,3 +349,52 @@ def game_era(lib_con, cache_con, norm_key):
     except Exception:                              # noqa: BLE001
         pass
     return None
+
+
+def pick_by_year(cands, year):
+    """The candidate a stated year identifies, or None.
+
+    `cands` are exact-normalized-title matches already; the only question left is WHICH
+    of them the game is. A year answers that, and nothing else does — so when the year
+    fails to single one out, the honest answer is None.
+
+    Live case (2026-08-21): six IGDB records are named exactly "Star Trek" — 1971, 1973,
+    1987 and three carrying no year. The AI said 2013. The ranking this replaces scored
+    every candidate identically ("does its year equal 2013" is false for all six), then
+    broke the tie on `year or 9999` — earliest first — and bound the owned 2013 Steam
+    game to the 1971 mainframe record.
+
+    Earliest-first is right for its own case and wrong here. It exists so a buried
+    original wins over a later remake, and IGDB's relevance search genuinely needs that
+    ("Gradius" returns only sequels, "Contra" returns the 2006 remake). But it is a
+    preference between candidates that could each be the game, and it was being asked to
+    decide between candidates where only one could. That is the same "a miss is not
+    consent" shape as the negative-cache read: absence of a matching year was treated as
+    permission to choose.
+
+    An undated candidate can never SATISFY a stated year, and equally can never be
+    refused for lacking one — `game_era()`'s rule, arrived at from 123 live false
+    refusals, holds on the candidate side too. So an undated record loses any contest a
+    year decides, and a LONE undated record still binds, because its silence is not an
+    argument against it. 23.8% of the IGDB mirror (88,453 of 371,978) carries no year and
+    7,149 of those share a name with a dated record, so this is the common case and not
+    the corner one; refusing all of them would drop real matches wholesale.
+
+    The rules, in order:
+      * no candidates                      -> None
+      * exactly one candidate              -> it, whether or not a year was stated
+      * a year is stated, one carries it   -> that one
+      * a year is stated, none carries it  -> None (the defect above)
+      * a year is stated, several carry it -> None (cannot be told apart)
+      * no year stated, several candidates -> None (nothing to decide on)
+    """
+    cands = list(cands or [])
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    y = _year(year)
+    if y is None:
+        return None                # several candidates and nothing to separate them
+    hits = [c for c in cands if _year(c.get("year")) == y]
+    return hits[0] if len(hits) == 1 else None

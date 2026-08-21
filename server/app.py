@@ -3731,12 +3731,15 @@ def _provider_match(title, year=None, consoles=None):
             cands.setdefault(h["igdb_id"], h)
     if not cands:
         return None                 # no trustworthy IGDB entry — better none than wrong
-    # prefer the AI's year (distinguishes remakes/eras sharing a title); else the
-    # earliest exact-title entry (the original, not a later remake/re-release).
-    best = sorted(cands.values(),
-                  key=lambda h: (0 if (year and h.get("year") == year) else 1,
-                                 h.get("year") or 9999))[0]
-    return _pack_igdb(best)
+    # The stated year must SINGLE ONE OUT — it is not a ranking preference. This used to
+    # sort by "does its year match" then by earliest, which meant a year matching NOTHING
+    # scored every candidate the same and handed the decision to the tiebreak: six records
+    # named "Star Trek" (1971, 1973, 1987, three undated), the AI saying 2013, and the
+    # owned Steam game bound to the 1971 mainframe record. `better none than wrong` two
+    # lines up was applied to the candidate set and never to the year. See
+    # docs/superpowers/specs/2026-08-21-undated-identity-design.md.
+    best = matchgate.pick_by_year(list(cands.values()), year)
+    return _pack_igdb(best) if best else None
 
 
 def _pack_igdb(h):
