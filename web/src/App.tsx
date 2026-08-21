@@ -5319,7 +5319,7 @@ function AiPricingGate() {
       const r = await api.aiPriceSuggest(chk?.provider, chk?.model)
       setSug(r)
       if (r.price) { setInUsd(String(r.price[0])); setOutUsd(String(r.price[1])) }
-      else setErr('Could not work out a price. Enter one below.')
+      else setErr('No published price found. Enter one below.')
     } catch (e) { setErr(String(e)) } finally { setBusy('') }
   }
 
@@ -5356,8 +5356,12 @@ function AiPricingGate() {
             : `${chk.model} has no price, so the budget cannot measure what this run spends.`}
         </p>
         <div className="bs-actions">
+          {/* "Look up", not "work out". Nothing is calculated: the provider is asked
+              which model the alias really is, and that model's PUBLISHED rate is read.
+              A verb that implies arithmetic invites the user to trust a number the app
+              never computed. */}
           <button className="go" disabled={!!busy} onClick={detect}>
-            {busy === 'detect' ? 'Working it out…' : 'Work out the price'}</button>
+            {busy === 'detect' ? 'Looking it up…' : 'Look up the price'}</button>
         </div>
         {basisText ? <p className="confirm-lede dim">{basisText}</p> : null}
         <div className="bs-row">
