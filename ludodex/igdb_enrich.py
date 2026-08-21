@@ -30,6 +30,7 @@ DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 import config
 import console_eras
+import matchgate
 import igdb
 import platmap
 from titlenorm import norm
@@ -294,7 +295,7 @@ def is_console_platform(platform):
     return bool(c) and c in platmap.GEN
 
 
-def _pick_era_aware(hits, nk, consoles, require_unique=False, platform=None):
+def _pick_era_aware(hits, nk, consoles, require_unique=False, platform=None, year=None):
     """From IGDB `search` hits, pick the best EXACT normalized-title match that is
     era-plausible for `consoles`. Returns (igdb_id, slug) or (0, None).
 
@@ -341,6 +342,15 @@ def _pick_era_aware(hits, nk, consoles, require_unique=False, platform=None):
             # every candidate says which platforms it is for, and none is ours: this is
             # a different release, and staying unmatched beats adopting it
             return 0, None
+    # A STATED year singles one out before ambiguity is refused. `year` is the AI's own
+    # answer for this game, which the store path has and the ROM path usually does not —
+    # so this only ever NARROWS a set that was about to be refused or ranked. The rule
+    # lives in matchgate; this is a caller, not a second copy of it.
+    if year and len(ok) > 1:
+        one = matchgate.pick_by_year(
+            [{"igdb_id": h["id"], "year": _year_of(h)} for h in ok], year)
+        if one:
+            ok = [h for h in ok if h["id"] == one["igdb_id"]]
     if require_unique and len(ok) > 1:
         return 0, None
     if consoles and any(console_eras.era(c) for c in consoles):

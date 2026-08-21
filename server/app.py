@@ -3702,44 +3702,27 @@ def _provider_match(title, year=None, consoles=None):
     none)."""
     if not title:
         return None
-    if consoles:
-        raw = _igdb_raw_hits(title)
-        if not raw:
-            return None
-        iid, _slug = igdb_enrich._pick_era_aware(
-            raw, titlenorm.norm(title), set(consoles), require_unique=False)
-        if not iid:
-            return None                 # era gate / exact-title rejected everything
-        hit = next((h for h in raw if h.get("id") == iid), None)
-        return _pack_igdb(_igdb_hits([hit])[0]) if hit else None
-    tn = titlenorm.norm(title)
-    try:
-        search_hits = _igdb_search(title, limit=8)
-    except Exception:
-        search_hits = []
-    sx = [h for h in search_hits if titlenorm.norm(h.get("name") or "") == tn]
-    # fast path: the fuzzy search already gave an exact-title entry at the AI's year.
-    yr_hit = next((h for h in sx if year and h.get("year") == year), None)
-    if yr_hit:
-        return _pack_igdb(yr_hit)
-    # else consult the exact-name index too — IGDB's relevance `search` routinely omits
-    # the buried original ("Gradius" → only its sequels) or ranks a modern re-release
-    # first ("Contra" → the 2006 remake), so merge both candidate sets before ranking.
-    cands = {h["igdb_id"]: h for h in sx}
-    for h in _igdb_by_name(title):
-        if titlenorm.norm(h.get("name") or "") == tn:
-            cands.setdefault(h["igdb_id"], h)
-    if not cands:
-        return None                 # no trustworthy IGDB entry — better none than wrong
-    # The stated year must SINGLE ONE OUT — it is not a ranking preference. This used to
-    # sort by "does its year match" then by earliest, which meant a year matching NOTHING
-    # scored every candidate the same and handed the decision to the tiebreak: six records
-    # named "Star Trek" (1971, 1973, 1987, three undated), the AI saying 2013, and the
-    # owned Steam game bound to the 1971 mainframe record. `better none than wrong` two
-    # lines up was applied to the candidate set and never to the year. See
+    raw = _igdb_raw_hits(title)
+    if not raw:
+        return None
+    # ONE selector, both cases. `_igdb_raw_hits` already queries BOTH `search "..."` and
+    # `where name ~ "..."`, which is the candidate merge the old store-only branch existed
+    # to do — and it carries alternative_names as well, so this matches more, not less.
+    #
+    # require_unique for a store/PC title is the rule `_pick_era_aware` was already
+    # written for, quoting its own docstring: "a generic store title is a coin-flip —
+    # IGDB ranks the 1973 mainframe 'Star Trek' above the 2013 game you actually own."
+    # The catalog sync has passed it since 2026-07 (igdb_enrich.py, `bool(appid)`), and
+    # correctly refused; only this path had a second, weaker matcher, which is what bound
+    # the owned 2013 Steam Star Trek to igdb:11485. See
     # docs/superpowers/specs/2026-08-21-undated-identity-design.md.
-    best = matchgate.pick_by_year(list(cands.values()), year)
-    return _pack_igdb(best) if best else None
+    iid, _slug = igdb_enrich._pick_era_aware(
+        raw, titlenorm.norm(title), set(consoles or ()),
+        require_unique=not consoles, year=year)
+    if not iid:
+        return None                 # era gate / ambiguity / exact-title rejected all
+    hit = next((h for h in raw if h.get("id") == iid), None)
+    return _pack_igdb(_igdb_hits([hit])[0]) if hit else None
 
 
 def _pack_igdb(h):
