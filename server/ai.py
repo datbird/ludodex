@@ -307,11 +307,18 @@ def suggest_price(provider, model):
     if got:
         return dict(out, basis="exact", price=list(got), resolved=model)
 
+    # THE OPENROUTER TOGGLE IS A PERMISSION, NOT A SCHEDULE, and this ignored it. The
+    # Settings panel HIDES its "Fetch current prices" button when the toggle is off, and
+    # the Auto-resolve endpoint guards its feed pull the same way — so this dialog was
+    # the only thing in the app reaching OpenRouter against a setting that says not to.
+    # "Off by default" is the app's stated position: native per-provider defaults come
+    # first, and the catalog is opt-in.
     feed = {}
-    try:
-        feed = feed_prices()
-    except Exception:                            # noqa: BLE001 — offline is not fatal
-        feed = {}
+    if prices_openrouter_enabled():
+        try:
+            feed = feed_prices()
+        except Exception:                        # noqa: BLE001 — offline is not fatal
+            feed = {}
     if model in feed:
         i, o = feed[model]
         return dict(out, basis="feed", price=[i, o, None], resolved=model)

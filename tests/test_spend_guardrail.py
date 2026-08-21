@@ -254,8 +254,16 @@ def main():
     i_feed = asrc.index("feed = feed_prices()")
     i_fam = asrc.index("name, price = _family_price(")
     check("the published feed is consulted BEFORE any guess", 0 < i_feed < i_fam)
-    check("and on demand, not only when the scheduled refresh is enabled",
-          "prices_openrouter_enabled" not in asrc[i_feed - 400:i_fam])
+    # The toggle is a PERMISSION, not a schedule. The Settings panel hides its "Fetch
+    # current prices" button when it is off, and the Auto-resolve endpoint guards its
+    # feed pull the same way — this dialog was the only thing reaching OpenRouter
+    # against a setting that says not to.
+    check("the OpenRouter toggle is honoured, like everywhere else",
+          "if prices_openrouter_enabled():" in asrc[i_feed - 600:i_feed + 200])
+    # It is still fetched ON DEMAND when permitted, rather than waiting for the daily
+    # job the user may never have scheduled.
+    check("but a permitted feed is fetched on demand, not on a schedule",
+          "feed = feed_prices()" in asrc)
     # OpenRouter marks alias entries with a leading '~', and ':batch' variants are a
     # different product at half the rate.
     check("alias entries are matched, batch variants are not",
