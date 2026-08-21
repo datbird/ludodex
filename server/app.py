@@ -5502,8 +5502,13 @@ def aimeta_pick_art(body: dict = Body(default={})):
     (_ai_art_pass — Light/Heavy syncs, gated per game by the art_adjudicated marker)
     and, when ai_art_auto_pick is enabled, the apply/reconcile path; the routine
     rebuild never calls it. Vision-picks the best image per kind (kinds with ≥2
-    candidate providers) and marks the game adjudicated. Synchronous.
-    Body: {norm_key|entry_key}."""
+    candidate providers, plus media.IDENTITY_KINDS on a single candidate — "is this
+    even this game" needs no second candidate) and marks the game adjudicated.
+    Synchronous.
+    Body: {norm_key|entry_key, kinds?}. `kinds` narrows the pass to those kinds — the
+    caller pays per kind, so a targeted repair ("re-judge covers only") should not be
+    billed for the kinds it is not repairing. Omitted = every qualifying kind, which is
+    what the wand button sends."""
     body = body or {}
     nk = (body.get("norm_key") or "").strip()
     if not nk and body.get("entry_key"):
@@ -5522,9 +5527,19 @@ def aimeta_pick_art(body: dict = Body(default={})):
             title = r["canonical_title"]
     finally:
         lc.close()
+    kinds = body.get("kinds") or None
+    if kinds:
+        kinds = tuple(k for k in kinds if k in media.SCALAR_KINDS)
+        if not kinds:
+            raise HTTPException(400, "no valid kinds given")
     try:
-        _ai_adjudicate_game(nk, title)
-        _mark_art_adjudicated(nk, int(time.time()))
+        _ai_adjudicate_game(nk, title, only_kinds=kinds)
+        # A NARROWED pass must not claim the game is fully adjudicated: the marker gates
+        # the Light/Heavy import passes, so marking 'all' here after judging one kind
+        # would silently foreclose every kind this call skipped. Scope the mark to match
+        # what was actually judged, exactly as _ai_art_pass does for its cover-only tier.
+        _mark_art_adjudicated(nk, int(time.time()),
+                              scope="cover" if kinds else "all")
     except Exception as e:
         raise HTTPException(502, "pick-art failed: %s" % str(e)[:200])
     return {"ok": True, "norm_key": nk}
@@ -5978,7 +5993,16 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                 if only_kinds:
                     q += "AND kind IN (%s) " % ",".join("?" * len(only_kinds))
                     args += list(only_kinds)
-                q += "GROUP BY kind HAVING COUNT(DISTINCT provider) >= 2"
+                # A kind qualifies on EITHER count: two providers to rank between, or
+                # one candidate whose kind carries the game's identity. The >=2 half is
+                # about RANKING; the IDENTITY_KINDS half is about "is this even this
+                # game", which needs no second candidate — and is the dangerous case,
+                # because a lone asset is served by default and never questioned. The
+                # loop below already handles a single candidate; this gate was what kept
+                # one from ever arriving.
+                q += ("GROUP BY kind HAVING COUNT(DISTINCT provider) >= 2 "
+                      "OR kind IN (%s)"
+                      % ",".join("'%s'" % k for k in media.IDENTITY_KINDS))
                 kinds = [r["kind"] for r in rc.execute(q, args)]
                 for kind in kinds:
                     # Grouped by (system, game_key) — the SAME tuple `chosen` is keyed

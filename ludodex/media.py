@@ -62,6 +62,25 @@ SCALAR_KINDS = ("cover", "box_back", "box_3d", "box_spine",
                 "marquee", "bezel", "arcade_cabinet", "arcade_controls", "pcb",
                 "title_screen", "mix")
 
+# Kinds where a LONE asset is still worth a vision call. The art carries the game's
+# IDENTITY — a title on a box front, a logo burned into the key art — so one candidate
+# can simply be the wrong game, and with nothing to compare it against it is served by
+# default and never questioned. That is the case _ai_adjudicate_game was written for
+# ("ONE candidate is still judged"), and the >=2-provider gate above it never let one
+# reach it: live, Beyond Oasis wore "The Story of Thor" with a single IGDB cover, and
+# 165 of the 249 single-provider cover games were marked adjudicated having never been
+# judged.
+#
+# Deliberately NOT every scalar kind:
+#   header/hero/logo/icon  Steam capsule art. The lone provider is the store publishing
+#                          art for its own game, so there is no identity question to ask
+#                          — and live these are 5,825 of the 7,819 skipped pairs.
+#   video                  a vision model cannot judge a video (1,281 pairs).
+#   screenshot             plural, and a screenshot carries no title to read.
+#   marquee/bezel/pcb/…    arcade furniture; identity is not legible in them.
+IDENTITY_KINDS = ("cover", "background", "box_back", "box_3d", "box_spine",
+                  "title_screen")
+
 # --------------------------------------------------------------------------- #
 #  Shape verification (Algo tier — measurement, not judgment)
 #
