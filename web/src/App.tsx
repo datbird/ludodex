@@ -5294,7 +5294,7 @@ function AiPricingGate() {
   const [chk, setChk] = useState<PricingChk | null>(null)
   const resolveRef = useRef<((v: boolean) => void) | null>(null)
   const [sug, setSug] = useState<{ resolved: string | null
-    basis: 'exact' | 'alias' | 'family' | 'unknown'; price: number[] | null
+    basis: 'exact' | 'feed' | 'alias' | 'ai' | 'family' | 'unknown'; price: number[] | null
     like?: string } | null>(null)
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
@@ -5338,11 +5338,23 @@ function AiPricingGate() {
 
   if (!chk) return null
   const stale = chk.state === 'stale'
-  const basisText = sug?.basis === 'alias'
-    ? `${chk.model} is really ${sug.resolved}. This is that model's published price.`
-    : sug?.basis === 'family'
-      ? `Nobody publishes a price for ${sug.resolved || chk.model}. This is ${sug.like}'s rate — the dearest in the same family, high on purpose so the budget stops early rather than late.`
-      : sug?.basis === 'exact' ? 'This model is already priced.' : ''
+  // Each line says WHERE the number came from. "family" is the only one that is a
+  // guess, and it must read as one: an earlier version called an unchecked guess
+  // "high on purpose", which dressed a 4x error as prudence.
+  // Each line says WHERE the number came from, strongest source first. Only 'family'
+  // is a guess, and it must read as one: an earlier version called an unchecked guess
+  // "high on purpose", which dressed a 4x error as prudence.
+  const basisText = sug?.basis === 'exact'
+    ? 'This model is already priced here.'
+    : sug?.basis === 'feed'
+      ? `Published rate for ${sug.resolved || chk.model}, from OpenRouter's public model list.`
+      : sug?.basis === 'alias'
+        ? `${chk.model} is really ${sug.resolved}. This is that model's published price.`
+        : sug?.basis === 'ai'
+          ? `No public listing had it, so the AI price helper read ${chk.provider}'s pricing page. Worth a glance before you rely on it.`
+          : sug?.basis === 'family'
+            ? `No published rate found for ${sug.resolved || chk.model}, so this is a GUESS — ${sug.like}'s rate, the dearest in the same family. Check it against the provider's pricing page before you rely on it.`
+            : ''
 
   return (
     <div className="overlay ai-price-overlay" onClick={() => finish(false)}>

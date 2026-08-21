@@ -244,6 +244,33 @@ def main():
               if pr == "gemini" and "flash" in n))
     ex = ai.suggest_price("gemini", "gemini-2.5-flash")
     check("an already-priced model reports basis 'exact'", ex["basis"] == "exact")
+    # A LOCAL TABLE BEING EMPTY IS NOT EVIDENCE A PRICE DOES NOT EXIST. suggest_price
+    # skipped the published feed entirely, so it announced "nobody publishes a price for
+    # gemini-3.7-flash" and substituted a same-family guess of $1.50/$9.00. The feed
+    # lists that model at $0.375/$1.875 and lists the alias too — the guess was four
+    # times the real rate, and the UI called it prudence.
+    asrc = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "server", "ai.py")).read()
+    i_feed = asrc.index("feed = feed_prices()")
+    i_fam = asrc.index("name, price = _family_price(")
+    check("the published feed is consulted BEFORE any guess", 0 < i_feed < i_fam)
+    check("and on demand, not only when the scheduled refresh is enabled",
+          "prices_openrouter_enabled" not in asrc[i_feed - 400:i_fam])
+    # OpenRouter marks alias entries with a leading '~', and ':batch' variants are a
+    # different product at half the rate.
+    check("alias entries are matched, batch variants are not",
+          'lstrip("~")' in asrc and '":" not in name' in asrc)
+    tsx0 = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "web", "src", "App.tsx")).read()
+    # The RENDERED string only. The comment above it quotes the old wording to explain
+    # why it went, and a whole-file search matched that instead of the UI text — the
+    # same trap a test in this repo already fell into once.
+    i_bt = tsx0.index("const basisText =")
+    rendered = tsx0[i_bt:tsx0.index("return (", i_bt)]
+    check("a guessed price is labelled a GUESS, not prudence",
+          "so this is a GUESS" in rendered and "high on purpose" not in rendered)
+    check("and it names where a real price came from",
+          "OpenRouter's public model list" in rendered)
     check("and suggest_price SAVES NOTHING",
           ai.price_get("gemini", "gemini-flash-latest") is None)
 

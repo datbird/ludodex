@@ -1404,7 +1404,7 @@ export const api = {
     })
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
     return r.json() as Promise<{ provider: string; model: string; resolved: string | null;
-      basis: 'exact' | 'alias' | 'family' | 'unknown'; price: number[] | null; like?: string }>
+      basis: 'exact' | 'feed' | 'alias' | 'ai' | 'family' | 'unknown'; price: number[] | null; like?: string }>
   },
   setAiLimit: async (scope: 'global' | 'provider' | 'model', key: string, caps: Partial<Caps>) => {
     const r = await fetch('/api/ai/limit', {

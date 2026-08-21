@@ -252,20 +252,70 @@ def price_state(provider, model):
     return ("stale" if age > PRICE_STALE_DAYS else "ok"), age
 
 
-def suggest_price(provider, model):
-    """What this model should cost, and how sure we are. -> dict, saves nothing.
+def feed_prices(timeout=30):
+    """{model name: (in_usd, out_usd)} per 1M tokens, from OpenRouter's public list.
 
-    Three steps, each weaker than the last, and the answer says which one produced it so
-    the UI can show a figure the user is able to judge rather than a bare number:
-      exact   the name is priced already
-      alias   the provider named a concrete model and THAT is priced
-      family  nothing is priced, so the dearest same-family model stands in
+    ASKED ON DEMAND, NOT ONLY ON A SCHEDULE. The scheduled refresh is a SETTING, and it
+    was off — so nothing had ever consulted this feed, and a model it lists plainly was
+    reported as one nobody prices. Pressing "look up the price" is an explicit request to
+    look, and it must not depend on a background job the user may never have enabled.
+
+    Names keep the last path segment, matching prices_refresh, and the leading `~` that
+    OpenRouter puts on alias entries is stripped: `~google/gemini-flash-latest` is how
+    the feed lists the very pointer that started this."""
+    import urllib.request
+    out = {}
+    req = urllib.request.Request("https://openrouter.ai/api/v1/models",
+                                 headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.load(r)
+    for m in (data.get("data") or []):
+        mid = (m.get("id") or "").lstrip("~")
+        name = mid.split("/", 1)[1] if "/" in mid else mid
+        pr = m.get("pricing") or {}
+        try:
+            i = float(pr.get("prompt") or 0) * 1e6
+            o = float(pr.get("completion") or 0) * 1e6
+        except (TypeError, ValueError):
+            continue
+        # `:batch` and other suffixed variants are a different product at a different
+        # rate. Matching one to a plain model name would under-price it by half.
+        if name and ":" not in name and (i or o):
+            out[name] = (i, o)
+    return out
+
+
+def suggest_price(provider, model):
+    """What this model costs, and how it was found. -> dict, saves nothing.
+
+    Four steps, strongest first, and the answer NAMES the one that produced it, because
+    a figure the user cannot judge is one they accept without reading:
+      exact   the name is priced here already
+      feed    a published rate, from OpenRouter's public model list
+      alias   the provider named the concrete model behind a pointer, and THAT is priced
+      family  nothing published, so the dearest same-family model stands in — a guess
+
+    THE FEED STEP WAS MISSING AND THAT WAS THE WHOLE BUG. Without it this reported
+    "nobody publishes a price for gemini-3.7-flash" and substituted a same-family guess
+    of $1.50/$9.00. The feed lists that exact model at $0.375/$1.875, and lists the alias
+    too. The guess was four times the real rate, and the interface called it prudence.
+    A local table being empty is never evidence that a price does not exist.
     """
     out = {"provider": provider, "model": model, "resolved": None,
            "basis": "unknown", "price": None}
     got = price_get(provider, model)
     if got:
         return dict(out, basis="exact", price=list(got), resolved=model)
+
+    feed = {}
+    try:
+        feed = feed_prices()
+    except Exception:                            # noqa: BLE001 — offline is not fatal
+        feed = {}
+    if model in feed:
+        i, o = feed[model]
+        return dict(out, basis="feed", price=[i, o, None], resolved=model)
+
     if looks_like_alias(model):
         real = detect_model_version(provider, model)
         if real:
@@ -273,7 +323,25 @@ def suggest_price(provider, model):
             got = price_get(provider, real)
             if got:
                 return dict(out, basis="alias", price=list(got))
-    name, price = _family_price(provider, out["resolved"] or model)
+            if real in feed:
+                i, o = feed[real]
+                return dict(out, basis="feed", price=[i, o, None])
+
+    # A MODEL RELEASED AFTER THIS BUILD IS THE NORMAL CASE, not an edge one. Providers
+    # ship models faster than any table ships, so the last real attempt asks a model to
+    # read the provider's own pricing page. It costs one small call and is only reached
+    # when both a local table and a public feed have already come up empty.
+    target = out["resolved"] or model
+    try:
+        for r in resolve_prices_ai([(provider, target)]) or []:
+            if (r.get("model") or "") and r.get("input") is not None:
+                return dict(out, basis="ai", price=[float(r["input"]),
+                                                    float(r["output"] or 0),
+                                                    r.get("cached")])
+    except Exception:                            # noqa: BLE001 — no key, no budget, offline
+        pass
+
+    name, price = _family_price(provider, target)
     if price:
         return dict(out, basis="family", price=list(price), like=name)
     return out
