@@ -264,6 +264,28 @@ def main():
     # job the user may never have scheduled.
     check("but a permitted feed is fetched on demand, not on a schedule",
           "feed = feed_prices()" in asrc)
+
+    print()
+    # ---- H9: one resolver, reused everywhere -------------------------------
+    # One job had three implementations. "Fetch current prices" pulled the catalog,
+    # "Auto-resolve" pulled it then asked an AI, and the budget dialog grew its own
+    # chain that skipped the catalog and ignored the toggle governing it. Same
+    # question, three answers, and nothing able to notice they disagreed.
+    check("there is a single named resolver", "def resolve_price(" in asrc)
+    app_src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "server", "app.py")).read()
+    check("the budget dialog endpoint uses it",
+          "ai.resolve_price(provider, model, save=False)" in app_src)
+    check("and the bulk Auto-resolve path uses the same one",
+          "ai.resolve_price(prov, mdl, save=True" in app_src)
+    check("no caller reaches past it to the AI transport",
+          "ai.resolve_prices_ai(" not in app_src)
+    # A guess is for showing a user, never for recording as a fact.
+    check("a family guess is never written to the prices table",
+          'got["basis"] not in ("family", "unknown", "exact")' in asrc)
+    got_g = ai.suggest_price("gemini", "totally-made-up-model-xyz")
+    check("an unknown model still returns a basis: %r" % got_g["basis"],
+          got_g["basis"] in ("family", "unknown", "ai"))
     # OpenRouter marks alias entries with a leading '~', and ':batch' variants are a
     # different product at half the rate.
     check("alias entries are matched, batch variants are not",

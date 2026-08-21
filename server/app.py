@@ -9784,7 +9784,9 @@ def ai_price_suggest(body: dict = Body(default={})):
     body = body or {}
     provider = (body.get("provider") or "").strip() or ai.provider_for_area("ingest")
     model = (body.get("model") or "").strip() or ai.model_for_area("ingest")
-    return ai.suggest_price(provider, model)
+    # save=False: proposing is not deciding. The user sees the figure and the basis, and
+    # the save happens when they accept it.
+    return ai.resolve_price(provider, model, save=False)
 
 
 @app.post("/api/ai/price")
@@ -9846,16 +9848,18 @@ def ai_prices_resolve(body: dict = Body(default={})):
                     targets.append(pm); seen.add(pm)
         targeted = len(targets)
         if targets:
-            try:
-                for r in ai.resolve_prices_ai(targets, note=note):
-                    prov = r.get("provider") or ""
-                    if not prov or not r.get("model"):
-                        continue
-                    ai.price_set(prov, r["model"], r["input"], r["output"],
-                                 r.get("cached"), source="ai")
-                    ai_set += 1
-            except Exception as e:
-                ai_err = str(e)[:200]
+            # THE SAME RESOLVER THE BUDGET DIALOG USES, once per model. Bulk and single
+            # answering one question two ways is what let them drift apart: this path
+            # asked an AI directly while the dialog tried the catalog and an alias probe
+            # first, so the two could return different prices for the same model.
+            for prov, mdl in targets:
+                try:
+                    got = ai.resolve_price(prov, mdl, save=True, note=note)
+                    if got.get("price") and got["basis"] not in ("family", "unknown",
+                                                                 "exact"):
+                        ai_set += 1
+                except Exception as e:           # noqa: BLE001 — one model, not the run
+                    ai_err = str(e)[:200]
     return {"prices": ai.prices_list(), "fetched": fetched, "ai_resolved": ai_set,
             "targeted": targeted, "still_missing": len(ai.prices_missing()),
             "fetch_error": fetch_err, "ai_error": ai_err}

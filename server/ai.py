@@ -285,7 +285,29 @@ def feed_prices(timeout=30):
     return out
 
 
-def suggest_price(provider, model):
+def resolve_price(provider, model, save=False, note=None):
+    """THE price resolver. Every caller in the app goes through this one function.
+
+    -> {provider, model, resolved, basis, price:[in, out, cached] | None, like?}
+
+    ONE JOB HAD THREE IMPLEMENTATIONS AND THEY DRIFTED. "Fetch current prices" pulled the
+    catalog, "Auto-resolve" pulled the catalog then asked an AI, and the budget dialog
+    grew its own chain that skipped the catalog entirely and then ignored the toggle
+    governing it. Same question, three answers, and no way to notice they disagreed.
+
+    `save=True` writes the result through price_set with a `source` naming the route that
+    produced it, so the prices table records HOW each figure was obtained. A guess is
+    never saved: `family` is a stand-in for showing a user, not a fact to record.
+    """
+    got = suggest_price(provider, model, note=note)
+    if save and got.get("price") and got["basis"] not in ("family", "unknown", "exact"):
+        pr = got["price"]
+        price_set(provider, model, pr[0], pr[1],
+                  pr[2] if len(pr) > 2 else None, source=got["basis"])
+    return got
+
+
+def suggest_price(provider, model, note=None):
     """What this model costs, and how it was found. -> dict, saves nothing.
 
     Four steps, strongest first, and the answer NAMES the one that produced it, because
@@ -340,7 +362,7 @@ def suggest_price(provider, model):
     # when both a local table and a public feed have already come up empty.
     target = out["resolved"] or model
     try:
-        for r in resolve_prices_ai([(provider, target)]) or []:
+        for r in resolve_prices_ai([(provider, target)], note=note) or []:
             if (r.get("model") or "") and r.get("input") is not None:
                 return dict(out, basis="ai", price=[float(r["input"]),
                                                     float(r["output"] or 0),
