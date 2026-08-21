@@ -2831,13 +2831,13 @@ def media_scan_local(body: dict = Body(default={})):
 
     def run(should_stop):
         for r in roots:
-            subprocess.run([sys.executable, os.path.join(DIR, "media_index.py"),
+            subprocess.run([sys.executable, os.path.join(PKG, "media_index.py"),
                             "--gamelist", r], timeout=1800, cwd=DIR)
             if should_stop():
                 return
         # pick the winning asset per (game, kind) for the kinds gamelist supplies,
         # so the newly-indexed covers become the chosen art the UI shows.
-        subprocess.run([sys.executable, os.path.join(DIR, "media_choose.py"),
+        subprocess.run([sys.executable, os.path.join(PKG, "media_choose.py"),
                         "--kinds", "cover,screenshot,logo"], timeout=1800, cwd=DIR)
 
     _start_job("artscan:%d" % dev_id, "artscan", "Indexing local art", run)
@@ -2911,7 +2911,7 @@ def ingest_hints_list(limit: int = 200):
 def ingest_hints_clear(system: str = None):
     """Drop hints and rebuild — the undo for an AI ingest pass."""
     n = ingesthints.clear(system)
-    subprocess.run([sys.executable, os.path.join(DIR, "build_library.py")],
+    subprocess.run([sys.executable, os.path.join(PKG, "build_library.py")],
                    timeout=900, cwd=DIR)
     return {"ok": True, "cleared": n}
 
@@ -10259,7 +10259,7 @@ def gog_connect(body: dict = Body(...)):
     if not code:
         raise HTTPException(400, "no login code found in what you pasted")
     try:
-        r = subprocess.run([sys.executable, os.path.join(DIR, "gog_owned.py"),
+        r = subprocess.run([sys.executable, os.path.join(PKG, "gog_owned.py"),
                             "--code", code],
                            capture_output=True, text=True, timeout=60, cwd=DIR)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -10285,7 +10285,7 @@ def psn_connect(body: dict = Body(...)):
     if not npsso:
         raise HTTPException(400, "no npsso token found in what you pasted")
     try:
-        r = subprocess.run([sys.executable, os.path.join(DIR, "psn_owned.py"),
+        r = subprocess.run([sys.executable, os.path.join(PKG, "psn_owned.py"),
                             "--npsso", npsso],
                            capture_output=True, text=True, timeout=60, cwd=DIR)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -10313,7 +10313,7 @@ def xbox_connect(body: dict = Body(...)):
     if not code:
         raise HTTPException(400, "no auth code found in what you pasted")
     try:
-        r = subprocess.run([sys.executable, os.path.join(DIR, "xbox_owned.py"),
+        r = subprocess.run([sys.executable, os.path.join(PKG, "xbox_owned.py"),
                             "--code", code],
                            capture_output=True, text=True, timeout=90, cwd=DIR)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -10338,7 +10338,7 @@ def xbox_device_start():
     """Begin the Xbox device-code flow. Returns the short code + microsoft.com/link
     URL for the UI to display; the device_code stays here and is consumed by /poll."""
     try:
-        r = subprocess.run([sys.executable, os.path.join(DIR, "xbox_owned.py"),
+        r = subprocess.run([sys.executable, os.path.join(PKG, "xbox_owned.py"),
                             "--device-start"],
                            capture_output=True, text=True, timeout=30, cwd=DIR)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -10364,7 +10364,7 @@ def xbox_device_poll():
     if not code or time.time() > _XBOX_DEVICE.get("expires_at", 0):
         return {"status": "expired", "account": None}
     try:
-        r = subprocess.run([sys.executable, os.path.join(DIR, "xbox_owned.py"),
+        r = subprocess.run([sys.executable, os.path.join(PKG, "xbox_owned.py"),
                             "--device-poll", code],
                            capture_output=True, text=True, timeout=30, cwd=DIR)
         d = json.loads(r.stdout)
@@ -10603,6 +10603,19 @@ def _n_identified_with_cover():
         return None
 
 
+def _script_path(script):
+    """A pipeline script's real path. Absolute paths pass through untouched.
+
+    ONE PLACE DECIDES WHERE SCRIPTS LIVE. They were named bare at ~20 call sites and
+    joined to DIR (the repo root) at 8 more, while the files themselves sit in
+    ludodex/. Both forms pointed at nothing, and each call site had to be found and
+    fixed separately — which is how half of them stayed broken."""
+    if os.path.isabs(script):
+        return script
+    inpkg = os.path.join(PKG, script)
+    return inpkg if os.path.exists(inpkg) else os.path.join(DIR, script)
+
+
 def _run_script(script, out=None, capture=False, timeout=300, args=None, job=None):
     """Run a pipeline script; return (ok, error_tail). When `job` is given the
     child gets its own session (so it can be paused/stopped as a group), is
@@ -10611,7 +10624,12 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None, job=Non
     chatty child can't deadlock on a full pipe."""
     if job is not None and not _sync_gate(job):
         return False, "cancelled"
-    argv = [sys.executable, script] + list(args or [])
+    # RESOLVED AGAINST THE PACKAGE, NOT THE WORKING DIRECTORY. Callers pass a bare
+    # name — "steam_owned.py" — which python resolves against CWD. The scripts moved
+    # into ludodex/ and CWD stayed /app, so every one of these became
+    # "can't open file '/app/steam_owned.py'": store syncs, media fetch, scores and the
+    # catalog rebuild, all of them, silently until something tried to run.
+    argv = [sys.executable, _script_path(script)] + list(args or [])
     errf = tempfile.TemporaryFile()
     outf = None
     try:
