@@ -536,6 +536,48 @@ def _igdb_years():
     return ry
 
 
+def _igdb_addon_parents():
+    """{igdb_id: (kind, parent_igdb_id)} for records that are ADD-ON CONTENT.
+
+    IGDB `game_type` 1 = dlc_addon, 2 = expansion. Both need the base game to run, so an
+    owned one is content for a game rather than a game you own.
+
+    TYPE 4 (standalone_expansion) IS DELIBERATELY EXCLUDED, and the live library is why.
+    A standalone expansion runs WITHOUT the base game, and 22 of datbird's 37 add-on-ish
+    entries are that type. Both Quake II Mission Packs are owned and Quake II is NOT, so
+    filing them under a parent would take them out of the grid and put them nowhere.
+
+    Read from the cached IGDB records, so this costs one local query and no network.
+    Deterministic (Algo tier): IGDB states both the type and the parent outright.
+    """
+    out = {}
+    _cache = os.path.join(DATA, "metadata-cache.sqlite")
+    if not os.path.exists(_cache):
+        return out
+    _c = sqlite3.connect(_cache)
+    try:
+        for _iid, _payload in _c.execute(
+                "SELECT igdb_id, payload_json FROM igdb_meta WHERE igdb_id IN ("
+                "SELECT igdb_id FROM igdb_resolution WHERE igdb_id>0)"):
+            try:
+                _g = json.loads(_payload or "{}") or {}
+            except ValueError:
+                continue
+            _t = _g.get("game_type")
+            if _t not in (1, 2):
+                continue
+            _p = _g.get("parent_game")
+            if isinstance(_p, dict):
+                _p = _p.get("id")
+            if _p:
+                out[int(_iid)] = ("dlc" if _t == 1 else "expansion", int(_p))
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        _c.close()
+    return out
+
+
 def _igdb_bundle_ids():
     """IGDB ids whose record is a COMPILATION, not a game (`game_type` 3=bundle,
     13=pack).
@@ -584,6 +626,9 @@ _ids = _igdb_ids()               # norm_key -> igdb_id (DESIGN §11.9 game_key)
 # sends the entry to `title:<norm_key>` in _game_key(), so each owned app keeps its own
 # identity and _id_groups has nothing to collapse. Two plain entries + a warning, per
 # the design's "Algo never guesses" rule.
+# ADD-ON CONTENT: {igdb_id: (kind, parent_igdb_id)}. Inverted to owned norm_keys below,
+# once every entry's identity is known.
+_addon_src = _igdb_addon_parents()
 _bundle_ids = _igdb_bundle_ids()
 _identity_refused = []           # [(norm_key, reason, detail)] -> identity_review table
 if _bundle_ids:
@@ -637,6 +682,29 @@ if _m2o_refused:
           "one igdb record): %s" % (len(_m2o_refused),
           ", ".join(sorted(_m2o_refused)[:12])
           + (" …" if len(_m2o_refused) > 12 else "")), file=sys.stderr)
+
+
+# Which OWNED titles are add-on content, and for which OWNED title. Built AFTER the
+# refusals above, so a bundle or many-to-one identity that lost its id cannot be a parent
+# and cannot be filed under one. `_ids` is norm_key -> igdb_id; invert it to find the
+# parent's key, and keep only pairs where BOTH sides are owned. An add-on whose base game
+# is not owned keeps parent_key NULL and stays in the grid, because hiding something you
+# own under something you do not is strictly worse.
+_by_igdb = {}
+for _nk, _iid in _ids.items():
+    _by_igdb.setdefault(_iid, _nk)
+_ADDON = {}                      # norm_key -> (kind, parent_norm_key or None)
+for _nk, _iid in _ids.items():
+    _hit = _addon_src.get(_iid)
+    if not _hit:
+        continue
+    _kind, _pid = _hit
+    _pnk = _by_igdb.get(_pid)
+    _ADDON[_nk] = (_kind, _pnk if _pnk and _pnk != _nk else None)
+if _ADDON:
+    _linked = sum(1 for _k, _p in _ADDON.values() if _p)
+    print("build_library: %d add-on entrie(s), %d filed under an owned game"
+          % (len(_ADDON), _linked), file=sys.stderr)
 
 
 def _entry_igdb_ids():
@@ -945,7 +1013,17 @@ CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
   n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
   has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
   has_archive INT, in_playnite INT, in_launchbox INT,
-  wanted INT DEFAULT 0);  -- wanted=1: a wishlist-only entry (no owned source)
+  wanted INT DEFAULT 0,   -- wanted=1: a wishlist-only entry (no owned source)
+  -- ADD-ONS (2026-08-22). An owned DLC or expansion stays a FULL entry: its own
+  -- attributes, media, providers and detail page, because datbird asked for them to be
+  -- clickable with their own date/description/art and a separate store would mean a
+  -- second copy of every enrichment path. It simply leaves the grid, which filters
+  -- parent_key IS NULL, and is listed under the game it extends instead.
+  parent_key TEXT,        -- the base game's base_key. NULL for a game, and for an
+                          -- add-on whose parent is NOT owned: hiding something you own
+                          -- under something you do not is strictly worse.
+  content_kind TEXT);     -- 'dlc' | 'expansion'. Set even when parent_key is NULL, so
+                          -- Discover can offer the base game as a want.
 CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
   source_id TEXT, title_raw TEXT, detail TEXT, state TEXT DEFAULT 'have',
   via_collection TEXT);
@@ -1010,8 +1088,8 @@ for (base, plat), g in games.items():
     cur.execute(
         "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,game_key,"
         "n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
-        "has_archive,in_playnite,in_launchbox,wanted) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "has_archive,in_playnite,in_launchbox,wanted,content_kind,parent_key) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (canonical, base, plat, "%s@%s" % (base, plat), bkey,
          ("title:%s" % base if (base, plat) in blocked_entries
           else _game_key(base, plat, bkey)),
@@ -1019,7 +1097,11 @@ for (base, plat), g in games.items():
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
          int("archive" in kinds), int(base in playnite_keys),
-         int(base in launchbox_keys), 0 if owned else 1))
+         int(base in launchbox_keys), 0 if owned else 1,
+         # add-on content: kind is set whenever IGDB says so, parent_key only when the
+         # base game is owned too (see _ADDON).
+         (_ADDON.get(base) or (None, None))[0],
+         (_ADDON.get(base) or (None, None))[1]))
     gid = cur.lastrowid
     key_to_gid[(base, plat)] = gid
     # metadata/tags fan out by the CROSS-REF key, so era-separated entries don't get

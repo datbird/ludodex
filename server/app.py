@@ -871,6 +871,17 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     where, args = [], []
     has_w = _has_col(con, "games", "wanted")
     has_ek = _has_col(con, "games", "entry_key")   # per-platform entries (DESIGN §11)
+    # ADD-ONS leave the grid. A DLC or expansion filed under an owned base game is
+    # content for a game, not a game you own, so it must not inflate the library or its
+    # counts. It keeps its full entry, attributes, media and detail page, and is listed
+    # under its parent instead (see 2026-08-22-addons-design.md).
+    #
+    # Only `parent_key IS NOT NULL` hides anything. An add-on whose base game is NOT
+    # owned has a NULL parent by construction and stays right here, because hiding
+    # something you own under something you do not is strictly worse. 'all' shows
+    # everything, which is what 'all' means.
+    if status != "all" and _has_col(con, "games", "parent_key"):
+        where.append("g.parent_key IS NULL")
     if status == "wanted":
         where.append("g.wanted=1" if has_w else "0")
     elif status == "utilities":
@@ -8199,11 +8210,33 @@ def game_detail(norm_key: str):
                        "AND (COALESCE(system,'')=? OR COALESCE(system,'')='') ORDER BY kind")
             _mk_args = (base, platform or "")
         media_kinds = [r["kind"] for r in con.execute(_mk_sql, _mk_args)]
+        # ADD-ONS you own for this game, and, when THIS entry is itself an add-on, the
+        # game it extends. Both are real entries, so each carries an entry_key the UI
+        # links straight to its own detail page with its own date, description and art.
+        addons, parent_of = [], None
+        if "parent_key" in _keys:
+            for row in con.execute(
+                    "SELECT entry_key, norm_key, platform, canonical_title, content_kind "
+                    "FROM games WHERE parent_key=? ORDER BY canonical_title", (base,)):
+                addons.append({"entry_key": row["entry_key"], "norm_key": row["norm_key"],
+                               "platform": row["platform"], "title": row["canonical_title"],
+                               "kind": row["content_kind"] or "dlc"})
+            if g["parent_key"]:
+                _p = con.execute(
+                    "SELECT entry_key, norm_key, platform, canonical_title FROM games "
+                    "WHERE base_key=? AND parent_key IS NULL LIMIT 1",
+                    (g["parent_key"],)).fetchone()
+                if _p:
+                    parent_of = {"entry_key": _p["entry_key"], "norm_key": _p["norm_key"],
+                                 "platform": _p["platform"], "title": _p["canonical_title"]}
         return {
             "norm_key": base,
             "entry_key": g["entry_key"] if "entry_key" in _keys else base,
             "platform": platform,
             "also_owned_on": also,             # sibling platform entries (cross-ref)
+            "addons": addons,                  # DLC/expansions owned FOR this game
+            "content_kind": (g["content_kind"] if "content_kind" in _keys else None),
+            "extends": parent_of,              # set when THIS entry is the add-on
             "title": g["canonical_title"],
             "sources": sources,
             "rom_files": _entry_rom_paths(sources),   # on-disk ROM path(s) for this entry

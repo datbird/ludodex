@@ -7423,6 +7423,21 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                   ? <SpinImg box className="hero-logo" src={logo.url} alt={d.title} />
                   : <h2 className="hero-title">{d.title}</h2>}
                 <div className="hero-sub">{d.title}</div>
+                {/* This entry IS add-on content: say so, and link to what it extends. */}
+                {d.content_kind && (
+                  <div className="also-on">
+                    <span className="also-on-label">
+                      {d.content_kind === 'expansion' ? 'expansion for' : 'DLC for'}
+                    </span>
+                    {d.extends
+                      ? (
+                        <button className="also-on-chip" type="button"
+                          onClick={() => onNavigate?.(d.extends!.entry_key)}
+                          title={`View ${d.extends.title}`}>{d.extends.title}</button>
+                        )
+                      : <span className="also-on-cur">a game you don't own</span>}
+                  </div>
+                )}
                 {(d.platform || (d.also_owned_on && d.also_owned_on.length > 0)) && (
                   <div className="also-on">
                     {d.platform && <span className="also-on-cur">{d.platform}</span>}
@@ -7441,6 +7456,20 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                 )}
               </div>
             </div>
+
+            {d.addons && d.addons.length > 0 && (
+              <div className="also-on addons-strip">
+                <span className="also-on-label">
+                  {d.addons.length === 1 ? 'add-on owned' : `${d.addons.length} add-ons owned`}
+                </span>
+                {d.addons.map((a) => (
+                  <button key={a.entry_key} className="also-on-chip" type="button"
+                    onClick={() => onNavigate?.(a.entry_key)}
+                    title={`View ${a.title} (${a.kind})`}>
+                    {a.title}</button>
+                ))}
+              </div>
+            )}
 
             <ArtStrip nk={nk} assets={assets} loading={!media} links={d.provider_links}
               kinds={kinds} onChange={(m) => { setMedia(m); setMediaDirty(true) }}

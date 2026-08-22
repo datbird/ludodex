@@ -72,6 +72,13 @@ export interface GameDetail {
   entry_key?: string        // this platform entry's id (base_key@platform)
   platform?: string | null  // this entry's platform
   also_owned_on?: { entry_key: string; platform: string; title: string; via?: string }[]
+  // DLC / expansions owned FOR this game. Real entries, so each links to its own detail
+  // page with its own release date, description and art.
+  addons?: { entry_key: string; norm_key: string; platform: string; title: string
+             kind: 'dlc' | 'expansion' }[]
+  // set when THIS entry is itself add-on content
+  content_kind?: 'dlc' | 'expansion' | null
+  extends?: { entry_key: string; norm_key: string; platform: string; title: string } | null
   title: string
   sources: { source: string; platform: string; source_id: string; title_raw: string; detail: string; os: string[] | null; state?: 'have' | 'want'; collection?: string | null; via_collection?: string }[]
   rom_files?: { path: string; filename: string; system: string }[]   // on-disk ROM path(s)
