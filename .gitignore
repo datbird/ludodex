@@ -54,3 +54,4 @@ device-media/
 .env
 .env.*
 !.env.example
+nintendo_games.tsv

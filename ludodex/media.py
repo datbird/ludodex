@@ -521,6 +521,7 @@ ESDE_SYSTEM_ALIAS = {
     "atarist": "atari st",
     "n3ds": "3ds",
     "switch": "nintendo switch",
+    "switch2": "nintendo switch 2",
     "zxspectrum": "zx spectrum",
     "tg16": "turbo gfx",
     "ngp": "neogeopocketcolor",

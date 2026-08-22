@@ -9981,6 +9981,22 @@ SERVICES = [
                          "value (the ~64 characters between the quotes).",
                  "post": "/api/services/psn/npsso"},
      "limits": _limits("psn", cooldown="500")},
+    {"id": "nintendo", "name": "Nintendo Account", "role": "source",
+     "hint": "Reads your Virtual Game Cards, which is the digital Switch and Switch 2 "
+             "library your account can move between consoles. Sign in at Nintendo, "
+             "then paste your browser cookies. PHYSICAL CARTS WILL NOT APPEAR, and the "
+             "session expires, so expect to re-paste. There is no purchase API off "
+             "console; this portal is the only readable surface.",
+     "creds": [],
+     "connect": {"url": "https://accounts.nintendo.com/portal/vgcs/",
+                 "action_label": "Open Nintendo",
+                 "field_label": "Paste the Nintendo cookies",
+                 "note": "Sign in at the link, then open your browser's dev tools "
+                         "(F12), go to Console, type  document.cookie  and press "
+                         "Enter. Copy the whole line it prints and paste it here. A "
+                         "devtools cookie export (the JSON array) works too.",
+                 "post": "/api/services/nintendo/cookie"},
+     "limits": _limits("nintendo")},
     {"id": "xbox", "name": "Xbox / Microsoft Store", "role": "source",
      "hint": "Connect your Microsoft account with a short code — no address-bar "
              "copying. Click Connect Xbox, then at microsoft.com/link enter the code "
@@ -10120,7 +10136,8 @@ def _svc_state(s):
         out["enabled"] = config.source_enabled(s["id"])
     if s.get("connect"):
         checker = {"ea": _ea_connected, "epic": _epic_connected,
-                   "psn": _psn_connected, "xbox": _xbox_connected}.get(s["id"])
+                   "psn": _psn_connected, "xbox": _xbox_connected,
+                   "nintendo": _nintendo_connected}.get(s["id"])
         out["connect"] = dict(s["connect"], connected=bool(checker and checker()))
     return out
 
@@ -10285,6 +10302,32 @@ def gog_connect(body: dict = Body(...)):
     return {"ok": True, "account": None}
 
 
+def _nintendo_connected():
+    """(bool) True if a Nintendo portal cookie has been saved (.nintendo/cookies.json).
+
+    A cookie on disk is not proof it still WORKS — there is no refresh token, so the
+    session expires and the next sync is where that shows. `--whoami` is the live check.
+    """
+    return os.path.exists(os.path.join(DATA, ".nintendo", "cookies.json"))
+
+
+@app.post("/api/services/nintendo/cookie")
+def nintendo_connect(body: dict = Body(...)):
+    """Accept the Nintendo account cookies and prove them against the portal.
+
+    Same shape as the PSN npsso flow: the user signs in normally and pastes what the
+    browser holds. nintendo_owned.py bootstraps the Virtual Game Card portal BEFORE
+    saving, so a bad or signed-out paste fails here rather than becoming an empty
+    library at the next sync."""
+    raw = (body or {}).get("cookie") or (body or {}).get("value") or ""
+    if not str(raw).strip():
+        raise HTTPException(400, "paste the Nintendo cookies first")
+    ok, err = _run_script("nintendo_owned.py", args=["--cookie", str(raw)], timeout=90)
+    if not ok:
+        raise HTTPException(400, "Nintendo connect failed: %s" % (err or "")[:200])
+    return {"connected": True}
+
+
 def _psn_connected():
     """(bool) True if a PSN login has been cached (.psn/tokens.json)."""
     return os.path.exists(os.path.join(DATA, ".psn", "tokens.json"))
@@ -10402,6 +10445,9 @@ SYNC_SPECS = {
     "ea":    ("ea_owned.py",    "ea_games.tsv",    True),
     "psn":   ("psn_owned.py",   "psn_games.tsv",   True),
     "xbox":  ("xbox_owned.py",  "xbox_games.tsv",  True),
+    # Nintendo reads the Virtual Game Card portal with a browser cookie, so it
+    # is refreshable in the same sense the others are: re-paste, not re-auth.
+    "nintendo": ("nintendo_owned.py", "nintendo_games.tsv", True),
 }
 
 # Stores that also expose a WISHLIST (Discover "Wanted"). Pulled alongside owned
@@ -10434,6 +10480,8 @@ def _sync_ready(sid):
         return _psn_connected()
     if sid == "xbox":
         return _xbox_connected()
+    if sid == "nintendo":
+        return _nintendo_connected()
     return False
 
 

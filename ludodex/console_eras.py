@@ -29,7 +29,7 @@ ERAS = {
     # Nintendo
     "nes": (1983, 1995), "snes": (1990, 2003), "n64": (1996, 2002),
     "gamecube": (2001, 2007), "wii": (2006, 2020), "wiiu": (2012, 2019),
-    "nintendo switch": (2017, 9999),
+    "nintendo switch": (2017, 9999), "nintendo switch 2": (2025, 9999),
     "gameboy": (1989, 2001), "gameboy color": (1998, 2003), "gba": (2001, 2008),
     "nds": (2004, 2015), "3ds": (2011, 2022), "virtualboy": (1995, 1996),
     # Sega

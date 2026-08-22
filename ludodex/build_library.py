@@ -57,7 +57,7 @@ from media import norm_system             # canonical console labels (gb->gamebo
 # carry-over and a rebuild-from-scratch silently drops every store's games. Fall back
 # to the legacy /app location if that's the only place TSVs exist (e.g. update.sh,
 # which writes beside the scripts) — migrated to /data on the next in-app sync.
-_STORE_SRCS = ("steam", "gog", "epic", "itch", "ea", "psn", "xbox")
+_STORE_SRCS = ("steam", "gog", "epic", "itch", "ea", "psn", "xbox", "nintendo")
 OWN = DATA
 if not any(os.path.exists(os.path.join(DATA, "%s_games.tsv" % s)) for s in _STORE_SRCS) \
         and any(os.path.exists(os.path.join(DIR, "%s_games.tsv" % s)) for s in _STORE_SRCS):

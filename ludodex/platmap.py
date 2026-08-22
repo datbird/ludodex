@@ -19,6 +19,9 @@ _ALIASES = {
     "wii": ["wii"],
     "wiiu": ["wiiu"],
     "switch": ["switch", "nintendoswitch"],
+    # Switch 2. Nintendo's own records call it OUNCE internally and the Virtual Game
+    # Card portal reports that codename, which nintendo_owned maps to this label.
+    "switch2": ["switch2", "nintendoswitch2", "nintendoswitch 2", "ounce"],
     "snes": ["snes", "supernintendoentertainmentsystem", "superfamicom", "sfc"],
     "nes": ["nes", "nintendoentertainmentsystem", "familycomputer", "famicom",
             "familycomputerdisksystem", "fds"],
@@ -203,7 +206,7 @@ GEN = {
     "dreamcast": 6, "ps2": 6, "gamecube": 6, "xbox": 6, "nds": 6, "psp": 6,
     "ps3": 7, "xbox360": 7, "wii": 7, "psvita": 7, "3ds": 7,
     "ps4": 8, "xboxone": 8, "wiiu": 8, "switch": 8,
-    "ps5": 9,
+    "ps5": 9, "switch2": 9,
 }
 
 
