@@ -547,32 +547,25 @@ def _igdb_addon_parents():
     entries are that type. Both Quake II Mission Packs are owned and Quake II is NOT, so
     filing them under a parent would take them out of the grid and put them nowhere.
 
-    Read from the cached IGDB records, so this costs one local query and no network.
-    Deterministic (Algo tier): IGDB states both the type and the parent outright.
+    READ FROM THE MIRROR, NOT THE CACHE, and that distinction is the whole function.
+    `metadata-cache.sqlite`'s igdb_meta payloads are built from `igdb.GAME_FIELDS`, which
+    does not request `parent_game` — so every cached record has the type and no parent,
+    and a first attempt against it found zero add-ons in a library holding fifteen. The
+    mirror (`igdb-catalog.sqlite`) stores `parent_game` as a column and already carries it
+    for 54,687 records. Local, complete, no refetch.
     """
     out = {}
-    _cache = os.path.join(DATA, "metadata-cache.sqlite")
-    if not os.path.exists(_cache):
+    _mir = os.path.join(DATA, "igdb-catalog.sqlite")
+    if not os.path.exists(_mir):
         return out
-    _c = sqlite3.connect(_cache)
+    _c = sqlite3.connect("file:%s?mode=ro" % _mir, uri=True)
     try:
-        for _iid, _payload in _c.execute(
-                "SELECT igdb_id, payload_json FROM igdb_meta WHERE igdb_id IN ("
-                "SELECT igdb_id FROM igdb_resolution WHERE igdb_id>0)"):
-            try:
-                _g = json.loads(_payload or "{}") or {}
-            except ValueError:
-                continue
-            _t = _g.get("game_type")
-            if _t not in (1, 2):
-                continue
-            _p = _g.get("parent_game")
-            if isinstance(_p, dict):
-                _p = _p.get("id")
-            if _p:
-                out[int(_iid)] = ("dlc" if _t == 1 else "expansion", int(_p))
+        for _iid, _t, _p in _c.execute(
+                "SELECT id, game_type, parent_game FROM games "
+                "WHERE game_type IN (1,2) AND parent_game IS NOT NULL AND parent_game>0"):
+            out[int(_iid)] = ("dlc" if _t == 1 else "expansion", int(_p))
     except sqlite3.OperationalError:
-        pass
+        pass                                   # mirror predates the column
     finally:
         _c.close()
     return out

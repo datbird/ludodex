@@ -38,7 +38,11 @@ GAME_FIELDS = (
     # game_type distinguishes a BUNDLE/pack from a game (3 = bundle). Authoritative,
     # free, and the deterministic half of match verification: a bundle's identity may
     # never define an individually-owned app (see the match-verification design).
+    # parent_game: which game an add-on extends. The MIRROR carries this as a column and
+    # is what build_library reads, but a cached record that lacks it can never say
+    # what it belongs to, so ask for it here too.
     "id,name,slug,summary,first_release_date,alternative_names.name,game_type,"
+    "parent_game,"
     "genres.name,themes.name,game_modes.name,player_perspectives.name,"
     "franchises.name,involved_companies.developer,"
     "involved_companies.publisher,involved_companies.company.name,"

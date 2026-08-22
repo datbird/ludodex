@@ -54,11 +54,53 @@ def main():
     print("1. only true add-on types are harvested")
     fn = body_of(BL, "_igdb_addon_parents")
     check("_igdb_addon_parents exists", bool(fn))
-    check("accepts game_type 1 and 2", "(1, 2)" in fn)
-    check("NEVER accepts 4 (standalone_expansion), which runs without the base game",
-          not re.search(r"\(1,\s*2,\s*4\)|\b4\b\s*\)", fn.split("game_type")[-1][:200]))
     check("requires a parent_game", "parent_game" in fn)
-    check("reads the cached records, no network", "igdb_meta" in fn and "http" not in fn)
+    # Which TYPES are accepted is proven behaviourally in 1b, not by grepping for a
+    # literal. The first version of this test matched a Python tuple "(1, 2)"; the
+    # harvester now expresses the same rule as SQL "IN (1,2)", and a text check that
+    # breaks on a rewrite of correct code is a check that teaches you to delete it.
+    # THE BUG THIS EXISTS TO CATCH. The first version read igdb_meta from
+    # metadata-cache.sqlite. Those payloads come from igdb.GAME_FIELDS, which did not
+    # request parent_game, so every cached record had a type and no parent and the
+    # harvest found ZERO add-ons in a library holding fifteen. The mirror stores
+    # parent_game as a COLUMN. A text assertion said "reads the cached records" and
+    # passed while the feature did nothing, so this is now behavioural.
+    # Check what the code EXECUTES, not the whole function: the docstring names
+    # igdb_meta on purpose, to explain the bug it must never repeat.
+    _stmts = fn.split('"""')[-1]        # everything after the docstring
+    _stmts = "\n".join(l for l in _stmts.splitlines()
+                       if not l.strip().startswith("#"))
+    check("opens the MIRROR, which is where parent_game lives",
+          "igdb-catalog.sqlite" in _stmts)
+    check("does not query igdb_meta, which never carries a parent",
+          "igdb_meta" not in _stmts)
+    check("igdb.GAME_FIELDS asks for parent_game too, for freshly fetched records",
+          "parent_game" in open(os.path.join(DIR, "ludodex", "igdb.py"),
+                                encoding="utf-8").read())
+
+    print("1b. and it actually finds them, against a fixture mirror")
+    import sqlite3
+    fix = os.path.join(os.environ["LUDODEX_DATA"], "igdb-catalog.sqlite")
+    c = sqlite3.connect(fix)
+    c.execute("CREATE TABLE games(id INTEGER PRIMARY KEY, name TEXT, game_type INT, "
+              "parent_game INT)")
+    c.executemany("INSERT INTO games(id,name,game_type,parent_game) VALUES(?,?,?,?)", [
+        (10, "Doom 3", 0, None),                       # a game
+        (11, "Resurrection of Evil", 2, 10),           # expansion    -> filed
+        (12, "Some Cosmetic Pack", 1, 10),             # dlc_addon    -> filed
+        (13, "Quake II Mission Pack", 4, 20),          # STANDALONE   -> never filed
+        (14, "Orphan Expansion", 2, None),             # no parent    -> not harvested
+    ])
+    c.commit()
+    c.close()
+    ns = {"os": os, "sqlite3": sqlite3, "DATA": os.environ["LUDODEX_DATA"]}
+    exec(compile(fn, "<harvester>", "exec"), ns)       # noqa: S102 — the real function
+    got = ns["_igdb_addon_parents"]()
+    check("expansion harvested", got.get(11) == ("expansion", 10))
+    check("dlc_addon harvested", got.get(12) == ("dlc", 10))
+    check("standalone_expansion NEVER harvested", 13 not in got)
+    check("no parent means nothing to file", 14 not in got)
+    check("a plain game is not add-on content", 10 not in got)
 
     print("2. the parent must be OWNED, or the add-on keeps its place in the grid")
     check("_ADDON is built by inverting the owned id map", "_by_igdb" in BL)
