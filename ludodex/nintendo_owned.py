@@ -4,10 +4,11 @@
   python3 ludodex/nintendo_owned.py --cookie '<pasted cookies>'   # connect
   python3 ludodex/nintendo_owned.py --whoami                      # prove the session
   python3 ludodex/nintendo_owned.py                               # TSV to stdout
+  python3 ludodex/nintendo_owned.py --exclude-addons              # drop DLC-only cards
 
-UNTESTED AGAINST A REAL ACCOUNT as of 2026-08-22. The call structure is read from
-`XenorPLxx/playnite-library-nintendo`, which does this for Playnite. Design and the
-measurement plan: docs/superpowers/specs/2026-08-22-nintendo-vgc-design.md.
+VERIFIED against a live account 2026-08-22: 184 titles, matching the portal exactly.
+The call structure is read from `XenorPLxx/playnite-library-nintendo`, which does this
+for Playnite. Design: docs/superpowers/specs/2026-08-22-nintendo-vgc-design.md.
 
 WHY THIS EXISTS AT ALL, given the source was removed once. The 2026-07-05 work proved
 there is no server-side purchase API: `hac.lp1.eshop.nintendo.net` does not resolve off
@@ -30,9 +31,9 @@ TWO STEPS, and the endpoint is NOT hardcoded:
   2. POST `getVgcs` to that URL. `idToken` goes in the query VARIABLES, not a bearer
      header; the only header is x-nintendo-savanna-client-id.
 
-WHAT IT DOES NOT RETURN, because the value of this depends on it: physical carts never
-appear, and how completely VGC covers older or delisted digital purchases is UNKNOWN.
-Measure that on the first live run before trusting the count.
+WHAT IT DOES NOT RETURN: a physical cart, unless its DLC was bought digitally. A card
+holding only add-on content IS kept, because it proves the base game is owned in some
+form. How completely VGC covers older or delisted digital purchases is still UNKNOWN.
 """
 import html
 import json
@@ -298,7 +299,17 @@ def platform_of(view):
 
 
 def is_addon_only(view):
-    """DLC with no base game. Owned, but not a game entry in its own right."""
+    """The card holds DLC and no base game.
+
+    NOT junk, and NOT a reason to drop the title. Live on datbird's account these are
+    Breath of the Wild, Splatoon 3, Pokemon Shield, Mario + Rabbids and Capcom Arcade
+    Stadium: games he owns on a CART, whose expansion he bought digitally. The card is
+    therefore evidence he owns the base game in some form, which is precisely the fact an
+    ownership catalog exists to record.
+
+    Excluding these by default is what made a 184-title portal import as 179. The Playnite
+    client offers it as an opt-in setting; this copied it as the default, which was wrong.
+    """
     return not view.get("hasApplication") and bool(view.get("hasAddOnContents"))
 
 
@@ -312,7 +323,7 @@ def clean_title(name):
     return re.sub(r"\s+", " ", t).strip()
 
 
-def fetch_owned(cookie=None, include_addons=False):
+def fetch_owned(cookie=None, exclude_addons=False):
     """[(applicationId, title, platform)] for the account's Virtual Game Cards.
 
     Lending state is deliberately ignored: a card loaned to another account is still
@@ -325,7 +336,7 @@ def fetch_owned(cookie=None, include_addons=False):
         if not views:
             break
         for v in views:
-            if not include_addons and is_addon_only(v):
+            if exclude_addons and is_addon_only(v):
                 continue
             plat = platform_of(v)
             if not plat:
@@ -359,8 +370,7 @@ def main(argv):
               % (params["countryCode"], params["nasLanguage"], params["shopId"]),
               file=sys.stderr)
         return
-    include_addons = "--include-addons" in argv
-    rows = fetch_owned(include_addons=include_addons)
+    rows = fetch_owned(exclude_addons="--exclude-addons" in argv)
     for app, title, plat in rows:
         print("%s\t%s\t%s" % (app, title, plat))
     print("# owned Nintendo games: %d" % len(rows), file=sys.stderr)

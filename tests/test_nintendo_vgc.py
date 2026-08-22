@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """The Nintendo Virtual Game Card chain, exercised without a Nintendo account.
 
-The integration itself is UNTESTED against a real account (2026-08-22). That is exactly
-why this exists: the parsing, paging and mapping are the parts that can be wrong in ways
-a live run would not obviously show, and they can all be proven offline against a fake
-portal and a fake GraphQL endpoint.
+The live chain is verified (2026-08-22, 184 titles). This exists because the parsing,
+paging and mapping are the parts that can be wrong in ways a live run does NOT obviously
+show, and they can all be proven offline against a fake portal and a fake GraphQL
+endpoint. It caught one: excluding DLC-only cards by default made a 184-title portal
+import as 179.
 
-What this CANNOT prove, and what the first live run is for:
-  * that the portal really carries `data`/`meta`/`state` blobs in that shape
-  * that `shopId = 3` is accepted from a browser session
+What this still cannot prove:
   * how completely Virtual Game Cards cover an account's digital purchases
+  * how long the session cookie lasts
 
 Fixtures are shaped from the field list the Playnite client requests, so if Nintendo
 changes the response the fake and the real thing diverge and the live run fails loudly.
@@ -164,16 +164,17 @@ def main():
     check("OUNCE maps to switch2", by_app["appO1"][1] == "switch2")
     check("trademark symbols stripped from the title",
           by_app["appNX1"][0] == "Super Mario Odyssey")
-    check("DLC-only entries are skipped by default", "appDLC" not in by_app)
+    check("a DLC-only card is KEPT: it means the base game is owned on a cart",
+          "appDLC" in by_app)
     check("a lent-out card is STILL OWNED", "appLEND" in by_app)
-    check("every other title survived", len(rows) == 300)
+    check("every title survived", len(rows) == 301)
 
-    print("5. add-ons can be asked for explicitly")
+    print("5. add-ons can be excluded on request")
     CALLS["graphql"] = 0
-    rows2 = nin.fetch_owned(include_addons=True)
-    check("include_addons keeps the DLC row",
-          any(a == "appDLC" for a, _, _ in rows2))
-    check("and nothing else changed", len(rows2) == 301)
+    rows2 = nin.fetch_owned(exclude_addons=True)
+    check("exclude_addons drops the DLC row",
+          not any(a == "appDLC" for a, _, _ in rows2))
+    check("and nothing else changed", len(rows2) == 300)
 
     print("6. mapping helpers stand alone")
     check("has* flags carry a platform the summary field omits",
