@@ -263,6 +263,32 @@ def score(owned, cand_name, year=None, cand_year=None):
         # loosening NOISE, because "iv" must stay distinguishing everywhere else.
         if not covered and numbering_variant(t, cand_name):
             covered = True
+        # THE MIRROR OF THE RULE ABOVE, and the half that was missing. `_covers`
+        # measures the OWNED title's words inside the candidate, so it catches
+        # "Boltgun 2" <- "Boltgun" and is blind to "Boltgun" <- "Boltgun 2": a sequel
+        # CONTAINS its original's whole title, so coverage is perfect and the extra
+        # numeral was only ever scored, never gated. The docstring above already claims
+        # this case is refused; it was not.
+        #
+        # Live: `evoland` took ScreenScraper 296456 — "Evoland II" — the id its real
+        # sequel already held, and invariant I9 caught the collision. Measured across
+        # all 934 name-derived identities, this refuses that one and nothing else.
+        #
+        # Scoped to an owned title carrying NO numeral of its own. When it has one and
+        # they differ, `_covers` already refuses, because the owned numeral is a
+        # significant word absent from the candidate.
+        #
+        # A numeral whose VALUE IS 1 is exempt, because the first entry in a series is
+        # what an unnumbered owned title already means. Measured: without this it
+        # refused "Being a DIK" <- "Being a DIK: Season 1" and "The Walking Dead" <-
+        # "The Walking Dead : Saison 1", both correct links, while still refusing
+        # "The Walking Dead: Saints & Sinners" <- "… - Chapter 2", which is a different
+        # product. Value, not notation, so "II" and "2" behave alike.
+        if covered and not numbering_variant(t, cand_name):
+            extra = [x for x in (ntok - qtok) if _is_numeral(x)]
+            if (extra and not any(_numeral_value(x) == 1 for x in extra)
+                    and not any(_is_numeral(x) for x in qtok)):
+                covered = False
         # Token sets cannot see that "Megaman X4" and "Mega Man X4" are the same game:
         # they share ONE token and score 0.50. Squashing the spaces out makes an equal
         # string an exact match whatever the word breaks.
