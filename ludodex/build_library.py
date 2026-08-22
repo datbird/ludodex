@@ -57,7 +57,10 @@ from media import norm_system             # canonical console labels (gb->gamebo
 # carry-over and a rebuild-from-scratch silently drops every store's games. Fall back
 # to the legacy /app location if that's the only place TSVs exist (e.g. update.sh,
 # which writes beside the scripts) — migrated to /data on the next in-app sync.
-_STORE_SRCS = ("steam", "gog", "epic", "itch", "ea", "psn", "xbox", "nintendo")
+# THE list of store sources. Two loops below used to hardcode their own copy of
+# it, so adding nintendo wrote a TSV that nothing ever read. Order is
+# load-significant, so it matches what those loops always used.
+_STORE_SRCS = ("steam", "epic", "gog", "itch", "ea", "psn", "xbox", "nintendo")
 OWN = DATA
 if not any(os.path.exists(os.path.join(DATA, "%s_games.tsv" % s)) for s in _STORE_SRCS) \
         and any(os.path.exists(os.path.join(DIR, "%s_games.tsv" % s)) for s in _STORE_SRCS):
@@ -229,7 +232,7 @@ def add_attrs(key, source, sid, record, origin=None):
 # On the producer (all inputs present) every category is regenerated, so this is a
 # no-op there.
 _REGEN = set()
-for _s in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox"):
+for _s in _STORE_SRCS:
     if config.source_enabled(_s) and os.path.exists(OWN + "/%s_games.tsv" % _s):
         _REGEN.add(_s)
 # Emulation is ADDITIVE by default: prior emulation games are carried over AND the
@@ -323,7 +326,7 @@ def load_tsv(path, source):
             add(title, source, platform, sid)
 
 
-for _src in ("steam", "epic", "gog", "itch", "ea", "psn", "xbox"):
+for _src in _STORE_SRCS:
     if config.source_enabled(_src):
         load_tsv(OWN + "/%s_games.tsv" % _src, _src)
 
