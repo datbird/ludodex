@@ -7457,20 +7457,6 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
               </div>
             </div>
 
-            {d.addons && d.addons.length > 0 && (
-              <div className="also-on addons-strip">
-                <span className="also-on-label">
-                  {d.addons.length === 1 ? 'add-on owned' : `${d.addons.length} add-ons owned`}
-                </span>
-                {d.addons.map((a) => (
-                  <button key={a.entry_key} className="also-on-chip" type="button"
-                    onClick={() => onNavigate?.(a.entry_key)}
-                    title={`View ${a.title} (${a.kind})`}>
-                    {a.title}</button>
-                ))}
-              </div>
-            )}
-
             <ArtStrip nk={nk} assets={assets} loading={!media} links={d.provider_links}
               kinds={kinds} onChange={(m) => { setMedia(m); setMediaDirty(true) }}
               heroPref={heroPref}
@@ -7495,6 +7481,24 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
                 <AttributeProvenance d={d} onChanged={reloadDetail} />
 
                 <TagSection nk={d.norm_key} initial={d.tags} />
+
+                {d.addons && d.addons.length > 0 && (
+                  <section>
+                    <h3>Add-ons you own
+                      <span className="sec-help">DLC and expansions for this game — each opens its own page</span>
+                    </h3>
+                    <div className="also-on addons-strip">
+                      {d.addons.map((a) => (
+                        <button key={a.entry_key} className="also-on-chip" type="button"
+                          onClick={() => onNavigate?.(a.entry_key)}
+                          title={`View ${a.title}`}>
+                          {a.title}
+                          <span className="also-on-label"> {a.kind}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
 
                 <section>
                   <h3>In your library
