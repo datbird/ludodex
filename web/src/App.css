@@ -1251,6 +1251,11 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
   z-index: 5; background: rgba(0,0,0,0.45); border-radius: 50%;
   width: 34px; height: 34px; color: #fff;
 }
+/* Back sits LEFT of the close button, same treatment, so the pair reads as one control
+   group over the hero art. Only rendered when the overlay has somewhere to return to. */
+.game-panel .close.detail-back { right: 54px; font-size: 20px; }
+.addons-strip { flex-wrap: wrap; gap: 6px; }
+.addons-strip .also-on-chip { max-width: 100%; }
 
 .hero {
   position: relative; height: 220px; overflow: hidden;

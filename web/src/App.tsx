@@ -671,6 +671,23 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
+  // Where the detail overlay has BEEN, so it can go back. Every in-overlay jump goes
+  // through one place — an add-on, a sibling platform ("also owned on"), a collection
+  // member — so one trail serves all of them rather than each growing its own return
+  // link. Cleared when the overlay closes: a trail that outlives the overlay would send
+  // Back somewhere the user never was.
+  const [trail, setTrail] = useState<string[]>([])
+  const openEntry = (key: string) => {
+    setTrail((t) => (selected && selected !== key ? [...t, selected] : t))
+    setSelected(key)
+  }
+  const goBack = () => {
+    setTrail((t) => {
+      if (!t.length) return t
+      setSelected(t[t.length - 1])
+      return t.slice(0, -1)
+    })
+  }
   // multi-select → device wishlist ("I want these games on that device")
   const [selectMode, setSelectMode] = useState(false)
   // multi-select: entry_key -> the row (keeps norm_key/emulation for actions across pages)
@@ -1425,8 +1442,11 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       {tab === 'files' && <FilesTab />}
 
-      {selected && <Detail nk={selected} onClose={() => { setSelected(null); refreshStats() }}
-        onMediaChanged={() => { load(true); setMediaTick((t) => t + 1) }} onNavigate={setSelected} />}
+      {selected && <Detail nk={selected}
+        onClose={() => { setSelected(null); setTrail([]); refreshStats() }}
+        onMediaChanged={() => { load(true); setMediaTick((t) => t + 1) }}
+        onNavigate={openEntry}
+        onBack={trail.length ? goBack : undefined} />}
       {showSettings && <Settings onClose={() => setShowSettings(false)}
         onPrefsChanged={() => { load(true); setPrefsTick((t) => t + 1) }} user={user}
         initialSection={settingsTarget} />}
@@ -7272,9 +7292,10 @@ function PeelModal({ nk, title, onClose, onPeeled }: {
   )
 }
 
-function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
+function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
   nk: string; onClose: () => void; onMediaChanged?: () => void
-  onNavigate?: (key: string) => void   // jump to a sibling platform entry ("also owned on")
+  onNavigate?: (key: string) => void   // jump to another entry, in this same overlay
+  onBack?: () => void                  // present only when this overlay has somewhere to go back TO
 }) {
   // `nk` is this platform entry's id (base_key@platform). The DETAIL is fetched by it
   // (per-platform view), but media candidates + title-level mutations key off the
@@ -7351,6 +7372,12 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate }: {
   return (
     <div className="overlay" ref={overlayRef} onClick={close}>
       <div className="panel game-panel" ref={panelRef} onClick={(e) => e.stopPropagation()}>
+        {/* Back appears only when this overlay has somewhere to return TO, so it never
+            offers a dead end. Escape still closes; Back retraces. */}
+        {onBack && (
+          <button className="close detail-back" onClick={onBack}
+            title="Back" aria-label="Back">←</button>
+        )}
         <button className="close" onClick={close}>×</button>
         {d && (
           <div className="hero-tools" ref={toolsRef}>
