@@ -376,6 +376,30 @@ The 11 net-new items from the design spec, all compile-clean:
 the Steam-attr feed. The Steam-attr cache fills on the next Steam-media pass. New sidecar DB
 `identity-disable.sqlite` auto-creates.
 
+## Grid collapse — considered and DEFERRED (2026-08-23)
+
+datbird, seeing DARK SOULS: REMASTERED twice on mobile (Steam + Switch): "then why are
+the 2 library entries…", then "ok I'll roll with it for now".
+
+**Not a bug, and not a Nintendo problem.** Both rows share `norm_key` and `base_key`
+(`dark souls`), and "also owned on" links them in both directions — verified through the
+API. The Library grid lists one tile per `(game, platform)`, which the 2026-07-20
+spotlight-collapse spec states outright:
+
+> **Spotlight rails only.** The main Library grid keeps one tile per `(game, platform)` —
+> that is the intentional ownership model (you *do* own it on 5 platforms).
+
+What HAS changed since that decision: Nintendo added 184 entries, so **61 titles are now
+owned on more than one platform**, against a library that used to be almost entirely `pc`.
+The case is far more common than when the call was made.
+
+If revisited, the machinery exists: `_spotlight_rows` already groups by resolved identity
+(`game_key` when `igdb:`, else `base_key`), and the grid could use the same rule with the
+platform chips on the tile. The real cost is that it changes what the library COUNT means,
+from entries to games, so it is a product decision and not a refactor.
+
+DO NOT re-file this as a duplicate-entry defect. It was measured and deferred.
+
 ## Open design decision
 
 - **Selection policy** (`DESIGN.md` §9) — which games push to a device: allowlist / tag /
