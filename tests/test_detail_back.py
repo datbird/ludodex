@@ -50,19 +50,33 @@ def main():
           re.search(r"setTrail\(\(t\) => \(selected && selected !== key \? \[\.\.\.t, selected\] : t\)\)",
                     APP) is not None)
     check("it never pushes the page you are already on", "selected !== key" in APP)
-    check("goBack pops one step", "return t.slice(0, -1)" in APP)
+    check("goBack pops one step", "setTrail(trail.slice(0, -1))" in APP)
     check("the overlay navigates via openEntry, not raw setSelected",
           "onNavigate={openEntry}" in APP and "onNavigate={setSelected}" not in APP)
 
-    print("2. Back is offered only when there is somewhere to go")
+    print("2. Back works even with NO history, which a stack alone cannot do")
+    # A trail only exists if you arrived from another entry this session. Open an add-on
+    # directly, or reload while on one, and React state is empty. The entry knows its
+    # parent, so it can always go up. That is what was actually asked for, and the first
+    # version missed it.
     check("onBack is undefined with an empty trail",
           "onBack={trail.length ? goBack : undefined}" in APP)
     check("Detail accepts onBack", re.search(r"function Detail\(\{[^}]*onBack", APP)
           is not None)
-    check("the button renders only when onBack is set",
-          re.search(r"\{onBack && \(\s*<button className=\"close detail-back\"", APP)
-          is not None)
+    check("the button renders when there is a trail OR a parent",
+          "{(onBack || d?.extends) && (" in APP)
+    check("with no trail it navigates to the parent",
+          "onBack ? onBack() : onNavigate?.(d!.extends!.entry_key)" in APP)
+    check("the title names where it goes", "Back to ${d?.extends?.title}" in APP)
     check("it is labelled for assistive tech", 'aria-label="Back"' in APP)
+
+    print("2b. goBack does not mutate state from inside an updater")
+    # setSelected inside a setTrail updater is a side effect during the update phase.
+    check("goBack reads the trail directly",
+          re.search(r"const goBack = \(\) => \{\s*if \(!trail\.length\) return", APP)
+          is not None)
+    check("and does not call setSelected inside setTrail",
+          "setTrail((t) => {" not in APP.split("const goBack")[1].split("}")[0] + "")
 
     print("3. closing forgets the trail")
     check("onClose clears it",

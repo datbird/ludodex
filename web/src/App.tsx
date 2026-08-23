@@ -682,11 +682,9 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
     setSelected(key)
   }
   const goBack = () => {
-    setTrail((t) => {
-      if (!t.length) return t
-      setSelected(t[t.length - 1])
-      return t.slice(0, -1)
-    })
+    if (!trail.length) return
+    setSelected(trail[trail.length - 1])
+    setTrail(trail.slice(0, -1))
   }
   // multi-select → device wishlist ("I want these games on that device")
   const [selectMode, setSelectMode] = useState(false)
@@ -7372,11 +7370,16 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
   return (
     <div className="overlay" ref={overlayRef} onClick={close}>
       <div className="panel game-panel" ref={panelRef} onClick={(e) => e.stopPropagation()}>
-        {/* Back appears only when this overlay has somewhere to return TO, so it never
-            offers a dead end. Escape still closes; Back retraces. */}
-        {onBack && (
-          <button className="close detail-back" onClick={onBack}
-            title="Back" aria-label="Back">←</button>
+        {/* Back has TWO sources, because a history stack alone is not enough. A trail
+            only exists if you arrived from another entry in this same session: open an
+            add-on directly, or reload the page while on one, and React state is empty.
+            The entry itself knows its parent (`extends`), so an add-on can always go up
+            even with no history. That is what was actually asked for. */}
+        {(onBack || d?.extends) && (
+          <button className="close detail-back"
+            onClick={() => (onBack ? onBack() : onNavigate?.(d!.extends!.entry_key))}
+            title={onBack ? 'Back' : `Back to ${d?.extends?.title}`}
+            aria-label="Back">←</button>
         )}
         <button className="close" onClick={close}>×</button>
         {d && (
