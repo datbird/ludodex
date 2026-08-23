@@ -83,11 +83,23 @@ def main():
           re.search(r"onClose=\{\(\) => \{ setSelected\(null\); setTrail\(\[\]\); ",
                     APP) is not None)
 
-    print("4. it is visible, and does not sit on top of Close")
+    print("4. it occupies a corner nothing else claims")
+    # The first version used right:54px. That is .hero-tools' exact slot, and hero-tools
+    # carries z-index 9 against the close button's 5, so the toolbar painted over the
+    # arrow: elementFromPoint at its centre returned the toolbar, and on a phone it was
+    # neither visible nor tappable. Measured in a real 390px viewport.
     check("detail-back is styled", ".detail-back" in CSS)
-    check("offset left of the close button",
-          re.search(r"\.game-panel \.close\.detail-back \{[^}]*right: 54px", CSS)
-          is not None)
+    rule = re.search(r"\.game-panel \.close\.detail-back \{([^}]*)\}", CSS)
+    check("the rule exists", rule is not None)
+    body = rule.group(1) if rule else ""
+    check("it sits on the LEFT, away from close and hero-tools", "left: 10px" in body)
+    check("and cancels the inherited right offset", "right: auto" in body)
+    check("NEVER right:54px, which is hero-tools' slot", "right: 54px" not in body)
+    tools = re.search(r"\.hero-tools \{([^}]*)\}", CSS)
+    check("hero-tools still claims right:54px, so the clash was real",
+          tools is not None and "right: 54px" in tools.group(1))
+    check("back is raised to hero-tools' layer so nothing paints over it",
+          "z-index: 9" in body)
 
     print("test_detail_back: all checks passed")
 

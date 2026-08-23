@@ -1251,9 +1251,12 @@ h3 .run-btn { margin: 0 0 0 12px; font-weight: 400; }
   z-index: 5; background: rgba(0,0,0,0.45); border-radius: 50%;
   width: 34px; height: 34px; color: #fff;
 }
-/* Back sits LEFT of the close button, same treatment, so the pair reads as one control
-   group over the hero art. Only rendered when the overlay has somewhere to return to. */
-.game-panel .close.detail-back { right: 54px; font-size: 20px; }
+/* Back sits TOP-LEFT, which is where a back control belongs and, more practically, the
+   only free corner. The right side is taken: .close at right:10px and .hero-tools at
+   right:54px with z-index 9. The first version of this button used right:54px, so
+   hero-tools painted straight over it and elementFromPoint at the button's centre
+   returned the toolbar. It rendered, reported visible, and could not be seen or tapped. */
+.game-panel .close.detail-back { left: 10px; right: auto; font-size: 20px; z-index: 9; }
 .addons-strip { flex-wrap: wrap; gap: 6px; }
 .addons-strip .also-on-chip { max-width: 100%; }
 
