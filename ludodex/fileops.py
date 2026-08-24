@@ -776,7 +776,13 @@ def _b64(s):
 def _sh_move(root, src, dst):
     a, b = shlex.quote(_abs(root, src)), shlex.quote(_abs(root, dst))
     d = shlex.quote(posixpath.dirname(_abs(root, dst)))
-    return "mkdir -p %s && mv -n %s %s" % (d, a, b)
+    # A COLLISION IS A FAILURE, NOT A SKIP. `mv -n` exits 0 when it declines to
+    # clobber (coreutils 9.1, the version in the image), so a step that moved nothing
+    # was recorded 'ok' — and undo then moved the OTHER file back over the source.
+    # Rendering two sources onto one destination is routine with a {system}/{filename}
+    # profile over a folder-per-game tree, so this has to be visible, not silent.
+    return ('if [ -e %s ]; then echo "destination exists: %s" >&2; false; '
+            'else mkdir -p %s && mv -n %s %s; fi' % (b, dst, d, a, b))
 
 
 def _op_script(root, op, src, dst, payload):
@@ -791,7 +797,12 @@ def _op_script(root, op, src, dst, payload):
     if op == "copy":
         a, b = shlex.quote(_abs(root, src)), shlex.quote(_abs(root, dst))
         d = shlex.quote(posixpath.dirname(_abs(root, dst)))
-        return "mkdir -p %s && cp -an %s %s" % (d, a, b)   # -a preserve+recursive, -n no-clobber
+        # `cp -an` exits 0 when the destination exists and copies nothing, so the step
+        # was 'ok' with no work done — and undo inverts a copy as `rm -rf <dst>`, which
+        # deleted the file that was already there. Fail instead; the plan is wrong.
+        return ('if [ -e %s ]; then echo "destination exists: %s" >&2; false; '
+                'else mkdir -p %s && cp -a %s %s; fi'    # -a preserve+recursive
+                % (b, dst, d, a, b))
     if op == "write":
         path = shlex.quote(_abs(root, dst))
         d = shlex.quote(posixpath.dirname(_abs(root, dst)))
@@ -831,6 +842,36 @@ def create_runbook(device_id, root, profile, ops, scope="multi_system",
     return run_id
 
 
+# A single `bash -c` argument is capped at MAX_ARG_STRLEN (128 KiB on Linux). Every
+# generated line carries absolute ROM paths, so a few hundred of them clear that and the
+# WHOLE batch dies with E2BIG before one file moves. Counting ops does not bound bytes;
+# this does.
+_ARGV_CHUNK = 60000
+
+
+def _run_chunks(fs, lines, timeout=1800, max_bytes=_ARGV_CHUNK):
+    """Run shell lines in argv-sized chunks. Returns (stdout, stderr) concatenated."""
+    out, err, cur, size = [], [], [], 0
+
+    def flush():
+        if not cur:
+            return
+        r = fs.run("\n".join(cur), timeout=timeout)
+        out.append(r.stdout or "")
+        err.append(r.stderr or "")
+        del cur[:]
+
+    for ln in lines:
+        n = len(ln.encode("utf-8")) + 1
+        if cur and size + n > max_bytes:
+            flush()
+            size = 0
+        cur.append(ln)
+        size += n
+    flush()
+    return "\n".join(out), "\n".join(err)
+
+
 def execute_runbook(run_id, batch=200, should_stop=None):
     """Run every still-pending step of a runbook, committing status after each
     batch so a crash leaves a precise resume point (call again to resume). Steps
@@ -865,16 +906,16 @@ def execute_runbook(run_id, batch=200, should_stop=None):
                 body = _op_script(root, o["op"], o["src"], o["dst"], o["payload"])
                 lines.append("%s && echo 'OK %d' || echo \"ERR %d rc=$?\""
                              % (body, o["seq"], o["seq"]))
-            r = fs.run("\n".join(lines), timeout=1800)
+            _out, _errtail = _run_chunks(fs, lines)
             seen = {}
-            for ln in (r.stdout or "").splitlines():
+            for ln in _out.splitlines():
                 if ln.startswith("OK "):
                     seen[int(ln[3:].split()[0])] = ("ok", "")
                 elif ln.startswith("ERR "):
                     parts = ln[4:].split(None, 1)
                     seen[int(parts[0])] = ("failed",
                                            (parts[1] if len(parts) > 1 else "")
-                                           + " " + (r.stderr or "")[-120:])
+                                           + " " + _errtail[-120:])
             for o in pend:
                 st, err = seen.get(o["seq"], ("failed", "no result (interrupted?)"))
                 con.execute("UPDATE run_ops SET status=?, error=? WHERE id=?",
@@ -1047,13 +1088,17 @@ def undo(run_id):
         else:
             body = "true"
         lines.append("%s && echo 'OK %d' || echo 'ERR %d'" % (body, i, i))
-    r = fs.run("\n".join(lines) or "true", timeout=1800)
-    ok = sum(1 for ln in (r.stdout or "").splitlines() if ln.startswith("OK "))
+    out, _err = _run_chunks(fs, lines or ["true"])
+    ok = sum(1 for ln in out.splitlines() if ln.startswith("OK "))
+    # ONLY 'undone' IF IT ACTUALLY UNDID. This was set unconditionally, so a run whose
+    # every inverse step printed ERR — or that never executed at all, back when the
+    # whole thing went into one over-long argv — still read as reversed in the history.
+    status = "undone" if ok == len(inverse) else "undo_failed"
     con = _con()
-    con.execute("UPDATE runs SET status='undone' WHERE id=?", (run_id,))
+    con.execute("UPDATE runs SET status=? WHERE id=?", (status, run_id))
     con.commit()
     con.close()
-    return {"run_id": run_id, "reverted": ok, "of": len(inverse)}
+    return {"run_id": run_id, "reverted": ok, "of": len(inverse), "status": status}
 
 
 def history(limit=50):
