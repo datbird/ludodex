@@ -9341,6 +9341,41 @@ def ops_reset(body: dict = Body(default={})):
     return out
 
 
+def _restore_db(src, dest):
+    """Put a backed-up database in place of a live one, atomically and checked.
+
+    shutil.copy2 onto the live path was wrong three ways. It rewrites the file the
+    running process still has open, so a request served before the (client-driven)
+    restart reads a file changing underneath it, and a failure partway leaves a
+    truncated database. It leaves the old -wal/-shm beside the new bytes, which SQLite
+    can replay onto them — reset.py already deletes those for exactly this reason. And
+    nothing checked the source, so a truncated transfer or a badly unpacked zip was
+    copied over good data.
+
+    Stage beside the target and rename: the live path is either the old file or the new
+    one, never half of either."""
+    con = sqlite3.connect("file:%s?mode=ro" % src, uri=True)
+    try:
+        row = con.execute("PRAGMA quick_check(1)").fetchone()
+    finally:
+        con.close()
+    if not row or str(row[0]).lower() != "ok":
+        raise ValueError("%s is not a healthy database (%s)"
+                         % (os.path.basename(src), row[0] if row else "unreadable"))
+    tmp = dest + ".restoring"
+    try:
+        shutil.copy2(src, tmp)                  # same directory, so replace is atomic
+        os.replace(tmp, dest)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    for side in ("-wal", "-shm"):               # a stale WAL would replay onto this
+        try:
+            os.remove(dest + side)
+        except FileNotFoundError:
+            pass
+
+
 @app.get("/api/ops/backups")
 def ops_backups():
     """List available backups (newest first): id, db count, total size."""
@@ -9366,17 +9401,24 @@ def ops_restore(body: dict = Body(...)):
     if not bid or os.path.basename(bid) != bid or not os.path.isdir(src_dir):
         raise HTTPException(404, "unknown backup %r" % bid)
     safety = ops_backup()["id"]                 # never restore without a way back
-    restored = 0
-    for f in os.listdir(src_dir):
+    keep_auth = not (body or {}).get("include_auth")
+    restored, failed, skipped = 0, [], []
+    for f in sorted(os.listdir(src_dir)):
         if not f.endswith(".sqlite"):
             continue
+        if f == "auth.sqlite" and keep_auth:
+            # THE WAY BACK IN. reset.py refuses to delete it for the same reason:
+            # silently swapping in an older credential set can lock the operator out
+            # of the machine they are repairing. Opt in when that IS the intent.
+            skipped.append(f)
+            continue
         try:
-            shutil.copy2(os.path.join(src_dir, f), os.path.join(DATA, f))
+            _restore_db(os.path.join(src_dir, f), os.path.join(DATA, f))
             restored += 1
-        except OSError:
-            pass
-    return {"ok": True, "restored": restored, "safety_backup": safety,
-            "restart_required": True}
+        except (OSError, ValueError, sqlite3.Error) as e:
+            failed.append({"db": f, "error": str(e)[:200]})
+    return {"ok": not failed, "restored": restored, "failed": failed,
+            "skipped": skipped, "safety_backup": safety, "restart_required": True}
 
 
 # A games entry id is `base_key@platform` (per-platform library entry, DESIGN §11).
@@ -12771,14 +12813,20 @@ def backup_restore(body: dict = Body(...)):
         if not found:
             raise HTTPException(400, "the archive contains no databases")
         safety = ops_backup()["id"]             # never restore without a way back
-        restored = []
+        keep_auth = not body.get("include_auth")
+        restored, failed, skipped = [], [], []
         for f in found:
+            if f == "auth.sqlite" and keep_auth:
+                skipped.append(f)               # the way back in — see ops_restore
+                continue
             try:
-                shutil.copy2(os.path.join(stage, "dbs", f), os.path.join(DATA, f))
+                _restore_db(os.path.join(stage, "dbs", f), os.path.join(DATA, f))
                 restored.append(f)
-            except OSError as e:
+            except (OSError, ValueError, sqlite3.Error) as e:
+                failed.append({"db": f, "error": str(e)[:200]})
                 print("restore %s: %s" % (f, e), file=sys.stderr)
-        return {"ok": True, "restored": restored, "count": len(restored),
+        return {"ok": not failed, "restored": restored, "count": len(restored),
+                "failed": failed, "skipped": skipped,
                 "safety_backup": safety, "restart_required": True}
     finally:
         shutil.rmtree(stage, ignore_errors=True)
