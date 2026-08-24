@@ -50,3 +50,21 @@ firebase*.json
 .new_keys
 .gogchk
 server.pid
+
+# --- development-time material: needed in a CHECKOUT, never at runtime ---
+# The image is what the app needs to RUN. Everything below is what a developer needs,
+# and it was all being copied in by `COPY . /app`: ~130 test scripts plus a 2 MB image
+# corpus, the verify_*.py one-offs (one of which used to rsync /data), the agent skills,
+# and the test runner. scripts/ itself stays — ssmirror-loop.sh runs in the container.
+tests/
+ludodex/verify_*.py
+skills/
+scripts/run_tests.sh
+
+# run artifacts that must never be baked in (ss_mirror writes these into the data dir;
+# a copy in the repo root is always a stray)
+ss-missing-ids.json
+ss-missing-ids.done
+*-missing-ids.json
+.itchchk
+.eachk

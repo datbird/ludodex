@@ -1,4 +1,12 @@
-# Only needed for the Firebase/Firestore sync target (sync_target=firebase|both).
-# PocketBase sync needs none of this — it uses the Python standard library.
+# The ONE extra package a bare (non-Docker) checkout needs to use Firestore as the
+# two-way backing store (`backingstore_backend=firebase`, see docs/SYNC.md). The Docker
+# image installs it already, via requirements.txt — this file exists for a plain
+# checkout, and because ludodex/remote_db.py names it when the import fails.
+#
+# Every other backing-store backend needs nothing extra: PocketBase is stdlib urllib,
+# and the SQL adapters' drivers are in requirements.txt.
+#
 #   python3 -m pip install --user -r requirements-firebase.txt
+#
+# Keep the pin in step with requirements.lock.
 google-auth>=2.0

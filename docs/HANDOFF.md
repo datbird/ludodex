@@ -1,12 +1,19 @@
 # ludodex — Handoff & Context
 
-**One-stop orientation** for picking ludodex back up (esp. now that dev is moving to
-the AI-server VM). Covers what ludodex is, what's built, where every document/script
-lives, and — the main event — the **full plan for the last open task: the AI-forward
-server (§6)**.
+**One-stop orientation** for picking ludodex back up. Covers what ludodex is, what's
+built, and where every document and script lives.
 
-Repo: `github.com/datbird/ludodex` (private). Last pushed HEAD at time of writing:
-see `git log -1`.
+Repo: `github.com/datbird/ludodex` — **public**. Nothing about the maintainer's own
+infrastructure belongs in this file; host addresses, credentials and operational notes
+live outside the repo.
+
+> **§6 of this document was a PLAN, and it shipped.** It described the AI-forward server
+> — FastAPI, the React UI, Docker, `requirements.txt` — as the last open task. All of it
+> exists now, and the API is ~230 endpoints rather than the eight sketched below. §6 is
+> kept as the record of what was intended, with each subsection marked against what
+> actually got built, because several of the decisions in it are still load-bearing and
+> the *reasoning* is not written down anywhere else. Do not read it as a description of
+> the current system: for that, read `README.md`, `DESIGN.md` and the per-topic pages.
 
 ---
 
@@ -23,8 +30,8 @@ Two intended uses:
 2. **Bridge** between ecosystems (Playnite/LaunchBox/ES-DE/RetroDECK), ludodex as the
    broker.
 
-The next big arc is the **Device layer** (designed, not built — `DESIGN.md`). The
-**immediate** next build is the **AI-forward server** (this doc, §6).
+The **Device layer is built**: devices, publish rules, plan/apply, and an install
+ledger (`ludodex/publish*.py`, `/api/devices/{id}/publish/*`). `DESIGN.md` has the model.
 
 ---
 
@@ -33,14 +40,17 @@ The next big arc is the **Device layer** (designed, not built — `DESIGN.md`). 
 | Area | State | Key scripts |
 |---|---|---|
 | Canonical catalog (dedup on `norm_key`) | ✅ | `build_library.py`, `titlenorm.py`, `romtags.py` |
-| Ownership sources: Steam·Epic·GOG·itch·**EA** | ✅ | `steam_owned.py` `epic_owned.py` `gog_owned.py` `itch_owned.py` `ea_owned.py` |
+| Ownership sources: Steam·Epic·GOG·itch·EA·**PSN·Xbox·Nintendo** | ✅ | `steam_owned.py` `epic_owned.py` `gog_owned.py` `itch_owned.py` `ea_owned.py` `psn_owned.py` `xbox_owned.py` `nintendo_owned.py` |
 | Emulation ROM index + local archives | ✅ | `build_romdb.py`, `crawl.py`, `process.py` |
 | Metadata: **IGDB** (live) | ✅ | `igdb.py`, `igdb_enrich.py` |
-| Metadata/media: **ScreenScraper** | ⏸ code done, **blocked on devid** | `screenscraper.py`, `ss_scrape.py` |
+| Metadata/media: **ScreenScraper** | ✅ live (devid ships embedded) | `screenscraper.py`, `ss_scrape.py`, `ss_mirror.py` |
+| Metadata: TheGamesDB · MobyGames · ArcadeDB · ZXInfo · libretro · Wikidata | ✅ | see `SOURCES.md` |
 | Media layer: index → choose → materialize (hybrid) | ✅ | `media.py` `media_index.py` `media_fetch.py` `media_choose.py` |
 | Frontend **Playnite** — both ways incl. media | ✅ | `playnite.py` `playnite_import.py` `playnite_export.py` `scripts/playnite_bridge.ps1` |
 | Frontend **LaunchBox** — both ways incl. media | ✅ | `launchbox.py` `launchbox_import.py` `launchbox_export.py` |
-| Remote sync (PocketBase / Firestore) | ✅ | `sync.py`, `requirements-firebase.txt` |
+| Backing store: two-way sync (PocketBase/Postgres/Supabase/MySQL/Firestore) | ✅ | `dbsync.py`, `remote_db.py` — see `SYNC.md` |
+| **FastAPI server + React SPA + Docker** (this doc's §6) | ✅ | `server/app.py`, `web/`, `Dockerfile`, `requirements.txt` |
+| **Device publishing** (rules → plan → apply → ledger) | ✅ | `publish.py` `publish_plan.py` `publish_apply.py` `publish_profiles.py` |
 | Config + integrations registry | ✅ | `config.py` (`config.py integrations`) |
 | Orchestration | ✅ | `scripts/update.sh`, `scripts/auth_status.sh`, `scripts/setup.sh` |
 
@@ -49,17 +59,17 @@ layer (95k assets indexed, ~71% catalog has art, content-addressed chosen repo),
 **Playnite & LaunchBox both-ways including media** (the frontend-sync hub), and the
 `DESIGN.md` device-layer spec.
 
-**Data artifacts (gitignored — live on the producer machine):**
+**Data artifacts (gitignored — they live in `$LUDODEX_DATA`, `/data` in the container):**
 `game-library.sqlite` (catalog), `media-index.sqlite` (assets by `norm_key`),
-`metadata-cache.sqlite` (IGDB), `config.sqlite`, `screenscraper-cache.sqlite`, and
-the `media/` content-addressed repo (`<sha1>.<ext>`). The Deck-local ROM index is
-`/home/deck/roms-index.sqlite`.
+`metadata-cache.sqlite`, `config.sqlite`, `roms-index.sqlite`, `screenscraper-cache.sqlite`
+and the rest — `SCHEMA.md` has the full list — plus the `media/` content-addressed repo
+(`<sha1>.<ext>`).
 
 ---
 
 ## 3. Document & code index
 
-**Docs (all in the repo root):**
+**Docs (all in `docs/`, except `README.md`):**
 - **`README.md`** — user-facing overview: why, quick start, how it works, schema, per-
   feature sections (media, Playnite, LaunchBox, sync), configuration, auth.
 - **`AUTH.md`** — every integration's credentials: how to obtain each token/key, a
@@ -69,9 +79,11 @@ the `media/` content-addressed repo (`<sha1>.<ext>`). The Deck-local ROM index i
   `origin` provenance, changelog, conflict awareness), and the Build-now / Next /
   Someday docket. **Selection policy** is the one open design decision.
 - **`HANDOFF.md`** — this file.
-- **`AI.md`** — how the AI features get model access (BYOAI): your own Claude
-  subscription vs. a developer API key, what each allows, and the (currently paused)
-  subscription Agent-SDK credit. Read before wiring AI auth.
+- **`AI.md`** — how the AI features get model access (BYOAI: an API key, from one of
+  four providers), the 14 configurable areas, and how a model is chosen per area.
+- **`SYNC.md`** — the two-way backing store (`dbsync.py`).
+- **`DOCKER.md`** · **`CONFIG.md`** · **`PIPELINE.md`** · **`SOURCES.md`** ·
+  **`SCHEMA.md`** · **`FRONTENDS.md`** · **`CLOUDFLARE.md`** · **`TASKS.md`**.
 - **`skills/*/SKILL.md`** — the 5 Claude skills: `games-update`, `games-query`,
   `games-auth`, `games-sync`, `games-playnite`.
 
@@ -80,56 +92,62 @@ credential steps; `python3 ludodex/config.py integrations <id>` drills in.
 
 ---
 
-## 4. Dev is moving to the AI-server VM
+## 4. Where it runs
 
-Going forward the server lives on the **AI-server VM** (the locked decision — it's
-always-on; the Deck can be off). Host address and SSH access creds are tracked
-outside this repo (operational notes / your own secret store), never committed here.
+ludodex runs as a **single container** (`Dockerfile`, `docker-compose.yml`, see
+`DOCKER.md`): FastAPI + the built React SPA + every OS tool the pipeline shells out to.
+All durable state is one volume at `/data`. Host addresses and credentials are tracked
+outside this repo.
 
-**Producer/consumer split (important):** the **Deck stays the producer** for
-Deck-local sources it alone can see — ES-DE/RetroDECK media on the microSD, the ROM
-index. It builds those and **pushes** the SQLite DBs + the `media/` repo to the VM.
-The **VM** runs the API/UI/AI and can itself run the remote-source pulls (Steam/IGDB/
-ScreenScraper) since those are just network calls. Decide the exact push mechanism in
-§6 (rsync DBs vs. run the pipeline on the VM vs. PocketBase as the shared store).
+The historical **producer/consumer split** is worth knowing because it still shapes the
+code: the Steam Deck was the producer for Deck-local sources it alone could see (ES-DE /
+RetroDECK media, the ROM index) and pushed its SQLite DBs to the server. That is why the
+pipeline scripts are standalone, and why everything joins on `norm_key` rather than a row
+id — `game_id` is rebuilt on every run. Today one container runs the whole pipeline, and
+other machines are reached as **devices** (`ludodex/devices.py`) rather than as a second
+half of the build.
 
-**Getting the repo onto the VM:**
+**Getting a checkout running without Docker:**
 ```bash
-ssh <ai-server-host>          # address in your operational notes, not the repo
 git clone https://github.com/datbird/ludodex.git
 cd ludodex
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements-firebase.txt   # + FastAPI deps once §6 adds requirements.txt
-# bring over the data artifacts (gitignored) from the Deck:
-#   rsync -av deck:~/game-ownership/{*.sqlite,media} ./
+pip install -r requirements.txt -c requirements.lock
 python3 ludodex/config.py init
+bash scripts/setup.sh            # guided credential walkthrough
 ```
-Node 22 + pnpm are already on the Deck for the React build (`deck-build-toolchain`
-memory); install the same on the VM, or build the SPA on the Deck and ship static.
 
 ---
 
 ## 5. Status of the task list
 
-- ✅ Done: IGDB pass, media layer (local + remote + choose/materialize), EA puller,
-  Playnite media both-ways, LaunchBox integration.
-- ⏸ **ScreenScraper** — removed from the active list; **parked pending the forum
-  devid/devpassword**. Code is complete; unblock steps are in `DESIGN.md` §11.
-- ◻ **AI-forward server** — the only open task. Full plan below.
+The live backlog is **`TASKS.md`**, not this file. As of this rewrite everything section
+6 planned is shipped, ScreenScraper is live (the devid ships embedded, so there is
+nothing to unblock), and the device layer is built.
 
 ---
 
-# 6. PLAN — AI-forward server (the last task)
+# 6. PLAN — AI-forward server — **SHIPPED**
+
+> **HISTORICAL.** This was the plan; it was built. Each subsection below is marked
+> against what exists. Kept because the *reasoning* behind several still-live decisions
+> is recorded nowhere else. For the current system read `README.md`, `DESIGN.md`,
+> `DOCKER.md` and `AI.md`.
 
 > **Goal:** turn ludodex from a CLI catalog into a service: a **REST API** + **Web UI**
 > that **serves the media itself**, hosted on the AI-server VM, with **AI** features
 > (natural-language search, smart art/metadata picks, dedupe assist). Stack is locked:
 > **Python FastAPI + React/Vite**, reusing the existing pipeline in-process.
 
-### 6.1 Architecture
+### 6.1 Architecture — **BUILT, differently**
+
+*What shipped:* one Docker container, not a systemd + nginx deployment on a VM, and the
+Deck→server push was replaced by the device layer. The in-process reuse of the pipeline
+modules is exactly as planned and is still how it works.
+
 
 ```
-   PRODUCER (Steam Deck)                 AI-SERVER VM (<user>@<ai-server-host>)
+   PRODUCER (Steam Deck)                 SERVER HOST (<user>@<ai-server-host>)
    ─────────────────────                 ──────────────────────────────────
    builds Deck-local data:               FastAPI app (uvicorn)
      ES-DE/RetroDECK media   ── push ──►   ├─ reads game-library.sqlite (catalog)
@@ -146,7 +164,13 @@ FastAPI imports the existing modules (`config`, `build_library` helpers, `media`
 `media_choose`, the `*_owned`/`*_export` scripts) **in-process** — no rewrite; the
 pipeline becomes a library the API calls.
 
-### 6.2 Data access
+### 6.2 Data access — **BUILT: (c)**
+
+*What shipped:* option **(c)**, not the recommended (a). The whole pipeline runs on the
+server; other machines are devices. Option (b) — PocketBase as the shared store — became
+something better than a push: the two-way **backing store** (`dbsync.py`, `SYNC.md`),
+where SQLite is the local cache and the remote holds the durable truth.
+
 
 - **Read-mostly** over the SQLite DBs (WAL mode for concurrent reads).
 - Join everything on **`norm_key`** (the stable key; game_id is rebuilt each run).
@@ -155,15 +179,22 @@ pipeline becomes a library the API calls.
 - **Push mechanism (decide):**
   - **(a) rsync the DBs + repo** Deck→VM after each `scripts/update.sh` (simplest; what the
     locked plan assumed).
-  - **(b) PocketBase/Firestore as the shared store** — `sync.py` already mirrors the
-    catalog; the API could read PocketBase instead of SQLite (adds a hop, gains a
-    ready API + auth).
+  - **(b) PocketBase/Firestore as the shared store** — the one-way `sync.py` mirror (now
+    retired) already pushed the catalog; the API could read PocketBase instead of SQLite
+    (adds a hop, gains a ready API + auth).
   - **(c) run the whole pipeline on the VM** and have the Deck only push its ES-DE
     media + ROM index. Cleanest long-term; needs the store creds on the VM.
   - **Recommendation:** start with (a) — fewest moving parts; revisit (c) once the
     server is real.
 
-### 6.3 API surface (v1)
+### 6.3 API surface (v1) — **BUILT, ~230 endpoints**
+
+*What shipped:* everything below, plus a great deal more (devices, publish, collections,
+fileops, backups, AI settings and spend, provider mirrors, review queues). Two
+corrections to the sketch: **`/api/search` is a `POST`**, not a `GET` — a
+natural-language query with its filters does not belong in a URL — and every `/api/*`
+route sits behind the session middleware.
+
 
 ```
 GET  /api/games            list/search; filters: q, source, platform, has_kind=cover,
@@ -187,7 +218,8 @@ POST /api/ownership /pins /ack                  manual edits → write ledger + 
 This realizes the "hybrid" media decision: eager-all is ~17 GB, so the server keeps
 the chosen repo small and fills it lazily as assets are requested.
 
-### 6.4 Web UI (React/Vite)
+### 6.4 Web UI (React/Vite) — **BUILT**
+
 
 - **Library grid** — covers, filter/search bar, source & platform facets, "has art"
   toggles; click → detail.
@@ -197,19 +229,23 @@ the chosen repo small and fills it lazily as assets are requested.
   acknowledge/un-acknowledge, changelog viewer.
 - Build static; serve from FastAPI or nginx. Talks only to `/api/*`.
 
-### 6.5 AI features (Claude — phased)
+### 6.5 AI features — **BUILT, 14 areas**
 
-Tier the models by cost: **Haiku 4.5** for cheap
-classification/extraction, **Sonnet 4.6** for most reasoning, **Opus 4.8** for the
-hardest calls. **Model access is BYOAI — see `AI.md`** for the full rules: a self-hosting
-subscriber can run it on their own Claude **subscription** (Agent SDK / `claude -p`;
-currently draws from plan usage limits), while any multi-user/hosted deployment needs a
-**developer API key** (Anthropic / OpenRouter / etc.); a subscription includes no raw API
-credits. Store any API key per `AUTH.md`'s credential convention (add an integration entry).
+*What shipped:* far more than the three below — see the area table in `AI.md`. Two things
+this section got wrong and that `AI.md` used to repeat:
+
+- **There is no subscription / Agent SDK / `claude -p` path.** All four providers
+  (`anthropic`, `openai`, `gemini`, `openrouter`) are API-key based. Nothing else was
+  ever implemented.
+- **Cost tiering is not automatic.** Every area defaults to the active provider's default
+  model — Haiku, on `anthropic`. A bigger model is a per-area setting
+  (`ai_area_<id>_model`) you choose; nothing steps up on its own.
+
+Store any API key per `AUTH.md`'s credential convention.
 
 1. **NL search** — "co-op platformers I own playable on the Deck" → the model emits a
    structured catalog query (function-calling against the schema) + optional semantic
-   rerank of titles/descriptions. Endpoint: `GET /api/search`.
+   rerank of titles/descriptions. Endpoint: `POST /api/search` (this said `GET`).
 2. **Smart art/metadata pick** — when providers disagree or a kind is missing, an AI
    assist proposes the best cover/metadata (or flags low-quality art). Augments the
    deterministic `media_choose` priority, never silently overrides it.
@@ -217,18 +253,26 @@ credits. Store any API key per `AUTH.md`'s credential convention (add an integra
    titles, punctuation, sub-titles); the model adjudicates merge/no-merge, a human
    confirms. Feeds back into `titlenorm` rules.
 
-### 6.6 Deployment on the VM
+### 6.6 Deployment — **BUILT as Docker**
 
-- `uvicorn` under **systemd**; **nginx/caddy** for TLS + static SPA.
+*What shipped:* the "optionally containerize" line at the bottom of this list is what
+happened, and it replaced the rest. `uvicorn` runs as the container's `CMD`; the SPA is
+built in a Docker stage and served by FastAPI; TLS is the reverse proxy's job outside the
+container (`CLOUDFLARE.md`). `requirements.txt` exists, and is pinned by
+`requirements.lock`.
+
+- ~~`uvicorn` under **systemd**; **nginx/caddy** for TLS + static SPA.~~
 - SQLite **WAL**; the DBs are read-mostly (writes only for ledger edits + serve-cache
   sha1 backfill).
 - Secrets live in `config.sqlite` (env var > config value); ludodex never reads
   1Password at runtime.
 - Optionally containerize (Docker) for a one-command deploy — the original vision
-  mentioned a "single Linux/Docker deployment."
-- Add a `requirements.txt` (fastapi, uvicorn, pillow, anthropic, …) when build starts.
+  mentioned a "single Linux/Docker deployment." **← this is what was done.**
+- ~~Add a `requirements.txt` (fastapi, uvicorn, pillow, anthropic, …) when build starts.~~
+  Done; see `requirements.txt` + `requirements.lock`.
 
-### 6.7 Phasing (maps to the locked plan: server core → UI → AI)
+### 6.7 Phasing — **all four phases done**
+
 
 1. **API core + media resolver** — `/api/games`, `/api/games/{nk}`, `/api/media/...`
    (materialize-on-serve), `/api/stats`. The DB-push mechanism (§6.2). Read-only.
@@ -238,12 +282,11 @@ credits. Store any API key per `AUTH.md`'s credential convention (add an integra
    endpoints + the manual-edit POSTs writing the ledger + changelog. Enables a future
    **multi-user client** (auth + per-user actor — Someday).
 
-### 6.8 Open questions (decide before/while building)
+### 6.8 Open questions — **answered**
 
-- **DB push mechanism** — §6.2 (a)/(b)/(c). *Recommend (a) to start.*
-- **Auth** — v1 single-user (a static token / LAN-only) vs. real multi-user now. The
-  `DESIGN.md` actor model wants per-user attribution eventually; don't over-build it
-  for v1.
+- ~~**DB push mechanism**~~ → (c), plus the two-way backing store. See 6.2.
+- ~~**Auth**~~ → real accounts with session middleware over every `/api/*` route, plus
+  Cloudflare Access as an optional outer gate (`CLOUDFLARE.md`).
 - **Selection policy** (`DESIGN.md` §9) — not a server blocker, but the device-layer
   endpoints need it.
 - **Serve-cache eviction** — when the lazily-materialized repo grows, LRU-evict
@@ -253,16 +296,13 @@ credits. Store any API key per `AUTH.md`'s credential convention (add an integra
 
 ## 7. Parked / Someday (don't lose these)
 
-- **ScreenScraper** — finish the moment the devid arrives (`DESIGN.md` §11).
-- **Device layer v1** (push-only) — full model in `DESIGN.md`; build after/with the
-  server.
-- **New sources** — Sony **PlayStation** (PSN console + PC via partner stores) and
-  Microsoft **Xbox / Microsoft Store** (PC Game Pass + Xbox console); both
-  account-aware. Ubisoft/Battle.net/Amazon as they come.
+- ~~**ScreenScraper**~~ — live; the devid ships embedded.
+- ~~**Device layer v1**~~ — built, including publish rules/plan/apply and the ledger.
+- ~~**New sources: PlayStation, Xbox**~~ — both built (`psn_owned.py`, `xbox_owned.py`),
+  as is Nintendo (`nintendo_owned.py`). Ubisoft/Battle.net/Amazon as they come.
 - **Bidirectional / hub-elsewhere sync** and the **multi-user client app**.
 - **Install-triggering** (legendary/store installs) — explicitly out of scope.
 
 ---
 
-*Everything above is in the repo. The one open task is §6; the one open design
-decision is selection policy (`DESIGN.md` §9). Start the server at Phase 1 (§6.7).*
+*Section 6 is a record, not a roadmap — it shipped. The live backlog is `TASKS.md`.*

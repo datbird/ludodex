@@ -162,9 +162,9 @@ A four-reviewer audit (media/vision · collections · identity/spend · server/U
 | ~~26~~ | ~~**Web-sourced media must rank below curated providers**~~ **ALREADY TRUE** | datbird's ranking policy (2026-08-02): tier 1 = deterministic image fitness (ratio, resolution, filler), tier 2 = the curated providers ludodex supports (IGDB/SS/SGDB/Steam), tier 3 = web-search-obtained media. Tiers 1 and 2 are ALREADY the design — `select()` ranks shape and filler above provider, `shape_ok` never penalises unknown dimensions, and `PRIORITY` already puts screenscraper above igdb for covers. **Tier 3 is the gap**: Wikimedia/`page_images`/`_complete_text_web` art sits in the same provider list with no demotion. **Verified 2026-08-02: no change needed.** Web art is tagged `provider='web'` and no `PRIORITY` list contains it, so `rank.get(provider, 99)` already places it below every curated provider. All three tiers of the policy are in place. |
 | ~~21~~ | ~~**Every provider is a provider**~~ **DONE 2026-08-03** | All three parts shipped. **(a)** SS eligibility follows `games.platform`. **(b)+(c)** `provider_ids.py` is the identity cache and `_match_providers()` records SS + SGDB identity for every game from EVERY onramp including the import (`provmatch` phase in `_sync_worker`) — a match is not an ingest. Backfilled: SS 1610/2255, SGDB 2252/2255, all 2255 decided. Three matcher defects found and fixed along the way (failure-recorded-as-miss on all three providers; PC games searched on raw title only because `systeme_id('pc')` is None; trademark + edition-suffix normalisation). Guards: `test_match_is_not_ingest.py`, `test_provider_query_rules.py`, `check_invariants.py` I7.
 | ~~22~~ | ~~**Deterministic "Fetch from <provider>"**~~ **DONE 2026-08-03** | `GET /api/media/matched-providers/{nk}` + `POST /api/media/fetch/{nk}`, and the `MediaFetchMenu` control beside the wand in BOTH placements (All Media + each category). Another caller of the shared pipeline narrowed by `provider=`/`kinds=`, not a new fetch path. Free by definition — no AI area consulted. Unmatched providers are shown DISABLED rather than hidden.
-| ~~18~~ | ~~**Live library repair — duplicate Ys collection**~~ **DONE 2026-08-01** | The review queue was accepted 2026-08-01 shortly BEFORE the apply-path guard (`97c8faa`) deployed, so the duplicate it prevents got in: `ys i` and `ys 2` are both recorded as "Ys I & II Chronicles+" with identical members, and the two phantom member entries carry a via-row from each — double-credited. Also still live: `ms-dos` ×11, `microsoft windows` ×1, `pc-8801` ×2, because the platform re-key rides `materialize_members`, which fires on record/apply/delete and hasn't been triggered since the deploy. **The whole repair is ONE call** — `DELETE /api/collections/ys 2` runs `clear_collection` then `_materialize_collection_members()`, which drops the duplicate's via-rows, collapses both Ys members onto the apps actually owned (removing both phantoms and the `pc-8801` facet), and re-keys the rest to `pc`. Expected: facets 16 → 13, Ys 8 entries → 6. Verified on a catalog copy and idempotent on re-run. Delete `ys 2`, NOT `ys i` — `ys i` holds the canonical appid 223810. **RESOLVED** — repaired 2026-08-01 by calling the endpoint's own two functions in-container (`clear_collection` + `materialize_members`): collections 30→29, facets 16→12, junk labels none, Ys 8→6 entries, re-run idempotent. Backup at `<appdata>/ludodex-repair-backup-20260801/`. |
+| ~~18~~ | ~~**Live library repair — duplicate Ys collection**~~ **DONE 2026-08-01** | The review queue was accepted 2026-08-01 shortly BEFORE the apply-path guard (`97c8faa`) deployed, so the duplicate it prevents got in: `ys i` and `ys 2` are both recorded as "Ys I & II Chronicles+" with identical members, and the two phantom member entries carry a via-row from each — double-credited. Also still live: `ms-dos` ×11, `microsoft windows` ×1, `pc-8801` ×2, because the platform re-key rides `materialize_members`, which fires on record/apply/delete and hasn't been triggered since the deploy. **The whole repair is ONE call** — `DELETE /api/collections/ys 2` runs `clear_collection` then `_materialize_collection_members()`, which drops the duplicate's via-rows, collapses both Ys members onto the apps actually owned (removing both phantoms and the `pc-8801` facet), and re-keys the rest to `pc`. Expected: facets 16 → 13, Ys 8 entries → 6. Verified on a catalog copy and idempotent on re-run. Delete `ys 2`, NOT `ys i` — `ys i` holds the canonical appid 223810. **RESOLVED** — repaired 2026-08-01 by calling the endpoint's own two functions in-container (`clear_collection` + `materialize_members`): collections 30→29, facets 16→12, junk labels none, Ys 8→6 entries, re-run idempotent. A backup of the catalog was taken beside the data directory first. |
 | ~~19~~ | ~~**No UI to delete a collection**~~ **DONE 2026-08-03** | `DELETE /api/collections/{key}` and `api.deleteCollection` existed from the start and NOTHING in `web/src` ever called them. A **Remove collection** control now sits in the collection section of the detail panel — the one surface that already knows a collection exists. Confirms first, spelling out that the member entries go with it while the collection game itself stays, then re-reads the detail and marks the grid dirty.
-| ~~17~~ | ~~**Agent/API auth**~~ **DONE 2026-08-22** | The API surface is complete (192 endpoints — scan, apply, rebuild, collections are all there), but every `/api/*` route is behind the session middleware, so an agent can't drive the app it maintains without a credential. That gate is correct — the instance is internet-exposed — so the fix is a way IN, not a way around: a dedicated non-admin account, or a scoped API token honoured alongside the session cookie. Until then, agent-side verification has to go through `docker exec`, which bypasses the very surface it should be testing. NB an agent with host root can mint its own session in `auth.sqlite`; that it *shouldn't* is a matter of conduct, not enforcement, which is itself an argument for issuing a real credential. | **RESOLVED.** A dedicated non-admin account now exists: ludodex user `claude-verify` (id 2, role `user`), password in 1Password (`<vault>` -> "ludodex claude-verify (agent UI verification)"). It is a way IN, as this task asked for, not a way around: the session middleware is untouched and the account is not admin. Driven through xbrowse (real Chrome on <workstation>) against `http://<docker-host>:8001/`, so verification finally goes through the surface it is testing rather than `docker exec`. Proved its worth immediately: the detail Back button reported `isVisible() == true` while `.hero-tools` painted over it, and only `document.elementFromPoint` at the element's centre found it. Two wrong explanations were given before that probe. Notes and the automation gotchas live in the `ludodex-agent-ui-verification` memory.
+| ~~17~~ | ~~**Agent/API auth**~~ **DONE 2026-08-22** | The API surface is complete (192 endpoints — scan, apply, rebuild, collections are all there), but every `/api/*` route is behind the session middleware, so an agent can't drive the app it maintains without a credential. That gate is correct — the instance is internet-exposed — so the fix is a way IN, not a way around: a dedicated non-admin account, or a scoped API token honoured alongside the session cookie. Until then, agent-side verification has to go through `docker exec`, which bypasses the very surface it should be testing. NB an agent with host root can mint its own session in `auth.sqlite`; that it *shouldn't* is a matter of conduct, not enforcement, which is itself an argument for issuing a real credential. | **RESOLVED.** A dedicated non-admin account now exists: ludodex user `claude-verify` (id 2, role `user`), password held in the maintainer's password manager, out of the repo. It is a way IN, as this task asked for, not a way around: the session middleware is untouched and the account is not admin. Verification drives a real browser against the deployed instance, so it finally goes through the surface it is testing rather than `docker exec`. Proved its worth immediately: the detail Back button reported `isVisible() == true` while `.hero-tools` painted over it, and only `document.elementFromPoint` at the element's centre found it. Two wrong explanations were given before that probe. Notes and the automation gotchas are kept with the maintainer's operational notes, outside this repo.
 
 The one-way **"Publish catalog"** mirror was **retired** 2026-07-21: nothing ever read what
 it published, and its name was persistently confused with the backing store that actually
@@ -297,16 +297,25 @@ hardcoded `0` rather than the prior value, silently disabling scheduled sync (it
 Guards added so it cannot recur:
 
 - `test_support.isolate()` ASSIGNS a temp dir; `assert_isolated()` exits loudly if the
-  resolved dir is live (`/data`, `<appdata>/ludodex`) or unset.
+  resolved dir is live (`/data`, plus anything in `LUDODEX_LIVE_DIRS`) or unset.
 - `test_dbsync_live.py`'s hand-rolled version of that check now calls the shared one.
 - The three tests that mutate the running instance BY DESIGN (`test_autosync`,
   `test_dbsync_roundtrip`, `test_dbsync_live`) require `LUDODEX_LIVE_TESTS=1`.
 - `scripts/run_tests.sh` gives every test its own scratch dir instead of trusting it.
 - `test_isolation_guard.py` pins all of the above, including a sweep that fails if any
-  test file reintroduces `setdefault` on `LUDODEX_DATA`.
+  test file reintroduces `setdefault` on `LUDODEX_DATA`. That sweep used to scan
+  `ludodex/` — where the tests used to live — and so had been scanning nothing since
+  they moved; it now scans `tests/` and asserts it can see the suite before trusting
+  its own verdict.
+- `scripts/run_tests.sh` **defaults to a THROWAWAY container** (`docker run --rm`, the
+  checkout mounted read-only, no data volume), and resets every live gate —
+  `LUDODEX_LIVE_TESTS`, `LUDODEX_LIVE_AI`, `LUDODEX_LIVE_CONFIG` — so an inherited
+  shell variable can no longer turn a routine sweep into real AI spend.
 
-**Run the suite with `docker exec -i ludodex bash /app/scripts/run_tests.sh`** — never by looping
-over `test_*.py` by hand.
+**Run the suite with `./scripts/run_tests.sh`** — never by looping over `test_*.py` by
+hand, and never against the running production container. `--local` runs it against the
+checkout with the host python; `--live-data` is the deliberate opt-in that mounts the
+real data volume into a throwaway container.
 
 ## Guards
 
@@ -319,9 +328,15 @@ over `test_*.py` by hand.
 
 ## Parked / blocked
 
-- **ScreenScraper** — code complete, blocked on a forum devid/devpassword. See `DESIGN.md` §11.
-- **Nintendo source** — PKCE login verified and UI-wired; `fetch_owned()` is still a TODO.
-- **Device layer v1** (push-only) — designed in `DESIGN.md`, not built.
+- ~~**ScreenScraper**~~ — **LIVE.** The devid/devpassword that blocked it now ship
+  embedded (they identify the software, not the user); an end-user ssid only raises the
+  request tier.
+- ~~**Nintendo source**~~ — **LIVE.** `nintendo_owned.fetch_owned()` is implemented — via
+  the **Virtual Game Card portal plus a browser cookie**, not the PKCE flow this entry
+  described; that research is superseded (see the 2026-08-22 design spec). `nintendo` is
+  in `build_library._STORE_SRCS`, and the entry two below already counts its 184 titles.
+- ~~**Device layer v1**~~ (push-only) — **BUILT**: rules → plan → apply → ledger, in
+  `ludodex/publish*.py` and the Publish tab.
 - **Discover / want-vs-have capstone** — store sale-watching over the wanted list. Wishlist
   import (Steam, GOG) and the Wanted attribute exist; the universe browser and price watching
   do not.

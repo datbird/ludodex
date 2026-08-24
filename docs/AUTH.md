@@ -188,7 +188,7 @@ Like LaunchBox it's a **meta-layer**, not a source (`in_playnite` provenance onl
 .\scripts/playnite_bridge.ps1 -Export -Path playnite_games.json
 ```
 ```
-python3 ludodex/config.py set playnite_import_json <path to playnite_games.json>  # update.sh ingests it
+python3 ludodex/config.py set playnite_import_json <path to playnite_games.json>  # scripts/update.sh ingests it
 python3 ludodex/playnite_export.py        # catalog + chosen art -> ludodex_to_playnite.json + _media/ bundle
 # copy the JSON AND its <name>_media/ folder to the Playnite machine, then:
 #   .\scripts/playnite_bridge.ps1 -Import -Path ludodex_to_playnite.json
@@ -325,26 +325,37 @@ rejected by URL pattern before reaching the vision picker; see `media_web._is_ju
 
 ---
 
-## Remote sync (optional)
+## Backing store (optional)
+
+Credentials for the external database that holds your durable data. What it does and how
+it reconciles is **[SYNC.md](SYNC.md)**; this section is only about the secrets.
 
 ### PocketBase
-Mirrors the catalog to a PocketBase instance. Auth = a dedicated **superuser**.
+Auth = a dedicated **superuser**.
 ```
 python3 ludodex/config.py set pocketbase_url https://<host>:8090
 python3 ludodex/config.py set pocketbase_admin_email <email>
-python3 ludodex/config.py set pocketbase_admin_password <password>
-python3 ludodex/config.py set sync_target pocketbase        # auto-sync after each rebuild
+python3 ludodex/config.py set pocketbase_admin_password <password>   # env POCKETBASE_PASSWORD overrides
+python3 ludodex/config.py set backingstore_backend pocketbase
 ```
 Create the superuser on the server:
 `docker exec <container> /pb/pocketbase superuser upsert <email> <password>`.
-Sync: `python3 sync.py` (delta) / `python3 sync.py --reconcile` (self-heal).
+Then: `python3 ludodex/dbsync.py pocketbase` (add `--dry-run` to see it first).
+
+### Postgres / Supabase / MySQL
+```
+python3 ludodex/config.py set backingstore_backend postgres     # or supabase | mysql
+python3 ludodex/config.py set postgres_url postgresql://user:pass@host:5432/ludodex
+# ...or the discrete fields: postgres_host/_port/_db/_user/_password (mysql_* for MySQL)
+```
+The password fields are stored in `config.sqlite`, which is gitignored.
 
 ### Firebase Firestore
 ```
 python3 ludodex/config.py set firebase_project_id <project>
 python3 ludodex/config.py set firebase_sa_json /path/to/service-account.json
-python3 ludodex/config.py set sync_target firebase      # or 'both'
-pip install -r requirements-firebase.txt        # google-auth, etc.
+python3 ludodex/config.py set backingstore_backend firebase
+pip install -r requirements-firebase.txt        # google-auth; the Docker image has it already
 ```
 Get the service-account JSON from the Firebase console → Project settings →
 Service accounts → Generate new private key. (Keep the JSON out of git — `*.json`

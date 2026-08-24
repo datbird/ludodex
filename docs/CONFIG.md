@@ -26,7 +26,8 @@ python3 ludodex/config.py get steam_id            # read one
 | `unraid_host` / `roms_path` | ssh target and ROM archive path, for `scripts/update.sh --roms` |
 | `launchbox_path` | LaunchBox install root |
 | `playnite_import_json` | path to a Playnite export to ingest |
-| `sync_target` | `pocketbase` · `firebase` · `both` |
+| `backingstore_backend` | `pocketbase` · `postgres` · `supabase` · `mysql` · `firebase` (blank = off) — see [SYNC.md](SYNC.md) |
+| `backingstore_auto_minutes` | auto-sync the backing store every N minutes (0 = manual only) |
 
 Credentials for every integration, and how to obtain them, are in **[AUTH.md](AUTH.md)**.
 

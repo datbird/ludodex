@@ -7,7 +7,7 @@ Status: **VERIFIED against a live account**, 2026-08-22. datbird:
 > out the theory as much as possible for testing later"
 
 Written from the Playnite client's call structure, then confirmed the same day through
-datbird's logged-in Chrome profile on <workstation> (see `xbrowse`). **179 owned titles came
+a logged-in Chrome profile driven by a remote browser session. **179 owned titles came
 back: 174 `switch`, 5 `switch2`.** Every shape below was observed, not inferred.
 
 | assumption | live result |

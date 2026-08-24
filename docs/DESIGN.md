@@ -1,8 +1,12 @@
 # ludodex — Design & Roadmap
 
-The canonical spec. The CLI pipeline + media layer + frontend adapters are **built**
-(see `README.md`); the **Device layer** below is **designed, not yet built**. This
-doc is the editable source of truth we sharpen against.
+The canonical spec and the editable source of truth we sharpen against.
+
+The CLI pipeline, media layer, frontend adapters, the FastAPI server + React UI, and the
+**Device layer** — including publishing — are all **built** (see `README.md`). Sections
+that describe something as forthcoming are marked; where a roadmap item shipped, the item
+says so rather than being deleted, because the reasoning behind it is still the reasoning
+behind the code.
 
 ---
 
@@ -587,14 +591,22 @@ predicate; `base_key` retained only for "also owned on").
 - Remote sync: PocketBase / Firestore.
 
 ### 🔜 Build now
-**Finish in flight:**
-- **ScreenScraper integration (metadata + media)** — code complete (`screenscraper.py`,
-  `ss_scrape.py`, wired into `build_library.py` + `scripts/update.sh`, tier/quota-aware,
-  resumable). **BLOCKED** on the developer `devid`/`devpassword` (forum request
-  pending). The moment it arrives: set the creds, `config.py enable screenscraper`,
-  run a scrape pass, validate metadata+media merge, done.
+**Finish in flight:** — *all of this shipped; kept as the record of what was planned.*
+- ~~**ScreenScraper integration (metadata + media)**~~ — **LIVE.** `screenscraper.py`,
+  `ss_scrape.py` and `ss_mirror.py`, wired into `build_library.py` +
+  `scripts/update.sh`, tier/quota-aware and resumable. The developer `devid`/
+  `devpassword` that blocked it now ship embedded (they identify the *software*, not
+  the user), resolving env → config → embedded; an end-user `ssid`/`sspassword` is
+  optional and only raises the request tier.
 
-**Device layer v1 (push-only, no install-triggering):**
+**Device layer v1 (push-only, no install-triggering)** — *BUILT.* Items 2-8 are all
+shipped: `ludodex/devices.py` holds the account and device registries, `publish.py` /
+`publish_plan.py` / `publish_apply.py` / `publish_profiles.py` hold rules, planning,
+application and the install ledger, and the **Publish** tab drives them over
+`/api/devices/{id}/publish/*`. Selection policy (item 9) is answered by publish RULES —
+a device's selection is a set of rules resolved to an effective list, not a single global
+policy. The numbered plan is kept below as the record.
+
 1. **This `DESIGN.md`** as the spec. ✅
 2. **Account registry** — multi-account per ecosystem (config table + CLI).
 3. **Device registry** — name/kind/transport/creds/channels (config table + CLI).
@@ -606,12 +618,12 @@ predicate; `base_key` retained only for "also owned on").
 8. **First detect probe** — Steam `appmanifest` read and/or RetroDECK ROM presence.
 9. **Decide selection policy** (§9) — gates the push UX.
 
-### 🔭 Next (after v1)
+### 🔭 Next (after v1) — *the server line below shipped*
 - More push channels: **Steam shortcuts.vdf + grid art** (non-Steam games on the Deck).
 - More detect probes per account/channel; reconcile loop.
 - Remote transports (ssh/rsync to the arcade cabinet; network/Unraid shares).
-- **AI-forward server (task #6):** FastAPI exposing catalog + ledger + conflicts +
-  media serving (materialize-on-serve); React/Vite UI; AI (NL search, art/dedupe assist).
+- ~~**AI-forward server (task #6)**~~ — **BUILT.** FastAPI over catalog, ledger,
+  conflicts and media (materialize-on-serve); React/Vite UI; 14 AI areas (`AI.md`).
 
 ### 🗄️ Someday (reserved — maybe never)
 - **Install-triggering** (legendary / store installs). **Explicitly out of scope** for
@@ -621,11 +633,9 @@ predicate; `base_key` retained only for "also owned on").
 - **Multi-user client app** that fills the Playnite/LaunchBox UI role over the API
   (auth, per-user actor, sharing).
 - **New ownership sources (account-aware):**
-  - **Sony PlayStation** — PSN ownership on **console** (PS4/PS5); PlayStation **PC**
-    titles currently ship via Steam/Epic, so capture PSN as a console source and PC
-    ports through their partner store.
-  - **Microsoft Xbox / Microsoft Store** — both **PC** (Xbox app / Microsoft Store /
-    Game Pass) and **console** (Xbox Live entitlements).
+  - ~~**Sony PlayStation**~~ — **BUILT** (`psn_owned.py`).
+  - ~~**Microsoft Xbox / Microsoft Store**~~ — **BUILT** (`xbox_owned.py`).
+  - ~~**Nintendo**~~ — **BUILT** (`nintendo_owned.py`, via the Virtual Game Card portal).
   - Others as they come up: Ubisoft Connect, Battle.net, Amazon Games.
 - **EmuDeck-specific channel** (today the generic path-configurable ES-DE writer covers
   it; revisit if its layout diverges).

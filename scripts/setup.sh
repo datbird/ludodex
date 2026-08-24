@@ -4,8 +4,14 @@
 # credential, then authenticates each store and builds the first catalog.
 # Safe to re-run: existing config values are shown as defaults (Enter keeps them).
 set -u
-cd "$(dirname "$0")" || exit 1
+# THE REPO ROOT, not scripts/ — see the note in update.sh. Pinned by
+# tests/test_repo_shell_entrypoints.py.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
+cd "$ROOT" || exit 1
 export PATH="$HOME/.local/bin:$PATH"
+export PYTHONPATH="$ROOT/ludodex${PYTHONPATH:+:$PYTHONPATH}"
+# Cached store tokens live under the DATA dir, not necessarily beside the repo.
+DATA_DIR="${LUDODEX_DATA:-$ROOT}"
 
 b() { printf '\033[1m%s\033[0m\n' "$*"; }          # bold
 dim() { printf '\033[2m%s\033[0m\n' "$*"; }        # dim
@@ -98,7 +104,7 @@ GOG uses a one-time OAuth code (then a cached refresh token).
 TXT
 echo "  https://auth.gog.com/auth?client_id=$(cfg gog_client_id)&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient&response_type=code&layout=client2"
 echo
-if [ -f .gog/tokens.json ]; then
+if [ -f "$DATA_DIR/.gog/tokens.json" ]; then
   echo "  already have a cached GOG token."
 elif yes "  Authenticate GOG now?"; then
   read -rp "  paste code: " gc
@@ -128,7 +134,7 @@ Set a host + path only if your ROMs live on another machine reached over ssh;
 for a local archive, just point roms_index_db at a DB you build with:
   python3 ludodex/build_romdb.py <filelist.tsv> roms-index.sqlite <roms-root>
 TXT
-if yes "  Configure a remote ROM host for 'update.sh --roms'?"; then
+if yes "  Configure a remote ROM host for 'scripts/update.sh --roms'?"; then
   ask unraid_host "  ssh target (e.g. root@192.168.1.10)"
   ask roms_path "  ROM archive path on that host"
 fi
@@ -166,22 +172,47 @@ fi
 echo
 
 # --- remote sync (optional) --------------------------------------------------
-rule; b "8) Remote sync (optional)"
+rule; b "8) Backing store (optional)"
 cat <<'TXT'
-Push the catalog to a remote DB after each update (so other devices/apps can
-read it). Targets: pocketbase, firebase, both — or blank to disable.
+Keep your durable data (ownership, tags, manual fixes) in an external database.
+SQLite stays the fast local cache; the backend holds the truth, and dbsync.py
+reconciles the two both ways after every update. Backends: pocketbase, postgres,
+supabase, mysql, firebase — or blank to disable.
+
+NB this replaced the old one-way "publish catalog" mirror (`sync_target`), which
+was retired in 2026-07: nothing ever read what it published.
 TXT
-ask sync_target "  sync target (blank/pocketbase/firebase/both)"
-T=$(cfg sync_target)
+ask backingstore_backend "  backend (blank/pocketbase/postgres/supabase/mysql/firebase)"
+T=$(cfg backingstore_backend)
 case "$T" in
-  *pocketbase*|*both*)
+  pocketbase)
     ask pocketbase_url "  PocketBase URL (https://...)"
     ask pocketbase_admin_email "  PocketBase admin email"
     read -rp "  PocketBase admin password (blank to skip; env POCKETBASE_PASSWORD overrides): " pbp
     [ -n "$pbp" ] && setcfg pocketbase_admin_password "$pbp" ;;
+  postgres|supabase)
+    echo "  A connection URL is enough; the discrete fields are the alternative."
+    ask postgres_url "  connection URL (postgresql://user:pass@host:5432/ludodex)"
+    if [ -z "$(cfg postgres_url)" ]; then
+      ask postgres_host "  Postgres host"
+      ask postgres_port "  Postgres port"
+      ask postgres_db   "  database name"
+      ask postgres_user "  user"
+      read -rp "  password (blank to skip): " pgp
+      [ -n "$pgp" ] && setcfg postgres_password "$pgp"
+    fi
+    [ "$T" = supabase ] && ask supabase_url "  Supabase project URL"
+    ;;
+  mysql)
+    ask mysql_host "  MySQL/MariaDB host"
+    ask mysql_port "  port"
+    ask mysql_db   "  database name"
+    ask mysql_user "  user"
+    read -rp "  password (blank to skip): " myp
+    [ -n "$myp" ] && setcfg mysql_password "$myp" ;;
 esac
 case "$T" in
-  *firebase*|*both*)
+  firebase)
     cat <<'TXT'
   Firebase (Firestore) — how to get the credentials:
     1. Create/pick a project at https://console.firebase.google.com
@@ -226,12 +257,12 @@ echo
 
 # --- build -------------------------------------------------------------------
 rule; b "Verifying auth"
-bash auth_status.sh
+bash scripts/auth_status.sh
 echo
 if yes "Build the catalog now?"; then
   python3 ludodex/build_library.py
 fi
 echo
 b "Done."
-echo "Update anytime with:  bash update.sh        (add --roms to rescan ROMs)"
+echo "Update anytime with:  bash scripts/update.sh   (add --roms to rescan ROMs)"
 echo "Inspect settings:     python3 ludodex/config.py list"

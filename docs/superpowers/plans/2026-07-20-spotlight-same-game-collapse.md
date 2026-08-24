@@ -1,5 +1,13 @@
 # Spotlight Same-Game Collapse — Implementation Plan
 
+> **Historical.** This plan shipped. `verify_spotlight_collapse.py`, created by
+> Step 1 below, was DELETED on 2026-08-24: it inlined a copy of the `_spotlight_rows`
+> SQL (Step 3 was supposed to keep the two in sync, and did not), so it drifted —
+> production went on to filter `hide_non_games`, homebrew and live compilations, and
+> the copy filtered none of them. An executable spec that no longer matches the
+> implementation proves nothing about it.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Collapse each dashboard Spotlight rail to one representative poster per game (by resolved identity), exclude recorded compilations by default with a toggle, and badge collapsed tiles with their platform count.
@@ -14,7 +22,7 @@
 - No new Python dependencies. No changes to the `games`/`game_scores`/`media` schema.
 - SQLite grouping key: `igdb:<id>` when `games.game_key LIKE 'igdb:%'`, else `base_key` (or `norm_key` when `base_key` absent). Guard every new SQL on the existing `_has_col`/`_hasgk` capability checks so older DBs still work.
 - Frontend: match existing patterns (server prefs via `api.setPrefs`; `.sl-card` markup; the `switch`/`pref-row` toggle style).
-- Verification runs against a COPY of the live catalog on <docker-host> (`<appdata>/ludodex/`), never mutating it.
+- Verification runs against a COPY of a live catalog on the Docker host, never mutating it.
 
 ---
 
@@ -180,12 +188,12 @@ In the `spotlight` endpoint, pass the pref:
                                     "spotlight_include_collections", False))
 ```
 
-- [ ] **Step 5: Verify against a COPY of the live catalog on <docker-host>**
+- [ ] **Step 5: Verify against a COPY of the live catalog**
 
 Copy the live DBs to a scratch dir and run the real query shape against the 1990s decade with the 5 Doom ports. Run:
 
 ```bash
-ssh <docker-host> 'cd <appdata>/ludodex && sqlite3 game-library.sqlite "
+ssh <docker-host> 'cd <data-dir> && sqlite3 game-library.sqlite "
   WITH base AS (SELECT g.norm_key, g.canonical_title t,
     (CASE WHEN g.game_key LIKE '\''igdb:%'\'' THEN g.game_key ELSE g.base_key END) k
     FROM games g WHERE EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id

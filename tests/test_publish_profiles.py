@@ -156,8 +156,8 @@ def main():
 
     print()
     print("8. the esgamelist profile reproduces a REAL library's paths")
-    # Every string below was read out of a live, ScreenScraper-scraped library:
-    # G:\games\emulation\roms\3do\gamelist.xml on <workstation>. This is the phase-6
+    # Every string below was read out of a live, ScreenScraper-scraped library: a
+    # Windows ROM tree's `3do/gamelist.xml`. This is the phase-6
     # reality check — a profile that agrees only with its own assumptions proves
     # nothing, so it is asserted against what the target actually contains.
     g = P.get("esgamelist")

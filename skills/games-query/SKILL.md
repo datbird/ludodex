@@ -5,7 +5,8 @@ description: Answer questions about the user's game collection from the unified 
 
 # Query the unified game library
 
-DB: `~/game-ownership/game-library.sqlite` (built by the `games-update` skill). One row
+DB: `$LUDODEX_DATA/game-library.sqlite` (config key `library_db`, built by the
+`games-update` skill). `LUDODEX_DATA` defaults to the ludodex checkout root. One row
 per deduped game; each lists every source it's available from.
 
 Schema:
@@ -38,7 +39,7 @@ so n_sources>1 is NOT the cross-source test.
 ## Patterns
 
 ```bash
-DB=~/game-ownership/game-library.sqlite
+DB="${LUDODEX_DATA:-$LUDODEX}/game-library.sqlite"
 # Do I own <game>, and where?
 sqlite3 -column -header "$DB" "SELECT canonical_title, sources_summary FROM games WHERE norm_key LIKE '%<term>%' ORDER BY canonical_title;"
 # Full source/platform detail for a game

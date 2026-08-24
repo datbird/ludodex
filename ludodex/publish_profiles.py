@@ -136,9 +136,9 @@ FOLDER = {
 # --------------------------------------------------------------------------- #
 #  EmulationStation gamelist layout (RetroBat / Batocera / rom-librarian)
 # --------------------------------------------------------------------------- #
-# TRANSCRIBED FROM A LIVE LIBRARY, not from documentation: G:\games\emulation\roms on
-# <workstation>, scraped by ScreenScraper. Everything below was read out of a real
-# gamelist.xml and the real folders beside it.
+# TRANSCRIBED FROM A LIVE LIBRARY, not from documentation: a Windows ROM tree scraped
+# by ScreenScraper. Everything below was read out of a real gamelist.xml and the real
+# folders beside it.
 #
 # The two ways it differs from ES-DE are exactly the ones the profile seam exists for:
 #

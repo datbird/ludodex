@@ -1,0 +1,76 @@
+# ludodex — RESOLVED Python dependency versions (the lock).
+#
+# requirements.txt says WHAT the app depends on and why. This file says WHICH VERSIONS
+# a build gets. Without it every `>=` floor re-resolves at build time, so two images
+# built a week apart contain different libraries and a failure that reproduces on one
+# does not reproduce on the other. The web side has had `pnpm-lock.yaml` +
+# `--frozen-lockfile` from the start; this is the Python half of the same guarantee.
+#
+# The Dockerfile installs `-r requirements.txt -c requirements.lock`: requirements.txt
+# stays the readable statement of intent, this file pins the outcome, and pip refuses
+# any version that contradicts it. tests/test_repo_packaging.py fails if a direct
+# dependency is missing here, so adding one to requirements.txt without re-locking is
+# caught in the suite rather than at build time.
+#
+# TO REGENERATE (from a checkout, on Python 3.12 to match the image):
+#
+#     python3 -m venv /tmp/lockenv && /tmp/lockenv/bin/pip install -q --upgrade pip
+#     /tmp/lockenv/bin/pip install --dry-run --ignore-installed \
+#         --report /tmp/report.json -r requirements.txt
+#     # then rewrite the block below from /tmp/report.json ("install"[].metadata)
+#
+# Resolved 2026-08-24. Lines marked (direct) are named in requirements.txt; the rest are
+# transitive and are pinned for exactly the same reason.
+
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==1.0.0            # (direct)
+anyio==4.14.2
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.4.2
+cryptography==50.0.0
+distro==1.9.0
+docstring-parser==0.18.0
+fastapi==0.141.1            # (direct)
+filelock==3.32.4
+google-auth==2.56.3            # (direct)
+google-genai==2.19.0            # (direct)
+h11==0.16.0
+httpcore==1.0.9
+httpcore2==2.12.0
+httptools==0.8.0
+httpx==0.28.1
+httpx2==2.12.0
+idna==3.19
+jiter==0.16.0
+legendary-gl==0.21.0            # (direct)
+openai==3.3.1            # (direct)
+pillow==12.3.0            # (direct)
+psycopg==3.3.4            # (direct)
+psycopg-binary==3.3.4
+pyasn1==0.6.4
+pyasn1-modules==0.4.2
+pycparser==3.0
+pycryptodomex==3.23.0
+pydantic==2.13.4
+pydantic-core==2.46.4
+pyjwt==2.13.0            # (direct)
+pymupdf==1.28.2            # (direct)
+pymysql==1.2.0            # (direct)
+python-dotenv==1.2.3
+pyyaml==6.0.3
+pyzipper==0.4.0            # (direct)
+requests==2.34.2
+sniffio==1.3.1
+starlette==1.6.0
+tenacity==9.1.4
+truststore==0.10.4
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.7.0
+uvicorn==0.52.4            # (direct)
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==16.1.1

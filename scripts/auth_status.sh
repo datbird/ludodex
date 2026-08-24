@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 # Report auth status for each game source. Prints "<source>: OK ..." or
 # "<source>: BROKEN ...". Used by the games-auth skill to decide what to re-auth.
-cd "$(dirname "$0")" || exit 1
+# THE REPO ROOT, not scripts/. While this cd'd to scripts/ every `python3
+# ludodex/config.py` below resolved to a file that does not exist, so EVERY source
+# reported BROKEN — and the .gogchk/.itchchk/.eachk scratch files were dropped into
+# scripts/. Pinned by tests/test_repo_shell_entrypoints.py.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
+cd "$ROOT" || exit 1
 export PATH="$HOME/.local/bin:$PATH"
+export PYTHONPATH="$ROOT/ludodex${PYTHONPATH:+:$PYTHONPATH}"
+
+# The pullers cache their tokens under the DATA dir (config.DATA), which defaults to
+# the repo root but moves with LUDODEX_DATA. Look where they actually write.
+DATA_DIR="${LUDODEX_DATA:-$ROOT}"
 
 # --- Steam (Web API key + configured SteamID; key never expires) ---
 KEY=$(python3 ludodex/config.py steam-key)
 if [ -z "$KEY" ]; then
-  echo "steam: BROKEN  no API key (run ./setup.sh, or set steam_api_key)"
+  echo "steam: BROKEN  no API key (run scripts/setup.sh, or set steam_api_key)"
 else
   N=$(STEAM_API_KEY="$KEY" python3 ludodex/steam_owned.py 2>/dev/null | wc -l)
   if [ "$N" -gt 0 ]; then echo "steam: OK  ($N games)"
@@ -20,16 +30,16 @@ if [ -n "$ES" ] && [ "$ES" != "<not logged in>" ]; then echo "epic: OK  (account
 else echo "epic: BROKEN  not logged in — re-auth needed"; fi
 
 # --- GOG (cached OAuth refresh token) ---
-if [ -f .gog/tokens.json ] && python3 ludodex/gog_owned.py >/dev/null 2>.gogchk; then
+if [ -f "$DATA_DIR/.gog/tokens.json" ] && python3 ludodex/gog_owned.py >/dev/null 2>.gogchk; then
   echo "gog: OK"
 else
-  echo "gog: BROKEN  $( [ -f .gog/tokens.json ] && echo 'refresh failed (token expired)' || echo 'no cached token' ) — re-auth needed"
+  echo "gog: BROKEN  $( [ -f "$DATA_DIR/.gog/tokens.json" ] && echo 'refresh failed (token expired)' || echo 'no cached token' ) — re-auth needed"
 fi
 rm -f .gogchk
 
 # --- itch.io (API key) ---
 if [ -z "$(python3 ludodex/config.py itch-key)" ]; then
-  echo "itch: BROKEN  no API key (run ./setup.sh, or set itch_api_key)"
+  echo "itch: BROKEN  no API key (run scripts/setup.sh, or set itch_api_key)"
 elif OUT=$(python3 ludodex/itch_owned.py 2>.itchchk); then
   echo "itch: OK  ($(printf '%s\n' "$OUT" | grep -c .) games)"
 else
@@ -38,7 +48,7 @@ fi
 rm -f .itchchk
 
 # --- EA app/Origin (remid cookie -> silent token refresh, or browser token) ---
-if [ ! -f .ea/cookies.json ] && [ ! -f .ea/token.json ] && [ -z "$(python3 ludodex/config.py get ea_remid)" ] && [ -z "$EA_REMID" ]; then
+if [ ! -f "$DATA_DIR/.ea/cookies.json" ] && [ ! -f "$DATA_DIR/.ea/token.json" ] && [ -z "$(python3 ludodex/config.py get ea_remid)" ] && [ -z "$EA_REMID" ]; then
   echo "ea: BROKEN  not logged in — see AUTH.md § EA (remid cookie, or --token)"
 elif WHO=$(python3 ludodex/ea_owned.py --whoami 2>.eachk); then
   echo "ea: OK  ($WHO)"

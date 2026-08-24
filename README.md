@@ -71,6 +71,10 @@ a Genesis game wearing Game Gear box art.
   right resolution, and demotes filler.
 - **Frontend interop** — imports from and exports to Playnite and LaunchBox, metadata
   *and* media, without clobbering your hand-curated art.
+- **Publishing to devices** — rules pick a slice of the library for a handheld or a
+  cabinet, a plan says exactly what would be copied and converted, and applying it
+  writes the files, the art and the gamelist in that target's own layout, recording
+  every result in an install ledger.
 - **Offline identity** — an optional prebuilt index resolves a store id, a title or a
   ROM hash to every other identifier for the same game, locally, in under a millisecond.
 
@@ -110,7 +114,7 @@ thing is one container.
 | **[Frontends](docs/FRONTENDS.md)** | Playnite and LaunchBox, both directions, metadata and art |
 | **[Credentials](docs/AUTH.md)** | Every integration, what it needs, and how to get it |
 | **[Configuration](docs/CONFIG.md)** | Config keys and behaviour preferences |
-| **[Remote sync](docs/SYNC.md)** | Mirror the catalog to PocketBase or Firestore |
+| **[Backing store](docs/SYNC.md)** | Two-way sync of your durable data with PocketBase, Postgres, Supabase, MySQL or Firestore |
 | **[Running in Docker](docs/DOCKER.md)** | Volumes, media storage, shares, upgrades |
 | **[Design & roadmap](docs/DESIGN.md)** | Where this is going, and why it's built this way |
 
@@ -118,9 +122,10 @@ thing is one container.
 
 Actively developed and in daily use against a library of ~570,000 ROM files and several
 thousand storefront titles. The catalog, matching, media pipeline, ownership model and
-frontend interop are all in production use. The **device publishing** layer — pushing a
+frontend interop are all in production use — as is **device publishing**: pushing a
 curated selection to a handheld or cabinet with the right formats, metadata and art for
-that target — is the next major feature.
+that target, via publish rules → plan → apply and an install ledger (the **Publish** tab,
+`/api/devices/{id}/publish/*`, `ludodex/publish*.py`).
 
 ## Privacy
 

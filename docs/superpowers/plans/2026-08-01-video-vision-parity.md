@@ -795,8 +795,8 @@ docker images ludodex:latest --format '{{.Size}}'   # BEFORE, record it
 cd ~/gitrepos/ludodex/web && pnpm build
 rsync -a --delete --exclude .git --exclude web/node_modules --exclude web/dist \
   --exclude __pycache__ --exclude .venv --exclude media --exclude '*.sqlite' \
-  ~/gitrepos/ludodex/ <docker-host>:<appdata>/ludodex-build/
-ssh <docker-host> 'cd <appdata>/ludodex-build && docker build -t ludodex:latest .; echo "RC=$?"'
+  ./ <docker-host>:<build-dir>/
+ssh <docker-host> 'cd <build-dir> && docker build -t ludodex:latest .; echo "RC=$?"'
 ```
 
 Expected: `RC=0`. Do NOT pipe the build — a pipeline's exit code is the last command's,

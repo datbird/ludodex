@@ -3,8 +3,17 @@
 # and report what's new since the last run. ROM index is reused as-is unless you
 # pass --roms (which re-scans the ROM host; slow). All auth is cached — no prompts.
 # Account/environment-specific values come from config (see config.py).
-cd "$(dirname "$0")" || exit 1
+# THE REPO ROOT, not scripts/. This file lived at the root until it moved into
+# scripts/ (608e201) and the `cd` did not follow, so every `python3 ludodex/...` below
+# resolved to `scripts/ludodex/...` and could not be opened. Pinned by
+# tests/test_repo_shell_entrypoints.py.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
+cd "$ROOT" || exit 1
 export PATH="$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
+# The package is not installed, so `import config` inside a -c one-liner needs it on
+# the path. Same class of breakage as the `cd`: a bare `import config` from the root
+# is a ModuleNotFoundError.
+export PYTHONPATH="$ROOT/ludodex${PYTHONPATH:+:$PYTHONPATH}"
 
 # Ownership TSVs must land wherever the app keeps its state, NOT beside the scripts.
 # build_library reads them from $LUDODEX_DATA and only falls back to the script dir when
@@ -74,7 +83,7 @@ if [ "$1" = "--roms" ]; then
   if [ -z "$HOST" ] || [ -z "$RPATH" ]; then
     echo "  skipped: set unraid_host + roms_path via config.py"
   else
-    scp -q build_romdb.py romtags.py "$HOST":/tmp/ \
+    scp -q ludodex/build_romdb.py ludodex/romtags.py "$HOST":/tmp/ \
       && ssh "$HOST" "find \"$RPATH\" -type f -printf '%s\t%T@\t%P\n' > /tmp/romscan.tsv 2>/dev/null && python3 /tmp/build_romdb.py /tmp/romscan.tsv /tmp/roms-index.sqlite \"$RPATH\"" \
       && scp -q "$HOST":/tmp/roms-index.sqlite "$ROM_DB" \
       && echo "  roms reindexed" || echo "  rom rescan FAILED"
@@ -145,8 +154,12 @@ if keys:
         print("  + %s  [%s]" % (t, s))
 PY
 
-TARGET=$(cfg sync_target)
-if [ -n "$TARGET" ]; then
-  echo "== syncing to remote ($TARGET) =="
-  python3 sync.py || echo "  sync FAILED (see above)"
+# The two-way BACKING STORE (dbsync.py). This used to run `sync.py`, the one-way
+# "publish catalog" mirror, which was retired 2026-07-21 — the file has not existed
+# since, so this step failed silently on every run. dbsync.py is the replacement and
+# is the thing that actually protects the data.
+BACKEND=$(cfg backingstore_backend)
+if [ -n "$BACKEND" ]; then
+  echo "== syncing backing store ($BACKEND) =="
+  python3 ludodex/dbsync.py "$BACKEND" || echo "  backing-store sync FAILED (see above)"
 fi

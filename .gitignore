@@ -28,6 +28,13 @@ firebase*.json
 .cur_keys
 .new_keys
 .gogchk
+.itchchk
+.eachk
+# mirror/scrape run artifacts (ssmirror-loop.sh writes these into the data dir; a
+# copy in the repo root is always a stray, never an input)
+ss-missing-ids.json
+ss-missing-ids.done
+*-missing-ids.json
 # error logs
 *.err
 # server runtime

@@ -18,6 +18,7 @@ Confusing the two is how a library ends up claiming you own every game IGDB know
 | `ea` | EA account library |
 | `psn` | PlayStation Network library |
 | `xbox` | Xbox / Microsoft Store library |
+| `nintendo` | Nintendo account library, via the Virtual Game Card portal |
 | `emulation` | an indexed ROM archive |
 | `archive` | any local folder or drive you register |
 | `manual` | games you add by hand |
@@ -59,9 +60,28 @@ The crawl itself is described in **[PIPELINE.md](PIPELINE.md)**.
 ### IGDB
 
 Resolves each catalog game to a canonical IGDB id — by store id via IGDB's own
-`external_games` map where possible, else by name search through the acceptance gate —
-and attaches genres, themes, game modes, developers, publishers, series, release dates,
-ratings and age ratings.
+`external_games` map where possible, else by name search — and attaches genres, themes,
+game modes, developers, publishers, series, release dates, ratings and age ratings.
+
+**How the name search decides, today.** `igdb_enrich.py` uses its own rules, not the
+shared acceptance gate:
+
+- `_title_matches` — the candidate's primary name **or any alternate name** must
+  normalize *exactly* to the game's `norm_key`. Not a fuzzy score: an exact normalized
+  equality.
+- `_era_ok` — a candidate is rejected only when its release year is impossible for
+  **every** platform the game lives on. So an Apple II ROM (era 1977-1993) rejects a
+  2010 movie tie-in of the same name, while a title also owned on Steam — `pc`, which is
+  not era-bound — accepts any year.
+- `matchgate.pick_by_year` is called for the year tie-break among survivors, and that is
+  the *only* part of the gate involved.
+
+`matchgate.score` — the coverage / `numbering_variant` / `safe_aliases` scoring that
+`provider_ids.py`, `matchindex.py` and `ra_fetch.py` all run their candidates through —
+**is not** applied here. That is a real inconsistency, not a documentation shortcut, and
+unifying it is in flight; see `docs/TASKS.md`. Until it lands, "IGDB resolution goes
+through the acceptance gate" is not true, which is why this section spells the rule out
+instead.
 
 ```bash
 # one-time: a free Twitch app at https://dev.twitch.tv/console/apps
@@ -81,9 +101,61 @@ no name matching at all — and by name plus system otherwise. Tier-aware and re
 it reads your live quota from the server rather than counting locally, and parks a
 cooldown rather than hammering a rate limit.
 
-### Others
+### TheGamesDB
 
-**RetroAchievements** for achievement sets, **SteamGridDB** for artwork gap-fill.
+Metadata and box art. The API key is rationed hard — **12,000 requests a month** on the
+paid Developer tier — and `ByGameName` costs one request per title and cannot be batched.
+So ludodex does not search it per game: `tgdb_mirror.py` walks its id space into a local
+catalogue once, and `tgdb_freemap.py` builds a free SHA1 → TheGamesDB-id map so a ROM's
+hash buys an id for nothing. `tgdb_normalize.py` reconciles its platform names.
+
+### MobyGames
+
+332,414 games, and the cheapest id space in the stack. Rate-limited per hour rather than
+per month, so `moby_mirror.py` walks it into a local catalogue and is resumable — a
+relaunch continues rather than restarting the clock.
+
+### ArcadeDB
+
+Arcade metadata **and** media, no key, no quota. Arcade is the one category where every
+other provider here is weak, so this is the specialist that covers it.
+
+### ZXInfo
+
+The ZX Spectrum archive. No key, no quota. Narrow and deep, which is the shape the rest
+of the stack is missing.
+
+### libretro DATs
+
+The No-Intro and Redump dump databases via libretro-database. Free, and the only source
+in the stack that carries a **disc serial** — which is an identifier, where a name is
+only a guess.
+
+### Wikidata
+
+Cross-database ids, free and CC0. A cross-reference table is a pointer, not content:
+"this game is MobyGames #1234" is a coordinate, so it carries no licensing weight and
+costs nothing to use.
+
+### RetroAchievements
+
+Achievement sets and which ones the configured user has earned. An enrichment provider,
+never an ownership source.
+
+### SteamGridDB
+
+Artwork gap-fill; needs a key.
+
+### The local mirrors
+
+IGDB, ScreenScraper, TheGamesDB and MobyGames each have a **local mirror**
+(`igdb_mirror.py`, `ss_mirror.py`, `tgdb_mirror.py`, `moby_mirror.py`). Matching a ROM
+library title-by-title means one rate-limited HTTP round trip per title, forever; a
+mirror turns that into a local lookup, and turns a metered subscription into something
+permanent. They are built once and kept current incrementally.
+
+> A mirror lives in the data dir, not the repo, and a **rebuild deletes the index** —
+> re-mirroring is expensive, so treat those files as data worth backing up.
 
 ## Media providers
 
@@ -99,6 +171,9 @@ materialized on demand.
 | IGDB images — cover, artwork, screenshots | remote |
 | ScreenScraper | remote |
 | SteamGridDB | remote, needs a key |
+| TheGamesDB — box art | remote |
+| MobyGames | remote |
+| ArcadeDB | remote, no key |
 
 ```bash
 python3 ludodex/media_index.py     # scan local providers

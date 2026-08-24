@@ -1,5 +1,17 @@
-# ludodex server runtime — the full set the container installs.
-# (Local dev can still use requirements-server.txt; this is the superset.)
+# ludodex server runtime — the full set the container installs, and the ONE file that
+# says what the app depends on.
+#
+# There used to be three. `requirements-server.txt` was a strict 6-line subset of this
+# one, kept for a "server only" install that no longer exists separately, and it cited a
+# HANDOFF section that describes the FastAPI server as future work — it has been removed.
+# `requirements-firebase.txt` stays, and only because it is genuinely a different
+# question: it is the ONE extra package a bare (non-Docker) checkout needs to talk to
+# Firestore, and `ludodex/remote_db.py` prints its name when that import fails. Two files
+# with two distinct jobs, not three with one.
+#
+# The floors below are the MINIMUM each package must be. The exact versions a build gets
+# are in `requirements.lock`, which the Dockerfile applies as a constraints file. Change
+# a floor here, then re-lock (instructions are in that file).
 
 # --- web server ---
 fastapi>=0.110
@@ -12,8 +24,8 @@ anthropic>=0.114     # provider: anthropic
 openai>=1.40         # provider: openai AND openrouter (OpenAI-compatible endpoint)
 google-genai>=0.3    # provider: gemini
 
-# --- optional sync target ---
-google-auth>=2.0     # only for the Firebase/Firestore sync target (sync.py)
+# --- Firebase/Firestore backing-store backend (dbsync.py) ---
+google-auth>=2.0     # only used when backingstore_backend=firebase
 
 # --- two-way backing-store SQL adapters (dbsync.py) — only used if you pick a SQL
 #     backend (Postgres/Supabase/MySQL); pure-Python drivers, no build tools needed ---

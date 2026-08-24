@@ -9,9 +9,14 @@ The user keeps a single local SQLite catalog of **every game they own/have**, de
 by title across sources: **emulation ROMs** (Unraid archive) + **Steam / Epic / GOG /
 itch.io** PC ownership. Each game lists all the sources it's available from.
 
-- Working dir / scripts: `~/game-ownership/`
-- Unified DB: `~/game-ownership/game-library.sqlite`
-- ROM index (input): `~/roms-index.sqlite`
+- The paths below are relative to a ludodex checkout. Set `LUDODEX` to wherever it
+  lives (`export LUDODEX=~/ludodex`), or just `cd` there first. Data files — the
+  catalog, the caches, the cached store tokens — live in `$LUDODEX_DATA`, which
+  defaults to the checkout root.
+- Entry point: `$LUDODEX/scripts/update.sh`; the pipeline scripts are in
+  `$LUDODEX/ludodex/`.
+- Unified DB: `$LUDODEX_DATA/game-library.sqlite` (config key `library_db`).
+- ROM index (input): `$LUDODEX_DATA/roms-index.sqlite` (config key `roms_index_db`).
 - Account/environment settings (SteamID, API keys, ROM host/paths) live in a
   `config` table — `python3 ludodex/config.py list` to see them, `config.py set <key> <value>`
   to change. Nothing personal is hardcoded in the scripts.
@@ -27,7 +32,7 @@ itch.io** PC ownership. Each game lists all the sources it's available from.
 ## To run an update
 
 ```bash
-bash ~/game-ownership/update.sh
+bash "$LUDODEX/scripts/update.sh"
 ```
 
 This pulls all stores (auth is cached — Steam via the configured API key, Epic via
@@ -39,7 +44,7 @@ Add `--roms` to also re-scan the ROM archive first (slow, ~5 min — only when t
 collection changed; needs `unraid_host` + `roms_path` set in config):
 
 ```bash
-bash ~/game-ownership/update.sh --roms
+bash "$LUDODEX/scripts/update.sh" --roms
 ```
 
 ## Schema (for answering questions)
@@ -58,13 +63,13 @@ for "available from multiple sources". **`n_sources`** = raw source-row count (a
 
 ```bash
 # does the user own a game, and where?
-sqlite3 ~/game-ownership/game-library.sqlite \
+sqlite3 "$LUDODEX_DATA/game-library.sqlite" \
   "SELECT canonical_title, sources_summary FROM games WHERE norm_key LIKE '%<term>%';"
 # games owned on multiple source KINDS (cross-source) — use n_kinds, not n_sources
-sqlite3 ~/game-ownership/game-library.sqlite \
+sqlite3 "$LUDODEX_DATA/game-library.sqlite" \
   "SELECT canonical_title, sources_summary FROM games WHERE n_kinds>1 ORDER BY canonical_title;"
 # counts per source
-sqlite3 ~/game-ownership/game-library.sqlite \
+sqlite3 "$LUDODEX_DATA/game-library.sqlite" \
   "SELECT SUM(has_emulation), SUM(has_steam), SUM(has_gog), SUM(has_epic), SUM(has_itch), SUM(has_archive) FROM games;"
 ```
 
@@ -76,8 +81,7 @@ sqlite3 ~/game-ownership/game-library.sqlite \
   profile privacy only for its owner's SteamID, so no public profile / login / 2FA.
 - **Epic**: `legendary` token in `~/.config/legendary` (auto-refreshes). Re-auth:
   `legendary auth` (browser code).
-- **GOG**: cached OAuth token in `~/game-ownership/.gog/tokens.json` (auto-refreshes).
-  Re-auth: `python3 ~/game-ownership/gog_owned.py --code <code>` (see login URL in
-  that file).
+- **GOG**: cached OAuth token in `$LUDODEX_DATA/.gog/tokens.json` (auto-refreshes).
+  Re-auth: `python3 ludodex/gog_owned.py --code <code>` (see login URL in that file).
 - **itch.io**: personal API key (no expiry), resolved by `config.py itch-key`. Re-auth:
   generate at https://itch.io/user/settings/api-keys → `config.py set itch_api_key <key>`.

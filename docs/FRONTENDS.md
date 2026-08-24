@@ -56,7 +56,7 @@ LaunchBox stores everything as plain files — Platform XMLs and `Images/` folde
 bridge is needed. ludodex reads and writes the install directly.
 
 ```bash
-python3 ludodex/config.py set launchbox_path <LaunchBox root>   # update.sh then imports
+python3 ludodex/config.py set launchbox_path <LaunchBox root>   # scripts/update.sh then imports
 python3 ludodex/launchbox_export.py                             # catalog + chosen art -> LaunchBox
 python3 ludodex/launchbox_export.py --link                      # symlink art instead of copying
 ```
