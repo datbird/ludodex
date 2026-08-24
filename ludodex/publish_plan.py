@@ -32,6 +32,7 @@ import time
 DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
+import devices               # noqa: E402
 import devicesync            # noqa: E402
 import publish               # noqa: E402
 import publish_profiles      # noqa: E402
@@ -106,6 +107,60 @@ def ledger_forget(device_id, entry_keys):
     con.close()
 
 
+def _target_is_reachable(device_id, rom_path):
+    """True when we can actually look at the target's ROM directory right now."""
+    if not rom_path:
+        return False
+    if _is_local(device_id):
+        return os.path.isdir(rom_path)
+    try:
+        return bool(devices.fs_stat(int(device_id), rom_path))
+    except Exception:                                   # noqa: BLE001
+        return False                                    # unreachable is not "empty"
+
+
+def _is_local(device_id):
+    try:
+        d = devices._device(int(device_id)) if device_id else None
+    except Exception:                                   # noqa: BLE001
+        return True
+    return not d or (d.get("transport") or "local") == "local"
+
+
+def dest_missing(device_id, rom_path=None):
+    """Entry keys the ledger says we placed whose file is NOT on the target now.
+
+    THIS IS THE 'REALITY' HALF OF THE DIFF. The module header promises the plan is
+    diffed against the device and not against last intent, because "devices are not
+    ours, people delete things". Nothing actually stated a destination, so a ROM the
+    user deleted stayed `skip / unchanged` forever while the plan reported
+    `observed: true`. An unreachable target returns [] and the caller must treat the
+    plan as unobserved: "I could not look" is never "nothing is missing"."""
+    if not _target_is_reachable(device_id, rom_path):
+        return []
+    led = ledger(device_id)
+    local = _is_local(device_id)
+    remote_have = None
+    if not local:
+        try:                                            # one listing, not one stat per file
+            remote_have = set(devices.list_names(int(device_id), rom_path) or [])
+        except Exception:                               # noqa: BLE001
+            return []
+    gone = []
+    for ek, row in sorted(led.items()):
+        paths = [row["dest_path"]] + list(row.get("extra_paths") or [])
+        paths = [x for x in paths if x]
+        if not paths:
+            continue
+        if local:
+            here = all(os.path.exists(x) for x in paths)
+        else:
+            here = all(os.path.basename(x) in remote_have for x in paths)
+        if not here:
+            gone.append(ek)
+    return gone
+
+
 def src_signature(paths):
     """A cheap, stable signature for a source set: size+mtime per file.
 
@@ -142,6 +197,11 @@ def plan(device_id, profile_id=None, source_mgr_id=None, rom_path=None,
     """
     prof = publish_profiles.get(profile_id or publish_profiles.DEFAULT_PROFILE)
     led = ledger(device_id)
+    # OBSERVED MEANS OBSERVED. This flag used to be `bool(observe and rom_path)` with
+    # nothing behind it: no destination was ever stated, so the action came from the
+    # ledger alone and a file the user deleted on the device read as "unchanged".
+    reachable = bool(observe) and _target_is_reachable(device_id, rom_path)
+    absent = set(dest_missing(device_id, rom_path)) if reachable else set()
     want = set(publish.intent_keys(device_id))
     rows = {r["entry_key"]: r for r in publish.entry_rows(sorted(want))}
 
@@ -184,6 +244,9 @@ def plan(device_id, profile_id=None, source_mgr_id=None, rom_path=None,
             if prev is None:
                 action = CONVERT if tool != "copy" else COPY
                 reason = "not present on target"
+            elif ek in absent:
+                action = CONVERT if tool != "copy" else COPY
+                reason = "we published it, but it is not on the target now"
             elif prev.get("src_sig") != sig:
                 action, reason = UPDATE, "source changed since it was published"
             else:
@@ -206,6 +269,12 @@ def plan(device_id, profile_id=None, source_mgr_id=None, rom_path=None,
         if ek in want:
             continue
         paths = [row["dest_path"]] + list(row.get("extra_paths") or [])
+        if ek in absent:
+            # already gone from the device; the ledger row is what needs clearing
+            items.append(_item(ek, rows.get(ek), None, SKIP,
+                               "no longer selected, and already absent from the target",
+                               dest=[p for p in paths if p]))
+            continue
         items.append(_item(ek, rows.get(ek), None, REMOVE,
                            "no longer selected for this device",
                            dest=[p for p in paths if p]))
@@ -214,10 +283,21 @@ def plan(device_id, profile_id=None, source_mgr_id=None, rom_path=None,
     if missing_tools:
         blockers.append("conversion tools not available here: %s"
                         % ", ".join(sorted(missing_tools)))
-    return {"device_id": int(device_id), "profile": prof["id"],
-            "observed": bool(observe and rom_path),
-            "items": items, "totals": totals, "blockers": blockers,
-            "dry_run": True}
+    out = {"device_id": int(device_id), "profile": prof["id"],
+           "observed": reachable,
+           "items": items, "totals": totals, "blockers": blockers,
+           "dry_run": True}
+    # MEASURE THE CARD, DO NOT ASK THE BROWSER FOR ITS SIZE. check_capacity used to run
+    # only when the API handler was handed a `free_bytes` field, and `over_capacity` was
+    # absent otherwise, which is falsy — so the "BLOCKED before anything is written"
+    # promise was a fail-open any caller could step past by omitting one key. When the
+    # target is reachable the planner can see the free space for itself.
+    if reachable and _is_local(device_id):
+        try:
+            check_capacity(out, shutil.disk_usage(rom_path).free)
+        except OSError:
+            pass
+    return out
 
 
 def _item(entry_key, meta, system, action, reason, source=None, dest=None,

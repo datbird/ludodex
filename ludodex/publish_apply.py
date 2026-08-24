@@ -89,6 +89,23 @@ def _convert(item, staged_dir):
     raise ApplyError("unknown conversion tool %r" % tool)
 
 
+def _staging_for(dest, local, fallback):
+    """Where to BUILD the file before the atomic swap.
+
+    Building in the data volume meant a plain copy ran twice: once from the source into
+    /data, and again when shutil.move crossed the filesystem boundary to the target.
+    docs/DOCKER.md tells users /data is small and on the SSD cache, so a 40 GB disc
+    image landed there first. Beside the destination, the swap is a rename.
+
+    A REMOTE target has no such option: the file has to exist here before it can be
+    pushed, so that one keeps the fallback."""
+    if not local:
+        return fallback
+    d = os.path.join(os.path.dirname(dest) or ".", ".ludodex-staging")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _place_local(staged, dest):
     """Stage-then-swap on a local path. os.replace is atomic within a filesystem, so
     the destination is either the old file or the new one at every instant."""
@@ -139,6 +156,7 @@ def apply_plan(device_id, plan, progress=None, allow_blocked=False, limit=None):
         items = items[:limit]
 
     staging = tempfile.mkdtemp(prefix="ludodex-publish-", dir=DATA)
+    _stages_used = set()
     try:
         for i, item in enumerate(items):
             act = item.get("action")
@@ -158,8 +176,10 @@ def apply_plan(device_id, plan, progress=None, allow_blocked=False, limit=None):
                 continue
 
             try:
-                staged = _convert(item, staging)
                 dest = item["dest"][0]
+                item_stage = _staging_for(dest, local, staging)
+                _stages_used.add(item_stage)
+                staged = _convert(item, item_stage)
                 if local:
                     _place_local(staged, dest)
                 else:
@@ -179,6 +199,9 @@ def apply_plan(device_id, plan, progress=None, allow_blocked=False, limit=None):
                                          "error": str(e)[:300]})
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+        for _d in _stages_used:
+            if _d != staging:
+                shutil.rmtree(_d, ignore_errors=True)
     report["elapsed"] = round(time.time() - report["started"], 1)
     return report
 
@@ -205,6 +228,7 @@ def _remove(device_id, item, report, local):
             "entry_key": item["entry_key"],
             "error": "plan named %d path(s) we have no record of placing; skipped them"
                      % len(strays)})
+    stuck = []
     for p in ours:
         try:
             if local:
@@ -213,7 +237,15 @@ def _remove(device_id, item, report, local):
             else:
                 devices.remove_paths(device_id, [p])
         except Exception as e:                              # noqa: BLE001
+            stuck.append(p)
             report["errors"].append({"entry_key": item["entry_key"],
                                      "error": "delete %s: %s" % (p, str(e)[:150])})
+    if stuck:
+        # KEEP THE RECORD OF WHAT WE PLACED. Forgetting a file we could not delete
+        # strands it: by this module's own rule a path with no ledger row "belongs to
+        # the user" and Publish must never touch it, so the next run would refuse to
+        # try again. The row is the only thing that makes a retry possible.
+        report["failed"] += 1
+        return
     publish_plan.ledger_forget(device_id, [item["entry_key"]])
     report["removed"] += 1
