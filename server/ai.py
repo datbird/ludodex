@@ -36,9 +36,55 @@ import config  # noqa: E402
 # --- token usage tracking + monthly limits (per provider / per model) --------
 USAGE_DB = os.path.join(DATA, "ai-usage.sqlite")
 
+# --- how many output tokens a call may produce -------------------------------
+# THE CAP IS A CEILING, NOT A SPEND — you are billed for what the model generates, not
+# for the room you allowed it. A cap set too low is the expensive mistake: the call is
+# billed in full and the answer is thrown away.
+#
+# It used to be max_tokens=400, hardcoded, in the Anthropic and OpenAI paths while
+# Gemini got 2048 — so the same batch succeeded on one provider and came back two thirds
+# missing on another. ingest_ai sends BATCH = 60 paths and budgets ~1,320 output tokens
+# per call; identify_roms, detect_collections, adjudicate_entry and analyze_game all
+# overran 400 routinely, and _json's truncation repair then handed back a partial answer
+# with no error at all. 2048 covers the largest batch this app sends with headroom, and
+# it is what Gemini was already using, so the providers now agree. Callers that know
+# their own size pass max_out.
+DEFAULT_MAX_OUT = 2048
+VISION_MAX_OUT = 512        # one small JSON verdict per image; 300 truncated the reason
+WEB_MAX_OUT = 2048          # a grounded answer plus its citations
+
+
+class TruncatedResponse(RuntimeError):
+    """The model hit the output cap, so the answer is incomplete.
+
+    A CUT-OFF REPLY MUST NOT LOOK LIKE A SHORT ONE. `_json` repairs an unterminated
+    object — it closes the open brackets and hands back whatever arrived — which is the
+    right thing to do for a model that drops a final brace, and exactly the wrong thing
+    for a reply the provider stopped mid-batch. Combined with a 400-token cap on a
+    60-item batch, that turned "two thirds of this import was never identified" into a
+    successful-looking run at full price. Carries the token counts because the call was
+    billed in full and still has to reach the ledger.
+    """
+
+    def __init__(self, msg, in_tok=0, out_tok=0):
+        RuntimeError.__init__(self, msg)
+        self.in_tok, self.out_tok = int(in_tok or 0), int(out_tok or 0)
+
+
+def _truncated(provider, model, cap, in_tok=0, out_tok=0):
+    return TruncatedResponse(
+        "%s/%s stopped at the %d-token output cap, so its answer is INCOMPLETE and "
+        "must not be used. Send fewer items per call, or give this call a larger "
+        "max_out." % (provider, model, cap), in_tok, out_tok)
+
 
 def _usage_con():
     con = sqlite3.connect(USAGE_DB)
+    # WAIT OUT CONTENTION RATHER THAN LOSING THE WRITE. The match pool runs several
+    # workers against this one file; with no busy_timeout the second writer gets
+    # "database is locked" immediately, and a dropped ledger write means spend that
+    # already happened is invisible to every cap.
+    con.execute("PRAGMA busy_timeout=10000")
     con.execute("""CREATE TABLE IF NOT EXISTS usage(
         provider TEXT, model TEXT, day TEXT, calls INTEGER DEFAULT 0,
         input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
@@ -81,6 +127,10 @@ DEFAULT_PRICES = {
     ("anthropic", "claude-sonnet-5"): (2.00, 10.00, 0.20),
     ("anthropic", "claude-sonnet-4-6"): (3.00, 15.00, 0.30),
     ("anthropic", "claude-haiku-4-5"): (1.00, 5.00, 0.10),
+    # THE DATED SNAPSHOT IS WHAT PROVIDERS ACTUALLY SHIPS AS THE DEFAULT, and price_get
+    # is an exact-name match — so listing only the family name left a fresh install
+    # unable to price its own default model, which now correctly means "stop".
+    ("anthropic", "claude-haiku-4-5-20251001"): (1.00, 5.00, 0.10),
     # OpenAI — developers.openai.com/api/docs/pricing
     ("openai", "gpt-5.5"): (5.00, 30.00, None),
     ("openai", "gpt-5.4"): (2.50, 15.00, None),
@@ -88,6 +138,15 @@ DEFAULT_PRICES = {
     ("openai", "gpt-5.4-nano"): (0.20, 1.25, None),
     ("openai", "gpt-5-mini"): (0.25, 2.00, None),
     ("openai", "gpt-5-nano"): (0.05, 0.40, None),
+    # OpenRouter — the ids carry a vendor prefix, and price_get matches the name
+    # EXACTLY, so an openrouter deployment had no priceable model whatsoever and any
+    # dollar budget was unmeasurable from the first call. These are the upstream
+    # published rates OpenRouter passes through; the optional feed refresh corrects them
+    # and a user override always wins.
+    ("openrouter", "anthropic/claude-haiku-4.5"): (1.00, 5.00, 0.10),
+    ("openrouter", "anthropic/claude-sonnet-4.6"): (3.00, 15.00, 0.30),
+    ("openrouter", "google/gemini-2.5-flash"): (0.30, 2.50, None),
+    ("openrouter", "openai/gpt-5-mini"): (0.25, 2.00, None),
 }
 
 
@@ -137,12 +196,28 @@ def run_daily_price_update(force=False):
         return {"error": str(e)}
 
 
+_SEEDED = set()
+
+
 def _seed_prices(con):
+    """Write the shipped default prices — ONCE per database, per process.
+
+    This used to run on EVERY price_get: sixteen INSERT OR IGNOREs on a connection that
+    then closed WITHOUT commit, so the work was rolled back and replayed forever. About
+    ten fresh SQLite opens happened per AI call, and the table it was seeding stayed
+    empty the whole time.
+    """
+    # The emptiness probe is one row, against twenty INSERTs — and it means a reset that
+    # recreates the database re-seeds instead of running priceless forever.
+    if USAGE_DB in _SEEDED and con.execute("SELECT 1 FROM prices LIMIT 1").fetchone():
+        return
     for (prov, model), (i, o, c) in DEFAULT_PRICES.items():
         con.execute("INSERT OR IGNORE INTO prices"
                     "(provider,model,in_usd,out_usd,cached_usd,source,updated) "
                     "VALUES(?,?,?,?,?,'default',?)",
                     (prov, model, i, o, c, datetime.date.today().isoformat()))
+    con.commit()
+    _SEEDED.add(USAGE_DB)
 
 
 # provider -> how to ask it which model an alias really is. A name like
@@ -166,6 +241,13 @@ def detect_model_version(provider, model, timeout=30):
     `gemini-3.7-flash`. So the probe is a real call, deliberately made as small as one
     can be: a single token in, a single token out.
 
+    IT IS A PAID CALL, SO IT IS GATED AND LEDGERED like every other one. It sat outside
+    both: no check_limit before, no record_usage after, reached from suggest_price for
+    any model name containing "latest" or "preview". Small is not free, and a call
+    nobody counts is the exact failure this file exists to prevent. A cap that is
+    already hit stops the probe — the caller then falls back to a published feed or a
+    family guess, which costs nothing.
+
     Never raises. Detection failing must leave the caller exactly where it was."""
     try:
         if provider == "gemini":
@@ -174,13 +256,22 @@ def detect_model_version(provider, model, timeout=30):
             key = key_for("gemini")
             if not key:
                 return None
+            check_limit(provider, model)
             url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-                   "%s:generateContent?key=%s" % (model, key))
+                   "%s:generateContent" % model)
             body = _json.dumps({"contents": [{"parts": [{"text": "hi"}]}],
                                 "generationConfig": {"maxOutputTokens": 1}}).encode()
+            # THE KEY GOES IN A HEADER, NEVER THE QUERY STRING. A URL is captured by
+            # every proxy and access log on the path, and urllib prints it back inside
+            # its own error messages — which is how a secret ends up in a log file
+            # nobody thought was sensitive.
             req = urllib.request.Request(
-                url, data=body, headers={"Content-Type": "application/json"})
+                url, data=body, headers={"Content-Type": "application/json",
+                                         "x-goog-api-key": key})
             d = _json.load(urllib.request.urlopen(req, timeout=timeout))
+            u = d.get("usageMetadata") or {}
+            record_usage(provider, model, u.get("promptTokenCount") or 0,
+                         u.get("candidatesTokenCount") or 0)
             got = (d.get("modelVersion") or "").strip()
             return got or None
     except Exception:                            # noqa: BLE001
@@ -414,6 +505,20 @@ def prices_list():
     return rows
 
 
+def _manual_prices(con):
+    """{(provider, model)} the user set by hand — the rows a refresh must never touch.
+
+    THIS IS A NAMED FUNCTION BECAUSE THE INLINE VERSION SILENTLY DID NOTHING. It read
+    `set(con.execute(...))`, and `_usage_con()` sets `row_factory = sqlite3.Row`, so the
+    set held Row OBJECTS while the guard below tested a plain tuple. A Row never equals a
+    tuple, so `(prov, model) in seen` was False for every manual row and the daily
+    unattended refresh overwrote each one — including the rate a user typed precisely to
+    make their dollar budget measurable.
+    """
+    return {(r["provider"], r["model"]) for r in con.execute(
+        "SELECT provider, model FROM prices WHERE source='manual'")}
+
+
 def prices_refresh():
     """Populate/refresh prices from OpenRouter's public models API (it lists
     per-token pricing for models across providers). Matches by model name, so it
@@ -442,9 +547,9 @@ def prices_refresh():
     updated = 0
     today = datetime.date.today().isoformat()
     # refresh existing non-manual rows + any usage model we can name-match
-    seen = set(con.execute("SELECT provider, model FROM prices "
-                           "WHERE source='manual'"))
-    targets = set(con.execute("SELECT DISTINCT provider, model FROM usage"))
+    seen = _manual_prices(con)
+    targets = {(r["provider"], r["model"]) for r in con.execute(
+        "SELECT DISTINCT provider, model FROM usage")}
     targets |= {(r["provider"], r["model"]) for r in con.execute(
         "SELECT provider, model FROM prices WHERE source!='manual'")}
     for prov, model in targets:
@@ -533,23 +638,56 @@ def cost_usd(in_tok, out_tok, provider, model):
     return (in_tok or 0) / 1e6 * (p[0] or 0) + (out_tok or 0) / 1e6 * (p[1] or 0)
 
 
-def record_usage(provider, model, in_tok, out_tok):
-    """Add one call's token usage to today's row. Never raises (best-effort)."""
+# Calls that were PAID FOR but could not be written to the ledger. Kept in memory and
+# printed, because the alternative — the old `except Exception: pass` — turned a locked
+# database into spend no cap could ever see. Read it with unrecorded_usage().
+_UNRECORDED = []
+_UNRECORDED_MAX = 200
+
+
+def unrecorded_usage():
+    """[{provider, model, input, output, error}] this process failed to record.
+
+    A non-empty list means the month's totals are a FLOOR and every dollar cap is
+    measuring less than was actually spent."""
+    return list(_UNRECORDED)
+
+
+def record_usage(provider, model, in_tok, out_tok, tries=3):
+    """Add one call's token usage to today's row. Never raises (best-effort).
+
+    Never raising is deliberate — the call has already been paid for, and throwing here
+    would also throw away the work it bought. But "best effort" used to mean
+    `except Exception: pass`, so under the parallel match pool a locked database silently
+    became unmeasured spend. Now it retries the write, and a write it truly cannot land
+    is reported to stderr and kept in unrecorded_usage() instead of vanishing.
+    """
     if not (provider and model):
         return
-    try:
-        con = _usage_con()
-        con.execute(
-            "INSERT INTO usage(provider,model,day,calls,input_tokens,output_tokens) "
-            "VALUES(?,?,?,1,?,?) ON CONFLICT(provider,model,day) DO UPDATE SET "
-            "calls=calls+1, input_tokens=input_tokens+excluded.input_tokens, "
-            "output_tokens=output_tokens+excluded.output_tokens",
-            (provider, model, datetime.date.today().isoformat(),
-             int(in_tok or 0), int(out_tok or 0)))
-        con.commit()
-        con.close()
-    except Exception:
-        pass
+    last = None
+    for i in range(max(1, tries)):
+        try:
+            con = _usage_con()
+            con.execute(
+                "INSERT INTO usage(provider,model,day,calls,input_tokens,output_tokens) "
+                "VALUES(?,?,?,1,?,?) ON CONFLICT(provider,model,day) DO UPDATE SET "
+                "calls=calls+1, input_tokens=input_tokens+excluded.input_tokens, "
+                "output_tokens=output_tokens+excluded.output_tokens",
+                (provider, model, datetime.date.today().isoformat(),
+                 int(in_tok or 0), int(out_tok or 0)))
+            con.commit()
+            con.close()
+            return True
+        except Exception as e:                   # noqa: BLE001
+            last = e
+            time.sleep(0.25 * (i + 1))
+    lost = {"provider": provider, "model": model, "input": int(in_tok or 0),
+            "output": int(out_tok or 0), "error": str(last)}
+    if len(_UNRECORDED) < _UNRECORDED_MAX:
+        _UNRECORDED.append(lost)
+    print("ai: UNMEASURED SPEND — could not record %d in / %d out tokens for %s/%s: %s"
+          % (lost["input"], lost["output"], provider, model, last), file=sys.stderr)
+    return False
 
 
 def _month_prefix():
@@ -740,9 +878,12 @@ def set_limit(scope, key, caps):
     con.close()
 
 
-def _enforce(scope, key, tag):
-    """Raise if any active cap on this (scope,key) is hit. The $ cap is skipped when
-    a used model is unpriced (cost unknowable) — the token caps are the fallback."""
+def _enforce(scope, key, tag, pending=None):
+    """Raise if any active cap on this (scope,key) is hit.
+
+    `pending` = the (provider, model) about to be called, when it has NO price. See
+    check_limit: a cap has to be tested against the call that is about to happen, not
+    only against the calls already recorded."""
     caps = limits_map()[scope].get(key)
     if not caps:
         return
@@ -765,6 +906,16 @@ def _enforce(scope, key, tag):
         # and never appears in the price table, so a $20 cap sat in the database while
         # 19,954,304 input tokens were recorded at $0.00 and nothing ever stopped.
         # Unknowable cost is the strongest reason to stop, not a licence to continue.
+        #
+        # AND THE MODEL ABOUT TO BE CALLED COUNTS AS USAGE. Reading `unpriced` only from
+        # the `usage` table meant the FIRST call to an unpriced model always passed —
+        # nothing was recorded yet, so there was nothing unpriced to notice — and the
+        # match pool let every worker through the gate before any of them wrote a row.
+        if pending:
+            raise RuntimeError(
+                "%s is set to $%.2f but %s/%s has no price, so this call's cost cannot "
+                "be measured. Set a price for it, or clear the budget%s"
+                % (tag, caps["usd"], pending[0], pending[1], where))
         if unpriced:
             raise RuntimeError(
                 "%s is set to $%.2f but this month's usage includes a model with no "
@@ -777,10 +928,20 @@ def _enforce(scope, key, tag):
 
 def check_limit(provider, model):
     """Raise RuntimeError if this month's usage has hit any provider- or model-scoped
-    cap (total / input / output tokens, or the $ budget)."""
-    _enforce("global", "all", "the global AI budget")
-    _enforce("provider", provider, "provider %r" % provider)
-    _enforce("model", model, "model %r" % model)
+    cap (total / input / output tokens, or the $ budget), or if the call about to be
+    made cannot be priced at all."""
+    # Asked ONCE, and only when a DOLLAR budget exists to measure: price_get opens the
+    # database and this runs in front of every paid call in the app. A token cap needs
+    # no price, so an install with only token caps pays nothing for this.
+    lm = limits_map()
+    wants_price = any((lm.get(s) or {}).get(k, {}).get("usd")
+                      for s, k in (("global", "all"), ("provider", provider),
+                                   ("model", model)))
+    pending = ((provider, model)
+               if wants_price and price_get(provider, model) is None else None)
+    _enforce("global", "all", "the global AI budget", pending)
+    _enforce("provider", provider, "provider %r" % provider, pending)
+    _enforce("model", model, "model %r" % model, pending)
 
 
 def usage_summary():
@@ -1270,9 +1431,12 @@ def model_for(provider):
 def active_provider():
     """Which provider to use: env override → config → first configured."""
     p = os.environ.get("AI_PROVIDER") or config.get("ai_provider")
-    if p in PROVIDERS and key_for(p):
-        return p
-    if p in PROVIDERS:                       # explicitly chosen but no key yet
+    if p in PROVIDERS:
+        # An explicit choice is honoured or it is nothing. Falling through to "first
+        # with a key" would quietly bill a provider the user did not pick. (This was
+        # written as two branches, the second unreachable: the first already returned
+        # for the with-key case, so `return p if key_for(p) else None` could only ever
+        # return None.)
         return p if key_for(p) else None
     for cand in PROVIDERS:                    # auto: first with a key
         if key_for(cand):
@@ -1391,6 +1555,7 @@ def list_models(provider, refresh=False, vision_only=False):
         return cached
     key = key_for(provider)
     ids = []
+    failed = False
     try:
         if key and provider == "anthropic":
             import anthropic
@@ -1409,12 +1574,17 @@ def list_models(provider, refresh=False, vision_only=False):
                            or getattr(m, "supported_generation_methods", None) or [])
                 if not actions or "generateContent" in actions:
                     ids.append((getattr(m, "name", "") or "").split("/")[-1])
-    except Exception:
-        ids = []
+    except Exception:                        # noqa: BLE001
+        ids, failed = [], True
     merged = sorted(x for x in (set(ids) | set(MODELS.get(provider, []))) if x)
     if not merged:
         merged = MODELS.get(provider, [])
-    _MODELS_CACHE[provider] = merged
+    # DO NOT CACHE A FAILURE. One transient 503 used to pin the curated fallback for the
+    # whole process lifetime, so a model the user had actually configured stayed absent
+    # from every picker until a restart. A list built without an error is stable and
+    # worth caching; a list built from an exception is just the fallback.
+    if not failed:
+        _MODELS_CACHE[provider] = merged
     if vision_only:
         vis = [m for m in merged if is_vision_model(provider, m)]
         return vis or merged
@@ -1503,7 +1673,7 @@ def _web_gemini(key, model, system, user):
     except Exception:
         client = genai.Client(api_key=key)
     cfg = types.GenerateContentConfig(
-        system_instruction=system, max_output_tokens=2048,
+        system_instruction=system, max_output_tokens=WEB_MAX_OUT,
         tools=[types.Tool(google_search=types.GoogleSearch())])
     resp = client.models.generate_content(model=model, contents=user, config=cfg)
     sources = []
@@ -1525,7 +1695,7 @@ def _web_anthropic(key, model, system, user):
     import anthropic
     client = anthropic.Anthropic(api_key=key)
     resp = client.messages.create(
-        model=model, max_tokens=2048, system=system,
+        model=model, max_tokens=WEB_MAX_OUT, system=system,
         messages=[{"role": "user", "content": user}],
         tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}])
     parts, sources = [], []
@@ -1571,22 +1741,47 @@ def _web_openai(key, model, user, base_url=None):
             getattr(u, "output_tokens", 0) or 0, _dedup_sources(sources))
 
 
+def _web_call(provider, key, model, system, user):
+    """THE web-grounded provider call → (text, in_tok, out_tok, sources).
+
+    ONE DISPATCH, GATED AND LEDGERED, BECAUSE THE COPIES WERE NEITHER. web_scores,
+    find_media_pages and find_media_urls each grew their own two lines —
+    `fn = _web_gemini if provider == "gemini" else _web_anthropic` then
+    `_retry(lambda: fn(...))` — with no check_limit() before and no record_usage()
+    after. Web search is the DEAREST call shape here (Anthropic bills per search on top
+    of tokens), and it was the only one no cap could see and no ledger counted.
+
+    The same copies also mis-dispatched OpenAI, which WEB_PROVIDERS declares web-capable:
+    they handed an OpenAI key to Anthropic's SDK, the caller's bare `except` swallowed
+    the failure, and the feature silently returned nothing.
+
+    Raises for a provider with no web tool — callers that can fall back to a plain
+    completion do so explicitly, so a missing tool can never look like an empty answer.
+    """
+    check_limit(provider, model)
+    if provider not in WEB_PROVIDERS:
+        raise RuntimeError("provider %r has no web search" % provider)
+
+    def fn():
+        if provider == "gemini":
+            return _web_gemini(key, model, system, user)
+        if provider == "anthropic":
+            return _web_anthropic(key, model, system, user)
+        return _web_openai(key, model, "%s\n\n%s" % (system, user))
+
+    est = _estimate_io(system, user, WEB_MAX_OUT)
+    text, i, o, src = _retry(fn, provider=provider, model=model, est=est)
+    record_usage(provider, model, i, o)
+    return text, i, o, src
+
+
 def _complete_text_web(provider, key, model, system, user):
     """Web-grounded completion → (text, sources). Enforces the usage limit and
     records tokens, like _complete_text. Falls back to a plain completion (no
     sources) for providers without a web tool."""
-    check_limit(provider, model)
-    if provider == "gemini":
-        text, i, o, src = _retry(lambda: _web_gemini(key, model, system, user))
-    elif provider == "anthropic":
-        text, i, o, src = _retry(lambda: _web_anthropic(key, model, system, user))
-    elif provider == "openai":
-        text, i, o, src = _retry(
-            lambda: _web_openai(key, model, "%s\n\n%s" % (system, user)))
-    else:                                   # no web tool (e.g. openrouter)
-        text = _complete_text(provider, key, model, system, user)
-        return text, []
-    record_usage(provider, model, i, o)
+    if not supports_web(provider):          # no web tool (e.g. openrouter)
+        return _complete_text(provider, key, model, system, user), []
+    text, _i, _o, src = _web_call(provider, key, model, system, user)
     return text, src
 
 
@@ -1621,11 +1816,18 @@ def title_aliases(title, platforms=(), limit=6):
     user = "Title: %s" % title
     if platforms:
         user += "\nPlatform(s): %s" % ", ".join(str(p) for p in platforms if p)
-    txt = _complete_text(prov, key, model, sys_p, user)
+    # json_mode=False: this asks for a JSON ARRAY, and OpenAI's json_object response
+    # format cannot return one. Forcing it made this function return [] on OpenAI every
+    # single time, so the alias rescue silently never fired for those deployments.
+    txt = _complete_text(prov, key, model, sys_p, user, json_mode=False)
     try:
         out = _json(txt)
     except Exception:                           # noqa: BLE001
         return []
+    if isinstance(out, dict):
+        # A provider that wraps the array anyway ({"aliases": [...]}) still answered
+        # the question — read it rather than throwing the answer away.
+        out = next((v for v in out.values() if isinstance(v, list)), None)
     if not isinstance(out, list):
         return []
     seen, res = {title.lower()}, []
@@ -1741,12 +1943,10 @@ def find_media_pages(title, systems=None, year=None, provider=None, model=None):
               "game — MobyGames, TheGamesDB, Wikipedia, archive.org, platform fan wikis. "
               "Answer in one short sentence; the sources matter, not the prose.")
     user = 'Where can I see the cover art for the video game "%s"%s%s?' % (title, yline, sysline)
-    fn = _web_gemini if provider == "gemini" else _web_anthropic
     try:
-        res = _retry(lambda: fn(key, model, system, user))
-    except Exception:
+        srcs = _web_call(provider, key, model, system, user)[3]
+    except Exception:                        # noqa: BLE001 — incl. a budget stop
         return []
-    srcs = res[3] if len(res) > 3 else []
     return [s for s in (srcs or []) if (s or {}).get("url")]
 
 
@@ -1772,10 +1972,9 @@ def find_media_urls(title, systems=None, year=None, provider=None, model=None):
     user = ('Find the cover/box art and up to 4 in-game screenshots for the video game "%s"%s%s.\n'
             'Respond as STRICT JSON only: {"cover":"<direct image url or empty>",'
             '"screenshots":["<direct image url>", ...]}' % (title, yline, sysline))
-    fn = _web_gemini if provider == "gemini" else _web_anthropic
     try:
-        txt = _retry(lambda: fn(key, model, system, user))[0]
-    except Exception:
+        txt = _web_call(provider, key, model, system, user)[0]
+    except Exception:                        # noqa: BLE001 — incl. a budget stop
         return []
     import re as _re
     m = _re.search(r"\{.*\}", txt or "", _re.S)
@@ -1796,54 +1995,138 @@ def find_media_urls(title, systems=None, year=None, provider=None, model=None):
     return out
 
 
-_TRANSIENT = ("503", "429", "500", "unavailable", "overloaded", "rate limit",
-              "timeout", "timed out", "temporarily", "try again")
+# WORDS, NOT BARE NUMBERS. This list used to hold "503", "429" and "500", matched as
+# substrings of the message text — so "the model returned 500 tokens", a request id
+# containing 429, or a model named gpt-503 each bought two extra PAID attempts at a
+# failure that was never going to succeed. An HTTP status is a property of the
+# exception (see _status_of); prose is only the fallback when there isn't one.
+_TRANSIENT = ("unavailable", "overloaded", "rate limit", "too many requests",
+              "timeout", "timed out", "deadline exceeded", "temporarily",
+              "try again", "internal server error", "connection reset")
+_TRANSIENT_STATUS = (408, 409, 425, 429, 500, 502, 503, 504)
+
+# Failures the provider MAY ALREADY HAVE BILLED: the request was processed and the
+# answer was lost on the way back (a client-side timeout, a gateway giving up on a
+# response that was being generated). A 429 or a 503 is a REFUSAL — nothing ran, so
+# counting it would push a budget over on work that never happened.
+_MAYBE_BILLED = ("timeout", "timed out", "deadline exceeded", "connection reset",
+                 "incomplete read", "read operation")
+_MAYBE_BILLED_STATUS = (408, 500, 502, 504)
 
 
-def _retry(fn, tries=3, base=2.0):
+def _status_of(err):
+    """The HTTP status an SDK exception carries, or None if it carries none."""
+    for attr in ("status_code", "status", "code", "http_status"):
+        v = getattr(err, attr, None)
+        if isinstance(v, int) and 100 <= v <= 599:
+            return v
+    resp = getattr(err, "response", None)
+    v = getattr(resp, "status_code", None)
+    return v if isinstance(v, int) and 100 <= v <= 599 else None
+
+
+def _is_transient(err):
+    """Worth paying for another attempt? A status, when there is one, is the answer."""
+    st = _status_of(err)
+    if st is not None:
+        return st in _TRANSIENT_STATUS
+    msg = str(err).lower()
+    return any(t in msg for t in _TRANSIENT)
+
+
+def _maybe_billed(err):
+    """Did this failure probably still cost money? See _MAYBE_BILLED."""
+    st = _status_of(err)
+    if st is not None:
+        return st in _MAYBE_BILLED_STATUS
+    msg = str(err).lower()
+    return any(t in msg for t in _MAYBE_BILLED)
+
+
+def _estimate_io(system, user, max_out):
+    """A deliberately HIGH (in, out) guess for a call whose real usage was lost.
+
+    Used only when an attempt was billed but its answer never arrived, so no token
+    counts exist. Guessing low lets spend run past the cap the user set; guessing high
+    trips it early and they raise it. Only one of those costs money — the same rule
+    _family_price follows. So: ~3 characters per token, which over-counts English on
+    purpose, and assume the model produced the full output cap.
+    """
+    chars = len(system or "") + len(user or "")
+    return max(1, chars // 3), int(max_out or 0)
+
+
+def _retry(fn, tries=3, base=2.0, provider=None, model=None, est=None):
     """Call fn(); retry transient provider errors (503/429/overload/timeout) with
-    linear backoff. Permanent errors (bad key, 400) raise immediately."""
+    linear backoff. Permanent errors (bad key, 400) raise immediately.
+
+    `est` = (in_tok, out_tok) to charge for an attempt the provider probably billed but
+    whose answer never came back. WITHOUT THIS THE LEDGER UNDER-COUNTS BY UP TO TWO FULL
+    CALLS per retried request: record_usage ran only after a successful return, so a
+    request that timed out after the model had already generated its answer was paid for
+    and never counted, and the month's cap was measured against a fiction.
+    """
     for i in range(tries):
         try:
             return fn()
         except Exception as e:            # noqa: BLE001
-            if i == tries - 1 or not any(t in str(e).lower() for t in _TRANSIENT):
+            if est and provider and model and _maybe_billed(e):
+                record_usage(provider, model, est[0], est[1])
+            if i == tries - 1 or not _is_transient(e):
                 raise
             time.sleep(base * (i + 1))
 
 
-def _complete_text(provider, key, model, system, user):
+def _complete_text(provider, key, model, system, user, max_out=None, json_mode=True):
     """Single text completion dispatched to the provider's SDK. Enforces the
-    monthly usage limit before calling, and records token usage after."""
+    monthly usage limit before calling, and records token usage after.
+
+    `max_out` — the output-token ceiling, sized by the caller (see DEFAULT_MAX_OUT).
+    `json_mode` — False when the answer is a JSON ARRAY rather than an object."""
     check_limit(provider, model)
+    cap = int(max_out or DEFAULT_MAX_OUT)
 
     def call():
         if provider == "anthropic":
-            return _call_anthropic(key, model, system, user)
+            return _call_anthropic(key, model, system, user, max_out=cap)
         if provider in ("openai", "openrouter"):
             base = "https://openrouter.ai/api/v1" if provider == "openrouter" else None
-            return _call_openai(key, model, system, user, base_url=base)
+            return _call_openai(key, model, system, user, base_url=base,
+                                max_out=cap, json_mode=json_mode)
         if provider == "gemini":
-            return _call_gemini(key, model, system, user)
+            return _call_gemini(key, model, system, user, max_out=cap)
         raise RuntimeError("unknown provider %r" % provider)
-    text, i, o = _retry(call)
+    try:
+        text, i, o = _retry(call, provider=provider, model=model,
+                            est=_estimate_io(system, user, cap))
+    except TruncatedResponse as e:
+        # Unusable, and billed in full. The ledger has to see it or the month's spend is
+        # understated by exactly the calls that wasted the most.
+        record_usage(provider, model, e.in_tok, e.out_tok)
+        raise
     record_usage(provider, model, i, o)
     return text
 
 
-def _complete_vision(provider, key, model, system, user, images):
+def _complete_vision(provider, key, model, system, user, images, max_out=None):
     """Multimodal completion. `images` = list of (mime, bytes). Enforces the
     monthly usage limit before calling, and records token usage after."""
     check_limit(provider, model)
-    if provider == "anthropic":
-        text, i, o = _vision_anthropic(key, model, system, user, images)
-    elif provider in ("openai", "openrouter"):
-        base = "https://openrouter.ai/api/v1" if provider == "openrouter" else None
-        text, i, o = _vision_openai(key, model, system, user, images, base_url=base)
-    elif provider == "gemini":
-        text, i, o = _vision_gemini(key, model, system, user, images)
-    else:
-        raise RuntimeError("unknown provider %r" % provider)
+    cap = int(max_out or VISION_MAX_OUT)
+    try:
+        if provider == "anthropic":
+            text, i, o = _vision_anthropic(key, model, system, user, images, max_out=cap)
+        elif provider in ("openai", "openrouter"):
+            base = "https://openrouter.ai/api/v1" if provider == "openrouter" else None
+            text, i, o = _vision_openai(key, model, system, user, images,
+                                        base_url=base, max_out=cap)
+        elif provider == "gemini":
+            text, i, o = _vision_gemini(key, model, system, user, images, max_out=cap)
+        else:
+            raise RuntimeError("unknown provider %r" % provider)
+    except TruncatedResponse as e:
+        record_usage(provider, model, e.in_tok, e.out_tok)
+        raise
     record_usage(provider, model, i, o)
     return text
 
@@ -2299,10 +2582,9 @@ def web_scores(title, systems=None, year=None, provider=None, model=None):
     user = ('What are the critic and user/player review scores for the video game "%s"%s%s?\n'
             'Respond as STRICT JSON only: {"critic": <0-100 or null>, '
             '"user": <0-100 or null>}.' % (title, yline, sysline))
-    fn = _web_gemini if provider == "gemini" else _web_anthropic
     try:
-        res = _retry(lambda: fn(key, model, system, user))
-    except Exception:
+        res = _web_call(provider, key, model, system, user)
+    except Exception:                        # noqa: BLE001 — incl. a budget stop
         return {}
     txt = res[0] if res else ""
     srcs = [s.get("url") for s in (res[3] if len(res) > 3 else []) or [] if (s or {}).get("url")]
@@ -2642,31 +2924,61 @@ def analyze_game(game, provider=None, model=None, web=False, force_web=False):
 
 
 # ------------------------------------------------------------------ provider calls
-def _call_anthropic(key, model, system, user):
+def _call_anthropic(key, model, system, user, max_out=None):
     import anthropic
     client = anthropic.Anthropic(api_key=key)
+    cap = int(max_out or DEFAULT_MAX_OUT)
     msg = client.messages.create(
-        model=model, max_tokens=400, system=system,
+        model=model, max_tokens=cap, system=system,
         messages=[{"role": "user", "content": user}],
     )
     text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
     u = getattr(msg, "usage", None)
-    return text, getattr(u, "input_tokens", 0) or 0, getattr(u, "output_tokens", 0) or 0
+    i = getattr(u, "input_tokens", 0) or 0
+    o = getattr(u, "output_tokens", 0) or 0
+    if getattr(msg, "stop_reason", None) == "max_tokens":
+        raise _truncated("anthropic", model, cap, i, o)
+    return text, i, o
 
 
-def _call_openai(key, model, system, user, base_url=None):
+# Models that REJECT `max_tokens` on chat completions and require
+# `max_completion_tokens` instead (OpenAI's API docs): the gpt-5 line and the o-series
+# reasoning models. PROVIDERS defaults OpenAI to gpt-5-mini, so the hardcoded parameter
+# name was a 400 on the SHIPPED configuration. An openrouter id carries a vendor prefix
+# ("openai/gpt-5-mini"), which must not hide the model name.
+_COMPLETION_TOKENS_MODELS = ("gpt-5", "o1", "o1-", "o3", "o4")
+
+
+def _openai_cap_param(model):
+    m = (model or "").lower().rsplit("/", 1)[-1]
+    return ("max_completion_tokens" if m.startswith(_COMPLETION_TOKENS_MODELS)
+            else "max_tokens")
+
+
+def _call_openai(key, model, system, user, base_url=None, max_out=None, json_mode=True):
+    """`json_mode=False` for a request whose answer is a JSON ARRAY.
+
+    This used to force `response_format={"type":"json_object"}` on every call. An object
+    is not an array, so title_aliases — which asks for "ONLY a JSON array" and then
+    requires `isinstance(out, list)` — returned [] every single time on OpenAI, and the
+    alias rescue that saves a match when an exact-title lookup fails never fired.
+    """
     import openai
     client = openai.OpenAI(api_key=key, base_url=base_url)
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
-        response_format={"type": "json_object"},
-        max_tokens=400,
-    )
+    cap = int(max_out or DEFAULT_MAX_OUT)
+    kw = {"model": model,
+          "messages": [{"role": "system", "content": system},
+                       {"role": "user", "content": user}],
+          _openai_cap_param(model): cap}
+    if json_mode:
+        kw["response_format"] = {"type": "json_object"}
+    resp = client.chat.completions.create(**kw)
     u = getattr(resp, "usage", None)
-    return (resp.choices[0].message.content,
-            getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0)
+    i = getattr(u, "prompt_tokens", 0) or 0
+    o = getattr(u, "completion_tokens", 0) or 0
+    if getattr(resp.choices[0], "finish_reason", None) == "length":
+        raise _truncated("openai", model, cap, i, o)
+    return resp.choices[0].message.content, i, o
 
 
 # thinking_budget=0 is a workaround for ONE model family: the gemini-2.5 line spends
@@ -2689,7 +3001,7 @@ def _wants_thinking_off(model):
     return m.startswith(_THINKING_OFF_PREFIXES) and m not in _NO_THINKING
 
 
-def _call_gemini(key, model, system, user):
+def _call_gemini(key, model, system, user, max_out=None):
     from google import genai
     from google.genai import types
     # cap the HTTP wait so a hung request can never stall a long batch/scan
@@ -2698,10 +3010,11 @@ def _call_gemini(key, model, system, user):
                               http_options=types.HttpOptions(timeout=90_000))
     except Exception:
         client = genai.Client(api_key=key)
+    cap = int(max_out or DEFAULT_MAX_OUT)
     cfg = dict(
         system_instruction=system,
         response_mime_type="application/json",
-        max_output_tokens=2048,
+        max_output_tokens=cap,
     )
     # Disable "thinking" only where it's both needed and accepted (see
     # _wants_thinking_off). Current models neither need it nor tolerate it.
@@ -2725,12 +3038,25 @@ def _call_gemini(key, model, system, user):
         cfg.pop("thinking_config", None)
         resp = _go(cfg)
     u = getattr(resp, "usage_metadata", None)
-    return (resp.text, getattr(u, "prompt_token_count", 0) or 0,
-            getattr(u, "candidates_token_count", 0) or 0)
+    i = getattr(u, "prompt_token_count", 0) or 0
+    o = getattr(u, "candidates_token_count", 0) or 0
+    if _gemini_truncated(resp):
+        raise _truncated("gemini", model, cap, i, o)
+    return resp.text, i, o
+
+
+def _gemini_truncated(resp):
+    """Did Gemini stop because it ran out of output budget? FinishReason.MAX_TOKENS."""
+    try:
+        fr = resp.candidates[0].finish_reason
+    except Exception:                        # noqa: BLE001 — no candidates, no verdict
+        return False
+    name = getattr(fr, "name", None) or str(fr or "")
+    return "MAX_TOKENS" in name.upper()
 
 
 # ------------------------------------------------------------------- vision calls
-def _vision_anthropic(key, model, system, user, images):
+def _vision_anthropic(key, model, system, user, images, max_out=None):
     import base64
     import anthropic
     client = anthropic.Anthropic(api_key=key)
@@ -2741,15 +3067,20 @@ def _vision_anthropic(key, model, system, user, images):
             "type": "base64", "media_type": mime,
             "data": base64.b64encode(data).decode()}})
     content.append({"type": "text", "text": user})
+    cap = int(max_out or VISION_MAX_OUT)
     msg = client.messages.create(
-        model=model, max_tokens=300, system=system,
+        model=model, max_tokens=cap, system=system,
         messages=[{"role": "user", "content": content}])
     text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
     u = getattr(msg, "usage", None)
-    return text, getattr(u, "input_tokens", 0) or 0, getattr(u, "output_tokens", 0) or 0
+    i = getattr(u, "input_tokens", 0) or 0
+    o = getattr(u, "output_tokens", 0) or 0
+    if getattr(msg, "stop_reason", None) == "max_tokens":
+        raise _truncated("anthropic", model, cap, i, o)
+    return text, i, o
 
 
-def _vision_openai(key, model, system, user, images, base_url=None):
+def _vision_openai(key, model, system, user, images, base_url=None, max_out=None):
     import base64
     import openai
     client = openai.OpenAI(api_key=key, base_url=base_url)
@@ -2760,17 +3091,22 @@ def _vision_openai(key, model, system, user, images, base_url=None):
         content.append({"type": "image_url",
                         "image_url": {"url": "data:%s;base64,%s" % (mime, b64)}})
     content.append({"type": "text", "text": user})
+    cap = int(max_out or VISION_MAX_OUT)
     resp = client.chat.completions.create(
-        model=model, max_tokens=300,
+        model=model,
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": content}],
-        response_format={"type": "json_object"})
+        response_format={"type": "json_object"},
+        **{_openai_cap_param(model): cap})
     u = getattr(resp, "usage", None)
-    return (resp.choices[0].message.content,
-            getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0)
+    i = getattr(u, "prompt_tokens", 0) or 0
+    o = getattr(u, "completion_tokens", 0) or 0
+    if getattr(resp.choices[0], "finish_reason", None) == "length":
+        raise _truncated("openai", model, cap, i, o)
+    return resp.choices[0].message.content, i, o
 
 
-def _vision_gemini(key, model, system, user, images):
+def _vision_gemini(key, model, system, user, images, max_out=None):
     from google import genai
     from google.genai import types
     client = genai.Client(api_key=key)
@@ -2779,8 +3115,9 @@ def _vision_gemini(key, model, system, user, images):
         parts.append(types.Part.from_text(text="Image %d:" % (i + 1)))
         parts.append(types.Part.from_bytes(data=data, mime_type=mime))
     parts.append(types.Part.from_text(text=user))
+    cap = int(max_out or VISION_MAX_OUT)
     cfg = dict(system_instruction=system,
-               response_mime_type="application/json", max_output_tokens=512)
+               response_mime_type="application/json", max_output_tokens=cap)
     # The vision path had been left behind when the text path was fixed: it sent
     # thinking_budget=0 unconditionally, so on the default model EVERY vision call
     # (smart art pick, add-by-image, media de-dup, category placement) died with a
@@ -2805,5 +3142,8 @@ def _vision_gemini(key, model, system, user, images):
         cfg.pop("thinking_config", None)
         resp = _go(cfg)
     u = getattr(resp, "usage_metadata", None)
-    return (resp.text, getattr(u, "prompt_token_count", 0) or 0,
-            getattr(u, "candidates_token_count", 0) or 0)
+    i = getattr(u, "prompt_token_count", 0) or 0
+    o = getattr(u, "candidates_token_count", 0) or 0
+    if _gemini_truncated(resp):
+        raise _truncated("gemini", model, cap, i, o)
+    return resp.text, i, o
