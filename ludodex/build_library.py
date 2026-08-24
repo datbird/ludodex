@@ -153,7 +153,7 @@ base_present = set()   # every base norm_key that has an owned/wanted entry (for
                        # wishlist "already owned?" check, which is title-level)
 
 
-def add(title, source, platform, sid, detail="", state="have"):
+def add(title, source, platform, sid, detail="", state="have", via_collection=None):
     # "Peel apart": a specific source row the user split off a merged entry goes to
     # its OWN key + title, overriding the natural title-derived key. Applied first so
     # the row lands on the peeled-off game on every rebuild.
@@ -208,9 +208,11 @@ def add(title, source, platform, sid, detail="", state="have"):
                 had = {d.strip() for d in (s[4] or "").split(",") if d.strip()}
                 g["sources"][i] = s = s[:4] + (",".join(sorted(had | xbox_devs)),) + s[5:]
             if state == "have" and s[5] != "have":   # have wins over want
-                g["sources"][i] = s[:5] + ("have",)
+                g["sources"][i] = s = s[:5] + ("have",) + s[6:]
+            if via_collection and not s[6]:          # keep the collection provenance
+                g["sources"][i] = s[:6] + (via_collection,)
             return ekey
-    g["sources"].append((source, ep, str(sid), title, detail, state))
+    g["sources"].append((source, ep, str(sid), title, detail, state, via_collection))
     return ekey
 
 
@@ -259,11 +261,20 @@ if os.path.exists(OUT):
                 playnite_keys.add(nk)
             if in_lb and not _regen_lb:
                 launchbox_keys.add(nk)
-        for src, plat, sid, title, detail in _prev.execute(
-                "SELECT source, platform, source_id, title_raw, detail FROM sources"):
+        # STATE AND PROVENANCE ARE PART OF THE ROW. Re-seeding without them let
+        # add()'s state="have" default land first, and the ownership merge that runs
+        # later could not downgrade it ("have wins over want"), so every per-format
+        # want became ownership on the next rebuild and stayed that way. A copy
+        # credited to an owned compilation came back as a direct purchase the same way.
+        _prev_cols = {r[1] for r in _prev.execute("PRAGMA table_info(sources)")}
+        _st = "state" if "state" in _prev_cols else "'have'"
+        _vc = "via_collection" if "via_collection" in _prev_cols else "NULL"
+        for src, plat, sid, title, detail, state, via in _prev.execute(
+                "SELECT source, platform, source_id, title_raw, detail, %s, %s "
+                "FROM sources" % (_st, _vc)):
             if src in _REGEN or not config.source_enabled(src):
                 continue                       # regenerated fresh, or turned off
-            add(title, src, plat, sid, detail or "")
+            add(title, src, plat, sid, detail or "", state or "have", via)
     except sqlite3.OperationalError:
         pass                                   # no prior library / schema mismatch
     try:                                       # wishlist-wanted games (may be absent in older DBs)
@@ -1101,8 +1112,8 @@ for (base, plat), g in games.items():
     # the shared title's metadata (an era-separated bkey != any provider norm_key).
     base_to_gids.setdefault(bkey, []).append(gid)
     cur.executemany(
-        "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,state)"
-        " VALUES(?,?,?,?,?,?,?)", [(gid,) + s for s in srcs])
+        "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,state,"
+        "via_collection) VALUES(?,?,?,?,?,?,?,?)", [(gid,) + s for s in srcs])
     _wrote += 1
     if _wrote % 200 == 0:
         print("PROG\t%d\t%d\t%s\tcatalog" % (_wrote, _wtotal, base), flush=True)
