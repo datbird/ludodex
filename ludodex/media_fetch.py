@@ -48,7 +48,9 @@ STEAM_META = os.path.join(DATA, "steam-meta.sqlite")
 # Steam store CDN. library_600x900 (portrait cover), library_hero (wide hero),
 # header.jpg (capsule/header banner), logo. Not every appid has every asset —
 # verified lazily when materialized.
-STEAM_CDN = "https://steamcdn-a.akamaihd.net/steam/apps/%s/%s"
+# `steamcdn-a.akamaihd.net` is Valve's retired hostname; STEAM_MOVIE below already uses
+# the current one, and two hosts for one CDN in one file is a fact stated twice.
+STEAM_CDN = "https://cdn.akamai.steamstatic.com/steam/apps/%s/%s"
 # Each kind lists every filename Steam is known to serve it under, tried in
 # order — prune_dead drops whichever 404s, so older/newer games both resolve.
 # The vertical cover capsule has two names: `library_600x900.jpg` (modern,
@@ -99,6 +101,7 @@ def invalidate_resmap():
     doesn't appear" failure the one-operation contract forbids."""
     global _RESMAP
     _RESMAP = None
+    _invalidate_repair()    # an identity change is exactly what the stamp repair is for
 
 
 def _resmap():
@@ -139,8 +142,71 @@ def game_key(nk, system=None):
     return "igdb:%s" % iid if iid else "title:%s" % nk
 
 
+_REPAIRED = None        # fingerprint of the inputs the last COMPLETED repair read
+
+
+def _repair_fingerprint(con):
+    """A cheap description of everything `_backfill_game_key`'s repairs read, or None.
+
+    None means "cannot tell", which never compares equal to a stored fingerprint — so an
+    unknown always costs a repair rather than skipping one. A miss must not be read as
+    consent, and here consent would mean leaving art invisible."""
+    def _st(path):
+        try:
+            s = os.stat(path)
+            return (s.st_ino, s.st_size, s.st_mtime_ns)
+        except OSError:
+            return "absent"
+    try:
+        # MAX(id) on an INTEGER PRIMARY KEY is O(1) in SQLite, so this stays free even on
+        # a 600k-row index. It catches rows that ARRIVED since the last repair; rows
+        # re-stamped in place are covered by put() clearing the memo directly.
+        top = con.execute("SELECT MAX(id) FROM media").fetchone()[0]
+    except sqlite3.Error:
+        return None
+    return (_st(os.path.join(DATA, "game-library.sqlite")), _st(META_CACHE), top)
+
+
 def _backfill_game_key(con):
-    """Stamp + REPAIR game_key on media rows. Idempotent.
+    """Stamp + REPAIR game_key on media rows. Idempotent, and CHEAP when idempotent.
+
+    The docstring below has always promised a cheap no-op "once every row is stamped",
+    but the existence check that delivered it was the LAST thing this function reached:
+    a full-table `LIKE 'title:%@%'` probe, an ATTACH + library-wide bundle UPDATE and a
+    correlated-subquery catalog UPDATE all ran first. `con_index()` calls this
+    unconditionally and every media path opens through `con_index()`, so a one-game wand
+    pull paid a library-wide repair sweep — and so did the next one, with nothing changed
+    in between.
+
+    The repairs themselves are right where they are: a row can be stamped and still
+    WRONG, so they have to run before the fully-stamped early-return. What was missing is
+    a guard on the only question that decides whether they can find anything — has any
+    INPUT changed since the last completed repair? Those inputs are the catalog, the
+    metadata cache and the media rows, and every seam that can make a stamp stale
+    (`put()`, `invalidate_resmap()`) clears this memo itself. Process-local on purpose:
+    a fresh CLI process always repairs once, and only the long-lived server, which is
+    where the repeated cost actually lands, is spared the repeat.
+
+    The memo is set only when the repair RAN TO COMPLETION — a deferred one (locked
+    database, damaged attach) retries on the next call exactly as before.
+    """
+    global _REPAIRED
+    fp = _repair_fingerprint(con)
+    if fp is not None and fp == _REPAIRED:
+        return
+    if _repair_game_key(con):
+        _REPAIRED = fp
+
+
+def _invalidate_repair():
+    """Force the next `_backfill_game_key` to do real work. Called wherever a stamp can
+    go stale without the catalog or the metadata cache changing underneath us."""
+    global _REPAIRED
+    _REPAIRED = None
+
+
+def _repair_game_key(con):
+    """The repair itself. Returns True when it ran to completion.
 
     Not merely a fill: two repair passes run before the fully-stamped early-return,
     because a row can be stamped and still WRONG. Identity changes after media is
@@ -206,6 +272,33 @@ def _backfill_game_key(con):
         if os.path.exists(_lib):
             try:
                 con.execute("ATTACH ? AS lgk", (_lib,))
+                # A row whose `meta` names a DIFFERENT igdb id than the entry's identity
+                # is another game's art. The blanket re-stamp below read neither provider
+                # nor meta, so it ADOPTED that art — which is how a superseded identity's
+                # 600x900 cover became a legitimate candidate for the new one and beat the
+                # right game's smaller cover on `res_band` (#31). Dropped rather than
+                # merely skipped: a candidate the ranker can still see is one that can
+                # still win, and re-fetching the current identity's art is free.
+                #
+                # Positive evidence only — an empty/NULL `meta` proves nothing about
+                # identity and is adopted exactly as before. Own-console rows are left
+                # alone here for the same reason the re-stamp skips them: they match on
+                # norm_key+system and never consult game_key.
+                #
+                # Guarded on the column existing because this repair must degrade rather
+                # than abort: a legacy index (or a fixture) without `meta` would raise and
+                # take the whole entry-derived repair down with it.
+                if "meta" in {r[1] for r in con.execute("PRAGMA table_info(media)")}:
+                    con.execute(
+                        "DELETE FROM media WHERE provider='igdb' "
+                        "AND COALESCE(system,'')='' AND COALESCE(meta,'') != '' "
+                        "AND norm_key IN ("
+                        "  SELECT base_key FROM lgk.games GROUP BY base_key "
+                        "  HAVING COUNT(DISTINCT COALESCE(game_key,''))=1 "
+                        "     AND MIN(COALESCE(game_key,'')) LIKE 'igdb:%') "
+                        "AND meta != SUBSTR((SELECT MIN(g.game_key) FROM lgk.games g "
+                        "                    WHERE g.base_key=media.norm_key), 6)")
+                    con.commit()
                 # Only where every entry sharing the base_key agrees: one stamp per
                 # norm_key cannot satisfy two identities, and picking one would silently
                 # hide the other entry's art (DESIGN §11.9 era splits). Ambiguous means
@@ -232,7 +325,7 @@ def _backfill_game_key(con):
                     pass
         if not con.execute("SELECT 1 FROM media WHERE game_key IS NULL "
                            "OR game_key='' LIMIT 1").fetchone():
-            return                              # already fully stamped
+            return True                         # already fully stamped
         if os.path.exists(META_CACHE):
             try:
                 con.execute("ATTACH ? AS mc", (META_CACHE,))
@@ -254,9 +347,11 @@ def _backfill_game_key(con):
             "UPDATE media SET game_key='title:'||norm_key "
             "WHERE game_key IS NULL OR game_key=''")
         con.commit()
+        return True
     except sqlite3.OperationalError as e:
         print("media_fetch: game_key backfill deferred: %s" % str(e)[:120],
               file=sys.stderr)
+        return False                            # not memoized — the next call retries
 
 
 def reconcile_after_build():
@@ -322,28 +417,14 @@ def reconcile_after_build():
 
 
 def con_index():
-    con = sqlite3.connect(INDEX)
-    con.execute("PRAGMA busy_timeout=30000")   # wait out the live server's locks
-    con.execute("PRAGMA journal_mode=WAL")     # readers never block the writer — avoids the
-                                               # reader/writer deadlock two concurrent media
-                                               # jobs hit in rollback mode ("database is locked")
-    con.execute("""CREATE TABLE IF NOT EXISTS media(
-      id INTEGER PRIMARY KEY, norm_key TEXT NOT NULL, system TEXT,
-      kind TEXT NOT NULL, provider TEXT NOT NULL, mount TEXT,
-      ref_type TEXT NOT NULL, ref TEXT NOT NULL, ext TEXT, sha1 TEXT,
-      width INTEGER, height INTEGER, chosen INTEGER DEFAULT 0,
-      matched INTEGER DEFAULT 0, meta TEXT, indexed_at INTEGER,
-      hidden INTEGER DEFAULT 0, game_key TEXT,
-      UNIQUE(provider, kind, ref))""")
-    _cols = {r[1] for r in con.execute("PRAGMA table_info(media)")}
-    if "hidden" not in _cols:
-        con.execute("ALTER TABLE media ADD COLUMN hidden INTEGER DEFAULT 0")
-    # DESIGN §11.9 — resolved-identity key for media (Phase 1: add + backfill + stamp
-    # on fetch; NOT yet read by the serve path, so this stays invisible until Phase 3).
-    if "game_key" not in _cols:
-        con.execute("ALTER TABLE media ADD COLUMN game_key TEXT")
-    con.execute("CREATE INDEX IF NOT EXISTS ix_media_nk ON media(norm_key)")
-    con.execute("CREATE INDEX IF NOT EXISTS ix_media_gk ON media(game_key, system, kind)")
+    """Open the media index for a fetch pass.
+
+    The schema is media_index.index_con()'s, not a second copy of it. This module used to
+    CREATE its own — without filler / ai_pick / detail / frame / sil — so whether those
+    columns existed came down to which module opened a fresh install first. Three
+    derivations of one fact; the fix is one fewer."""
+    import media_index
+    con = media_index.index_con()
     _backfill_game_key(con)
     return con
 
@@ -393,6 +474,13 @@ def put(con, nk, kind, provider, url, now, ext="jpg", system=None, meta=None,
         attrs=None, gkey=None):
     if (nk, kind, provider, url) in _banned():
         return                              # user banned this asset — don't re-add
+    # ONE place, because `ext` comes from outside and ends up as a FILENAME in the
+    # content-addressed repo: SteamGridDB's is `url.rsplit(".", 1)[-1]`, which for a
+    # dotless path is the whole tail (`host/grid/abc`), and ScreenScraper's is its
+    # free-text `format` field. Sanitising at each call site would be the same rule
+    # written twice, and the second copy is where it stops being applied.
+    import media
+    ext = media.safe_ext(ext)
     if attrs:                               # structured per-asset metadata -> JSON meta
         meta = json.dumps({k: v for k, v in attrs.items() if v not in (None, "")},
                           separators=(",", ":"))
@@ -414,6 +502,12 @@ def put(con, nk, kind, provider, url, now, ext="jpg", system=None, meta=None,
                 "indexed_at=excluded.indexed_at, game_key=excluded.game_key",
                 (nk, system, kind, provider, "url", url, ext, 1, meta, now,
                  gkey or game_key(nk, system)))
+    # This writes game_key from the resolution cache, which the catalog is free to
+    # disagree with — so a row can be re-stamped in place and become stale without the
+    # media row COUNT or MAX(id) moving. Tell the repair memo, or that row would keep a
+    # key the entry no longer has and its art would be invisible until something else
+    # happened to change the catalog.
+    _invalidate_repair()
 
 
 # --------------------------------------------------------------------------- #
@@ -662,6 +756,41 @@ def fetch_steam_media(con, now, only=None, refresh=False, limit=None, art=True):
           % (n, len(todo)), file=sys.stderr)
 
 
+def _drop_superseded_igdb(con, current):
+    """Delete igdb rows whose `meta` names an igdb id the title no longer resolves to.
+
+    `current` = {norm_key: {"<igdb id>", ...}}. Returns rows removed.
+
+    fetch_igdb only ever UPSERTS, keyed (provider, kind, ref), so a row fetched under a
+    PREVIOUS igdb id can never be overwritten by the new one — it sits alongside, and
+    the entry-derived repair in _backfill_game_key then re-stamps it with the entry's
+    new game_key, making another game's cover a legitimate candidate. `res_band` ranks
+    above provider priority, so the wrong game's 600x900 cover then beats the right
+    game's smaller one and is served (#31). fetch_screenscraper has always done a scoped
+    delete for exactly this reason; this is its igdb counterpart.
+
+    POSITIVE EVIDENCE ONLY. A row is dropped because its `meta` names an id this title
+    no longer resolves to — never because `meta` is absent. An unattributed row proves
+    nothing about its identity, and reading "I don't know" as "delete it" is the same
+    fail-open mistake pointing the other way."""
+    if not current:
+        return 0
+    pairs = [(nk, i) for nk, ids in current.items() for i in ids]
+    con.execute("DROP TABLE IF EXISTS temp._igdb_cur")
+    con.execute("CREATE TEMP TABLE _igdb_cur(nk TEXT, iid TEXT)")
+    con.executemany("INSERT INTO _igdb_cur(nk,iid) VALUES(?,?)", pairs)
+    con.execute("CREATE INDEX temp.ix_igdb_cur_nk ON _igdb_cur(nk)")
+    try:
+        n = con.execute(
+            "DELETE FROM media WHERE provider='igdb' AND COALESCE(meta,'') != '' "
+            "AND norm_key IN (SELECT nk FROM _igdb_cur) "
+            "AND NOT EXISTS(SELECT 1 FROM _igdb_cur c "
+            "               WHERE c.nk=media.norm_key AND c.iid=media.meta)").rowcount
+    finally:
+        con.execute("DROP TABLE temp._igdb_cur")
+    return n
+
+
 def fetch_igdb(con, now, only=None):
     """Fetch IGDB cover/artwork/screenshot URLs for resolved games. `only` (a set of
     norm_keys) scopes the fetch to specific games — the surgical per-game wand path;
@@ -695,6 +824,13 @@ def fetch_igdb(con, now, only=None):
     except sqlite3.OperationalError:
         pass                                # no per-entry overrides table yet
     mc.close()
+    # Which igdb ids this title legitimately holds art for, right now. Built from the
+    # same two maps the fetch itself uses, so there is one derivation, not two.
+    cur = {}                                # norm_key -> {"<igdb id>", ...}
+    for _m in (res, eres):
+        for _iid, _nks in _m.items():
+            for _nk in _nks:
+                cur.setdefault(_nk, set()).add(str(_iid))
     if not res and not eres:
         print("media_fetch: igdb — no resolutions cached yet"
               + ("" if only is None else " for the requested games"), file=sys.stderr)
@@ -738,16 +874,21 @@ def fetch_igdb(con, now, only=None):
             for nk in eres.get(gid, ()):    # per-entry override: pinned game_key
                 n += _emit(nk, g, "igdb:%d" % gid)
         con.commit()
+    # AFTER the batches, deliberately: art is never removed before its replacement has
+    # landed, and a query that raises leaves the index exactly as it was.
+    stale = _drop_superseded_igdb(con, cur)
+    con.commit()
     print("media_fetch: igdb — %d image URLs from %d resolved + %d override entries"
-          % (n, sum(len(v) for v in res.values()),
-             sum(len(v) for v in eres.values())), file=sys.stderr)
+          "%s" % (n, sum(len(v) for v in res.values()),
+                  sum(len(v) for v in eres.values()),
+                  (" (%d superseded-identity rows dropped)" % stale) if stale else ""),
+          file=sys.stderr)
 
 
 def _sgdb_get(path, key):
     req = urllib.request.Request(SGDB + path,
                                  headers={"Authorization": "Bearer " + key,
                                           "User-Agent": "ludodex"})
-    import json
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.load(r)
 
@@ -765,8 +906,22 @@ def _sgdb_game_id(key, appid=None, title=None):
     completely different facts: swallowing the error here turned an API hiccup into a
     stored "SteamGridDB does not have this game". Same defect as ScreenScraper's, found
     by auditing for the class after the Mass Effect 2 report.
+
+    Which of the two a call was is decided by the STATUS, not by whether the call
+    returned. `looked` used to be set after `_sgdb_get` returned, and SteamGridDB's normal
+    answer for an appid it does not carry is a 404 — which raises. So the commonest miss
+    there is looked like a failure and was re-queried on every run forever, while a
+    genuine outage on the appid call, paired with a clean title miss, was cached as
+    "SteamGridDB does not have this game". Both halves of the very rule this docstring
+    describes were inverted.
+
+    `failed` is tracked separately and OUTRANKS a clean title miss: the appid is the exact
+    handle, so if we could not ask it we did not look, however tidy the fallback search's
+    answer was.
     """
-    looked = False
+    import urllib.error
+    looked = False              # a provider ANSWERED, including "no such game"
+    failed = False              # a lookup we could not make at all
     if appid:
         try:
             g = _sgdb_get("/games/steam/%s" % appid, key)
@@ -774,8 +929,13 @@ def _sgdb_game_id(key, appid=None, title=None):
             gid = (g.get("data") or {}).get("id")
             if gid:
                 return gid
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):
+                looked = True   # SGDB answered: it carries no game for this appid
+            else:
+                failed = True   # 401/429/5xx is the provider failing, not a miss
         except Exception:
-            pass
+            failed = True
     if title:
         try:
             d = _sgdb_get("/search/autocomplete/%s"
@@ -795,53 +955,127 @@ def _sgdb_game_id(key, appid=None, title=None):
             for it in items:
                 if matchgate.score([title], it.get("name") or "")[0]:
                     return it.get("id")
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):
+                looked = True
+            else:
+                failed = True
         except Exception:
-            pass
-    if not looked:
+            failed = True
+    if failed or not looked:
         raise RuntimeError("steamgriddb lookup failed for %r/%r — not a miss"
                            % (appid, title))
     return None
 
 
-def fetch_steamgriddb_targets(con, now, targets, limit=None):
-    """Gap-fill hero/logo/cover/icon from SteamGridDB for arbitrary identified
-    games — NOT just Steam. `targets` = [(norm_key, title, steam_appid_or_None)];
-    each resolves by appid or by title search. Returns the number of URLs added."""
+# How many candidates to keep per kind. `items[0]` — the first row SteamGridDB happened
+# to return — was the whole selection, which hands the choice to the provider's ordering
+# and leaves the ranker (shape, res_band, filler, region, the user's pin) nothing to
+# choose between. A handful is enough to make the ranking mean something and still costs
+# no extra API calls: they arrive in the same response.
+SGDB_PER_KIND = 3
+
+
+def _sgdb_ids_con():
+    """The shared provider-identity cache, or None when there isn't one yet.
+
+    `provider_ids` exists precisely so a SteamGridDB id is looked up once and remembered
+    — and its own module docstring names this function as where SGDB's matcher used to
+    throw the answer away. Reading it here means a gap-fill costs no lookup at all once
+    the match sweep has run, and writing back means this path stops being the one that
+    forgets."""
+    if not os.path.exists(META_CACHE):
+        return None
+    try:
+        import provider_ids
+        con = sqlite3.connect(META_CACHE)
+        con.execute("PRAGMA busy_timeout=15000")
+        provider_ids.ensure_tables(con)
+        return con
+    except Exception:                       # noqa: BLE001 — no cache just means a lookup
+        return None
+
+
+def fetch_steamgriddb_targets(con, now, targets, limit=None, gap_only=True):
+    """Fetch hero/logo/cover/icon from SteamGridDB for arbitrary identified games — NOT
+    just Steam. `targets` = [(norm_key, title, steam_appid_or_None)]; each resolves by
+    appid or by title search. Returns the number of URLs added.
+
+    `gap_only` keeps a library-wide sweep proportional to what is missing. The per-game
+    on-demand path wants the opposite — its endpoint promises it "pulls everything a
+    matched provider holds" — so it passes False and gets every kind.
+
+    The gap test's kinds are DERIVED from SGDB_KINDS rather than hand-listed. The
+    hand-written list said cover/hero/logo while the fetch loop pulls those three AND
+    `icon`, so a game whose only missing kind was the icon was skipped as "already
+    covered" and could never get one."""
     invalidate_resmap()   # identities may have changed since the last call
     key = config.steamgriddb_key()
     if not key:
         print("media_fetch: steamgriddb — no API key; skipping", file=sys.stderr)
         return 0
-    have = {(nk, k) for nk, k in con.execute(
-        "SELECT norm_key, kind FROM media WHERE kind IN "
-        "('cover','hero','logo','icon')")}
-    todo = [t for t in targets
-            if any((t[0], k) not in have for k in ("cover", "hero", "logo"))]
+    kinds = tuple(sorted({k for k, _dim in SGDB_KINDS.values()}))
+    todo = list(targets)
+    if gap_only:
+        have = {(nk, k) for nk, k in con.execute(
+            "SELECT norm_key, kind FROM media WHERE kind IN (%s)"
+            % ",".join("?" * len(kinds)), kinds)}
+        todo = [t for t in todo if any((t[0], k) not in have for k in kinds)]
     if limit:
         todo = todo[:limit]
+    ids = _sgdb_ids_con()
     n = 0
-    for nk, title, appid in todo:
-        try:
-            gid = _sgdb_game_id(key, appid, title)
-            if not gid:
-                continue
-            for ep, (kind, dim) in SGDB_KINDS.items():
-                q = "/%s/game/%s" % (ep, gid) + ("?dimensions=%s" % dim if dim else "")
-                try:
-                    d = _sgdb_get(q, key)
-                except Exception:
+    try:
+        import provider_ids
+        for nk, title, appid in todo:
+            try:
+                gid = None
+                if ids is not None:
+                    c = provider_ids.cached(ids, "steamgriddb", nk)
+                    if c and provider_ids.is_real_id("steamgriddb", c[0]):
+                        gid = c[0]
+                if gid is None:
+                    # ONE call. This used to run _sgdb_game_id twice per game — once to
+                    # test it and once to use it — which doubled the rate-limited traffic
+                    # and could return two different answers.
+                    gid = _sgdb_game_id(key, appid, title)
+                    if ids is not None:
+                        # The RECORDED id, not the searched one. `record` refuses an id
+                        # another game in this library already holds — a search's
+                        # nearest-record guess, the way Hammerwatch II and Heroes of
+                        # Hammerwatch II came to share SGDB 5462929 — and returns 0.
+                        # Fetching art for it anyway would put the other game's cover on
+                        # this one, which is the thing the guard exists to stop.
+                        gid = provider_ids.record(
+                            ids, "steamgriddb", nk, gid, title,
+                            "steam_appid" if appid else "search") or None
+                        ids.commit()
+                if not gid:
                     continue
-                items = d.get("data") or []
-                if items and items[0].get("url"):
-                    url = items[0]["url"]
-                    put(con, nk, kind, "steamgriddb", url, now,
-                        ext=url.rsplit(".", 1)[-1].split("?")[0], meta=str(gid))
-                    n += 1
-                time.sleep(0.2)
-        except Exception as e:
-            print("media_fetch: steamgriddb %r: %s" % (title or nk, e), file=sys.stderr)
-        con.commit()
-    print("media_fetch: steamgriddb — %d URLs across %d gap games"
+                for ep, (kind, dim) in SGDB_KINDS.items():
+                    q = "/%s/game/%s" % (ep, gid) + ("?dimensions=%s" % dim if dim else "")
+                    try:
+                        d = _sgdb_get(q, key)
+                    except Exception:
+                        continue
+                    for it in (d.get("data") or [])[:SGDB_PER_KIND]:
+                        url = it.get("url")
+                        if not url:
+                            continue
+                        # ext still derived from the url, but put() sanitises it: a
+                        # DOTLESS path made `url.rsplit(".", 1)[-1]` the whole tail.
+                        put(con, nk, kind, "steamgriddb", url, now,
+                            ext=url.rsplit(".", 1)[-1], meta=str(gid))
+                        n += 1
+                    time.sleep(0.2)
+            except Exception as e:
+                print("media_fetch: steamgriddb %r: %s" % (title or nk, e),
+                      file=sys.stderr)
+            con.commit()
+    finally:
+        if ids is not None:
+            ids.close()
+    print("media_fetch: steamgriddb — %d URLs across %d game(s)"
           % (n, len(todo)), file=sys.stderr)
     return n
 
@@ -934,7 +1168,6 @@ def fetch_screenscraper(con, now, only=None):
         print("media_fetch: screenscraper — no cache yet (run ss_scrape.py)",
               file=sys.stderr)
         return
-    import json
     import screenscraper as ss
     sc = sqlite3.connect(cache)
     q = ("SELECT norm_key, system, payload_json FROM ss_game "
@@ -969,6 +1202,13 @@ def fetch_screenscraper(con, now, only=None):
           % (n, len(rows)), file=sys.stderr)
 
 
+# How long a ref that ANSWERED suppresses a re-probe. Long enough that a routine sync
+# costs nothing, short enough that a CDN dropping an asset is noticed within a month —
+# the same shape as provider_ids.MISS_TTL, and for the same reason: a recorded result is
+# a record, never a permanent verdict.
+PROBE_TTL = 30 * 24 * 3600
+
+
 def prune_dead(con, workers=16, only_nks=None, providers=("steam", "igdb", "steamgriddb"),
                kinds=None):
     """HEAD-check un-materialized public URL refs and drop the definitively-dead
@@ -982,9 +1222,17 @@ def prune_dead(con, workers=16, only_nks=None, providers=("steam", "igdb", "stea
     run, instead of re-probing the whole index."""
     import urllib.error
     from concurrent.futures import ThreadPoolExecutor
+    now = int(time.time())
+    # `sha1 IS NULL` alone was the whole gate, and it is the wrong question: sha1 records
+    # that the bytes were DOWNLOADED, and only the CHOSEN asset per (game, kind) is ever
+    # materialized. So every non-chosen candidate looked permanently unverified and the
+    # same speculative Steam URLs were re-HEADed with 16 threads on every sync, forever,
+    # to learn what they said last time. `probed` records that the ref ANSWERED; a stale
+    # record still falls through and is asked again.
     base = ("SELECT id, ref FROM media WHERE ref_type='url' AND (sha1 IS NULL OR sha1='')"
+            " AND COALESCE(probed,0) < ?"
             " AND provider IN (%s)" % ",".join("?" * len(providers)))
-    base_params = list(providers)
+    base_params = [now - PROBE_TTL] + list(providers)
     if kinds:
         base += " AND kind IN (%s)" % ",".join("?" * len(kinds))
         base_params += list(kinds)
@@ -1012,13 +1260,22 @@ def prune_dead(con, workers=16, only_nks=None, providers=("steam", "igdb", "stea
             return rid, e.code
         except Exception:
             return rid, None                       # transient — keep the ref
-    dead = []
+    dead, answered = [], []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for rid, st in ex.map(check, rows):
             if st in (404, 410):
                 dead.append(rid)
+            elif st is not None:
+                answered.append(rid)      # it spoke; remember that, don't re-ask next sync
     if dead:
         con.executemany("DELETE FROM media WHERE id=?", [(d,) for d in dead])
+    if answered:
+        # Only rows that ANSWERED. A transient failure records nothing, so "I could not
+        # ask" is retried rather than becoming a stored "it is fine" — the same rule the
+        # dead-vs-transient split above already follows in the other direction.
+        con.executemany("UPDATE media SET probed=? WHERE id=?",
+                        [(now, a) for a in answered])
+    if dead or answered:
         con.commit()
     print("media_fetch: prune — checked %d url refs, removed %d dead"
           % (len(rows), len(dead)), file=sys.stderr)

@@ -13,9 +13,27 @@ import sqlite3
 
 FIELDS = ("top", "right", "bottom", "left", "zoom")
 
+# Files whose schema this process has already settled. `_db()` ran two CREATEs, two
+# PRAGMA table_info scans, up to seven ALTERs and a commit on EVERY call — and
+# `get_all`/`for_keys` call it per request, so drawing one page of the library grid meant
+# a write transaction against framing.sqlite. The heal itself is still needed (the
+# backing-store sync can recreate a table from only the columns the remote data held), so
+# it is not removed; it just stops being repeated. Per PATH, not global: the same process
+# opens more than one data dir in the tests and in a device export.
+_HEALED = set()
+
 
 def _db(data_dir):
-    con = sqlite3.connect(os.path.join(data_dir, "framing.sqlite"))
+    path = os.path.join(data_dir, "framing.sqlite")
+    con = sqlite3.connect(path)
+    if path in _HEALED:
+        return con
+    _ensure(con)
+    _HEALED.add(path)
+    return con
+
+
+def _ensure(con):
     con.execute("""CREATE TABLE IF NOT EXISTS framing(
         norm_key TEXT NOT NULL, kind TEXT NOT NULL,
         m_top REAL DEFAULT 0, m_right REAL DEFAULT 0,
@@ -137,7 +155,17 @@ def get_hero(data_dir, norm_key):
 
 
 def set_hero(data_dir, norm_key, source):
-    """Set/clear the hero override. Empty or 'auto' clears it (back to default)."""
+    """Set/clear the hero override. Empty, 'auto' or anything that is not a media KIND
+    clears it (back to default), and the cleared value is what comes back.
+
+    The value is read as a media kind and used to choose what the detail hero displays,
+    so a typo or a retired kind name used to be stored happily and then silently do
+    nothing — which reads to a user as the feature being broken rather than the input
+    being wrong. media.KINDS is the vocabulary; validating against it here means there is
+    no second list to keep in step."""
+    import media
+    if source and source not in media.KINDS and source != "auto":
+        source = None                     # not a kind: refuse it rather than store a no-op
     con = _db(data_dir)
     try:
         if not source or source == "auto":

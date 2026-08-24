@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback, useMemo, Fragment, type ReactNode, type CSSProperties, type ChangeEvent, type DragEvent, type FormEvent, type MouseEvent as ReactMouseEvent } from 'react'
+import { useEffect, useState, useRef, useCallback, useMemo, memo, Fragment, type ReactNode, type CSSProperties, type ChangeEvent, type DragEvent, type FormEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { api } from './api'
 import ErrorBoundary from './ErrorBoundary'
 import type {
@@ -81,6 +81,66 @@ function readPref(name: string, fallback: string): string {
 }
 function writePref(name: string, value: string) {
   try { localStorage.setItem(prefKey(name), value) } catch { /* storage disabled */ }
+}
+
+// ONE SHAPE FOR EVERY MUTATION CALL SITE. The recurring bug in this file was
+// `try { await api.x() } catch {}` followed by the success path anyway — the editor
+// closed, the detail reloaded, and the value simply was not there. Returning ok:false
+// instead of throwing makes running the success path something you have to opt into.
+type Attempt<T> = { ok: true; value: T } | { ok: false; error: string }
+async function attempt<T>(fn: () => Promise<T>,
+                          onErr?: (msg: string) => void): Promise<Attempt<T>> {
+  try {
+    const value = await fn()
+    onErr?.('')
+    return { ok: true, value }
+  } catch (e) {
+    const error = (e as Error)?.message || 'Request failed'
+    onErr?.(error)
+    return { ok: false, error }
+  }
+}
+// For call sites that had nowhere to put an error: a state slot plus a runner. Pair it
+// with <MutErr msg={err} /> so a failed save is visible instead of silently discarded.
+function useMutation() {
+  const [err, setErr] = useState('')
+  const run = useCallback(<T,>(fn: () => Promise<T>) => attempt(fn, setErr), [])
+  return { err, setErr, run }
+}
+function MutErr({ msg }: { msg: string }) {
+  return msg ? <div className="mut-err">⚠ {msg}</div> : null
+}
+
+// The server caps /api/games at limit=1000 (Query(60, ge=1, le=1000)), so the old
+// `limit: 2000` scope fetch was a guaranteed 422 and the bulk tools could never run
+// on an unselected view. Page instead, so "N games in the current view" is the set
+// that actually gets acted on.
+const GAMES_PAGE_MAX = 1000
+const BULK_SCOPE_MAX = 20000            // sanity stop; a 30k library is a real thing
+async function collectScopeKeys(qy: GamesQuery): Promise<{ keys: string[]; total: number }> {
+  const keys: string[] = []
+  let total = 0
+  for (let off = 0; off < BULK_SCOPE_MAX; off += GAMES_PAGE_MAX) {
+    const page = await api.games({ ...qy, limit: GAMES_PAGE_MAX, offset: off })
+    total = page.total
+    // Too big to act on in one go — stop after the first page rather than walking 20
+    // of them just to refuse. The caller reports `total`.
+    if (total > BULK_SCOPE_MAX) return { keys: [], total }
+    keys.push(...page.items.map((g) => g.norm_key))
+    if (!page.items.length || off + page.items.length >= page.total) break
+  }
+  return { keys: [...new Set(keys)], total }
+}
+
+// A bare number is a TITLE — "1942", "1943", "2048", "428" are all real games — so it
+// must run a name search. Treating it as an IGDB id pinned a durable manual match to an
+// unrelated game and left those titles unsearchable. An id now has to say it is one:
+// an igdb.com link, or the explicit `igdb:<id>` form.
+const igdbRefOf = (raw: string): string | null => {
+  const s = raw.trim()
+  const tagged = /^igdb[:\s/]+(\d+)$/i.exec(s)
+  if (tagged) return tagged[1]
+  return /igdb\.com\/games\//i.test(s) ? s : null
 }
 
 const SRC_LABEL: Record<string, string> = {
@@ -443,6 +503,30 @@ function Cover({ g, compact }: {
   return fs ? <div className="frame-box" style={fs}>{img}</div> : img
 }
 
+// One poster tile, memoised. The grid holds up to a few thousand of these (perPage goes
+// to 1000 and "Load more" concatenates), each with its own SpinImg state — and every
+// root re-render (a keystroke in the search box, the 20s refreshStats) used to re-render
+// all of them. These props only change when the row itself, select mode, or this card's
+// own picked state changes.
+const GameCard = memo(function GameCard({ g, selectMode, picked, onPick }: {
+  g: GameRow; selectMode: boolean; picked: boolean; onPick: (g: GameRow) => void
+}) {
+  return (
+    <button onClick={() => onPick(g)} data-reveal-key={g.entry_key ?? g.norm_key}
+      className={'card' + (selectMode && picked ? ' picked' : '')}>
+      {selectMode && <span className="card-check">{picked ? '✓' : ''}</span>}
+      <div className="cover">
+        <Cover g={g} />
+        {g.wanted && <span className="want-badge">WANTED</span>}
+      </div>
+      <div className="title">{g.title}</div>
+      <div className="srcs">
+        {g.wanted ? g.sources_summary.replace(/wishlist:/, 'Wishlist: ') : g.sources_summary}
+      </div>
+    </button>
+  )
+})
+
 // Sources that don't identify a game to an external catalogue — a loose ROM or a manual
 // entry has nothing to link out to.
 const NON_ID_SOURCES = new Set(['emulation', 'archive', 'physical', 'rom', 'digital', 'manual'])
@@ -527,8 +611,11 @@ export default function App() {
   if (!authState || !authState.authenticated) {
     return <AuthScreen needsSetup={!!authState?.needs_setup} onAuthed={refreshAuth} />
   }
-  // Mounted ONCE, above everything. Every AI path calls ensureAiPricing() and the same
-  // dialog answers, wherever in the tree the request came from.
+  // Mounted ONCE, above everything, so the same dialog answers wherever in the tree the
+  // request came from. Every path that can start a PAID model run awaits
+  // ensureAiPricing() first — search, the wand, metadata scan/refine, art pick, split
+  // assist, add-by-image, dedupe, price auto-resolve, a store sync, and a device import
+  // whose manager sits on the Heavy tier. Adding a paid call without one is the bug.
   return (
     <>
       <AiPricingGate />
@@ -730,6 +817,14 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   }, [theme])
 
   const refreshStats = useCallback(() => { api.stats().then(setStats).catch(() => {}) }, [])
+  // Is an "Apply AI metadata + rebuild" job live? Derived by JobMonitor's single jobs
+  // poll and pushed here, so PendingApplyBar does not need a second poller of its own.
+  const [applyRunning, setApplyRunning] = useState(false)
+  // STABLE identity. Passed as an inline lambda before, so every keystroke gave the
+  // consumers a new function and tore down the effects that hold it in their deps —
+  // which is how the running→finished transition got missed.
+  const appliedRef = useRef<() => void>(() => {})
+  const onApplied = useCallback(() => appliedRef.current(), [])
   useEffect(() => {
     refreshStats()
     api.facets().then(setFacets).catch(() => {})
@@ -740,34 +835,58 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
     return () => clearInterval(t)
   }, [refreshStats])
 
+  // One definition of "the current view". The bulk tools used to be handed a
+  // different, thinner query than the one the grid ran, so the wand's
+  // "N games in the current view" counted one set and scanned another.
+  const libraryQuery = useMemo<GamesQuery>(() => ({
+    q: searchMode === 'basic' ? (q || undefined) : undefined,
+    query: searchMode === 'query' ? (q || undefined) : undefined,
+    include: Object.keys(filters).filter((k) => filters[k] === 'include'),
+    exclude: Object.keys(filters).filter((k) => filters[k] === 'exclude'),
+    sort: ([1, 2, 3] as const)
+      .map((r) => Object.keys(sort).find((k) => sort[k] === r))
+      .filter((k): k is string => !!k),
+    status,
+    // the show-unidentified toggle is the single control for ROM visibility —
+    // honored during search too (toggle it on to find unidentified titles).
+    identified: showUnidentified ? 'all' : 'only',
+  }), [q, searchMode, filters, sort, status, showUnidentified])
+
+  // Exactly one library fetch is ever live. Without this, a "Load more" still in flight
+  // when a filter/keystroke triggers the debounced reset landed AFTER it and appended
+  // the previous query's rows onto the new result set, with `total` from whichever
+  // response happened to arrive last. Abort the old request, and ignore any answer that
+  // is not from the request we are currently waiting on.
+  const loadRef = useRef<{ ctl: AbortController; seq: number } | null>(null)
+  const seqRef = useRef(0)
+  useEffect(() => () => loadRef.current?.ctl.abort(), [])   // never setState after unmount
+
   const load = useCallback(async (reset: boolean) => {
+    loadRef.current?.ctl.abort()
+    const ctl = new AbortController()
+    const seq = ++seqRef.current
+    loadRef.current = { ctl, seq }
     setLoading(true)
     try {
       const off = reset ? 0 : offset
-      const qy: GamesQuery = {
-        q: searchMode === 'basic' ? (q || undefined) : undefined,
-        query: searchMode === 'query' ? (q || undefined) : undefined,
-        include: Object.keys(filters).filter((k) => filters[k] === 'include'),
-        exclude: Object.keys(filters).filter((k) => filters[k] === 'exclude'),
-        sort: ([1, 2, 3] as const)
-          .map((r) => Object.keys(sort).find((k) => sort[k] === r))
-          .filter((k): k is string => !!k),
-        status,
-        // the show-unidentified toggle is the single control for ROM visibility —
-        // honored during search too (toggle it on to find unidentified titles).
-        identified: showUnidentified ? 'all' : 'only',
-        limit: perPage,
-        offset: off,
-      }
-      const page = await api.games(qy)
+      const page = await api.games({ ...libraryQuery, limit: perPage, offset: off }, ctl.signal)
+      if (seqRef.current !== seq) return                    // superseded — drop the answer
       setTotal(page.total)
       setHidden(page.hidden_unidentified ?? 0)
       setOffset(off + page.items.length)
       setItems((prev) => (reset ? page.items : [...prev, ...page.items]))
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortError') return       // we cancelled it on purpose
+      throw e
     } finally {
-      setLoading(false)
+      if (seqRef.current === seq) setLoading(false)
     }
-  }, [q, status, showUnidentified, filters, sort, perPage, offset, searchMode])
+  }, [libraryQuery, perPage, offset])
+
+  // Keep the stable onApplied pointing at the CURRENT refresh, without changing its
+  // identity — the consumers hold it in effect deps.
+  useEffect(() => { appliedRef.current = () => { refreshStats(); load(true) } },
+    [refreshStats, load])
 
   const filterKey = JSON.stringify(filters)
   const sortReloadKey = JSON.stringify(sort)
@@ -777,7 +896,10 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
     setAiNote('')
     const t = setTimeout(() => { setOffset(0); load(true) }, 250)
     return () => clearTimeout(t)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deps are the query INPUTS on purpose, not `load`: `load` changes identity on
+    // every offset change, so including it would re-fire this debounce after each
+    // "Load more" and reset the list the user just extended.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- narrow deps, see above
   }, [q, status, showUnidentified, filterKey, sortReloadKey, perPage, searchMode])
 
   // Set a flag to include/exclude; clicking the same cell toggles it off, and
@@ -794,15 +916,14 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   useEffect(() => {
     if (selectMode && !wishDevs.length) api.devices().then((d) => setWishDevs(d.devices)).catch(() => {})
   }, [selectMode, wishDevs.length])
-  const togglePick = (g: GameRow) =>
-    setPicked((p) => {
+  // stable across renders so the memoised GameCard is not invalidated by every keystroke
+  const onCard = useCallback((g: GameRow) => {
+    if (!selectMode) { setSelected(g.entry_key ?? g.norm_key); return }
+    setPicked((p) => {                        // any game is selectable
       const n = new Map(p); const k = g.entry_key ?? g.norm_key
       n.has(k) ? n.delete(k) : n.set(k, g); return n
     })
-  const onCard = (g: GameRow) => {
-    if (!selectMode) { setSelected(g.entry_key ?? g.norm_key); return }
-    togglePick(g)                             // any game is selectable
-  }
+  }, [selectMode])
   // Store-marketplace games (Steam/Epic/GOG/itch/EA…) live in their launchers and
   // can't sync to a device — only ROMs (has an emulation source) are eligible.
   const addPickedTo = (deviceId: number, deviceName: string) => {
@@ -830,7 +951,10 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const pickedRoms = [...picked.values()].filter((r) => r.emulation)
   const pickedStore = [...picked.values()].filter((r) => !r.emulation)
   const activeFilters = Object.keys(filters).length
-  const filterSections = buildFilterSections(facets)
+  // Memoised: buildFilterSections locale-sorts every facet attribute list, and this ran
+  // on EVERY render of a 40-state component — including every keystroke in the search
+  // box, while attrCols right below it was already memoised.
+  const filterSections = useMemo(() => buildFilterSections(facets), [facets])
   // every categorical attribute is available as an optional table column (id
   // 'attr:<kind>'); 'description' is excluded (too long for a cell).
   const attrCols = useMemo(() => Object.keys(facets?.attributes || {})
@@ -840,11 +964,14 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   const visibleAttrCols = attrCols.filter((c) => cols.includes(c.id))
   const fq = filterQ.trim().toLowerCase()
   // Currently-applied filters, resolved to display names for the "Applied" chips.
-  const filterNames = new Map<string, string>()
-  filterSections.forEach((s) => s.rows.forEach((r) => filterNames.set(r.id, r.name)))
-  const appliedFilters = Object.entries(filters).map(([id, state]) => ({
+  const filterNames = useMemo(() => {
+    const m = new Map<string, string>()
+    filterSections.forEach((s) => s.rows.forEach((r) => m.set(r.id, r.name)))
+    return m
+  }, [filterSections])
+  const appliedFilters = useMemo(() => Object.entries(filters).map(([id, state]) => ({
     id, state, name: filterNames.get(id) || prettifyFilterId(id),
-  }))
+  })), [filters, filterNames])
   // Dropdowns stay open until an outside click or a re-click of their toggle.
   const filtersRef = useClickOutside<HTMLDivElement>(filtersOpen && !aiMode, () => setFiltersOpen(false))
   const modeRef = useClickOutside<HTMLDivElement>(modeOpen, () => setModeOpen(false))
@@ -879,8 +1006,11 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       setHidden(0)
       setOffset(res.result.items.length)
       setAiNote(res.explanation)
-    } catch {
-      setAiNote('AI search unavailable (no API key configured) — showing a text search instead.')
+    } catch (e) {
+      // This said "no API key configured" for EVERY failure — a tripped budget cap, a
+      // 500, a timeout. Say what actually came back, so the fix matches the cause.
+      setAiNote(`AI search didn't run — ${(e as Error)?.message || 'the request failed'}.`
+        + ' Showing a text search instead.')
       setOffset(0); load(true)
     } finally {
       setLoading(false)
@@ -904,7 +1034,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
         </div>
         <div className="jm-slot">
           <JobMonitor onOpen={setSelected} pendingApply={stats?.pending_meta ?? 0}
-            onApplied={() => { refreshStats(); load(true) }} />
+            onApplied={onApplied} onApplyRunning={setApplyRunning} />
         </div>
         <div className="header-actions">
           <SyncMenu onOpenSettings={openSettings} />
@@ -989,8 +1119,8 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       {tab === 'library' && (<>
       {!!stats?.pending_meta && (
-        <PendingApplyBar count={stats.pending_meta}
-          onApplied={() => { refreshStats(); load(true) }} />
+        <PendingApplyBar count={stats.pending_meta} applyRunning={applyRunning}
+          onApplied={onApplied} />
       )}
       <div className="controls">
         <div className="controls-search">
@@ -1255,11 +1385,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
             {selectMode ? '✕ Cancel select' : '☑ Select'}
           </button>
           <BulkToolbox
-            filterQuery={{
-              q: q || undefined,
-              include: Object.keys(filters).filter((k) => filters[k] === 'include'),
-              exclude: Object.keys(filters).filter((k) => filters[k] === 'exclude'),
-            }}
+            filterQuery={libraryQuery}
             filterCount={total}
             onApplied={() => load(true)}
             label="Tools" btnClass="filter-btn wand-btn" />
@@ -1294,22 +1420,11 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       {view === 'poster' ? (
         <div className={'grid' + (selectMode ? ' selecting' : '')}>
-          {items.map((g) => (
-            <button key={g.entry_key ?? g.norm_key} onClick={() => onCard(g)}
-              data-reveal-key={g.entry_key ?? g.norm_key}
-              className={'card'
-                + (selectMode && picked.has(g.entry_key ?? g.norm_key) ? ' picked' : '')}>
-              {selectMode && (
-                <span className="card-check">{picked.has(g.entry_key ?? g.norm_key) ? '✓' : ''}</span>
-              )}
-              <div className="cover">
-                <Cover g={g} />
-                {g.wanted && <span className="want-badge">WANTED</span>}
-              </div>
-              <div className="title">{g.title}</div>
-              <div className="srcs">{g.wanted ? g.sources_summary.replace(/wishlist:/, 'Wishlist: ') : g.sources_summary}</div>
-            </button>
-          ))}
+          {items.map((g) => {
+            const k = g.entry_key ?? g.norm_key
+            return <GameCard key={k} g={g} selectMode={selectMode}
+              picked={picked.has(k)} onPick={onCard} />
+          })}
         </div>
       ) : (
         <div className="table-scroll">
@@ -1742,6 +1857,10 @@ function BackingStore() {
     setCfg(d); setBackend(d.backend); setVals({ ...d.values }); setAuto(d.auto_minutes || 0)
   }
   useEffect(() => { api.backingConfig().then(hydrate).catch(() => {}) }, [])
+  // The sync poll ran for up to 120s with no alive flag, so closing Settings left it
+  // calling setMsg/setBusy on a dead component. Own the handle and clear it on unmount.
+  const pollRef = useRef<number | null>(null)
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
   if (!cfg) return <div className="loading">Loading…</div>
   const secret = (k: string) => k in cfg.secret_set
@@ -1767,28 +1886,35 @@ function BackingStore() {
     catch (e) { setTest({ ok: false, error: (e as Error).message }) } finally { setBusy('') }
   }
   const syncNow = async () => {
-    setBusy('sync'); setMsg('Syncing…')
-    try { await persist() } catch { /* surfaced by the sync call itself */ }
-    try {
-      await api.backingRun(false)
-      let n = 0
-      const poll = setInterval(async () => {
-        n++
-        try {
-          const s = await api.backingStatus()
-          if (!s.running || n > 120) {
-            clearInterval(poll); setBusy('')
-            const last = s.last
-            if (last?.error) setMsg('Sync failed: ' + last.error)
-            else if (last?.stores) {
-              const up = last.stores.reduce((a, x) => a + x.pushed + x.pushed_deleted, 0)
-              const down = last.stores.reduce((a, x) => a + x.pulled + x.pulled_deleted, 0)
-              setMsg(`Synced · ↑${up} pushed · ↓${down} pulled`)
-            } else setMsg('Synced ✓')
-          }
-        } catch { /* keep polling */ }
-      }, 1000)
-    } catch (e) { setMsg((e as Error).message); setBusy('') }
+    setBusy('sync'); setTest(null); setMsg('')
+    // The save used to be swallowed here — "surfaced by the sync call itself" was
+    // false, a validation error was never shown — so a failed save silently synced the
+    // OLD stored config and then reported success. Stop instead, and say what broke.
+    const saved = await attempt(persist, setMsg)
+    if (!saved.ok) { setBusy(''); return }
+    setMsg('Syncing…')
+    const started = await attempt(() => api.backingRun(false), setMsg)
+    if (!started.ok) { setBusy(''); return }
+    let n = 0
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollRef.current = window.setInterval(async () => {
+      n++
+      try {
+        const s = await api.backingStatus()
+        if (!s.running || n > 120) {
+          if (pollRef.current) clearInterval(pollRef.current)
+          pollRef.current = null
+          setBusy('')
+          const last = s.last
+          if (last?.error) setMsg('Sync failed: ' + last.error)
+          else if (last?.stores) {
+            const up = last.stores.reduce((a, x) => a + x.pushed + x.pushed_deleted, 0)
+            const down = last.stores.reduce((a, x) => a + x.pulled + x.pulled_deleted, 0)
+            setMsg(`Synced · ↑${up} pushed · ↓${down} pulled`)
+          } else setMsg('Synced ✓')
+        }
+      } catch { /* keep polling */ }
+    }, 1000)
   }
 
   return (
@@ -2283,6 +2409,10 @@ function PublishPanel({ onBrowse }: { onBrowse: () => void }) {
     api.publishIntent(dev).then((r) => setMarked(r.entries)).catch(() => {})
   }, [dev])
   useEffect(() => { load(); setPlan(null) }, [load])
+  // The plan is computed FROM these three. Only a DEVICE change cleared it before, so
+  // changing the profile, ROM path or source manager after "Compute plan" left the stale
+  // plan on screen — and "Apply this plan" would have applied that stale plan.
+  useEffect(() => { setPlan(null) }, [profile, romPath, srcMgr])
 
   useEffect(() => {
     if (!job?.running) return
@@ -2569,6 +2699,14 @@ function SnapshotBackups() {
 
   const save = async (j: BackupJob) => {
     const d = merged(j)
+    // The server reads contents=[] as "ALL". So "Everything" OFF with nothing ticked
+    // silently became a FULL backup — which this panel's own hint says includes stored
+    // store logins and API keys. Refuse it and make the user say which one they mean.
+    if (!d.all_contents && !(d.contents || []).length) {
+      setMsg('Pick at least one database, or tick “Everything” — an empty selection would '
+        + 'back up everything, including stored logins and API keys.')
+      return
+    }
     setBusy('save' + j.id); setMsg('')
     try {
       await api.setBackupJob({
@@ -2698,7 +2836,7 @@ function SnapshotBackups() {
                 </div>
                 <div className="bk-row">
                   <label>Folder</label>
-                  <input className="bk-path" placeholder="<backup-share>/ludodex"
+                  <input className="bk-path" placeholder="/srv/ludodex/backups"
                     value={d.dest_path || ''}
                     onChange={(e) => patch(j.id, { dest_path: e.target.value })} />
                 </div>
@@ -2783,11 +2921,16 @@ function CfAccessPanel() {
     .catch((e) => setErr((e as Error).message))
   useEffect(() => { load() }, [])
 
+  // `patch` swallows its own failure and returns normally, so saveCfg used to show the
+  // red error AND "Saved ✓" at the same time. Enabling Access with a wrong AUD locks
+  // everyone out of the app, so this one in particular has to be truthful.
   const patch = async (p: Partial<{ enabled: boolean; team_domain: string; aud: string }>) => {
-    try { setSt(await api.cfAccessSet(p)); setErr('') } catch (e) { setErr((e as Error).message) }
+    const r = await attempt(() => api.cfAccessSet(p), setErr)
+    if (r.ok) setSt(r.value)
+    return r.ok
   }
   const saveCfg = async () => {
-    await patch({ team_domain: team.trim().replace(/\/+$/, ''), aud: aud.trim() })
+    if (!(await patch({ team_domain: team.trim().replace(/\/+$/, ''), aud: aud.trim() }))) return
     setSaved(true); setTimeout(() => setSaved(false), 1500)
   }
   const addMap = async (e: FormEvent) => {
@@ -2880,16 +3023,19 @@ const MEDIA_MODES: { id: MediaMode; name: string; hint: string }[] = [
 function BannedMediaPanel() {
   const [items, setItems] = useState<BannedMedia[] | null>(null)
   const [busy, setBusy] = useState('')
+  const { err, run } = useMutation()
   const load = useCallback(() => api.bannedMedia().then((d) => setItems(d.banned)).catch(() => setItems([])), [])
   useEffect(() => { load() }, [load])
   const unban = async (b: BannedMedia) => {
     setBusy(b.norm_key + b.ref)
-    try { await api.unbanMedia(b); await load() } catch { /* */ } finally { setBusy('') }
+    if ((await run(() => api.unbanMedia(b))).ok) await load()
+    setBusy('')
   }
   if (!items) return <div className="loading">Loading…</div>
   return (
     <div className="banned-media">
       <h3>Banned media</h3>
+      <MutErr msg={err} />
       <p className="dim">Assets you banned are deleted and never re-downloaded from their
         provider. Unban one to let it come back on the next media fetch.</p>
       {items.length === 0
@@ -2925,6 +3071,7 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
   // MUST stay above the `if (!prefs) return` below — a hook after a conditional early
   // return changes the hook count between renders (React error #310, white-screens the app).
   const [langResult, setLangResult] = useState<MediaLangResult | null>(null)
+  const { err, run } = useMutation()
   const load = () => api.prefs().then(setPrefs).catch(() => {})
   useEffect(() => { load() }, [])
   const running = prefs?.media_job?.running
@@ -2937,59 +3084,52 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
   if (!prefs) return <div className="loading">Loading…</div>
   const job = prefs.media_job
 
-  const setHide = async (v: boolean) => {
-    setPrefs({ ...prefs, hide_non_games: v })
-    try { await api.setPrefs({ hide_non_games: v }); onChanged() } catch { load() }
+  // ONE optimistic setter. Each of these used to splat the RENDER-TIME `prefs` closure,
+  // so two quick toggles made the second overwrite the first's optimistic value on
+  // screen; and a rejected write was reloaded away with nothing said. Update from the
+  // previous state, and report the failure.
+  const savePref = async (patch: Partial<Prefs>, after?: () => void) => {
+    setPrefs((p) => p ? { ...p, ...patch } : p)
+    const r = await run(() => api.setPrefs(patch))
+    if (r.ok) after?.()
+    else load()                                   // put the server's truth back on screen
   }
-  const setMode = async (m: MediaMode) => {
-    setPrefs({ ...prefs, media_mode: m })
-    try { await api.setPrefs({ media_mode: m }) } catch { load() }
-  }
-  const setLangAt = async (i: number, v: string) => {
+  const setHide = (v: boolean) => savePref({ hide_non_games: v }, onChanged)
+  const setMode = (m: MediaMode) => savePref({ media_mode: m })
+  const setLangAt = (i: number, v: string) => {
     const slots = [0, 1, 2].map((j) => (prefs.media_languages || [])[j] || '')
     slots[i] = v
     const next = slots.filter(Boolean).filter((x, j, a) => a.indexOf(x) === j)
-    setPrefs({ ...prefs, media_languages: next })
-    try { await api.setPrefs({ media_languages: next }) } catch { load() }
+    return savePref({ media_languages: next })
   }
-  const setLangMode = async (m: MediaLangMode) => {
-    setPrefs({ ...prefs, media_lang_mode: m })
-    try { await api.setPrefs({ media_lang_mode: m }) } catch { load() }
-  }
+  const setLangMode = (m: MediaLangMode) => savePref({ media_lang_mode: m })
+  // In BAN mode this DELETES files, so a failure has to be said out loud rather than
+  // becoming an unhandled rejection while the button just goes back to idle.
   const applyLangFilter = async () => {
+    if (prefs.media_lang_mode === 'ban' && !window.confirm(
+      'Apply the language filter in “Ban” mode?\n\nArt in the languages you excluded is '
+      + 'DELETED and never re-downloaded. You can unban it later in Settings › Banned media.'))
+      return
     setBusy(true)
-    try { setLangResult(await api.mediaLanguageFilter()) } finally { setBusy(false) }
+    const r = await run(() => api.mediaLanguageFilter())
+    if (r.ok) setLangResult(r.value)
+    setBusy(false)
   }
   const downloadNow = async () => {
     setBusy(true)
-    try { const r = await api.mediaMaterialize(); setPrefs((p) => p ? { ...p, media_job: r.media_job } : p) }
-    finally { setBusy(false) }
+    const r = await run(() => api.mediaMaterialize())
+    if (r.ok) setPrefs((p) => p ? { ...p, media_job: r.value.media_job } : p)
+    setBusy(false)
   }
-  const setApplyMode = async (m: FileopsApplyMode) => {
-    setPrefs({ ...prefs, fileops_apply_mode: m })
-    try { await api.setPrefs({ fileops_apply_mode: m }) } catch { load() }
-  }
-  const setManifests = async (v: boolean) => {
-    setPrefs({ ...prefs, manifests_enabled: v })
-    try { await api.setPrefs({ manifests_enabled: v }) } catch { load() }
-  }
-  const setXbox = async (v: 'xbox' | 'pc') => {
-    setPrefs({ ...prefs, xbox_platform: v })
-    try { await api.setPrefs({ xbox_platform: v }) } catch { load() }
-  }
-  const setThreshold = async (v: number) => {
-    setPrefs({ ...prefs, match_confidence_threshold: v })
-    try { await api.setPrefs({ match_confidence_threshold: v }); onChanged() } catch { load() }
-  }
-  const setBand = async (lo: number, hi: number) => {
+  const setApplyMode = (m: FileopsApplyMode) => savePref({ fileops_apply_mode: m })
+  const setManifests = (v: boolean) => savePref({ manifests_enabled: v })
+  const setXbox = (v: 'xbox' | 'pc') => savePref({ xbox_platform: v })
+  const setThreshold = (v: number) => savePref({ match_confidence_threshold: v }, onChanged)
+  const setBand = (lo: number, hi: number) => {
     if (lo >= hi) return
-    setPrefs({ ...prefs, match_ai_band_lo: lo, match_ai_band_hi: hi })
-    try { await api.setPrefs({ match_ai_band_lo: lo, match_ai_band_hi: hi }) } catch { load() }
+    return savePref({ match_ai_band_lo: lo, match_ai_band_hi: hi })
   }
-  const setAutoFix = async (v: number) => {
-    setPrefs({ ...prefs, auto_fix_confidence: v })
-    try { await api.setPrefs({ auto_fix_confidence: v }) } catch { load() }
-  }
+  const setAutoFix = (v: number) => savePref({ auto_fix_confidence: v })
   const autoFix = prefs.auto_fix_confidence ?? 75
   const thr = prefs.match_confidence_threshold ?? 60
   const bandLo = prefs.match_ai_band_lo ?? 40
@@ -2997,6 +3137,7 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
 
   return (
     <div className="lib-prefs">
+      <MutErr msg={err} />
       <div className="pref-row">
         <label className="switch">
           <input type="checkbox" checked={honorRM}
@@ -3214,6 +3355,10 @@ function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
   const [inclColl, setInclColl] = useState(false)
   const [themes, setThemes] = useState<SpotlightTheme[] | null>(null)
   const [themesOpen, setThemesOpen] = useState(false)
+  // Raw text while the number field is being typed in. It used to commit on every
+  // keystroke through a clamp, so typing "12" SAVED 3 and then 12, and "20" saved 3
+  // then 30 — the clamp turning an unfinished number into a persisted one.
+  const [draft, setDraft] = useState<string | null>(null)
   useEffect(() => {
     api.prefs().then((p) => {
       setSecs(p.spotlight_seconds)
@@ -3261,8 +3406,16 @@ function DashboardPrefs({ onChanged }: { onChanged: () => void }) {
             onChange={(e) => setSecs(Number(e.target.value))}
             onMouseUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
             onKeyUp={(e) => commit(Number((e.target as HTMLInputElement).value))} />
-          <input className="pref-num" type="number" min={3} max={300} value={secs}
-            onChange={(e) => commit(Number(e.target.value))} />
+          <input className="pref-num" type="number" min={3} max={300}
+            value={draft ?? String(secs)}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={() => {
+              const raw = draft
+              setDraft(null)
+              const v = Number(raw)
+              if (raw !== null && raw.trim() !== '' && Number.isFinite(v)) commit(v)
+            }}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} />
           <span className="pref-unit">seconds</span>
         </div>
         <div className="pref-presets">
@@ -3470,8 +3623,11 @@ function AddFromImage({ sources, systems, onAdded }: {
   }
   const toRows = (games: RecognizedGame[]) => games.map((g) => ({ ...g, checked: true,
     src: matchSource(g.source), plat: matchSystem(g.platform) }))
+  // Both of these call a vision model, so both answer to the budget gate first — the
+  // rule is that EVERY path that can spend goes through it, not most of them.
   const recognize = async () => {
     if (!urls.length) return
+    if (!(await ensureAiPricing('identify'))) return
     setRecognizing(true); setErr(''); setNote('')
     try { setRows(toRows((await api.identifyImage(urls)).games)) }
     catch (e) { setErr((e as Error).message) }
@@ -3479,6 +3635,7 @@ function AddFromImage({ sources, systems, onAdded }: {
   }
   const scanFolder = async () => {
     if (!folder.trim()) return
+    if (!(await ensureAiPricing('identify'))) return
     setRecognizing(true); setErr(''); setNote(''); setRows(null); setAdded(0)
     try {
       const r = await api.identifyFolder(folder.trim())
@@ -3490,11 +3647,25 @@ function AddFromImage({ sources, systems, onAdded }: {
   const addSelected = async () => {
     if (!rows) return
     setBusy(true); setErr(''); let n = 0
+    // Failures used to vanish: every add could fail, `added` stayed 0, `err` stayed ''
+    // and the panel rendered nothing at all. Count them and say what went wrong.
+    const failures: string[] = []
+    let firstErr = ''
     for (const g of rows.filter((r) => r.checked)) {
       try { await api.addGame({ title: g.title, source: g.src, platform: g.plat || g.src }); n++ }
-      catch { /* skip failures, keep going */ }
+      catch (e) {
+        failures.push(g.title)
+        if (!firstErr) firstErr = (e as Error).message
+      }
     }
-    setAdded(n); onAdded(); setBusy(false)
+    if (failures.length) {
+      setErr(`${failures.length} of ${failures.length + n} couldn't be added`
+        + `${firstErr ? ` — ${firstErr}` : ''}: ${failures.slice(0, 3).join(', ')}`
+        + `${failures.length > 3 ? '…' : ''}`)
+    }
+    setAdded(n)
+    if (n) onAdded()
+    setBusy(false)
   }
   const upd = (i: number, patch: Partial<{ checked: boolean; src: string; plat: string }>) =>
     setRows((prev) => prev!.map((r, j) => j === i ? { ...r, ...patch } : r))
@@ -3776,9 +3947,16 @@ function AiBudgets() {
   }
   const addLimit = async () => {
     const key = scope === 'provider' ? prov : modelKey.trim()
-    if (!key) return
+    if (!key) { setMsg('Name the model to limit first.'); return }
     const n = parseFloat(addUsd.replace(/[^0-9.]/g, '') || '0')
-    await saveCaps(scope, key, { usd: n > 0 ? n / (cur.fx || 1) : 0, total: n > 0 ? 0 : 1 })
+    // A blank amount used to be stored as monthly_tokens=1 — a live cap the server hits
+    // on the very next call, which BLOCKED the provider while the row read "Total
+    // tokens: 1". A limit with no number is not a limit; refuse it and say why.
+    if (!(n > 0)) {
+      setMsg(`Type a monthly budget first — a limit with no amount would block ${key} entirely.`)
+      return
+    }
+    await saveCaps(scope, key, { usd: n / (cur.fx || 1), total: 0 })
     setModelKey(''); setAddUsd('')
   }
   const savePrice = async (p: AiPrice, inUsd: number, outUsd: number, cached: number | null) => {
@@ -3800,6 +3978,9 @@ function AiBudgets() {
     finally { setRefreshing(false) }
   }
   const doResolve = async (useAi: boolean) => {
+    // Auto-resolve with AI is itself a paid call (area 'prices'), so it answers to the
+    // same gate as every other spend. The feed-only path costs nothing.
+    if (useAi && !(await ensureAiPricing('prices'))) { setAskResolve(false); return }
     setResolving(true); setMsg(''); setAskResolve(false)
     try {
       const r = await api.resolveAiPrices(useAi, resolveNote)
@@ -3906,6 +4087,12 @@ function AiBudgets() {
             </div>
             {c.caps.usd > 0 && c.used.unpriced &&
               <div className="br-warn dim">⚠ Some usage here has no price set — the $ budget can’t be enforced, but the token caps still apply.</div>}
+            {/* An amount-less "+ add" used to store monthly_tokens=1, which reads as a live
+                cap and refuses every call. Name it, or the row just looks like "Total
+                tokens: 1" and nobody connects that to "this provider stopped working". */}
+            {c.caps.total === 1 &&
+              <div className="br-warn">⚠ The token cap here is <b>1</b> — that blocks every
+                call to {c.key}. Set a real budget, or clear the token cap to unblock it.</div>}
           </div>
         ))}
         <div className="budget-add">
@@ -3922,7 +4109,11 @@ function AiBudgets() {
           <input className="cap-num" inputMode="decimal" placeholder={`budget ${curSym(cur).trim()}/mo`}
             value={addUsd} onChange={(e) => setAddUsd(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') addLimit() }} />
-          <button className="ops-btn" onClick={addLimit}>＋ add</button>
+          <button className="ops-btn" onClick={addLimit}
+            disabled={!(parseFloat(addUsd.replace(/[^0-9.]/g, '') || '0') > 0)
+              || (scope === 'model' && !modelKey.trim())}
+            title="A limit needs an amount — without one it would block the provider outright">
+            ＋ add</button>
         </div>
       </div>
 
@@ -4091,6 +4282,7 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
   const [liveModels, setLiveModels] = useState<Record<string, string[]>>({})
   const [visionModels, setVisionModels] = useState<Record<string, string[]>>({})
   const [refreshing, setRefreshing] = useState(false)
+  const { err, run } = useMutation()
   const prov = (id: string | null) => cfg.providers.find((p) => p.id === id)
   // Live, full model catalog per provider (falls back to the curated hints in cfg).
   const modelsFor = (id: string | null) =>
@@ -4099,17 +4291,24 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
   const visionFor = (id: string | null) =>
     (id && visionModels[id]) || modelsFor(id)
 
+  // WHICH providers are configured, as a stable string. `cfg.providers` is a fresh
+  // array on every reload(), so keying the fetch on the array itself refetched the whole
+  // model catalog (2 requests per provider) every time any unrelated setting was saved.
+  const configured = useMemo(
+    () => cfg.providers.filter((p) => p.configured).map((p) => p.id).join(','),
+    [cfg.providers])
+
   // Fetch each configured provider's catalog (full + vision-only). refresh=true
   // busts the server cache so new/removed provider models show up without restart.
   const loadModels = useCallback(async (refresh = false) => {
     if (refresh) setRefreshing(true)
     try {
-      const cfgd = cfg.providers.filter((p) => p.configured)
+      const ids = configured ? configured.split(',') : []
       const [full, vis] = await Promise.all([
-        Promise.all(cfgd.map((p) => api.aiModels(p.id, refresh, false)
-          .then((r) => [p.id, r.models] as const).catch(() => null))),
-        Promise.all(cfgd.map((p) => api.aiModels(p.id, refresh, true)
-          .then((r) => [p.id, r.models] as const).catch(() => null))),
+        Promise.all(ids.map((id) => api.aiModels(id, refresh, false)
+          .then((r) => [id, r.models] as const).catch(() => null))),
+        Promise.all(ids.map((id) => api.aiModels(id, refresh, true)
+          .then((r) => [id, r.models] as const).catch(() => null))),
       ])
       const m: Record<string, string[]> = {}, v: Record<string, string[]> = {}
       for (const row of full) if (row) m[row[0]] = row[1]
@@ -4118,27 +4317,27 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
     } finally {
       if (refresh) setRefreshing(false)
     }
-  }, [cfg.providers])
+  }, [configured])
 
   useEffect(() => { loadModels(false) }, [loadModels])
 
-  async function setDefaultProvider(p: string) { await api.setAiConfig({ provider: p }); onChange() }
-  async function saveDefaultModel(m: string) {
-    if (cfg.default.provider)
-      await api.setAiConfig({ models: { [cfg.default.provider + '_model']: m } })
-    onChange()
+  // Every one of these used to have no catch at all: a 4xx became an unhandled
+  // rejection and the controlled <select> simply snapped back with nothing said.
+  const saveCfg = async (patch: Parameters<typeof api.setAiConfig>[0]) => {
+    if ((await run(() => api.setAiConfig(patch))).ok) onChange()
   }
-  async function setVisionProvider(p: string) { await api.setAiConfig({ vision: { provider: p, model: '' } }); onChange() }
-  async function saveVisionModel(m: string) { await api.setAiConfig({ vision: { model: m } }); onChange() }
-  async function setArea(id: string, provider: string, model: string) {
-    await api.setAiConfig({ areas: { [id]: { provider, model } } }); onChange()
-  }
-  async function saveEscalationModel(id: string, model: string) {
-    await api.setAiConfig({ areas: { [id]: { escalation_model: model } } }); onChange()
-  }
-  async function savePrompt(id: string, prompt: string) {
-    await api.setAiConfig({ areas: { [id]: { prompt } } }); onChange()
-  }
+  const setDefaultProvider = (p: string) => saveCfg({ provider: p })
+  const saveDefaultModel = (m: string) => cfg.default.provider
+    ? saveCfg({ models: { [cfg.default.provider + '_model']: m } })
+    : Promise.resolve()
+  const setVisionProvider = (p: string) => saveCfg({ vision: { provider: p, model: '' } })
+  const saveVisionModel = (m: string) => saveCfg({ vision: { model: m } })
+  const setArea = (id: string, provider: string, model: string) =>
+    saveCfg({ areas: { [id]: { provider, model } } })
+  const saveEscalationModel = (id: string, model: string) =>
+    saveCfg({ areas: { [id]: { escalation_model: model } } })
+  const savePrompt = (id: string, prompt: string) =>
+    saveCfg({ areas: { [id]: { prompt } } })
 
   return (
     <>
@@ -4148,6 +4347,7 @@ function AiUsage({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
         actual model. “Default” inherits the global default below. Subscriptions can’t
         power the app — use API keys (Gemini has a free tier). See <code>AI.md</code>.
       </p>
+      <MutErr msg={err} />
       <p className="dim ai-badge-legend">
         The badges tell you what a function does: <VisionBadge /> means it analyzes
         images (so it uses the <em>Image analysis</em> default), <DataBadge /> means it
@@ -4301,17 +4501,20 @@ function ApiKeys({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
   const [keys, setKeys] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const { err, run } = useMutation()
 
+  // Neither of these had a catch: a rejected key save became an unhandled rejection,
+  // the field cleared, and "Saved ✓" was the only thing the user saw.
   async function save() {
     setSaving(true); setSaved(false)
-    try {
-      const payload: Record<string, string> = {}
-      Object.entries(keys).forEach(([k, v]) => { if (v !== '') payload[k] = v })
-      await api.setAiConfig({ keys: payload }); setKeys({}); setSaved(true); onChange()
-    } finally { setSaving(false) }
+    const payload: Record<string, string> = {}
+    Object.entries(keys).forEach(([k, v]) => { if (v !== '') payload[k] = v })
+    const r = await run(() => api.setAiConfig({ keys: payload }))
+    if (r.ok) { invalidateAttrCapabilities(); setKeys({}); setSaved(true); onChange() }
+    setSaving(false)
   }
   async function clearKey(field: string) {
-    await api.setAiConfig({ keys: { [field]: '' } }); onChange()
+    if ((await run(() => api.setAiConfig({ keys: { [field]: '' } }))).ok) onChange()
   }
 
   return (
@@ -4340,6 +4543,7 @@ function ApiKeys({ cfg, onChange }: { cfg: AiConfig; onChange: () => void }) {
           </div>
         </div>
       ))}
+      <MutErr msg={err} />
       <div className="settings-actions sticky-actions">
         <button className="go" disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save keys'}</button>
         {saved && <span className="saved">Saved ✓</span>}
@@ -4514,6 +4718,7 @@ function ManagerModal({ deviceId, deviceName, kinds, existing, onClose, onSaved 
   const [mode, setMode] = useState<ImportMode>(existing?.import_mode || 'algo')
   const [est, setEst] = useState<ImportEstimate | null>(null)
   const [busy, setBusy] = useState(false)
+  const { err, run } = useMutation()
   useEffect(() => { api.mediaKinds().then((d) => setMkinds(d.kinds)).catch(() => {}) }, [])
   // Cost/cap preview for the selected tier. Only the AI tiers have anything to
   // report, and only an existing source has an index to count against.
@@ -4531,18 +4736,21 @@ function ManagerModal({ deviceId, deviceName, kinds, existing, onClose, onSaved 
   const kindLabel = caps ? caps[0] : kind
   const togglePick = (k: string) =>
     setPick((p) => { const n = new Set(p); n.has(k) ? n.delete(k) : n.add(k); return n })
+  // No catch at all before this: a rejected save (bad path, duplicate manager) became
+  // an unhandled rejection and the modal stayed open with nothing said.
   const save = async () => {
     setBusy(true)
-    try {
-      onSaved(await api.setManager({
-        ...(existing ? { id: existing.id } : {}),
-        device_id: deviceId, kind, name,
-        rom_path: doesRoms ? rom : '', media_path: doesMedia ? media : '',
-        media_kinds: doesMedia ? Array.from(pick) : [],
-        import_mode: doesRoms ? mode : 'algo',
-      }))
-      onClose()
-    } finally { setBusy(false) }
+    const r = await run(() => api.setManager({
+      ...(existing ? { id: existing.id } : {}),
+      device_id: deviceId, kind, name,
+      rom_path: doesRoms ? rom : '', media_path: doesMedia ? media : '',
+      media_kinds: doesMedia ? Array.from(pick) : [],
+      import_mode: doesRoms ? mode : 'algo',
+    }))
+    setBusy(false)
+    if (!r.ok) return
+    onSaved(r.value)
+    onClose()
   }
   return (
     <div className="overlay overlay-2" onClick={onClose}>
@@ -4635,6 +4843,7 @@ function ManagerModal({ deviceId, deviceName, kinds, existing, onClose, onSaved 
             </div>
           </div>
         )}
+        <MutErr msg={err} />
         <div className="dm-actions">
           <button className="ops-btn" onClick={onClose}>Cancel</button>
           <button className="go primary" disabled={busy} onClick={save}>
@@ -4682,8 +4891,17 @@ function DeviceForm({ initial, submitLabel, hasPassword, onSaved, onCancel }: {
     <>
       <div className="dev-add-grid">
         <input placeholder="Name (e.g. Steam Deck)" value={f.name} onChange={(e) => up('name', e.target.value)} />
+        {/* SMB is offered nowhere any more. Nothing on the server can use it: Test,
+            directory browsing, file ops and every remote command refuse it outright
+            ("SMB transport is not supported … use SSH"), and the form never had a
+            `share` input to fill in either. Picking it only ever produced a device
+            that could not be used and an opaque failure on Test. The option survives
+            for a device already saved as SMB, so it can be seen and re-pointed at SSH
+            rather than silently changing type underneath the user. */}
         <select value={f.transport} onChange={(e) => up('transport', e.target.value)}>
-          <option value="ssh">SSH</option><option value="smb">SMB</option><option value="local">Local</option>
+          <option value="ssh">SSH</option>
+          <option value="local">Local</option>
+          {initial.transport === 'smb' && <option value="smb">SMB (not supported)</option>}
         </select>
         {f.transport !== 'local' && <>
           <input placeholder="host / IP / ssh alias" value={f.host} onChange={(e) => up('host', e.target.value)} />
@@ -4702,6 +4920,11 @@ function DeviceForm({ initial, submitLabel, hasPassword, onSaved, onCancel }: {
         <button className="go primary" disabled={busy || !f.name.trim()} onClick={save}>{busy ? 'Saving…' : submitLabel}</button>
         {onCancel && <button className="ops-btn dev-cancel" onClick={onCancel}>Cancel</button>}
       </div>
+      {f.transport === 'smb' && (
+        <div className="fo-warn">⚠ This device is set to <b>SMB</b>, which ludodex cannot
+          use — Test, browsing and every file operation refuse it. Switch it to <b>SSH</b>
+          (or Local) to make it work.</div>
+      )}
       {err && <div className="connect-msg err">{err}</div>}
     </>
   )
@@ -4727,6 +4950,7 @@ function DevicesPanel() {
   const [wantCounts, setWantCounts] = useState<Record<string, number>>({})
   const [wants, setWants] = useState<Record<number, GameRow[]>>({})
   const [wantsOpen, setWantsOpen] = useState<number | null>(null)
+  const [devErr, setDevErr] = useState('')      // a failed remove has to be visible
   useEffect(() => { api.wantsSummary().then((w) => setWantCounts(w.counts)).catch(() => {}) }, [])
   const toggleWants = async (id: number) => {
     if (wantsOpen === id) { setWantsOpen(null); return }
@@ -4735,8 +4959,10 @@ function DevicesPanel() {
       try { const r = await api.deviceWants(id); setWants((w) => ({ ...w, [id]: r.wants })) } catch { /* */ }
     }
   }
+  // The local list used to be pruned whether or not the server agreed, so a failed
+  // remove looked exactly like a successful one until the next reload.
   const removeWant = async (id: number, nk: string) => {
-    await api.removeWant(id, nk).catch(() => {})
+    if (!(await attempt(() => api.removeWant(id, nk), setDevErr)).ok) return
     setWants((w) => ({ ...w, [id]: (w[id] || []).filter((g) => g.norm_key !== nk) }))
     setWantCounts((c) => ({ ...c, [id]: Math.max(0, (c[id] || 1) - 1) }))
   }
@@ -4752,7 +4978,35 @@ function DevicesPanel() {
     catch (e) { setTest((t) => ({ ...t, [id]: { ok: false, detail: (e as Error).message } })) }
     finally { setBusy(null) }
   }
-  const syncDev = async (id: number) => {
+  // Both removals cascade on the server — library_managers, device_wants and
+  // publish.intent_clear_device go with the device, and a manager also deletes its
+  // roms-index-mgr<id>.sqlite. A stray click on a small "x" used to do all of that
+  // with no question asked, so they confirm like every other destructive action here.
+  const removeDev = async (d: Device) => {
+    const n = wantCounts[d.id] || 0
+    if (!window.confirm(`Remove the device “${d.name}”?\n\n`
+      + `Its ${d.managers.length} library manager${d.managers.length === 1 ? '' : 's'}, `
+      + `its ROM index${d.managers.length === 1 ? '' : 'es'}`
+      + `${n ? `, its ${n}-game wishlist` : ''} and its publish curation go with it. `
+      + `This can't be undone.`)) return
+    const r = await attempt(() => api.removeDevice(d.id), setDevErr)
+    if (r.ok) apply(r.value)
+  }
+  const removeMgr = async (d: Device, m: LibraryManager) => {
+    if (!window.confirm(`Remove “${m.name || m.kind_label}” from ${d.name}?\n\n`
+      + `Its ROM index is deleted — the next sync has to rebuild it from scratch. `
+      + `This can't be undone.`)) return
+    const r = await attempt(() => api.removeManager(m.id), setDevErr)
+    if (r.ok) apply(r.value)
+  }
+
+  // POST /api/devices/{id}/sync finishes with the Heavy AI supplement whenever ANY of
+  // the device's managers is on the heavy tier — a paid run that used to start with no
+  // budget gate in front of it at all.
+  const spendsAi = (d: Device) => d.managers.some((m) => m.import_mode === 'heavy')
+  const syncDev = async (d: Device) => {
+    const id = d.id
+    if (spendsAi(d) && !(await ensureAiPricing('metadata'))) return
     setBusy(id); setSync((s) => ({ ...s, [id]: {} }))
     try { const r = await api.syncDevice(id); setSync((s) => ({ ...s, [id]: r })); load() }
     catch (e) { setSync((s) => ({ ...s, [id]: { error: (e as Error).message } })) }
@@ -4768,8 +5022,9 @@ function DevicesPanel() {
         ludodex reaches each over <b>SSH</b> and pulls its ROMs + media. Add a device,
         then add the <b>library managers</b> on it (RetroDECK/ES-DE, RetroBat, Playnite,
         LaunchBox, or a raw ROM folder) with their paths. Creds are stored locally,
-        never in 1Password. (SMB needs cifs-utils on the server.)</p>
+        never in 1Password. <b>SSH or Local only</b> — SMB is not supported by the server.</p>
 
+      <MutErr msg={devErr} />
       {data.devices.length === 0 && <div className="sync-note dim">No devices yet — add one below.</div>}
       {data.devices.map((d) => (
         <div key={d.id} className="dev-card">
@@ -4780,9 +5035,18 @@ function DevicesPanel() {
               {' · '}{d.auth}{d.has_password ? ' 🔑' : ''}</span>
             <div className="dev-actions">
               <button className="ops-btn" disabled={busy === d.id} onClick={() => testDev(d.id)}>Test</button>
-              <button className="ops-btn" disabled={busy === d.id} onClick={() => syncDev(d.id)}>{busy === d.id ? 'Syncing…' : 'Sync'}</button>
+              {/* Two buttons in this app say "Sync" for the same device and do
+                  different things. This one imports AND runs the Heavy AI supplement
+                  when a manager is on the heavy tier; the one in the sync menu's ROM
+                  repos only rescans files. Say which is which on the button. */}
+              <button className="ops-btn" disabled={busy === d.id} onClick={() => syncDev(d)}
+                title={spendsAi(d)
+                  ? 'Imports this device, then runs the Heavy AI supplement over what the providers could not resolve. This SPENDS AI tokens.'
+                  : 'Imports this device — ROMs and media. No AI (no manager is on the Heavy tier).'}>
+                {busy === d.id ? 'Syncing…' : spendsAi(d) ? 'Import + AI' : 'Import'}</button>
               <button className="ops-btn" onClick={() => setEditing(editing === d.id ? null : d.id)}>{editing === d.id ? 'Close' : 'Edit'}</button>
-              <button className="emu-rm" title="Remove device" onClick={async () => apply(await api.removeDevice(d.id))}>×</button>
+              <button className="emu-rm" title="Remove device"
+                onClick={() => removeDev(d)}>×</button>
             </div>
           </div>
           {editing === d.id && (
@@ -4808,7 +5072,8 @@ function DevicesPanel() {
                 <code className="dm-path">{[m.rom_path && 'ROMs: ' + m.rom_path, m.media_path && 'Media: ' + m.media_path].filter(Boolean).join('   ·   ') || '(no paths set)'}</code>
                 {m.media_path && <span className="dm-mkinds">{m.media_kinds && m.media_kinds.length ? m.media_kinds.map((k) => k.replace(/_/g, ' ')).join(', ') : 'all media types'}</span>}
                 <button className="dm-edit" title="Edit paths / settings" onClick={() => setEditMgr(m.id)}>✎</button>
-                <button className="emu-rm" title="Remove" onClick={async () => apply(await api.removeManager(m.id))}>×</button>
+                <button className="emu-rm" title="Remove library manager"
+                  onClick={() => removeMgr(d, m)}>×</button>
                 {editMgr === m.id && (
                   <ManagerModal existing={m} deviceId={d.id} deviceName={d.name} kinds={kinds}
                     onClose={() => setEditMgr(null)} onSaved={(x) => { apply(x); setEditMgr(null) }} />
@@ -4852,11 +5117,12 @@ function DevicesPanel() {
 function SteamMediaPref() {
   const [n, setN] = useState<number | null>(null)
   const [saved, setSaved] = useState(false)
+  const { err, run } = useMutation()
   useEffect(() => { api.prefs().then((p) => setN(p.screenshot_limit ?? 0)).catch(() => {}) }, [])
   if (n === null) return null
   const save = async (v: number) => {
     setN(v); setSaved(false)
-    try { await api.setPrefs({ screenshot_limit: v }); setSaved(true) } catch { /* */ }
+    setSaved((await run(() => api.setPrefs({ screenshot_limit: v }))).ok)
   }
   return (
     <div className="svc-field steam-shots">
@@ -4865,6 +5131,7 @@ function SteamMediaPref() {
         onChange={(e) => save(Math.max(0, parseInt(e.target.value, 10) || 0))} />
       <span className="dim">0 = no limit — pull every screenshot &amp; trailer Steam offers.
         {saved && <span className="saved"> ✓</span>}</span>
+      <MutErr msg={err} />
     </div>
   )
 }
@@ -4931,18 +5198,24 @@ function Credentials() {
   const [vals, setVals] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const { err, run } = useMutation()
   const reload = () => api.servicesConfig().then((d) => setData(d.services)).catch(() => {})
   useEffect(() => { reload() }, [])
 
+  // No catch before this: a rejected credential save became an unhandled rejection and
+  // the fields cleared as though it had worked.
   async function save() {
     setSaving(true); setSaved(false)
-    try {
-      const payload: Record<string, string> = {}
-      Object.entries(vals).forEach(([k, v]) => { if (v !== '') payload[k] = v })
-      await api.setServices(payload); setVals({}); setSaved(true); reload()
-    } finally { setSaving(false) }
+    const payload: Record<string, string> = {}
+    Object.entries(vals).forEach(([k, v]) => { if (v !== '') payload[k] = v })
+    const r = await run(() => api.setServices(payload))
+    // a new provider credential changes what providers can supply — drop the hint cache
+    if (r.ok) { invalidateAttrCapabilities(); setVals({}); setSaved(true); reload() }
+    setSaving(false)
   }
-  const clearField = async (key: string) => { await api.setServices({ [key]: '' }); reload() }
+  const clearField = async (key: string) => {
+    if ((await run(() => api.setServices({ [key]: '' }))).ok) reload()
+  }
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const toggle = (id: string) =>
     setExpanded((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n })
@@ -5026,6 +5299,7 @@ function Credentials() {
           </div>
         )
       })}
+      <MutErr msg={err} />
       <div className="settings-actions sticky-actions">
         <button className="go" disabled={saving} onClick={save}>
           {saving ? 'Saving…' : 'Save credentials'}</button>
@@ -5177,14 +5451,15 @@ function RateLimits() {
   const [vals, setVals] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const { err, run } = useMutation()
   const reload = () => api.servicesConfig().then((d) => setData(d.services)).catch(() => {})
   useEffect(() => { reload() }, [])
 
   async function save() {
     setSaving(true); setSaved(false)
-    try {
-      await api.setServices(vals); setVals({}); setSaved(true); reload()
-    } finally { setSaving(false) }
+    const r = await run(() => api.setServices(vals))
+    if (r.ok) { setVals({}); setSaved(true); reload() }
+    setSaving(false)
   }
 
   if (!data) return <div className="loading">Loading…</div>
@@ -5215,6 +5490,7 @@ function RateLimits() {
           ))}
         </div>
       ))}
+      <MutErr msg={err} />
       <div className="settings-actions">
         <button className="go" disabled={saving} onClick={save}>
           {saving ? 'Saving…' : 'Save limits'}</button>
@@ -5226,13 +5502,19 @@ function RateLimits() {
 
 function Dedupe({ onClose }: { onClose: () => void }) {
   useScrollLock()
-  const [loading, setLoading] = useState(true)
-  const [items, setItems] = useState<DedupeSuggestion[]>([])
+  const [loading, setLoading] = useState(false)
+  const [items, setItems] = useState<DedupeSuggestion[] | null>(null)
   const [err, setErr] = useState('')
-  useEffect(() => {
-    api.dedupe(12).then((d) => setItems(d.suggestions))
-      .catch((e) => setErr(String(e))).finally(() => setLoading(false))
-  }, [])
+  // This used to fire on MOUNT with no budget gate, so merely OPENING the modal spent
+  // money. The paid run is now a deliberate click that asks the pricing gate first.
+  const run = async () => {
+    setErr('')
+    if (!(await ensureAiPricing('dedupe'))) return
+    setLoading(true)
+    try { setItems((await api.dedupe(12)).suggestions) }
+    catch (e) { setErr((e as Error).message) }
+    finally { setLoading(false) }
+  }
   return (
     <div className="overlay dedupe-overlay" onClick={onClose}>
       <div className="panel dedupe-panel" onClick={(e) => e.stopPropagation()}>
@@ -5242,6 +5524,13 @@ function Dedupe({ onClose }: { onClose: () => void }) {
           verdict is review-only — nothing is merged automatically.</p>
         {loading ? <div className="loading">Scanning… (AI is reviewing candidate pairs)</div>
           : err ? <div className="loading">Couldn’t run dedupe: {err}</div>
+          : items === null ? (
+            <div className="dedupe-start">
+              <p className="dim">This asks a model to adjudicate candidate pairs, so it
+                costs tokens. Nothing runs until you press the button.</p>
+              <button className="go" onClick={run}>Scan for duplicates</button>
+            </div>
+          )
           : items.length === 0 ? <div className="loading">No likely duplicates found.</div>
           : (
             <div className="dedupe-list">
@@ -5292,25 +5581,40 @@ function fmtUptime(s: number) {
 // ensureAiPricing(): true means go, false means the user backed out.
 type PricingChk = {
   ok: boolean; provider?: string; model?: string; budget_usd?: number
-  state?: 'ok' | 'missing' | 'stale'; age_days?: number | null; reason?: string
+  state?: 'ok' | 'missing' | 'stale' | 'unmeasurable'; age_days?: number | null; reason?: string
 }
 // Set by the single mounted gate. Imperative on purpose: an AI action can live anywhere
 // in the tree, and threading a promise-returning callback through every one of them is
 // how some path ends up quietly skipping the check.
 let _askPricing: ((c: PricingChk) => Promise<boolean>) | null = null
 
+// A budget the code cannot MEASURE right now stops the spend. This used to
+// `catch { return true }` and `if (!_askPricing) return true`, so a network blip, a
+// 500, or no gate mounted let a paid run go ahead with no measurement at all — the
+// "a miss reads as consent" shape this codebase keeps paying for.
 export async function ensureAiPricing(area = 'ingest'): Promise<boolean> {
   let chk: PricingChk
-  try { chk = await api.aiPricingCheck(area) } catch { return true }
+  try {
+    chk = await api.aiPricingCheck(area)
+  } catch (e) {
+    const reason = (e as Error)?.message || 'the budget check did not answer'
+    if (!_askPricing) return false
+    return _askPricing({ ok: false, state: 'unmeasurable', reason })
+  }
   if (chk.ok) return true
-  // No gate mounted is not a reason to block work the user asked for.
-  if (!_askPricing) return true
+  // Nothing mounted to ask means nothing can measure this either — refuse, don't assume.
+  if (!_askPricing) return false
   return _askPricing(chk)
 }
 
+type PricingAsk = { chk: PricingChk; resolve: (v: boolean) => void }
+
 function AiPricingGate() {
   const [chk, setChk] = useState<PricingChk | null>(null)
-  const resolveRef = useRef<((v: boolean) => void) | null>(null)
+  // A QUEUE, not one slot. With a single resolveRef a second concurrent ask overwrote
+  // the first and the first caller's promise never settled, leaving its button stuck
+  // on "loading" for the rest of the session.
+  const queueRef = useRef<PricingAsk[]>([])
   const [sug, setSug] = useState<{ resolved: string | null
     basis: 'exact' | 'feed' | 'alias' | 'ai' | 'family' | 'unknown'; price: number[] | null
     like?: string } | null>(null)
@@ -5319,16 +5623,37 @@ function AiPricingGate() {
   const [inUsd, setInUsd] = useState('')
   const [outUsd, setOutUsd] = useState('')
 
-  useEffect(() => {
-    _askPricing = (c: PricingChk) => new Promise<boolean>((resolve) => {
-      setChk(c); setSug(null); setErr(''); setInUsd(''); setOutUsd('')
-      resolveRef.current = resolve
-    })
-    return () => { _askPricing = null }
+  const showHead = useCallback(() => {
+    setSug(null); setErr(''); setInUsd(''); setOutUsd(''); setBusy('')
+    setChk(queueRef.current[0]?.chk ?? null)
   }, [])
 
+  useEffect(() => {
+    _askPricing = (c: PricingChk) => new Promise<boolean>((resolve) => {
+      queueRef.current.push({ chk: c, resolve })
+      if (queueRef.current.length === 1) showHead()
+    })
+    return () => {
+      // Unmounting must not strand callers mid-await — an unanswered promise is a
+      // button stuck on "loading" forever. Refusing is the safe answer for a spend.
+      const waiting = queueRef.current
+      queueRef.current = []
+      for (const a of waiting) a.resolve(false)
+      _askPricing = null
+    }
+  }, [showHead])
+
   const finish = (go: boolean) => {
-    resolveRef.current?.(go); resolveRef.current = null; setChk(null)
+    const head = queueRef.current.shift()
+    head?.resolve(go)
+    // Saving a price answers every other caller queued behind it for the same model.
+    if (go && head?.chk.provider && head.chk.model) {
+      const same = queueRef.current.filter(
+        (a) => a.chk.provider === head.chk.provider && a.chk.model === head.chk.model)
+      queueRef.current = queueRef.current.filter((a) => !same.includes(a))
+      for (const a of same) a.resolve(true)
+    }
+    showHead()
   }
 
   const detect = async () => {
@@ -5355,6 +5680,27 @@ function AiPricingGate() {
   }
 
   if (!chk) return null
+  // The check itself failed, so there is no price to look up and nothing to type. Say
+  // what broke and make running unmeasured a separate, deliberate click — the default
+  // has to be "don't spend".
+  if (chk.state === 'unmeasurable') return (
+    <div className="overlay ai-price-overlay" onClick={() => finish(false)}>
+      <div className="panel confirm-panel" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={() => finish(false)}>×</button>
+        <h3>The budget check didn’t answer</h3>
+        <p className="confirm-lede">
+          ludodex could not reach the AI budget check{chk.reason ? ` (${chk.reason})` : ''},
+          so it cannot measure what this paid run would spend. Nothing has started.
+        </p>
+        <div className="confirm-actions">
+          <button className="go primary" onClick={() => finish(false)}>Don’t run</button>
+          <button className="go" onClick={() => finish(true)}
+            title="Run unmeasured — only your provider's own billing limits stop it.">
+            Run anyway, unmeasured</button>
+        </div>
+      </div>
+    </div>
+  )
   const stale = chk.state === 'stale'
   // Each line says WHERE the number came from. "family" is the only one that is a
   // guess, and it must read as one: an earlier version called an unchecked guess
@@ -5492,11 +5838,17 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
     load()
   }
   // After a browser connect (Epic/EA) succeeds, sync that store — but only once any
-  // in-flight job finishes, since a single sync runs at a time.
+  // in-flight job finishes, since a single sync runs at a time. The wait had no alive
+  // flag, so closing the menu left it polling and then starting a sync from a component
+  // the user had already dismissed.
+  const aliveRef = useRef(true)
+  useEffect(() => { aliveRef.current = true; return () => { aliveRef.current = false } }, [])
   const connectThenSync = (id: string) => async () => {
     const tick = async () => {
+      if (!aliveRef.current) return
       try {
         const s = await api.syncStatus()
+        if (!aliveRef.current) return
         if (s.job?.running) { setTimeout(tick, 1500); return }
       } catch { /* */ }
       runOne(id, false)   // auto-sync after a fresh connect = new-games (fast)
@@ -5745,8 +6097,9 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
               {romListOpen && (
                 <div className="sync-list">
                   <button className="go sync-all sync-rom-all" disabled={anyRunning || !romEnabled.length}
+                    title="File rescan only — no AI, no spend. The Heavy AI supplement runs from a device's own Import button in Settings → Devices."
                     onClick={runRomAll}>
-                    {romRunning ? 'Scanning…' : 'Sync all ROM locations'}
+                    {romRunning ? 'Scanning…' : 'Rescan all ROM locations (files only)'}
                   </button>
                   <div className="rom-children">
                   {romEnabled.map((l) => {
@@ -5766,9 +6119,13 @@ function SyncMenu({ onOpenSettings }: { onOpenSettings?: (section?: string) => v
                               : l.count != null ? `${l.count.toLocaleString()} files`
                               : 'not scanned'}
                           </span>
+                          {/* Named for what it does. The device card's button was also
+                              called "Sync" and additionally runs the Heavy AI supplement;
+                              this one only rescans files. */}
                           {rs?.state !== 'running' && (
                             <button className="ops-btn" disabled={anyRunning}
-                              onClick={(e) => { e.stopPropagation(); runRomOne(l.id) }}>Sync</button>
+                              title="Rescans this location for added/removed ROMs and rebuilds the catalog. No AI, no spend."
+                              onClick={(e) => { e.stopPropagation(); runRomOne(l.id) }}>Rescan files</button>
                           )}
                           {l.transport === 'local' && (
                             <button className="ops-btn" title="Index art already sitting inside this ROM tree (no move) so your local covers show up"
@@ -6218,8 +6575,6 @@ function ServerOps() {
   )
 }
 
-const KIND_ORDER: Record<string, number> = {}
-
 const OS_NAME: Record<string, string> = { windows: 'Windows', mac: 'macOS', linux: 'Linux' }
 const OS_ABBR: Record<string, string> = { windows: 'Win', mac: 'Mac', linux: 'Linux' }
 
@@ -6270,19 +6625,25 @@ function TagSection({ nk, initial }: { nk: string; initial: TagRef[] }) {
   const [tags, setTags] = useState<TagRef[]>(initial)
   const [val, setVal] = useState('')
   const [busy, setBusy] = useState(false)
+  const { err, run } = useMutation()
   useEffect(() => { setTags(initial) }, [initial])
 
+  // Both used to `catch { /* ignore */ }`, so a rejected tag (duplicate, bad
+  // characters, a 500) left the input cleared and the chip list unchanged with
+  // nothing said. Show the server's message instead.
   const add = async () => {
     const t = val.trim()
     if (!t || busy) return
     setBusy(true)
-    try { setTags((await api.addTag(nk, t)).tags); setVal('') }
-    catch { /* ignore */ } finally { setBusy(false) }
+    const r = await run(() => api.addTag(nk, t))
+    if (r.ok) { setTags(r.value.tags); setVal('') }
+    setBusy(false)
   }
   const remove = async (t: string) => {
     setBusy(true)
-    try { setTags((await api.removeTag(nk, t)).tags) }
-    catch { /* ignore */ } finally { setBusy(false) }
+    const r = await run(() => api.removeTag(nk, t))
+    if (r.ok) setTags(r.value.tags)
+    setBusy(false)
   }
 
   return (
@@ -6302,6 +6663,7 @@ function TagSection({ nk, initial }: { nk: string; initial: TagRef[] }) {
           )}
         </span>
       </div>
+      <MutErr msg={err} />
     </section>
   )
 }
@@ -6334,12 +6696,21 @@ const attrLabel = (kind: string) => kind === 'content_type' ? 'Type' : kind.repl
 
 // Fetched once per session, not per game — the matrix is a fact about the providers,
 // not about the title being viewed.
+// Module-level so every open game shares one fetch. It had NO invalidation, so the
+// provider-capability hints stayed stale until a hard reload — a newly-added API key
+// changed nothing on screen. A short TTL plus an explicit bust on credential saves.
 let _capsCache: AttrCapabilities | null = null
+let _capsAt = 0
+const CAPS_TTL_MS = 5 * 60 * 1000
+function invalidateAttrCapabilities() { _capsCache = null; _capsAt = 0 }
 function useAttrCapabilities() {
-  const [caps, setCaps] = useState<AttrCapabilities | null>(_capsCache)
+  const fresh = _capsCache && Date.now() - _capsAt < CAPS_TTL_MS
+  const [caps, setCaps] = useState<AttrCapabilities | null>(fresh ? _capsCache : null)
   useEffect(() => {
-    if (_capsCache) return
-    api.attrCapabilities().then((c) => { _capsCache = c; setCaps(c) }).catch(() => {})
+    if (_capsCache && Date.now() - _capsAt < CAPS_TTL_MS) { setCaps(_capsCache); return }
+    api.attrCapabilities()
+      .then((c) => { _capsCache = c; _capsAt = Date.now(); setCaps(c) })
+      .catch(() => {})
   }, [])
   return caps
 }
@@ -6352,23 +6723,31 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
   const [manual, setManual] = useState('')
   // Hidden by default when a game opens (per request); the header toggle reveals it.
   const [show, setShow] = useState(false)
+  const { err, run } = useMutation()
   useEffect(() => { setShow(false); setEditing(null) }, [d.norm_key])
 
   // Every editable attribute kind, blanks included, in the server's vocabulary order;
   // any extra kind the game happens to have (that isn't in the vocab) is appended.
   const vocab = d.editable_kinds && d.editable_kinds.length
     ? d.editable_kinds : Object.keys(prov).sort()
-  const extra = Object.keys(prov).filter((k) => !vocab.includes(k)).sort()
+  // Overrides count as kinds too. A hand-written kind the server's vocab doesn't list
+  // — 'notes', saved by the Resolve modal's "Reference links / notes" box — was stored
+  // but rendered nowhere, so the user's text simply vanished on save.
+  const extra = [...new Set([...Object.keys(prov), ...Object.keys(overrides)])]
+    .filter((k) => !vocab.includes(k)).sort()
   const kinds = [...vocab, ...extra]
   const filled = kinds.filter((k) => prov[k]?.length || overrides[k]).length
 
+  // Both used to swallow the failure and then close the editor + reload the detail as
+  // if it had worked, so the user watched their edit disappear with no explanation.
+  // Only run the success path when the write actually succeeded.
   const setOv = async (kind: string, value: string, origin: string) => {
-    try { await api.setAttributeOverride(d.norm_key, kind, value, origin) } catch { /* ignore */ }
+    const r = await run(() => api.setAttributeOverride(d.norm_key, kind, value, origin))
+    if (!r.ok) return
     setEditing(null); setManual(''); onChanged()
   }
   const clearOv = async (kind: string) => {
-    try { await api.clearAttributeOverride(d.norm_key, kind) } catch { /* ignore */ }
-    onChanged()
+    if ((await run(() => api.clearAttributeOverride(d.norm_key, kind))).ok) onChanged()
   }
 
   return (
@@ -6381,6 +6760,7 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
       </button>
       {show && (
       <div className="ap-list">
+        <MutErr msg={err} />
         {d.rom_files && d.rom_files.length > 0 && (
           <div className="ap-row ap-readonly">
             <span className="ap-kname">ROM file{d.rom_files.length > 1 ? 's' : ''}</span>
@@ -6590,37 +6970,37 @@ function About({ attrs, scores, prov }: {
 // Accepted-but-unapplied metadata changes surface here, above the library search,
 // so applying isn't buried in Settings. Apply runs the batch job (link matches,
 // fetch records, rebuild); the bar clears once the pending count drops.
-function PendingApplyBar({ count, onApplied }: { count: number; onApplied: () => void }) {
+// `applyRunning` is a PROP, not a third /api/jobs poller. JobMonitor already polls jobs,
+// already derives applyRunning and already fires onApplied on the running→finished
+// transition, so this component's own 2.5s poll was pure duplication — and because its
+// effect depended on the inline `onApplied` lambda, every keystroke in the search box
+// tore it down, reset `prev` to false and fired an immediate api.jobs(), losing the very
+// transition it existed to catch.
+function PendingApplyBar({ count, applyRunning, onApplied }: {
+  count: number; applyRunning: boolean; onApplied: () => void
+}) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const [applyRunning, setApplyRunning] = useState(false)
-  // While an "Apply AI metadata + rebuild" job is live, these changes ARE being applied,
-  // so this bar is redundant with that job — hide it, and refresh when it finishes.
-  useEffect(() => {
-    let alive = true, prev = false
-    const check = () => api.jobs().then((r) => {
-      if (!alive) return
-      const running = r.jobs.some((j) => j.kind === 'aimeta-apply'
-        && (j.status === 'running' || j.status === 'paused'))
-      setApplyRunning(running)
-      if (prev && !running) onApplied()      // apply finished -> refresh so pending clears
-      prev = running
-    }).catch(() => {})
-    check(); const t = setInterval(check, 2500)
-    return () => { alive = false; clearInterval(t) }
-  }, [onApplied])
+  // The apply poll runs for up to 4 minutes; without this it kept calling setBusy /
+  // onApplied long after the bar unmounted.
+  const aliveRef = useRef(true)
+  useEffect(() => { aliveRef.current = true; return () => { aliveRef.current = false } }, [])
   const apply = async () => {
     setBusy(true); setErr('')
     try {
-      await api.aimetaApply(undefined, true)      // apply all accepted, all media
+      // The remembered wand scope, like MetadataReview.apply — `true` pulled EVERY media
+      // kind even for a user who had limited the wand to covers.
+      await api.aimetaApply(undefined, wandMedia())
     } catch (e) { setBusy(false); setErr(e instanceof Error ? e.message : 'failed'); return }
     let tries = 0                                  // apply is a background job — poll
     const poll = async () => {
+      if (!aliveRef.current) return
       tries += 1
       const [s, jobs] = await Promise.all([
         api.stats().catch(() => null),
         api.jobs().then((r) => r.jobs).catch(() => [] as Job[]),
       ])
+      if (!aliveRef.current) return
       const pendingCleared = !!s && (s.pending_meta ?? 0) < count
       // the metadata apply is what we wait on — NOT the separate 'aimeta-art' art job,
       // which hydrates in the background after the rebuild.
@@ -6663,6 +7043,10 @@ const OWN_FORMS: { id: string; label: string }[] = [
   { id: 'digital', label: '☁ Digital' },
 ]
 const formLabel = (f: string) => OWN_FORMS.find((x) => x.id === f)?.label ?? f
+// A fact's identity is (form, platform, state) — the same triple the remove call uses.
+// Keying these rows by array INDEX recycled DOM node state onto the wrong row when one
+// was removed from the middle.
+const factKey = (f: OwnershipFact) => `${f.form}|${f.platform}|${f.state}`
 const stateIcon = (s: string) => (s === 'want' ? '🕗' : '✓')
 // Pretty-print a stored ownership platform slug: prefer the live IGDB system name,
 // then systemLabel's mapping, else the raw slug.
@@ -6674,11 +7058,14 @@ function OwnershipEditor({ nk, title, facts, onChanged }: {
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
+  const { err, run } = useMutation()
 
+  // "surfaced elsewhere" was untrue — nothing surfaced it, so a failed remove reloaded
+  // the detail and the chip came straight back with no explanation.
   const remove = async (f: OwnershipFact) => {
     setBusy(true)
-    try { await api.clearOwnership(nk, f.form, f.platform, f.state); onChanged() }
-    catch { /* surfaced elsewhere */ } finally { setBusy(false) }
+    if ((await run(() => api.clearOwnership(nk, f.form, f.platform, f.state))).ok) onChanged()
+    setBusy(false)
   }
 
   return (
@@ -6691,8 +7078,8 @@ function OwnershipEditor({ nk, title, facts, onChanged }: {
       </div>
       {facts.length > 0 && (
         <div className="own-facts">
-          {facts.map((f, i) => (
-            <span key={i} className={'own-chip ' + f.state}>
+          {facts.map((f) => (
+            <span key={factKey(f)} className={'own-chip ' + f.state}>
               <span className="own-chip-state">{stateIcon(f.state)}</span>
               {formLabel(f.form)}{f.platform ? ' · ' + prettyPlatform(f.platform, f.form) : ''}
               <button className="own-chip-x" title="Remove" disabled={busy}
@@ -6701,6 +7088,7 @@ function OwnershipEditor({ nk, title, facts, onChanged }: {
           ))}
         </div>
       )}
+      <MutErr msg={err} />
       {open && <OwnershipOverlay nk={nk} title={title} facts={facts}
         onChanged={onChanged} onClose={() => setOpen(false)} />}
     </div>
@@ -6775,8 +7163,8 @@ function OwnershipOverlay({ nk, title, facts, onChanged, onClose }: {
         {s.year ? <span className="own-sys-year dim">{s.year}</span> : null}
         {others.length > 0 && (
           <span className="own-sys-badges" title="Already marked in other forms">
-            {others.map((o, i) => (
-              <span key={i} className={'own-sys-badge ' + o.state}>
+            {others.map((o) => (
+              <span key={factKey(o)} className={'own-sys-badge ' + o.state}>
                 {stateIcon(o.state)}{formLabel(o.form).replace(/^\S+\s/, '')}
               </span>
             ))}
@@ -6841,12 +7229,18 @@ function OwnershipOverlay({ nk, title, facts, onChanged, onClose }: {
         {facts.length > 0 && (
           <div className="own-current">
             <span className="own-current-h dim">Marked:</span>
-            {facts.map((f, i) => (
-              <span key={i} className={'own-chip ' + f.state}>
+            {facts.map((f) => (
+              <span key={factKey(f)} className={'own-chip ' + f.state}>
                 <span className="own-chip-state">{stateIcon(f.state)}</span>
                 {formLabel(f.form)}{f.platform ? ' · ' + prettyPlatform(f.platform, f.form, names) : ''}
+                {/* The overlay already renders `err` above; route the failure there
+                    instead of dropping it, so a refused remove says why. */}
                 <button className="own-chip-x" title="Remove"
-                  onClick={() => api.clearOwnership(nk, f.form, f.platform, f.state).then(onChanged).catch(() => {})}>×</button>
+                  onClick={async () => {
+                    const r = await attempt(
+                      () => api.clearOwnership(nk, f.form, f.platform, f.state), setErr)
+                    if (r.ok) onChanged()
+                  }}>×</button>
               </span>
             ))}
           </div>
@@ -6858,9 +7252,9 @@ function OwnershipOverlay({ nk, title, facts, onChanged, onClose }: {
 
 // Gear + sliders to position/zoom one image inside its viewport. Live-previews
 // through onChange (the parent applies it to the image) and debounce-saves.
-function FrameEditor({ nk, kind, value, onChange, label, disabled }: {
+function FrameEditor({ nk, kind, value, onChange, label }: {
   nk: string; kind: string; value?: Frame
-  onChange: (f: Frame | undefined) => void; label?: string; disabled?: boolean
+  onChange: (f: Frame | undefined) => void; label?: string
 }) {
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
   const gearRef = useRef<HTMLButtonElement>(null)
@@ -6882,10 +7276,6 @@ function FrameEditor({ nk, kind, value, onChange, label, disabled }: {
     const r = gearRef.current?.getBoundingClientRect()
     if (r) setPos({ top: Math.min(r.bottom + 6, window.innerHeight - 250),
                     left: Math.min(r.left, window.innerWidth - 250) })
-  }
-  if (disabled) {
-    return <button className="frame-gear disabled" disabled
-      title="Position/zoom framing has moved — open the media (click the count) and use ⚙ on the #1 image. This gear is reserved for future per-category settings.">⚙</button>
   }
   return (
     <>
@@ -7023,13 +7413,14 @@ function ResolveModal({ nk, title, platform, alsoOwnedOn, onClose, onReload, onG
             <button className="fixdup-back" onClick={() => setMode('hub')}>← back</button>
             <label className="rm-label">Match to a specific game</label>
             <input className="fixdup-search" autoFocus
-              placeholder="Paste an IGDB link / id, or search by name"
+              placeholder="Search by name, or paste an IGDB link (or type igdb:1942)"
               value={igdbRef || q}
               onChange={(e) => { const v = e.target.value
-                if (/igdb\.com|^\d+$/.test(v.trim())) { setIgdbRef(v); setQ('') }
+                if (igdbRefOf(v)) { setIgdbRef(v); setQ('') }
                 else { setQ(v); setIgdbRef('') } }} />
-            {igdbRef.trim() && (
-              <button className="go" disabled={busy} onClick={() => applyMatch(igdbRef.trim())}>
+            {igdbRefOf(igdbRef) && (
+              <button className="go" disabled={busy}
+                onClick={() => applyMatch(igdbRefOf(igdbRef) as string)}>
                 Use this IGDB match</button>
             )}
             {cands.map((c) => (
@@ -7048,7 +7439,8 @@ function ResolveModal({ nk, title, platform, alsoOwnedOn, onClose, onReload, onG
               </label>
             )}
             <label className="rm-label">Reference links / notes
-              <span className="dim"> · optional — Wikipedia, your own notes, anything</span></label>
+              <span className="dim"> · optional — saved on the game as a <b>notes</b> attribute,
+                under “View / edit all attributes”</span></label>
             <textarea className="rm-refs" rows={3} placeholder="Paste URLs or notes for this match…"
               value={refs} onChange={(e) => setRefs(e.target.value)} />
           </div>
@@ -7086,25 +7478,31 @@ function FixDupModal({ nk, title, onClose, onMerged }: {
   nk: string; title: string; onClose: () => void; onMerged: (canonical: string) => void
 }) {
   const [canonical, setCanonical] = useState<'this' | 'other' | null>(null)
-  const [q, setQ] = useState('')
+  // Seeded with this game's title so the CHEAP indexed name search runs on open. Opening
+  // "Part of another game" used to fire api.suspectedDupes(80) — a difflib pairwise scan
+  // over the WHOLE library — only to throw away everything but this one norm_key.
+  const [q, setQ] = useState(title)
   const [results, setResults] = useState<GameRow[]>([])
-  const [suggested, setSuggested] = useState<GameRow[]>([])
+  const [suggested, setSuggested] = useState<GameRow[] | null>(null)
+  const [scanning, setScanning] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [confirm, setConfirm] = useState<{ other: string; msg: string } | null>(null)
 
-  // Likely duplicates for THIS game, from the fuzzy similarity scan — so you
-  // usually don't have to search.
-  useEffect(() => {
-    api.suspectedDupes(80).then((r) => {
-      const rows = r.dupes
+  // The library-wide fuzzy scan, now behind an explicit click — it is expensive and the
+  // title search above answers most cases without it.
+  const scanDupes = async () => {
+    setScanning(true)
+    const r = await attempt(() => api.suspectedDupes(80), setErr)
+    if (r.ok) {
+      setSuggested(r.value.dupes
         .filter((d) => d.a_nk === nk || d.b_nk === nk)
         .map((d) => (d.a_nk === nk
           ? { norm_key: d.b_nk, title: d.b } as GameRow
-          : { norm_key: d.a_nk, title: d.a } as GameRow))
-      setSuggested(rows)
-    }).catch(() => {})
-  }, [nk])
+          : { norm_key: d.a_nk, title: d.a } as GameRow)))
+    }
+    setScanning(false)
+  }
 
   useEffect(() => {
     if (!q.trim()) { setResults([]); return }
@@ -7152,16 +7550,24 @@ function FixDupModal({ nk, title, onClose, onMerged }: {
             <p className="dim">{canonical === 'this'
               ? <>Pick the duplicate to fold <b>into</b> “{title}”. Its ownership, media &amp; tags move here; “{title}” keeps its title &amp; match.</>
               : <>Pick the correct entry — “{title}” folds <b>into</b> it (that one keeps its title &amp; match).</>}</p>
-            {suggested.length > 0 && (
+            {suggested && suggested.length > 0 && (
               <div className="fixdup-suggest">
                 <div className="fixdup-sub">Likely duplicates</div>
                 {suggested.map(row)}
               </div>
             )}
+            {suggested && suggested.length === 0 && (
+              <div className="fixdup-sub dim">The similarity scan found no near-match for this game.</div>
+            )}
             <input className="fixdup-search" autoFocus placeholder="…or search all games" value={q}
               onChange={(e) => setQ(e.target.value)} />
             {results.map(row)}
-            <button className="fixdup-back" onClick={() => { setCanonical(null); setQ('') }}>← back</button>
+            {suggested === null && (
+              <button className="ops-btn" disabled={scanning} onClick={scanDupes}
+                title="Compares every title in the library against every other — slow on a large library, so it only runs when you ask">
+                {scanning ? 'Scanning the library…' : '🔎 Scan the library for likely duplicates'}</button>
+            )}
+            <button className="fixdup-back" onClick={() => { setCanonical(null); setQ(title) }}>← back</button>
           </div>
         )}
         {confirm && (
@@ -7206,6 +7612,7 @@ function PeelModal({ nk, title, onClose, onPeeled }: {
   })
 
   const askAi = async () => {
+    if (!(await ensureAiPricing('split'))) return
     setAiBusy(true); setErr('')
     try {
       const r = await api.splitSuggest(nk)
@@ -7318,19 +7725,38 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
   const [frames, setFrames] = useState<Record<string, Frame>>({})
   const [resolve, setResolve] = useState(false)
   const [idBusy, setIdBusy] = useState('')   // provider whose disable toggle is in-flight
+  const { err: detailErr, setErr: setDetailErr } = useMutation()
   const [toolsOpen, setToolsOpen] = useState(false)
   const toolsRef = useClickOutside<HTMLDivElement>(toolsOpen, () => setToolsOpen(false))
   useEffect(() => { setToolsOpen(false) }, [nk])
 
-  const reloadDetail = useCallback(() => { api.detail(nk).then(setD).catch(() => {}) }, [nk])
-  useEffect(() => { reloadDetail() }, [reloadDetail])
+  // Guarded and cancelled per `nk`. Clicking two "also owned on" chips quickly used to
+  // leave `d` showing game A while `nk`, `media` and the ArtStrip had already moved to
+  // game B — the old fetch simply won because it answered last, and `d` was never
+  // cleared on the key change. Same pattern as OwnershipOverlay/InspectModal.
+  const detailRef = useRef<AbortController | null>(null)
+  const reloadDetail = useCallback(() => {
+    detailRef.current?.abort()
+    const ctl = new AbortController()
+    detailRef.current = ctl
+    api.detail(nk, ctl.signal).then((r) => { if (!ctl.signal.aborted) setD(r) }).catch(() => {})
+  }, [nk])
+  useEffect(() => {
+    setD(null)                       // the previous game's body must not outlive its key
+    reloadDetail()
+    return () => detailRef.current?.abort()
+  }, [nk, reloadDetail])
   useEffect(() => { setFrames(d?.framing ?? {}) }, [d?.framing])
   useEffect(() => { setHeroPref(d?.hero_pref ?? null) }, [d?.hero_pref])
-  useEffect(() => { setMedia(null); api.mediaLibrary(nk).then(setMedia).catch(() => {}) }, [nk])
+  useEffect(() => {                       // same race as the detail fetch: guard it too
+    let live = true
+    setMedia(null)
+    api.mediaLibrary(nk).then((r) => { if (live) setMedia(r) }).catch(() => {})
+    return () => { live = false }
+  }, [nk])
   useEffect(() => {
     api.mediaKinds().then((r) => {
       setKinds(r.kinds)
-      r.kinds.forEach((k, i) => { KIND_ORDER[k.kind] = i })
     }).catch(() => {})
   }, [])
 
@@ -7416,6 +7842,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
             onReload={() => reloadDetail()}
             onGone={() => { setResolve(false); onClose() }} />
         )}
+        <MutErr msg={detailErr} />
         {!d ? <div className="loading">Loading…</div> : (
           <>
             <div className={'hero' + (bg ? '' : marquee.length ? ' hero-marquee-mode' : ' hero-plain')}
@@ -7548,8 +7975,11 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
                       </tr>
                     </thead>
                     <tbody>
+                      {/* a source row's identity is (source, id, platform) — index keys
+                          recycled a removed row's cell state onto its neighbour */}
                       {d.sources.map((s, i) => (
-                        <tr key={i} className={s.state === 'want' ? 'src-want' : ''}>
+                        <tr key={`${s.source}|${s.source_id ?? i}|${s.platform ?? ''}`}
+                          className={s.state === 'want' ? 'src-want' : ''}>
                           <td>{s.state === 'want'
                             ? <span className="own-pill want">🕗 Want</span>
                             : !identified && NON_ID_SRC.has(s.source)
@@ -7649,8 +8079,11 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
                   if (!metaChips.length && !storeChips.length) return null
                   const toggle = async (provider: string, off: boolean) => {
                     setIdBusy(provider)
-                    try { await api.setIdentityDisabled(d.norm_key, provider, off); reloadDetail() }
-                    catch { /* ignore */ } finally { setIdBusy('') }
+                    // swallowed before, so the chip snapped back with no reason given
+                    const r = await attempt(
+                      () => api.setIdentityDisabled(d.norm_key, provider, off), setDetailErr)
+                    if (r.ok) reloadDetail()
+                    setIdBusy('')
                   }
                   return (
                     <section className="idvia">
@@ -7740,6 +8173,7 @@ function MediaWand({ nk, kinds, label, onDone }: {
   // (1) judge what we already hold. Paid, and only ever from this click — scope is
   // exactly one game and exactly the kinds in scope, never the catalog.
   const pickBest = async () => {
+    if (!(await ensureAiPricing('art'))) return
     setBusy('best')
     try {
       let changed = 0
@@ -7749,8 +8183,10 @@ function MediaWand({ nk, kinds, label, onDone }: {
       }
       onDone(changed ? `re-picked ${changed} ${changed === 1 ? 'category' : 'categories'}`
         : 'No clearer winner than what is already #1')
-    } catch {
-      onDone('AI pick unavailable — set an AI provider for “art” in Settings › AI')
+    } catch (e) {
+      // Said "no AI provider" for every failure — a tripped budget cap, a 500, a
+      // timeout. Report what came back so the fix matches the cause.
+      onDone(`AI pick didn't run — ${(e as Error)?.message || 'the request failed'}`)
     } finally { setBusy(''); setOpen(false) }
   }
 
@@ -7760,17 +8196,28 @@ function MediaWand({ nk, kinds, label, onDone }: {
     setBusy(alsoWeb ? 'both' : 'find')
     try {
       let added = 0
+      const failed: string[] = []
       const changed = new Set<string>()
-      for (const p of ['igdb', 'screenscraper', 'steamgriddb', 'thegamesdb', ...(alsoWeb ? ['web'] : [])]) {
+      // 'thegamesdb' used to be in this list and the server rejects it with a 400
+      // (it takes igdb, screenscraper, steamgriddb, steam, web) — one guaranteed
+      // failure per run, hidden by the catch. Ask only for what the server accepts.
+      const provs = ['igdb', 'screenscraper', 'steamgriddb', 'steam',
+                     ...(alsoWeb ? ['web'] : [])]
+      for (const p of provs) {
         try {
           const r = await api.mediaFetch(nk, p, kinds ?? undefined)
           added += r.added; r.chosen_changed.forEach((c) => changed.add(c))
-        } catch { /* one provider failing never stops the rest */ }
+        } catch { failed.push(providerLabel(p)) }   // one failing never stops the rest
       }
+      // If EVERY provider failed, "the providers have nothing more" is a lie — the
+      // app never heard from any of them. Say which ones did not answer.
+      const note = failed.length ? ` · couldn't reach ${failed.join(', ')}` : ''
       onDone(added
         ? `+${added} candidate${added === 1 ? '' : 's'}` +
-          (changed.size ? ` · ${[...changed].join(', ')} changed` : ' · chosen unchanged')
-        : 'Nothing new to add — every provider already gave us what it has')
+          (changed.size ? ` · ${[...changed].join(', ')} changed` : ' · chosen unchanged') + note
+        : failed.length === provs.length
+          ? `No provider answered — couldn't reach ${failed.join(', ')}`
+          : 'Nothing new to add — every provider already gave us what it has' + note)
     } finally { setBusy(''); setOpen(false) }
   }
 
@@ -7804,8 +8251,10 @@ function MediaWand({ nk, kinds, label, onDone }: {
           <div className="prov-menu mw-menu" role="menu" onClick={(e) => e.stopPropagation()}>
             <div className="prov-menu-h">Magic wand · {label}</div>
             {rows.map((r) => (
+              // disabled while a run is going: without it a second click started a
+              // second PAID run on top of the first.
               <button key={r.key} className="prov-menu-row mw-row" role="menuitem"
-                onClick={r.run}>
+                disabled={!!busy} onClick={r.run}>
                 <span className="prov-fav has-logo mw-chip" aria-hidden="true">{r.icon}</span>
                 <span className="prov-menu-lbl">{r.title}
                   <span className="mw-sub">{r.sub}</span>
@@ -7926,12 +8375,14 @@ function ProviderScopePanel() {
   const [st, setSt] = useState<ProviderScopeState | null>(null)
   const [open, setOpen] = useState<string | null>(null)
   const [busy, setBusy] = useState('')
+  const { err, run } = useMutation()
   useEffect(() => { api.providerScope().then(setSt).catch(() => setSt(null)) }, [])
 
   const save = async (body: Parameters<typeof api.setProviderScope>[0]) => {
     setBusy(body.provider)
-    try { setSt(await api.setProviderScope(body)) } catch { /* */ }
-    finally { setBusy('') }
+    const r = await run(() => api.setProviderScope(body))
+    if (r.ok) setSt(r.value)
+    setBusy('')
   }
   const toggleIn = (list: string[], v: string) =>
     list.includes(v) ? list.filter((x) => x !== v) : [...list, v]
@@ -7940,6 +8391,7 @@ function ProviderScopePanel() {
   return (
     <div className="svc-group">
       <div className="svc-group-title">Provider scope</div>
+      <MutErr msg={err} />
       <p className="dim ps-intro">
         Every provider runs for every source and platform by default. Turn one off
         entirely, or narrow it — the per-game cost below is measured on this server.
@@ -8238,6 +8690,7 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
   const [busy, setBusy] = useState(false)
   // status line for whichever of the two controls last ran
   const [aiMsg, setAiMsg] = useState('')
+  const { err: mutErr, run: runMut } = useMutation()
   useEffect(() => { setOrder(byRank(assets)) }, [assets])
   // Enlarged view: ← / → step through this category, Esc closes JUST the viewer.
   useEffect(() => {
@@ -8253,10 +8706,15 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
     return () => window.removeEventListener('keydown', onKey)
   }, [viewing, order])
 
+  // A failed save used to leave the order the user just arranged on screen, then snap
+  // back on the next re-render with nothing said. Put it back AND say why.
   const persist = async (next: MediaAsset[]) => {
+    const before = order
     setBusy(true)
-    try { onChange(await api.setPins(nk, kind.kind, next.map((a) => a.id))) }
-    catch { /* */ } finally { setBusy(false) }
+    const r = await runMut(() => api.setPins(nk, kind.kind, next.map((a) => a.id)))
+    if (r.ok) onChange(r.value)
+    else setOrder(before)
+    setBusy(false)
   }
   // The one true reorder primitive — move item `from` to slot `to` and save. Both the
   // tap controls (▲ ▼ ★, the reliable path on mobile) and the drag handle route through
@@ -8300,11 +8758,21 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
   }
   const act = async (fn: () => Promise<MediaLibrary>) => {
     setBusy(true)
-    try { onChange(await fn()) } catch { /* */ } finally { setBusy(false) }
+    const r = await runMut(fn)
+    if (r.ok) onChange(r.value)
+    setBusy(false)
   }
   const redist = (a: MediaAsset, val: boolean) => act(() => api.setMediaRedist(nk, a.id, val))
   const remove = (a: MediaAsset) => {
-    if (a.user) { act(() => api.deleteUserMedia(nk, a.id)); return }
+    // An upload cannot be re-fetched from anywhere, so deleting one asks — the ban path
+    // right beside it always did, and this was the more final of the two.
+    if (a.user) {
+      if (window.confirm(`Delete your uploaded ${a.kind.replace(/_/g, ' ')}?\n\n`
+        + `It came from you, so nothing can re-download it. This can't be undone.`)) {
+        act(() => api.deleteUserMedia(nk, a.id))
+      }
+      return
+    }
     if (window.confirm(`Ban this ${a.kind.replace(/_/g, ' ')}?\n\nIt'll be deleted and `
       + `never re-downloaded from ${a.provider}. You can unban it later in `
       + `Settings › Banned media.`)) act(() => api.banMedia(nk, a.id))
@@ -8341,6 +8809,7 @@ function MediaKindOverlay({ nk, kind, assets, onClose, onChange, frames, onFrame
         <p className="mko-desc dim">Set priority — <b>#1 is the one used.</b> Tap <b>★ Use</b> to promote,
           <b> ▲ ▼</b> to nudge, or drag the ⠿ handle · click to enlarge{framable ? ' · ⚙ on #1 frames its position & zoom' : ''}
           {kind.description ? ' · ' + kind.description : ''}</p>
+        <MutErr msg={mutErr} />
         {order.length === 0
           ? <div className="sync-note dim">No media of this type yet.</div>
           : (
@@ -8468,12 +8937,11 @@ function MediaKindCard({ nk, kind, assets, onChange, frames, onFrame }: {
           <button className={'am-badge' + (n ? ' am-clickable' : '')} disabled={!n}
             title={n ? 'View all' : undefined}
             onClick={() => { if (n) setGallery(true) }}>{n ? `×${n}` : '—'}</button>
-          {onFrame && (
-            /* Position/zoom framing moved into the media overlay (⚙ on the #1 image).
-               The gear stays here, grayed, reserved for future per-category settings. */
-            <FrameEditor nk={nk} kind={kind.kind} value={frames?.[kind.kind]} label={kind.kind}
-              onChange={(fr) => onFrame(kind.kind, fr)} disabled />
-          )}
+          {/* The permanently-disabled gear that used to sit here is gone. Framing moved
+              into the media overlay (⚙ on the #1 image) and its tooltip said it was
+              "reserved for future per-category settings" — a control that can never be
+              pressed teaches the user that gears here do nothing. `frames`/`onFrame`
+              still pass through to the overlay below, where the gear DOES work. */}
           <button className={'am-up' + (open ? ' on' : '')} title="Add media"
             onClick={() => setOpen((v) => !v)}>+</button>
         </span>
@@ -8490,8 +8958,13 @@ function MediaKindCard({ nk, kind, assets, onChange, frames, onFrame }: {
                 : (a.thumb || a.is_image)
                 ? <SpinImg src={a.thumb || a.url} />
                 : <span className="am-file">{(a.ext || 'file').toUpperCase()}</span>}
+              {/* An upload came from the user — nothing can re-fetch it — so deleting
+                  it asks first, like the ban control on the same asset elsewhere. */}
               <button className="am-del" title="Remove upload" disabled={busy}
-                onClick={() => run(() => api.deleteUserMedia(nk, a.id), false)}>×</button>
+                onClick={() => { if (window.confirm(
+                  `Delete your uploaded ${kind.kind.replace(/_/g, ' ')}?\n\n`
+                  + `It came from you, so nothing can re-download it. This can't be undone.`))
+                  run(() => api.deleteUserMedia(nk, a.id), false) }}>×</button>
             </span>
           ))}
         </div>
@@ -8562,7 +9035,10 @@ function SpotlightSection({ onOpen, prefsTick, mediaTick, onOpenSettings }: {
       kindRef.current = next.kind
       setSp(next)
     }).catch(() => { /* keep the current spotlight on failure */ })
-  }, [mediaTick])   // eslint-disable-line react-hooks/exhaustive-deps
+    // mediaTick ONLY: this is a "a cover just changed" signal, and re-running it for
+    // any other reason would rotate the spotlight the user is looking at.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- narrow deps, see above
+  }, [mediaTick])
   // Rotate on a real timer (not the CSS animationend, which can silently miss a
   // fire when the tab is backgrounded/paused and leave the spotlight stuck).
   useEffect(() => {
@@ -8574,8 +9050,11 @@ function SpotlightSection({ onOpen, prefsTick, mediaTick, onOpenSettings }: {
   // un-hover. Restart the CSS bar in lockstep so it never finishes early and sits
   // empty while the (fresh, longer) timeout is still counting down.
   useEffect(() => {
+    // paused/seconds ONLY: `loading` and `sp` are read as a guard, not as triggers —
+    // bumping the cycle when a new spotlight arrives would double-restart the bar.
     if (!paused && !loading && sp) setCycle((c) => c + 1)
-  }, [paused, seconds])   // eslint-disable-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- narrow deps, see above
+  }, [paused, seconds])
 
   // First-load feedback: while the (sometimes slow, post-rebuild) first request is in
   // flight or after a failure, show a skeleton / retry instead of silently rendering
@@ -8779,9 +9258,15 @@ function DashStats({ stats, onBrowse, onFilter }: {
 function Achievements({ nk }: { nk: string }) {
   const [a, setA] = useState<AchData | null>(null)
   const [loaded, setLoaded] = useState(false)
+  // Cancelled + guarded on `nk`: navigating between games faster than the fetch answers
+  // used to leave one game's achievements rendered under another game's title.
   useEffect(() => {
-    setLoaded(false)
-    api.achievements(nk).then(setA).catch(() => setA(null)).finally(() => setLoaded(true))
+    setLoaded(false); setA(null)
+    const ctl = new AbortController()
+    api.achievements(nk, ctl.signal)
+      .then((r) => { if (!ctl.signal.aborted) { setA(r); setLoaded(true) } })
+      .catch(() => { if (!ctl.signal.aborted) { setA(null); setLoaded(true) } })
+    return () => ctl.abort()
   }, [nk])
 
   if (!loaded) return null
@@ -9497,7 +9982,9 @@ function FileOpsOperations() {
       finally { if (id === dseq.current) setDetecting(false) }
     }, 400)
     return () => clearTimeout(t)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // The four inputs to base() and nothing else. `base` is rebuilt every render, so
+    // depending on it would re-detect on every keystroke anywhere in the panel.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- narrow deps, see above
   }, [deviceId, root, scope, system])
 
   // Preview the plan — but only when it's cheap or you've asked for it. Big folders
@@ -9522,7 +10009,9 @@ function FileOpsOperations() {
       } finally { if (id === seq.current) setBusy('') }
     }, 300)
     return () => clearTimeout(t)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Every value the plan is computed FROM is listed; `base` and the api wrappers are
+    // rebuilt each render and would re-plan on every unrelated keystroke.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- narrow deps, see above
   }, [shouldPlan, op, deviceId, root, scope, system, profileId, dest, mediaLayout, extractOp])
 
   const cancelPlan = () => { planAbort.current?.abort(); seq.current++; setBusy(''); setPlanRequested(false) }
@@ -9738,18 +10227,25 @@ function FileProfiles() {
   const [profiles, setProfiles] = useState<FileProfile[]>([])
   const [vars, setVars] = useState<FileVariable[]>([])
   const [editing, setEditing] = useState<FileProfile | null>(null)
+  const { err, run } = useMutation()
   const reload = () => api.fileProfiles().then((p) => setProfiles(p.profiles)).catch(() => {})
   useEffect(() => { reload(); api.fileVariables().then((v) => setVars(v.variables)).catch(() => {}) }, [])
 
   const blank: FileProfile = { name: '', description: '', target: '{system}/{filename}', m3u: false, prune_empty: true, rename: false, all_files: false, archive_policy: 'keep' }
   const clone = (p: FileProfile) => setEditing({ ...p, id: undefined, name: p.name + ' (copy)', builtin: false })
-  const del = async (pid: string) => { if (confirm('Delete this profile?')) { await api.deleteFileProfile(pid); reload() } }
+  // Had no catch: a refused delete (a profile still referenced by a runbook) became an
+  // unhandled rejection and the row stayed put with nothing said.
+  const del = async (pid: string) => {
+    if (!confirm('Delete this profile?')) return
+    if ((await run(() => api.deleteFileProfile(pid))).ok) reload()
+  }
 
   const builtins = profiles.filter((p) => p.builtin)
   const customs = profiles.filter((p) => !p.builtin)
   return (
     <>
       <h2>Layout profiles</h2>
+      <MutErr msg={err} />
       <p className="dim">A profile describes a target on-disk layout as a path template
         over the variable bubbles. Built-ins are read-only — clone one to tweak it, or
         build your own.</p>
@@ -9905,14 +10401,12 @@ function providerMatches(p: AiFindingPayload): ProviderMatch[] {
   return p.provider_match ? [p.provider_match] : []
 }
 
-const PROVIDER_LABEL: Record<string, string> = {
-  igdb: 'IGDB', screenscraper: 'ScreenScraper', thegamesdb: 'TheGamesDB',
-  ai_web: 'AI Web Search', arcadedb: 'ArcadeDB', zxinfo: 'ZXInfo',
-  mobygames: 'MobyGames',
-}
-
+// providers.ts owns provider display names (this file already imports providerLabel for
+// other rows). A second, smaller map here drifted from it — 'steamgriddb' and every
+// store were missing, so those rows fell back to the raw id.
 function pmLabel(m: ProviderMatch): string {
-  return PROVIDER_LABEL[m.provider || (m.igdb_id ? 'igdb' : '')] || m.provider || 'provider'
+  const id = m.provider || (m.igdb_id ? 'igdb' : '')
+  return id ? providerLabel(id) : 'provider'
 }
 
 function pmId(m: ProviderMatch): string | number | undefined {
@@ -10231,7 +10725,9 @@ function MagicWandOverlay({ filterQuery, filterCount, target, onClose }: {
     : `${(filterCount ?? 0).toLocaleString()} games in the current view`
 
   const wave = async () => {
-    setBusy(true); setErr(''); setMsg('')
+    setErr(''); setMsg('')
+    if (!(await ensureAiPricing('metadata'))) return
+    setBusy(true)
     const heavy = tier === 'heavy'
     const opts = {
       web: heavy && !!targets?.web_capable,
@@ -10242,8 +10738,13 @@ function MagicWandOverlay({ filterQuery, filterCount, target, onClose }: {
       if (target) {
         r = await api.aimetaScan({ norm_keys: target.norm_keys, label: target.label, ...opts })
       } else {
-        const page = await api.games({ ...(filterQuery || {}), limit: 2000, offset: 0 })
-        const keys = page.items.map((g) => g.norm_key)
+        const { keys, total } = await collectScopeKeys(filterQuery || {})
+        if (total > BULK_SCOPE_MAX) {
+          setErr(`The current view holds ${total.toLocaleString()} entries — more than the`
+            + ` ${BULK_SCOPE_MAX.toLocaleString()} a single wand run takes. Narrow the filters`
+            + ` and run it in batches.`)
+          setBusy(false); return
+        }
         if (!keys.length) { setErr('No games in the current view.'); setBusy(false); return }
         r = await api.aimetaScan({ norm_keys: keys, label: 'filtered', ...opts })
       }
@@ -10336,8 +10837,13 @@ function AttributeEditorModal({ filterQuery, filterCount, target, onApplied, onC
     try {
       let keys = target?.norm_keys
       if (!keys) {
-        const page = await api.games({ ...(filterQuery || {}), limit: 2000, offset: 0 })
-        keys = page.items.map((g) => g.norm_key)
+        const scope = await collectScopeKeys(filterQuery || {})
+        if (scope.total > BULK_SCOPE_MAX) {
+          setErr(`The current view holds ${scope.total.toLocaleString()} entries — more than`
+            + ` the ${BULK_SCOPE_MAX.toLocaleString()} one edit takes. Narrow the filters first.`)
+          setBusy(false); return
+        }
+        keys = scope.keys
       }
       if (!keys.length) { setErr('No games in scope.'); setBusy(false); return }
       const r = await api.bulkSetAttribute({ norm_keys: keys, kind, value: clear ? undefined : value, clear })
@@ -10449,7 +10955,9 @@ function MetadataScan() {
   }, [anyRunning, loadScans])
 
   const start = async (target: string) => {
-    setBusy(target); setErr(''); setMsg('')
+    setErr(''); setMsg('')
+    if (!(await ensureAiPricing('metadata'))) return
+    setBusy(target)
     try {
       const r = await api.aimetaScan({ target, limit, web: web && !!targets?.web_capable, match_provider: matchProvider })
       setMsg(`Scanning ${r.count.toLocaleString()} game(s) — track progress in the job monitor by the sync button, then review results in the Review tab.`)
@@ -10739,7 +11247,9 @@ function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onR
   const [cands, setCands] = useState<{ igdb_id: number | null; name: string; year: number | null; platforms: string[] }[] | null>(null)
   const refList = () => refs.split(/[\s,]+/).map((s) => s.trim()).filter((s) => /^https?:\/\//i.test(s))
   const run = async () => {
-    setBusy(true); setErr(''); setNote('')
+    setErr(''); setNote('')
+    if (!(await ensureAiPricing('metadata'))) return
+    setBusy(true)
     try {
       const r = await api.aimetaRefine({
         norm_key: f.norm_key, hint: hint.trim(), refs: refList(), model: model || undefined,
@@ -10770,12 +11280,13 @@ function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onR
   const pinOrSearch = async () => {
     const v = pinInput.trim()
     if (!v) return
-    if (/igdb\.com\/games\//i.test(v) || /^\d+$/.test(v)) { doPin(v); return }
+    const ref = igdbRefOf(v)
+    if (ref) { doPin(ref); return }
     setBusy(true); setErr(''); setCands(null)
     try {
       const r = await api.identify(v)
       setCands(r.candidates || [])
-      if (!(r.candidates || []).length) setErr('No IGDB matches for that name — try an IGDB link or id.')
+      if (!(r.candidates || []).length) setErr('No IGDB matches for that name — try an IGDB link, or igdb:<id>.')
     } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
   if (!open) return (
@@ -10810,7 +11321,7 @@ function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onR
         <div className="refine-pin-h">Still wrong? Pin the identity yourself</div>
         <div className="refine-pin-row">
           <input className="refine-pin-in" value={pinInput}
-            placeholder="Paste an IGDB game link or id, or type a game name to search"
+            placeholder="Type a game name to search, or paste an IGDB link (or igdb:1942)"
             onChange={(e) => setPinInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') pinOrSearch() }} />
           {systems.length > 0 && (
@@ -10821,7 +11332,7 @@ function RefinePanel({ f, currentModel, escalationModel, models, webCapable, onR
             </select>
           )}
           <button className="ops-btn go" disabled={busy || !pinInput.trim()} onClick={pinOrSearch}>
-            {/igdb\.com\/games\/|^\d+$/i.test(pinInput.trim()) ? 'Pin' : 'Search'}
+            {igdbRefOf(pinInput) ? 'Pin' : 'Search'}
           </button>
         </div>
         {cands && cands.length > 0 && (
@@ -11270,11 +11781,13 @@ function MetadataReview() {
       .then(setData).catch(() => setData({ findings: [], counts: {} })),
     [status, kind])
   useEffect(() => { reload() }, [reload])
-
   const [note, setNote] = useState('')
+
+  // Swallowed the failure and reloaded anyway, so a rejected accept looked exactly like
+  // a successful one — the row simply came back unchanged.
   const act = async (id: number, action: 'accept' | 'reject' | 'reset') => {
-    try { await api.aimetaFindingAction(id, action) } catch { /* ignore */ }
-    reload()
+    const r = await attempt(() => api.aimetaFindingAction(id, action), setNote)
+    if (r.ok) reload()
   }
   const acceptAll = async () => {
     setNote('')
@@ -11361,10 +11874,12 @@ function MetadataReview() {
 // Compact AI-finding callout for the game detail view.
 function AiMetaCallout({ finding, onChanged }: { finding: AiFinding; onChanged: () => void }) {
   const [busy, setBusy] = useState(false)
+  const { err, run } = useMutation()
+  // No catch: a 4xx became an unhandled rejection and the callout just sat there.
   const act = async (a: 'accept' | 'reject') => {
     setBusy(true)
-    try { await api.aimetaFindingAction(finding.id, a); onChanged() }
-    finally { setBusy(false) }
+    if ((await run(() => api.aimetaFindingAction(finding.id, a))).ok) onChanged()
+    setBusy(false)
   }
   const p = finding.payload
   const m = p.match || ({} as AiFinding['payload']['match'])
@@ -11397,6 +11912,7 @@ function AiMetaCallout({ finding, onChanged }: { finding: AiFinding; onChanged: 
         <span className={'run-badge s-' + (finding.status === 'applied' ? 'done' : 'failed')}>
           {finding.status === 'applied' ? '✓ applied' : finding.status}</span>
       )}
+      <MutErr msg={err} />
     </div>
   )
 }
@@ -11560,7 +12076,10 @@ function flashPendingApply() {
   window.setTimeout(() => el.classList.remove('pa-flash'), 1800)
 }
 
-function JobMonitor({ onOpen, pendingApply = 0, onApplied }: { onOpen?: (k: string) => void; pendingApply?: number; onApplied?: () => void }) {
+function JobMonitor({ onOpen, pendingApply = 0, onApplied, onApplyRunning }: {
+  onOpen?: (k: string) => void; pendingApply?: number; onApplied?: () => void
+  onApplyRunning?: (running: boolean) => void        // the ONE jobs poll owns this fact
+}) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [open, setOpen] = useState(false)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
@@ -11574,13 +12093,15 @@ function JobMonitor({ onOpen, pendingApply = 0, onApplied }: { onOpen?: (k: stri
     && (j.status === 'running' || j.status === 'paused'))
   const prevApplyRunning = useRef(false)
   useEffect(() => {
+    onApplyRunning?.(applyRunning)         // PendingApplyBar reads it from here
     if (prevApplyRunning.current && !applyRunning) onApplied?.()
     prevApplyRunning.current = applyRunning
-  }, [applyRunning, onApplied])
+  }, [applyRunning, onApplied, onApplyRunning])
   const applyPending = async () => {
     const before = pendingApply
     try {
-      const r = await api.aimetaApply(undefined, true)
+      // the remembered wand scope, not "every kind" — see MetadataReview.apply
+      const r = await api.aimetaApply(undefined, wandMedia())
       showToast(`✨ Applying ${before} change${before === 1 ? '' : 's'}` +
         (r.coalesced ? ' — added to the running rebuild.' : ' — rebuilding…'))
     } catch (e) { showToast((e as Error).message); return }
@@ -11669,6 +12190,7 @@ function JobMonitor({ onOpen, pendingApply = 0, onApplied }: { onOpen?: (k: stri
         </div>
       )}
       {open && <JobOverlay onClose={() => setOpen(false)} onOpen={onOpen}
+        jobs={jobs} reload={load}
         pendingApply={showPending ? pendingApply : 0} onApply={applyPending} />}
       {review && <AiReviewModal runId={review.runId} title={review.title}
         onClose={() => { setReview(null); load(); onApplied?.() }} />}
@@ -11676,14 +12198,18 @@ function JobMonitor({ onOpen, pendingApply = 0, onApplied }: { onOpen?: (k: stri
   )
 }
 
-function JobOverlay({ onClose, onOpen, pendingApply = 0, onApply }: { onClose: () => void; onOpen?: (k: string) => void; pendingApply?: number; onApply?: () => void }) {
-  const [jobs, setJobs] = useState<Job[]>([])
+// Rendered by JobMonitor, which is ALREADY polling /api/jobs — so it takes the list and
+// the refresh from its parent instead of opening a second poll of the same endpoint at a
+// slightly different interval.
+function JobOverlay({ onClose, onOpen, pendingApply = 0, onApply, jobs, reload }: {
+  onClose: () => void; onOpen?: (k: string) => void; pendingApply?: number
+  onApply?: () => void; jobs: Job[]; reload: () => void
+}) {
   const [openRun, setOpenRun] = useState<number | null>(null)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
   const [clearing, setClearing] = useState(false)
   const wrapRef = useClickOutside<HTMLDivElement>(true, onClose)
-  const load = useCallback(() => api.jobs().then((j) => setJobs(j.jobs)).catch(() => {}), [])
-  useEffect(() => { load(); const t = setInterval(load, 2000); return () => clearInterval(t) }, [load])
+  const load = reload
 
   const act = async (fn: Promise<unknown>) => { try { await fn } catch { /* */ } load() }
   // finished jobs that "Clear finished" will dismiss — done/interrupted/failed, not

@@ -107,7 +107,10 @@ export function useReveal(getOrigin?: () => RevealOrigin, ready: boolean = true)
       window.clearTimeout(cap)
       pending.forEach(cancelAnimationFrame)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Mount-only on purpose: this hides the panel before the FIRST paint. `play` is
+    // stable (useCallback with no deps) and re-running this would re-hide a panel that
+    // has already grown in.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- mount-only, see above
   }, [])
 
   // Grow the real window in once its content is ready.

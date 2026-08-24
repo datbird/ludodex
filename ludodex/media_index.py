@@ -55,6 +55,13 @@ DOC_EXTS = (".pdf",)
 
 
 def index_con():
+    """THE media-index schema, created and healed in ONE place.
+
+    It was written out three times — here, in media_fetch.con_index() and (as a
+    different subset of ALTERs) in media_choose.con_index() — and it worked only by
+    accident of ordering: whichever module opened a fresh install first decided what the
+    table contained. media_choose's opener assumed the table already existed and raised
+    `no such table: media` when it was the first to run. Both now delegate here."""
     con = sqlite3.connect(INDEX)
     con.execute("PRAGMA busy_timeout=30000")   # wait out concurrent media jobs' locks
     con.execute("PRAGMA journal_mode=WAL")     # readers never block the writer
@@ -123,11 +130,103 @@ def index_con():
     # rectangle, a near-empty canvas) — those would collide by the thousand.
     if "sil" not in _cols:
         con.execute("ALTER TABLE media ADD COLUMN sil TEXT")
-    # Outside the guard: media_choose.con_index() heals the same column, so an index
-    # created only on the branch that ADDS it would never exist on the commoner path.
-    con.execute("CREATE INDEX IF NOT EXISTS ix_media_frame ON media(frame)")
-    con.execute("CREATE INDEX IF NOT EXISTS ix_media_sil ON media(sil)")
+    # probed: when prune_dead last HEAD-checked this URL and it ANSWERED. Only the chosen
+    # asset ever gets a sha1, so "sha1 IS NULL" left every non-chosen candidate looking
+    # unverified forever and the same handful of Steam URLs per game were re-probed with
+    # 16 threads on every single sync. A proven-live ref is remembered instead, and only
+    # re-probed once the record goes stale — a URL that worked can still die, so this is
+    # a TTL, never a permanent pass.
+    if "probed" not in _cols:
+        con.execute("ALTER TABLE media ADD COLUMN probed INTEGER")
+    # Outside the guard: an index created only on the branch that ADDS the column would
+    # never exist on the commoner path.
+    #
+    # COVERING (frame, norm_key): select()'s template query groups by frame and counts
+    # DISTINCT norm_key, so an index on frame alone still had to fetch every framed row.
+    con.execute("CREATE INDEX IF NOT EXISTS ix_media_frame ON media(frame, norm_key)")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_media_sil ON media(sil, kind, norm_key)")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_media_gk ON media(game_key, system, kind)")
+    con.commit()
     return con
+
+
+# --------------------------------------------------------------------------- #
+#  One writer for every local scan
+#
+#  The scanners used INSERT OR REPLACE and main() opened with a blanket per-provider
+#  DELETE, so a rescan destroyed and rebuilt rows for files that had not changed.
+#  media_fetch.put() has carried the reason not to for as long as it has existed:
+#  REPLACE deletes the existing row, which drops its `sha1` — the pointer to bytes
+#  already sitting in the media repo — along with the measured width/height, the
+#  `filler`/`detail`/`frame`/`sil` image evidence the ranker sorts on, the PAID
+#  `ai_pick` verdict and the language `hidden` flag. Every local scan re-copied,
+#  re-measured and re-purchased all of it.
+#
+#  "Each provider is FULLY refreshed per run (local scans are cheap), so removed
+#  assets drop out" is still true, and still the point — it is just done by SWEEPING
+#  the rows this scan did not see, which reaches the same end state without touching
+#  the survivors.
+# --------------------------------------------------------------------------- #
+_BANNED = None
+
+
+def _banned():
+    """Cached {(norm_key, kind, provider, ref)} the user banned — never re-index these.
+
+    mediaflags says the ban is "Enforced in media_fetch.put()", and that was the whole
+    defect: a banned LOCAL asset was put straight back by the next scan, so the ban only
+    ever held for art fetched over HTTP."""
+    global _BANNED
+    if _BANNED is None:
+        try:
+            import mediaflags
+            _BANNED = mediaflags.banned_set()
+        except Exception:                    # noqa: BLE001 — a missing flag DB bans nothing
+            _BANNED = set()
+    return _BANNED
+
+
+def invalidate_banned():
+    """Drop the cached ban set. The server imports this module and lives for days, so a
+    ban applied in the UI has to be visible to the next scan without a restart."""
+    global _BANNED
+    _BANNED = None
+
+
+def put_local(con, nk, kind, provider, path, ext, now, system=None, mount=None,
+              matched=0):
+    """Index ONE local file by reference. Returns True when a row was written.
+
+    ON CONFLICT ... DO UPDATE, never INSERT OR REPLACE — see the block comment above.
+    Only the facts a rescan can actually re-derive are refreshed; everything measured,
+    paid for or chosen downstream is left exactly as it was."""
+    if (nk, kind, provider, path) in _banned():
+        return False               # banned: a rescan must not resurrect it (then swept)
+    con.execute(
+        "INSERT INTO media(norm_key,system,kind,provider,mount,ref_type,ref,ext,"
+        "matched,indexed_at) VALUES(?,?,?,?,?,'file',?,?,?,?) "
+        "ON CONFLICT(provider,kind,ref) DO UPDATE SET "
+        "norm_key=excluded.norm_key, system=excluded.system, mount=excluded.mount, "
+        "ext=excluded.ext, matched=excluded.matched, indexed_at=excluded.indexed_at",
+        (nk, system, kind, provider, mount, path, ext, int(matched), now))
+    return True
+
+
+def sweep(con, provider, now, ref_prefix=None):
+    """Drop this provider's rows that the just-finished scan did not touch.
+
+    The "removed assets drop out" half of a full refresh. Every row the scan saw was
+    stamped `indexed_at = now`, so anything still carrying an older stamp is a file that
+    is gone (or one the user has since banned). `ref_prefix` scopes the sweep to one
+    scanned root, exactly as the gamelist DELETE it replaces did."""
+    q = "DELETE FROM media WHERE provider=? AND COALESCE(indexed_at,0)!=?"
+    args = [provider, now]
+    if ref_prefix:
+        q += " AND ref LIKE ?"
+        args.append(ref_prefix.rstrip("/") + "/%")
+    n = con.execute(q, args).rowcount
+    con.commit()
+    return n
 
 
 def catalog():
@@ -185,8 +284,8 @@ def scan_gamelist(con, owned, now, root):
     root = (root or "").rstrip("/")
     if not root or not os.path.isdir(root):
         return 0, 0
-    # re-scannable: drop this root's prior gamelist rows first
-    con.execute("DELETE FROM media WHERE provider='gamelist' AND ref LIKE ?", (root + "/%",))
+    # re-scannable WITHOUT a delete-then-rebuild: rows are upserted and whatever this
+    # pass does not touch is swept at the end (see put_local / sweep).
     # find just the 'images' dirs — don't walk the whole (huge) ROM tree
     try:
         out = subprocess.run(["find", root, "-type", "d", "-name", "images"],
@@ -215,14 +314,14 @@ def scan_gamelist(con, owned, now, root):
             if not nk:
                 continue
             is_match = nk in owned
-            con.execute(
-                "INSERT OR REPLACE INTO media(norm_key,system,kind,provider,mount,"
-                "ref_type,ref,ext,matched,indexed_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (nk, fplat, kind, "gamelist", "gamelist", "file",
-                 os.path.join(imgdir, fn), ext.lower().lstrip("."), int(is_match), now))
+            if not put_local(con, nk, kind, "gamelist",
+                             os.path.join(imgdir, fn), ext.lower().lstrip("."), now,
+                             system=fplat, mount="gamelist", matched=is_match):
+                continue
             rows += 1
             matched += int(is_match)
     con.commit()
+    sweep(con, "gamelist", now, ref_prefix=root)
     return rows, matched
 
 
@@ -265,16 +364,18 @@ def scan_esde(con, owned, now):
                         if not nk:
                             continue
                         is_match = nk in owned
-                        con.execute(
-                            "INSERT OR REPLACE INTO media(norm_key,system,kind,"
-                            "provider,mount,ref_type,ref,ext,matched,indexed_at)"
-                            " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                            (nk, fplat, kind, "esde", mount["name"], "file",
-                             os.path.join(dirpath, fn), ext.lower().lstrip("."),
-                             int(is_match), now))
+                        if not put_local(con, nk, kind, "esde",
+                                         os.path.join(dirpath, fn),
+                                         ext.lower().lstrip("."), now,
+                                         system=fplat, mount=mount["name"],
+                                         matched=is_match):
+                            continue
                         rows += 1
                         matched += int(is_match)
         con.commit()
+    # After EVERY mount, never per mount: one mount's rows must not be swept because a
+    # later mount is the one being walked.
+    sweep(con, "esde", now)
     return rows, matched
 
 
@@ -303,15 +404,13 @@ def scan_steamgrid(con, steam, now):
             if not nk:                      # art for a non-owned/shortcut appid
                 continue
             ext = os.path.splitext(fn)[1].lower().lstrip(".")
-            con.execute(
-                "INSERT OR REPLACE INTO media(norm_key,system,kind,provider,"
-                "mount,ref_type,ref,ext,matched,indexed_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (nk, None, kind, "steamgrid", "steam", "file",
-                 os.path.join(gdir, fn), ext, 1, now))
+            if not put_local(con, nk, kind, "steamgrid", os.path.join(gdir, fn),
+                             ext, now, mount="steam", matched=1):
+                continue
             rows += 1
             matched += 1
     con.commit()
+    sweep(con, "steamgrid", now)
     return rows, matched
 
 
@@ -332,12 +431,12 @@ def main(argv):
         return
 
     if only in (None, "esde") and config.media_enabled("esde"):
-        con.execute("DELETE FROM media WHERE provider='esde'")
+        # No blanket DELETE: scan_esde upserts and then sweeps what it did not see, so
+        # an unchanged file keeps its sha1 / measurements / ai_pick / hidden.
         r, m = scan_esde(con, owned, now)
         print("media_index: esde — %d assets (%d matched to a catalog game)"
               % (r, m), file=sys.stderr)
     if only in (None, "steamgrid") and config.media_enabled("steamgrid"):
-        con.execute("DELETE FROM media WHERE provider='steamgrid'")
         r, m = scan_steamgrid(con, steam, now)
         print("media_index: steamgrid — %d assets" % r, file=sys.stderr)
 

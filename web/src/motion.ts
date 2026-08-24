@@ -26,6 +26,16 @@ export function setHonorReducedMotion(v: boolean): void {
   } catch {
     /* ignore */
   }
+  stampMotionAttr()
+}
+
+// Publish the SAME decision motionReduced() makes as a root attribute, so CSS can gate
+// on it too. A bare `@media (prefers-reduced-motion: reduce)` rule would ignore this
+// app's opt-in (`honor`, default off) and suppress animations for a user who explicitly
+// asked to always play them — the attribute keeps CSS and JS answering the same way.
+export function stampMotionAttr(): void {
+  if (typeof document === 'undefined') return
+  document.documentElement.setAttribute('data-motion', motionReduced() ? 'reduced' : 'full')
 }
 
 // True when animations should be SUPPRESSED: only when we're honoring the OS setting
@@ -37,4 +47,12 @@ export function motionReduced(): boolean {
     !!window.matchMedia &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches
   )
+}
+
+stampMotionAttr()
+
+// The OS setting can change while the app is open.
+if (typeof window !== 'undefined' && window.matchMedia) {
+  const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+  if (mq.addEventListener) mq.addEventListener('change', stampMotionAttr)
 }

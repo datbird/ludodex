@@ -155,6 +155,11 @@ def contact_sheet(src, repo, ref, px=320):
     Returns None when ffmpeg is absent or no frame could be read — the caller skips the
     candidate rather than scoring it blind."""
     path = sheet_path(repo, ref)
+    # `os.path.exists` is only a sound guard because the write below is ATOMIC: the file
+    # cannot exist half-finished, so its presence really does mean a complete sheet. It
+    # was not always so — the sheet used to be written straight to this path, and a
+    # crash, a full disk or a killed job left a truncated JPEG that was handed to the
+    # vision model, and scored, on every call from then on.
     if os.path.exists(path):
         try:
             with open(path, "rb") as fh:
@@ -192,9 +197,21 @@ def contact_sheet(src, repo, ref, px=320):
     except Exception:
         return None
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as fh:
-            fh.write(data)
+        d = os.path.dirname(path)
+        os.makedirs(d, exist_ok=True)
+        # Write private, then rename: a reader must see a whole sheet or no sheet, never
+        # the middle of one. Writing `path` directly is what made a killed job poison the
+        # cache permanently.
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=os.path.basename(path) + ".",
+                                   suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
     except OSError:
         pass                        # the cache is an optimization, not a requirement
     return data

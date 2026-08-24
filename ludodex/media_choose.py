@@ -45,24 +45,19 @@ def repo_dir():
 
 
 def con_index():
-    con = sqlite3.connect(INDEX)
+    """Open the media index for a select/materialize pass.
+
+    The canonical schema lives in media_index.index_con() — and now it is the only one.
+    This opener used to ALTER its own subset of columns in and ASSUME the table already
+    existed, which meant `no such table: media` whenever it was the first to touch a
+    fresh install, and a different set of columns whenever it was not.
+
+    busy_timeout and WAL come with it: materialize() holds the write connection across
+    long downloads while the live server reads and writes the same index, and without a
+    busy timeout a momentary lock aborts the whole pass at commit time."""
+    import media_index
+    con = media_index.index_con()
     con.row_factory = sqlite3.Row
-    # materialize() holds the write connection across long downloads while the live
-    # server reads/writes the same index — without a busy timeout a momentary lock
-    # aborts the whole pass at commit time. Wait for the lock instead of failing.
-    con.execute("PRAGMA busy_timeout=30000")
-    con.execute("PRAGMA journal_mode=WAL")   # concurrent-safe with background media jobs
-    # Heal the columns select() READS, not just the ones this module writes: the
-    # canonical schema lives in media_index.index_con(), but the CLI opens the index
-    # here, so an index built before a column existed would fail the ranking query
-    # rather than simply ranking without it.
-    _cols = {r[1] for r in con.execute("PRAGMA table_info(media)")}
-    for _c, _decl in (("hidden", "INTEGER DEFAULT 0"), ("filler", "INTEGER"),
-                      ("ai_pick", "INTEGER"), ("detail", "REAL"), ("frame", "TEXT"),
-                      ("sil", "TEXT")):
-        if _c not in _cols:
-            con.execute("ALTER TABLE media ADD COLUMN %s %s" % (_c, _decl))
-    con.commit()
     return con
 
 
@@ -227,24 +222,46 @@ def select(con, kinds=None, only=None):
     # game, the pick made while the asset was unmeasured stands forever — a 460x215
     # screenshot keeps the cover slot while eight measured 484x680 covers sit unused,
     # because at ranking time nothing knew their shapes.
-    # TEMPLATE frames, resolved once per pass. Whether a frame is a template is a
-    # property of the WHOLE corpus, so this query is deliberately unscoped: it ignores
-    # `kinds` and `only` and asks the entire index. Scoping it to the rows being ranked
-    # would be the fail-open shape — a re-rank of one game sees its frame exactly once,
-    # concludes "shared by 1 game, not a template", and hands the pack back the slot it
-    # just lost. `chosen` is likewise irrelevant: a pack's members count whether or not
-    # they currently hold a slot.
+    # TEMPLATE frames. Whether a frame is a template is a property of the WHOLE corpus,
+    # so the COUNT is deliberately unscoped: it ignores `kinds` and `only` and asks the
+    # entire index. Scoping the count would be the fail-open shape — a re-rank of one
+    # game sees its frame exactly once, concludes "shared by 1 game, not a template", and
+    # hands the pack back the slot it just lost. `chosen` is likewise irrelevant: a pack's
+    # members count whether or not they currently hold a slot.
+    #
+    # The LIST is a different question, and it was being answered the same way. A scoped
+    # re-rank only needs to know about the frames ITS OWN candidates hold — at most a
+    # handful — and the old query grouped every frame in the library, twice, to produce
+    # verdicts about assets nobody asked about. That cost is paid on the FIRST SERVE of
+    # any URL asset, because measurement is lazy and the serve path re-ranks the game it
+    # just measured. Restricting which frames are asked about changes no count and no
+    # answer; `only=None` still asks about all of them.
+    _fscope, _fargs = "", []
+    if only:
+        _only_ok = [k for k in only if k]
+        if not _only_ok:
+            return 0
+        _ph = ",".join("?" * len(_only_ok))
+        _fscope = (" AND frame IN (SELECT frame FROM media WHERE norm_key IN (%s) "
+                   "AND frame IS NOT NULL)" % _ph)
+        _fargs = list(_only_ok)
     _templates = {row[0] for row in con.execute(
-        "SELECT frame FROM media WHERE frame IS NOT NULL AND COALESCE(hidden,0)=0 "
-        "GROUP BY frame HAVING COUNT(DISTINCT norm_key) >= ?",
-        (media.TEMPLATE_MIN_GAMES,))}
+        "SELECT frame FROM media WHERE frame IS NOT NULL AND COALESCE(hidden,0)=0"
+        + _fscope + " GROUP BY frame HAVING COUNT(DISTINCT norm_key) >= ?",
+        _fargs + [media.TEMPLATE_MIN_GAMES])}
     # The SECOND proof of pack membership, for the plates whose border colours vary
-    # per game and so never share a frame hash. Same unscoped-count reasoning.
+    # per game and so never share a frame hash. Same unscoped-COUNT reasoning, same
+    # scoped list.
+    _sscope, _sargs = "", []
+    if only:
+        _sscope = (" AND sil IN (SELECT sil FROM media WHERE norm_key IN (%s) "
+                   "AND sil IS NOT NULL)" % ",".join("?" * len(_fargs)))
+        _sargs = list(_fargs)
     _sils = {row[0] for row in con.execute(
         "SELECT sil FROM media WHERE sil IS NOT NULL AND COALESCE(hidden,0)=0 "
-        "AND kind IN (%s) GROUP BY sil HAVING COUNT(DISTINCT norm_key) >= ?"
-        % ",".join("'%s'" % k for k in media.SILHOUETTE_KINDS),
-        (media.TEMPLATE_MIN_GAMES,))}
+        "AND kind IN (%s)" % ",".join("'%s'" % k for k in media.SILHOUETTE_KINDS)
+        + _sscope + " GROUP BY sil HAVING COUNT(DISTINCT norm_key) >= ?",
+        _sargs + [media.TEMPLATE_MIN_GAMES])}
     _q = ("SELECT id, norm_key, system, kind, provider, ref, matched, ref_type, game_key, "
           "width, height, filler, detail, ai_pick, meta, frame, sil "
           "FROM media WHERE kind IN (%s) AND COALESCE(hidden,0)=0"
@@ -289,6 +306,12 @@ def select(con, kinds=None, only=None):
         # excludes assets we have actually looked at.
         if not media.shape_ok(r["kind"], sw, sh):
             continue
+        # NOTE (audit): `bad_shape` is always 0 — a measured wrong shape is DISQUALIFIED
+        # by the `continue` above, so this term ranks nothing. It should come out of the
+        # sort key, but tests/test_detail_scale.py asserts the literal
+        # `all(c[3] == 1 for c in cands)` below, which pins filler to tuple index 3.
+        # Removing the term shifts it to 2 and breaks that assertion, so this is left for
+        # whoever owns that test to change in the same commit.
         bad_shape = 0
         # A confirmed letterboxed paste loses to ANY authored cover, whoever supplied it
         # — this is where Steam's "authoritative for its own games" precedence has to
@@ -398,17 +421,72 @@ def _materialize_row(repo, r):
                 data = resp.read()
         if not data:
             return None
+        # VERIFY THE BODY BEFORE IT IS STAMPED. An HTTP 200 is not an image: a provider
+        # out of quota, a CDN interstitial or a login wall all answer 200 with an HTML
+        # page, and this used to sha1 it, write it as <sha>.jpg and hand the sha back to
+        # be stamped on the row. Nothing downstream could object — _measure() returns
+        # (None, None) for anything it cannot open, shape_ok() reads unknown dimensions
+        # as acceptable, the blank-media guard reads undecodable bytes as "keep it" —
+        # and materialize() only ever revisits rows whose sha1 IS NULL, so the error
+        # page held the slot permanently and was served as the cover.
+        #
+        # Returning None makes it a RECORDED FAILURE instead: every caller treats that
+        # as a dead reference, so the row is dropped and the next-best candidate is
+        # elected, which is what should have happened the first time.
+        if media.asset_format(data, r["ext"]) is None:
+            print("media_choose: %s answered %d bytes that are not an image (%s) — "
+                  "dropping the reference" % (r["provider"], len(data), r["ref"][:120]),
+                  file=sys.stderr)
+            return None
         sha = hashlib.sha1(data).hexdigest()
         ext = (r["ext"] or "jpg").split("?")[0]
         dest = os.path.join(repo, "%s.%s" % (sha, ext))
         if not os.path.exists(dest):
-            tmp = dest + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(data)
-            shutil.move(tmp, dest)
+            # A PRIVATE temp name, then an atomic rename. `dest + ".tmp"` was one shared
+            # name per sha, so two concurrent materializations of the same asset — the
+            # batch pass and a serve-time fetch, two device exports — opened the same
+            # path, interleaved their writes and each moved the result into place. The
+            # winner was whatever bytes happened to be in the file, and the loser's move
+            # raised, which read as a dead reference and cost the row its slot.
+            import tempfile
+            fd, tmp = tempfile.mkstemp(dir=repo, prefix=sha + ".", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, dest)       # atomic: a reader sees all of it or none
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)          # our own leftovers are never someone else's
         return sha
     except Exception:
         return None
+
+
+def sweep_temp(repo, older_than=3600):
+    """Remove orphaned `.tmp` files from the media repo. Returns how many.
+
+    Orphans were EXPECTED — the size summary has always skipped `*.tmp` — and never
+    cleaned, so a killed materialize pass left its half-written bytes in the repo for
+    good. `older_than` protects a materialization that is still running: only a temp
+    file nothing has touched for that long can be assumed abandoned."""
+    import time as _t
+    cutoff = _t.time() - max(0, older_than)
+    n = 0
+    try:
+        names = os.listdir(repo)
+    except OSError:
+        return 0
+    for fn in names:
+        if not fn.endswith(".tmp"):
+            continue
+        p = os.path.join(repo, fn)
+        try:
+            if os.path.getmtime(p) <= cutoff:
+                os.unlink(p)
+                n += 1
+        except OSError:
+            pass                            # raced with its own writer; leave it
+    return n
 
 
 def _measure(path):
@@ -525,16 +603,22 @@ def materialize(con, kind=None, limit=None, all_refs=False, progress=False):
     machine-readable `PROG\\t<i>\\t<n>\\t<norm_key>\\t<kind>` line per item so a
     caller can show what's being pulled live."""
     repo = repo_dir()
+    sweep_temp(repo)          # anything a killed pass left behind, before adding more
     base = "(sha1 IS NULL OR sha1='')" if all_refs else "chosen=1 AND (sha1 IS NULL OR sha1='')"
     # Never download videos into the repo — trailers are tens of MB each and play fine
     # streamed live through the media-asset proxy. Keep them as references always.
     q = "SELECT * FROM media WHERE kind!='video' AND " + base
+    args = []
     if kind:
-        q += " AND kind='%s'" % kind
+        # BOUND, not interpolated: `kind` is a --kind argument off the command line and
+        # the endpoints hand it through from a request. It is not ours, and it was being
+        # spliced straight into the statement.
+        q += " AND kind=?"
+        args.append(kind)
     q += " ORDER BY ref_type"        # local files first (cheap), then URLs
     if limit:
         q += " LIMIT %d" % int(limit)
-    rows = con.execute(q).fetchall()
+    rows = con.execute(q, args).fetchall()
     n = len(rows)
     ok = dead = 0
     for i, r in enumerate(rows, 1):

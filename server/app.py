@@ -3051,6 +3051,14 @@ def sync_device_ep(dev_id: int):
             # (Guardrail: an AI run covers only what the user's action targeted.)
             keys = aimeta.targets("unmatched", 2000, sources=["emulation"])
             if keys:
+                # THE SAME QUESTION THE UI ASKS BEFORE IT SPENDS. The browser gates this
+                # through /api/ai/pricing-check, but any other caller reached it
+                # ungated, and a dollar cap on an unpriced model cannot stop anything.
+                _chk = ai_pricing_check("metadata")
+                if not _chk.get("ok"):
+                    out["heavy_scan"] = {"skipped": _chk.get("reason")
+                                         or "the budget cannot measure this model"}
+                    return out
                 provider = ai.provider_for_area("metadata")
                 ai._resolve(provider, ai.model_for_area("metadata"))
                 run_id = aimeta.scan_new("heavy import", keys, False, True, None)
@@ -5041,7 +5049,7 @@ def _auto_fix_contamination(nks, should_stop=lambda: False, threshold=None):
                       % (s["norm_key"], s["platform"], str(e)[:120]), file=sys.stderr)
     for nk in touched:
         try:
-            _reconcile_media_now({nk}, now)
+            _reconcile_media_now({nk})
         except Exception:
             pass
     if touched:
@@ -5185,7 +5193,7 @@ def resolve_per_entry_identity(nks, should_stop=lambda: False, threshold=None, a
                               file=sys.stderr)
             for tnk in touched:
                 try:
-                    _reconcile_media_now({tnk}, now)
+                    _reconcile_media_now({tnk})
                 except Exception:
                     pass
             if touched:
@@ -5722,7 +5730,7 @@ def aimeta_pin(body: dict = Body(default={})):
     # game_key, already correct). For a global re-derivation use the Rebuild button.
     try:
         _apply_identity(nk, iid, plat, name, detach=detach)
-        _reconcile_media_now({nk}, now)
+        _reconcile_media_now({nk})
     except Exception as e:
         print("aimeta pin: reconcile failed: %s" % str(e)[:200], file=sys.stderr)
     _enqueue_media_reconcile({nk}, True)
@@ -6621,7 +6629,7 @@ def _aimeta_apply(should_stop, only_ids=None):
     # cover shows when this apply job finishes — not after the ~30-min whole-catalog art
     # tail: what this writes IS the result (a full rebuild only happens on request).
     try:
-        _reconcile_media_now(touched, now)
+        _reconcile_media_now(touched)
     except Exception as e:
         print("aimeta apply: instant media failed (reconcile will apply): %s"
               % str(e)[:200], file=sys.stderr)
@@ -6905,7 +6913,7 @@ def _apply_surgical_meta(touched):
         con.close()
 
 
-def _reconcile_media_now(touched, now):
+def _reconcile_media_now(touched):
     """Surgical, synchronous media reconcile for the games an apply just touched: fetch
     their provider art (IGDB — incl. per-entry same-title override ids) and re-choose the
     best per kind, so the corrected identity's cover is available immediately. Whole-catalog
@@ -7534,8 +7542,11 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
                 pid = provider_ids.resolve(
                     mc, "steamgriddb", nk, title, plats,
                     lambda t, s, _a=appid: _search_with_aliases(
-                        lambda q: {"sgdb_id": _mf._sgdb_game_id(sgdb_key, _a, q)}
-                        if _mf._sgdb_game_id(sgdb_key, _a, q) else None),
+                        # ONE lookup, not two: this was evaluated in the condition and
+                        # again in the value, doubling rate-limited traffic and letting
+                        # one question get two different answers.
+                        lambda q: (lambda g: {"sgdb_id": g} if g else None)(
+                            _mf._sgdb_game_id(sgdb_key, _a, q))),
                     force=force)
                 searched = searched or _before is None or force
                 if pid:
@@ -7630,7 +7641,10 @@ def _pull_media_sources(con, nk, want_web=False, provider=None, kinds=None):
             print("media ss %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
     if _mf.config.steamgriddb_key() and _want("steamgriddb"):
         try:
-            _mf.fetch_steamgriddb_targets(con, now, [(nk, title, appid)])
+            # gap_only=False: this endpoint's promise is "pull everything a matched
+            # provider holds", not "fill the kinds that happen to be empty".
+            _mf.fetch_steamgriddb_targets(con, now, [(nk, title, appid)],
+                                          gap_only=False)
         except Exception as e:
             print("media sgdb %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
     web_n = 0
@@ -8102,6 +8116,9 @@ _EDITABLE_ATTR_KINDS = [
     "regions", "os", "device",
     "version", "completion_status", "user_score", "critic_score",
     "community_score", "playtime", "description",
+    # the Resolve modal stores its "reference links / notes" as an override of this
+    # kind; leaving it out of the list is why that text used to vanish on save
+    "notes",
 ]
 
 
@@ -8207,6 +8224,7 @@ def _apply_art_rejects(con, nk, kind, cands, rejects, ban_at=ART_REJECT_BAN_AT,
         if not ref:
             continue
         mediaflags.ban(nk, kind, prov, ref)
+        media_index.invalidate_banned()   # long-lived server: the cache would go stale
         con.execute("UPDATE media SET chosen=0, ai_pick=NULL WHERE norm_key=? AND "
                     "kind=? AND provider IS ? AND ref=?", (nk, kind, prov, ref))
         n += 1
@@ -9156,6 +9174,7 @@ def ban_media(norm_key: str, aid: int):
         raise HTTPException(404, "no such asset")
     kind, provider, ref = ident
     mediaflags.ban(norm_key, kind, provider, ref)
+    media_index.invalidate_banned()
     wc = sqlite3.connect(INDEX_DB, timeout=30)
     try:
         wc.execute("DELETE FROM media WHERE norm_key=? AND kind=? AND provider=? "
@@ -9215,6 +9234,7 @@ def unban_media(body: dict = Body(...)):
     if not all((nk, kind, provider, ref)):
         raise HTTPException(400, "norm_key, kind, provider, ref required")
     mediaflags.unban(nk, kind, provider, ref)
+    media_index.invalidate_banned()
     return {"ok": True}
 
 

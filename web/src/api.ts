@@ -864,8 +864,8 @@ export interface Job {
   target_key?: string // single-game scan → the game's key, so its name links to detail
 }
 
-async function get<T>(path: string): Promise<T> {
-  const r = await fetch(path)
+async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const r = await fetch(path, { signal })
   if (!r.ok) throw new Error(`${r.status} ${path}`)
   return r.json()
 }
@@ -923,7 +923,9 @@ export const api = {
 
   stats: () => get<Stats>('/api/stats'),
   facets: () => get<Facets>('/api/facets'),
-  games: (qy: GamesQuery) => {
+  // `signal` matters here: a superseded library fetch that still lands overwrites the
+  // newer query's rows (or appends the old page onto them). Callers abort the old one.
+  games: (qy: GamesQuery, signal?: AbortSignal) => {
     const p = new URLSearchParams()
     if (qy.q) p.set('q', qy.q)
     if (qy.query) p.set('query', qy.query)
@@ -937,9 +939,10 @@ export const api = {
     if (qy.identified && qy.identified !== 'only') p.set('identified', qy.identified)
     p.set('limit', String(qy.limit ?? 60))
     p.set('offset', String(qy.offset ?? 0))
-    return get<GamesPage>('/api/games?' + p.toString())
+    return get<GamesPage>('/api/games?' + p.toString(), signal)
   },
-  detail: (nk: string) => get<GameDetail>('/api/games/' + encodeURIComponent(nk)),
+  detail: (nk: string, signal?: AbortSignal) =>
+    get<GameDetail>('/api/games/' + encodeURIComponent(nk), signal),
   suspectedDupes: (limit = 60) => get<{ dupes: DupeCandidate[] }>('/api/games/dupes?limit=' + limit),
   mergeGame: async (nk: string, other: string, canonical: 'this' | 'other',
                     force = false) => {
@@ -973,8 +976,8 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 180)}`)
     return r.json() as Promise<{ split: boolean; to_key: string; title: string; peeled: number }>
   },
-  achievements: (nk: string) =>
-    get<Achievements>('/api/games/' + encodeURIComponent(nk) + '/achievements'),
+  achievements: (nk: string, signal?: AbortSignal) =>
+    get<Achievements>('/api/games/' + encodeURIComponent(nk) + '/achievements', signal),
   gameTags: (nk: string) =>
     get<GameTags>('/api/games/' + encodeURIComponent(nk) + '/tags'),
   addTag: async (nk: string, tag: string) => {

@@ -294,6 +294,108 @@ def looks_padded(path, bands=9):
 #  Hashing what the frame looks like separates them: the box_3d clusters vanish and
 #  the packs stay.
 # --------------------------------------------------------------------------- #
+#  Body verification — an HTTP 200 is not an image
+#
+#  A provider that is out of quota, behind a CDN interstitial or simply confused
+#  answers 200 with an HTML page, and materialize() used to sha1 whatever came back,
+#  write it as <sha>.jpg and stamp the row with it. Nothing downstream can object:
+#  _measure() returns (None, None) for anything it cannot open, shape_ok() reads
+#  unknown dimensions as acceptable, and the blank-media guard reads undecodable
+#  bytes as "keep it" — three gates in a row treating a miss as consent. And because
+#  materialize() only revisits rows whose sha1 IS NULL, the error page then holds the
+#  slot forever and is served as the cover.
+#
+#  So the body is judged HERE, before it can be stamped. Two tiers, neither of them
+#  fail-open: the magic number settles the common case (HTML, JSON, an empty body)
+#  with no dependency at all, and Pillow — when present — must then actually decode
+#  it, which is what catches the half-written body whose first bytes are fine.
+# --------------------------------------------------------------------------- #
+_MAGIC = (
+    (b"\xff\xd8\xff", "jpg"),
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+    (b"II*\x00", "tif"),
+    (b"MM\x00*", "tif"),
+    (b"BM", "bmp"),
+    (b"\x00\x00\x01\x00", "ico"),
+    (b"%PDF", "pdf"),
+)
+# ISO-BMFF brands that carry a still image (AVIF / HEIF). The brand sits at byte 8,
+# after the `ftyp` box header at byte 4.
+_FTYP_IMAGE = (b"avif", b"avis", b"heic", b"heix", b"heif", b"hevc", b"mif1", b"msf1")
+DOC_EXT = ("pdf",)          # the one non-image family a media row can legitimately hold
+
+
+def _magic_format(data):
+    """Canonical extension implied by the leading bytes, or None."""
+    if not data:
+        return None
+    for sig, ext in _MAGIC:
+        if data.startswith(sig):
+            return ext
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    if data[4:8] == b"ftyp" and data[8:12] in _FTYP_IMAGE:
+        return "avif"
+    return None
+
+
+# Extensions a media reference may legitimately carry. Anything else is not ours: `ext`
+# arrives from a provider URL (`url.rsplit(".", 1)[-1]`, which for a DOTLESS path yields
+# the whole tail — `host/grid/abc`) or from ScreenScraper's free-text `format` field, and
+# it is then used as a FILENAME in the content-addressed repo. A value from outside must
+# be checked before it is spliced into something that parses.
+SAFE_EXTS = ("jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "tif", "tiff", "avif",
+             "svg", "pdf", "mp4", "webm", "mkv", "mov", "m4v", "ogv")
+
+
+def safe_ext(value, default="jpg"):
+    """A filename-safe extension for a media reference, or `default`.
+
+    An allowlist rather than an escape: there is a small known set of things an asset can
+    be, so anything unrecognised is a parse that went wrong, not an exotic format worth
+    preserving."""
+    e = (value or "").split("?")[0].split("#")[0].strip().lower()
+    e = e.rsplit("/", 1)[-1].lstrip(".")     # a dotless path yields the whole tail
+    return e if e in SAFE_EXTS else default
+
+
+def asset_format(data, ext=None):
+    """The REAL format of a downloaded body ('jpg'/'png'/'pdf'/…), or None.
+
+    None means "these bytes are not the asset they claim to be" and is the only answer
+    a caller may act on — there is deliberately no third state, because an "unsure"
+    would be read as consent by every gate downstream (see the block comment above).
+
+    `ext` is what the reference DECLARED. It is used only to separate the two families:
+    a manual that came back as a picture, or a cover that came back as a PDF, is the
+    wrong body whatever else it is. A png served as `.jpg` is NOT an error — providers
+    mislabel extensions constantly and the bytes are still the art."""
+    fmt = _magic_format(data)
+    if fmt is None:
+        return None
+    if ext:                         # nothing declared, nothing to contradict
+        want_doc = ext.split("?")[0].lower().lstrip(".") in DOC_EXT
+        if want_doc != (fmt in DOC_EXT):
+            return None             # image-vs-document mismatch: not this asset
+    if fmt in DOC_EXT:
+        return fmt                  # no decoder here; the magic number is the check
+    try:
+        from PIL import Image
+    except ImportError:
+        return fmt                  # magic-only tier — still refuses HTML and JSON
+    try:
+        import io as _io
+        im = Image.open(_io.BytesIO(data))
+        real = (im.format or "").lower()
+        im.verify()                 # full parse: a truncated body must never be stored
+    except Exception:               # noqa: BLE001 — anything Pillow rejects is not art
+        return None
+    return {"jpeg": "jpg", "tiff": "tif"}.get(real, real) or fmt
+
+
+# --------------------------------------------------------------------------- #
 FRAME_GRID = 32          # signature resolution
 FRAME_INSET = 5          # cells from each edge that make up the frame band
 _FRAME_MIN_CELLS = 4     # distinct quantised colours below which a frame is "flat"
@@ -565,9 +667,16 @@ def steamgrid_kind(filename):
 # --------------------------------------------------------------------------- #
 #  provider registry — local (mount-based) + remote (fetched by id)
 # --------------------------------------------------------------------------- #
-LOCAL_PROVIDERS = ("esde", "steamgrid", "playnite", "launchbox")
+# The registry is what config.MEDIA_PROVIDERS is DERIVED from, so a provider missing
+# here is invisible to `config.py enable <provider>` and to the per-provider scope
+# settings — while still writing rows and still filling slots. Three were: `gamelist`
+# (art indexed in place inside a ROM tree, a local scan like esde), `screenscraper` and
+# `web` (the open-web last resort). All three appear in PRIORITY, which is the proof
+# they are real: a name in a priority list that no registry knows about is a provider
+# nobody can turn off.
+LOCAL_PROVIDERS = ("esde", "steamgrid", "playnite", "launchbox", "gamelist")
 REMOTE_PROVIDERS = ("steam", "igdb", "steamgriddb", "thegamesdb",
-                    "arcadedb", "zxinfo", "mobygames")
+                    "arcadedb", "zxinfo", "mobygames", "screenscraper", "web")
 MEDIA_PROVIDERS = LOCAL_PROVIDERS + REMOTE_PROVIDERS
 
 # Per-kind provider priority for choosing the ONE best asset (first available
