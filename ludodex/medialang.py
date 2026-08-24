@@ -163,6 +163,18 @@ def apply_filter(the_mode=None, prefs=None, limit=None):
     the_mode = the_mode or mode()
     prefs = prefs if prefs is not None else preferred()
     res = {"mode": the_mode, "scanned": 0, "hidden": 0, "banned": 0, "kept": 0}
+    # NO PREFERENCE IS NOT A PREFERENCE FOR NOTHING. `preferred()` returns [] when the
+    # user has never picked a language, and `lang not in []` is true for every asset that
+    # can be pinned to any language at all — so turning the mode on before picking one
+    # hid, or in `ban` mode DELETED AND PERMANENTLY BANNED, every region-tagged asset in
+    # the index. The mode and the language list are separate settings and the sync worker
+    # calls this with no arguments on a schedule, so the guard belongs here, in front of
+    # every caller. Falling back to a DEFAULT language would be the same mistake with a
+    # nicer face: it would still be deleting art over an opinion nobody expressed.
+    if the_mode != "off" and not prefs:
+        res["skipped"] = ("no language preference set — pick one before hiding or "
+                          "banning art by language")
+        the_mode = "off"                  # still clears stale flags below
     if not os.path.exists(INDEX_DB):
         return res
     con = sqlite3.connect(INDEX_DB)
