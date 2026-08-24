@@ -29,23 +29,54 @@ def _con():
     # columns — here value/origin/created — which would break every attribute read
     # and the bulk attribute editor). PK matches the sync key, so ALTER-add suffices.
     have = {r[1] for r in con.execute("PRAGMA table_info(overrides)")}
-    for col, decl in (("value", "TEXT"), ("origin", "TEXT"), ("created", "REAL")):
+    for col, decl in (("value", "TEXT"), ("origin", "TEXT"), ("created", "REAL"),
+                      ("set_by", "TEXT")):
         if col not in have:
             con.execute("ALTER TABLE overrides ADD COLUMN %s %s" % (col, decl))
     con.commit()
     return con
 
 
-def set_override(norm_key, kind, value, origin="manual"):
+def set_override(norm_key, kind, value, origin="manual", by="user"):
+    """Record an override. Returns True if it was written, False if it was refused.
+
+    `origin` names where the VALUE came from ('manual', 'igdb', 'screenscraper', ...).
+    `by` names who chose it: 'user' for anything a person asked for, 'auto' for anything
+    a pass decided on its own. They are different questions, and only the second one can
+    answer "may this write win": a user who picks IGDB's release year in the UI stores
+    origin='igdb', which is exactly what the attribute adjudicator stores when it decides
+    the same thing without being asked.
+
+    AN AUTOMATIC WRITE NEVER OVERWRITES A USER'S. This table is where the user's
+    corrections live, and the wand's consensus pass used to replace them silently, with
+    no undo and no trace — the review page then showed the machine's answer as the
+    user's own. Refusing is the only safe direction; the pass has nothing to lose.
+
+    Rows written before `set_by` existed are read as 'user' when their origin is manual
+    (a hand-typed value, protect it) and 'auto' otherwise."""
     if not (norm_key and kind) or value in (None, ""):
         raise ValueError("norm_key, kind and value are required")
+    by = "user" if (by or "user") != "auto" else "auto"
     con = _con()
-    con.execute("INSERT INTO overrides(norm_key,kind,value,origin,created) "
-                "VALUES(?,?,?,?,?) ON CONFLICT(norm_key,kind) DO UPDATE SET "
-                "value=excluded.value, origin=excluded.origin, created=excluded.created",
-                (norm_key, kind, str(value), origin or "manual", time.time()))
-    con.commit()
-    con.close()
+    try:
+        if by == "auto":
+            prev = con.execute("SELECT origin, set_by FROM overrides WHERE norm_key=? "
+                               "AND kind=?", (norm_key, kind)).fetchone()
+            if prev is not None:
+                was = prev["set_by"] or ("user" if (prev["origin"] or "") == "manual"
+                                         else "auto")
+                if was == "user":
+                    return False
+        con.execute(
+            "INSERT INTO overrides(norm_key,kind,value,origin,created,set_by) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(norm_key,kind) DO UPDATE SET "
+            "value=excluded.value, origin=excluded.origin, created=excluded.created, "
+            "set_by=excluded.set_by",
+            (norm_key, kind, str(value), origin or "manual", time.time(), by))
+        con.commit()
+    finally:
+        con.close()
+    return True
 
 
 def clear_override(norm_key, kind):

@@ -5030,9 +5030,9 @@ def _heavy_ai_consensus(keys, stop):
                         val = choice.get("value")
                         if isinstance(val, list):
                             val = ", ".join(str(x) for x in val)
-                        if val not in (None, ""):
-                            overrides.set_override(nk, kind, str(val), "ai-consensus")
-                            n_over += 1
+                        if val not in (None, "") and overrides.set_override(
+                                nk, kind, str(val), "ai-consensus", by="auto"):
+                            n_over += 1     # a refused write is not a change
                 except Exception:                # noqa: BLE001 — spend cap or provider error
                     pass
             # web-score fallback: only for games with NO computed score at all
@@ -6123,7 +6123,7 @@ def _ai_adjudicate_game(nk, title, only_kinds=None, attrs=True):
                     val = conflicts[k][prov]
                     sval = ", ".join(str(x) for x in val) if isinstance(val, list) else str(val)
                     if sval:
-                        overrides.set_override(nk, k, sval, origin=prov)
+                        overrides.set_override(nk, k, sval, origin=prov, by="auto")
     except Exception as e:
         print("adjudicate attrs %s: %s" % (nk, str(e)[:160]), file=sys.stderr)
     return picked
