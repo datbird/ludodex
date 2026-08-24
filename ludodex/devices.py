@@ -280,8 +280,52 @@ def fs_mkdir(dev_id, path):
         raise RuntimeError((r.stderr or "mkdir failed")[:200])
 
 
+# Directories a delete may name but never BE. `rm -rf -- /data` is a valid shell command
+# and used to be a valid Commander request: the only guard was `p.strip("/")`, which
+# refuses exactly one string ("/"). These are the roots a machine — or this app — cannot
+# be repaired without; deleting something INSIDE them is still allowed, which is what
+# makes a ROM share under /mnt usable and /mnt itself untouchable.
+_FS_ROOTS = frozenset((
+    "/", "/app", "/bin", "/boot", "/data", "/dev", "/etc", "/home", "/lib", "/lib32",
+    "/lib64", "/libx32", "/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin",
+    "/srv", "/sys", "/tmp", "/usr", "/var",
+))
+
+
+def fs_delete_refusal(path):
+    """Why `path` may not be deleted, or None when it may.
+
+    A refusal is per PATH, and the caller refuses the whole request on the first one: a
+    batch that deletes four ROMs and /etc must not delete the four ROMs."""
+    p = str(path or "").strip()
+    if not p:
+        return "empty path"
+    if not p.startswith("/"):
+        # A relative path means "wherever the shell happened to land", which on a device
+        # is the login directory and here is the server's CWD. Never guess.
+        return "%r is not an absolute path" % p
+    if ".." in p.split("/"):
+        # Nothing in the UI produces one, and normalising it away would delete a path the
+        # user never named — the parent of the folder they were looking at.
+        return "%r walks out of the folder it names" % p
+    q = os.path.normpath(p)              # collapses trailing/duplicate slashes
+    if q in _FS_ROOTS:
+        return "%s is a system directory" % q
+    for own in (DATA, DIR, os.path.dirname(DIR)):
+        own = os.path.normpath(own or "/")
+        if q == own or own.startswith(q.rstrip("/") + "/"):
+            # q IS, or CONTAINS, the databases and code this install runs on.
+            return "%s holds ludodex's own files" % q
+    return None
+
+
 def fs_delete(dev_id, paths):
-    safe = [p for p in (paths or []) if p and p.strip("/")]
+    safe = []
+    for p in (paths or []):
+        why = fs_delete_refusal(p)
+        if why:
+            raise ValueError("refusing to delete: %s" % why)
+        safe.append(os.path.normpath(str(p)))
     if not safe:
         return
     r = _dev_run(dev_id, "rm -rf -- " + " ".join(shlex.quote(p) for p in safe))
@@ -360,7 +404,35 @@ def _rsync(src_spec, dst_spec, ssh_dev, timeout=3600):
     argv += [src_spec, dst_spec]
     if ssh_dev:
         argv = _wrap_pw(ssh_dev, argv)
-    return _run(argv, timeout=timeout)
+    return _run(argv, timeout=timeout, env=_pw_env(ssh_dev) if ssh_dev else None)
+
+
+def transfer_item_path(root, item):
+    """`root/item` for a PLAIN entry name, or raise ValueError.
+
+    The endpoint's filter was `"/" not in i`, which blocks a slash and nothing else — so
+    ".." named the PARENT of the declared root, and in move mode that parent was handed
+    to `rm -rf` after being copied away. An item is one directory entry: no separator, no
+    "." or "..", nothing that starts with "-" (rsync reads those as options).
+
+    Containment is proved with realpath, not a string prefix, because "/roms/x/../../etc"
+    and a symlink pointing out of the tree both pass a prefix test."""
+    root = str(root or "").rstrip("/")
+    it = str(item or "")
+    if not root.startswith("/"):
+        raise ValueError("%r is not an absolute directory" % root)
+    if not it or it in (".", ".."):
+        raise ValueError("%r is not a file name" % it)
+    if "/" in it or "\\" in it or "\x00" in it:
+        raise ValueError("%r is a path, not a name in this folder" % it)
+    if it.startswith("-"):
+        raise ValueError("%r starts with '-' and would be read as an option" % it)
+    full = os.path.join(root, it)
+    real_root = os.path.realpath(root)
+    prefix = real_root if real_root.endswith("/") else real_root + "/"
+    if not os.path.realpath(full).startswith(prefix):
+        raise ValueError("%r does not stay inside %s" % (it, root))
+    return full
 
 
 def transfer_run(job, src_dev_id, src_dir, items, dst_dev_id, dst_dir, mode="copy",
@@ -375,6 +447,10 @@ def transfer_run(job, src_dev_id, src_dir, items, dst_dev_id, dst_dir, mode="cop
             d["password"] = _dev_password(d["id"])
     src_dir = (src_dir or "").rstrip("/")
     dst_dir = (dst_dir or "/").rstrip("/") or "/"
+    # The DESTINATION was never checked at all. A relative one lands wherever the remote
+    # shell starts, and one beginning with "-" is read by rsync as an option.
+    if not src_dir.startswith("/") or not dst_dir.startswith("/"):
+        raise ValueError("src_dir and dst_dir must be absolute paths")
     total = len(items)
     job["prog"] = {"done": 0, "total": max(total, 1)}
     errors = []
@@ -386,8 +462,12 @@ def transfer_run(job, src_dev_id, src_dir, items, dst_dev_id, dst_dir, mode="cop
         for i, it in enumerate(items, 1):
             if should_stop and should_stop():
                 break
-            s_item = src_dir + "/" + it
             try:
+                # ".." used to address the PARENT of src_dir here — copied away, then in
+                # move mode removed with `rm -rf`. Refusing is per item, inside the same
+                # try, so one bad name is reported like any other failure instead of
+                # aborting the items around it.
+                s_item = transfer_item_path(src_dir, it)
                 if src and dst:                              # device↔device: 2-hop
                     r1 = _rsync(_spec(src, s_item), tmp + "/", src)
                     if r1.returncode != 0:
@@ -558,18 +638,31 @@ def _scp_opts(dev):
 
 
 def _wrap_pw(dev, argv):
+    """`sshpass -e`, NOT `-p <password>`.
+
+    `-p` puts the device password in /proc/<pid>/cmdline, where every account on the box
+    can read it and `ps` prints it — for the whole life of the child, which for the media
+    rsync is up to 3600s. `-e` reads $SSHPASS instead, and /proc/<pid>/environ is readable
+    only by the owner. Pair every call with `env=_pw_env(dev)`."""
     if dev.get("auth") == "password" and dev.get("password"):
-        return ["sshpass", "-p", dev["password"]] + argv
+        return ["sshpass", "-e"] + argv
     return argv
 
 
-def _run(argv, timeout=120):
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+def _pw_env(dev):
+    """The environment `_wrap_pw`'s argv needs, or None when there is no password."""
+    if dev.get("auth") == "password" and dev.get("password"):
+        return dict(os.environ, SSHPASS=dev["password"])
+    return None
+
+
+def _run(argv, timeout=120, env=None):
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
 
 
 def _ssh(dev, remote_cmd, timeout=180):
     return _run(_wrap_pw(dev, ["ssh"] + _ssh_opts(dev) + [_target(dev), remote_cmd]),
-                timeout=timeout)
+                timeout=timeout, env=_pw_env(dev))
 
 
 def browse_dirs(dev_id, path):
@@ -777,7 +870,7 @@ def pull_roms(dev, lm):
         scp = _wrap_pw(dev, ["scp"] + sopts + [os.path.join(DIR, "build_romdb.py"),
                        os.path.join(DIR, "romtags.py"),
                        os.path.join(DIR, "romhash.py"), tgt + ":/tmp/"])
-        r = _run(scp, timeout=60)
+        r = _run(scp, timeout=60, env=_pw_env(dev))
         if r.returncode != 0:
             raise RuntimeError("scp builder failed: " + (r.stderr or "")[:160])
         remote = ("find %s -type f -printf '%%s\\t%%T@\\t%%P\\n' > /tmp/ldx_romscan.tsv"
@@ -808,7 +901,7 @@ def pull_roms(dev, lm):
             print("romhash on device skipped: %s" % str(e)[:160], file=sys.stderr)
         back = _wrap_pw(dev, ["scp"] + sopts + [tgt + ":/tmp/ldx-roms-index.sqlite",
                         out])
-        r = _run(back, timeout=120)
+        r = _run(back, timeout=120, env=_pw_env(dev))
         if r.returncode != 0:
             raise RuntimeError("scp index back failed: " + (r.stderr or "")[:160])
     con = sqlite3.connect(out)
@@ -853,7 +946,7 @@ def pull_media(dev, lm):
         os.makedirs(dest, exist_ok=True)
         argv = _wrap_pw(dev, ["rsync", "-a", "--delete", "-e", _rsync_ssh_e(dev),
                         "%s:%s/" % (_target(dev), mpath), dest + "/"])
-        r = _run(argv, timeout=1800)
+        r = _run(argv, timeout=1800, env=_pw_env(dev))
         if r.returncode != 0:
             raise RuntimeError("rsync media failed: " + (r.stderr or "")[:200])
     config.media_mount_set("device-%d" % lm["id"], dest, "esde", 1, kinds or None)

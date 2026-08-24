@@ -10,6 +10,7 @@ only live on the producer (the Deck). See HANDOFF.md §6.
 
 Run:  uvicorn server.app:app --host 0.0.0.0 --port 8001
 """
+import hashlib
 import io
 import json
 import os
@@ -170,12 +171,65 @@ def _set_session_cookie(resp, token):
                     max_age=auth.SESSION_TTL, path="/")
 
 
+# OPERATOR POWERS, admin-only. The role column existed but decided nothing outside user
+# management: `_require_admin` was called on /api/auth/* and nowhere else, so any account
+# with role "user" could POST /api/fs/delete — which ends in `bash -c "rm -rf -- …"` on the
+# host as root — list any directory on the box through /api/devices/browse, or point
+# /api/games/identify-folder (a paid vision call) at any folder it liked.
+#
+# The line drawn: reaching the HOST FILESYSTEM, reading or writing stored CREDENTIALS, and
+# DESTROYING what a rebuild cannot put back. Curating the catalog — tags, ownership,
+# framing, pins, per-game AI actions — stays open to every signed-in user, because that is
+# what a "user" account is for.
+#
+# Matched on the path in the auth middleware rather than per handler: most of these
+# handlers never take `request`, so a decorator would have to be added by hand to each one
+# and the next endpoint added beside them would silently be open again.
+_ADMIN_ONLY = tuple(re.compile(p) for p in (
+    r"^/api/fs/",                       # raw mkdir / delete / transfer / stat on a host
+    r"^/api/fileops/",                  # detect, plan, run and undo file operations
+    r"^/api/ops/",                      # restart, db-fix, optimize, reset, backup, restore
+    r"^/api/backups/",                  # snapshot jobs + restore
+    r"^/api/backingstore/",             # external DB credentials + restore
+    r"^/api/devices/browse",            # directory listing of any path on any device
+    r"^/api/devices/managers",          # where ludodex reads and writes on a device
+    r"^/api/devices/migrate-storage$",
+    r"^/api/devices/\d+/(sync|test)$",  # pulls a library / uses stored credentials
+    r"^/api/media/scan-local$",         # walks a host ROM tree
+    r"^/api/games/identify-folder$",    # a host folder -> a paid vision model
+    r"^/api/catalog/rebuild$",          # re-derives the whole catalog
+    r"^/api/matchindex/(download|rebuild|learned/(import|clear))$",
+))
+# Reads here are ordinary UI (capability badges, the current AI model, the device list);
+# only the WRITES are operator work.
+_ADMIN_ONLY_WRITE = tuple(re.compile(p) for p in (
+    r"^/api/devices$",
+    r"^/api/devices/\d+$",
+    r"^/api/archives",
+    r"^/api/ingest-hints$",
+    r"^/api/services",                  # store logins: npsso, cookies, auth codes
+    r"^/api/ai/(config|limit|prices|price|currency)",   # keys + the spend guardrail
+))
+_WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+
+
+def _admin_required_for(method, path):
+    """True when this request is operator work rather than catalog work."""
+    if any(rx.search(path) for rx in _ADMIN_ONLY):
+        return True
+    return ((method or "").upper() in _WRITE_METHODS
+            and any(rx.search(path) for rx in _ADMIN_ONLY_WRITE))
+
+
 @app.middleware("http")
 async def _auth_gate(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/") and not path.startswith(_AUTH_OPEN):
-        if not _current_user(request):
+        user = _current_user(request)
+        if not user:
             return JSONResponse({"detail": "authentication required"}, status_code=401)
+        if _admin_required_for(request.method, path) and user.get("role") != "admin":
+            return JSONResponse({"detail": "admin access required"}, status_code=403)
     return await call_next(request)
 
 
@@ -543,6 +597,64 @@ def lib():
     con.execute("ATTACH DATABASE ? AS sco", ("file:%s?mode=ro" % SCORES_DB,))
     con.execute("ATTACH DATABASE ? AS ov", ("file:%s?mode=ro" % overrides.DB,))
     return con
+
+
+# --------------------------------------------------------------------------- #
+#  Outbound fetches of a URL somebody else chose.
+#
+#  Five call sites fetched a user-supplied or LLM-proposed URL with no idea where it
+#  pointed — there was no address check anywhere in this file. ludodex runs INSIDE a home
+#  LAN, so "fetch this URL" was a request the server would gladly make to 127.0.0.1:8090,
+#  the router, or a cloud metadata endpoint on 169.254.169.254, and hand the answer back
+#  through the UI. One check, one opener, used by all of them.
+# --------------------------------------------------------------------------- #
+def _public_url_or_refuse(url):
+    """Return `url` when it names a PUBLIC http(s) address, else raise ValueError.
+
+    Resolves the hostname first: a name that looks external can answer with 127.0.0.1,
+    and it is the ADDRESS that decides whether a fetch reaches the internet or the box
+    the server is standing on."""
+    import ipaddress
+    import socket
+    u = urllib.parse.urlsplit((url or "").strip())
+    if u.scheme.lower() not in ("http", "https"):
+        raise ValueError("only http(s) URLs can be fetched, not %r" % (u.scheme or ""))
+    host = u.hostname
+    if not host:
+        raise ValueError("that URL has no host")
+    try:
+        infos = socket.getaddrinfo(host, u.port or (443 if u.scheme == "https" else 80),
+                                   proto=socket.IPPROTO_TCP)
+    except OSError as e:
+        raise ValueError("couldn't resolve %s: %s" % (host, e))
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        # EVERY answer has to be public: a name that resolves to both a public address
+        # and a LAN one must not be reachable by winning a race.
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            raise ValueError("%s resolves to %s, which is on this machine or this "
+                             "network — ludodex only fetches public addresses"
+                             % (host, ip))
+    return url
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-checks the destination of every redirect. Without this the guard is one
+    `Location: http://192.168.1.1/` away from being decorative."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _public_url_or_refuse(newurl)
+        return urllib.request.HTTPRedirectHandler.redirect_request(
+            self, req, fp, code, msg, headers, newurl)
+
+
+def _safe_urlopen(url, headers=None, timeout=30):
+    """urlopen for an untrusted URL: public addresses only, redirects re-checked."""
+    _public_url_or_refuse(url)
+    req = urllib.request.Request(url, headers=dict(headers or {}))
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    return opener.open(req, timeout=timeout)
 
 
 # ------------------------------------------------------------------------- routes
@@ -1907,7 +2019,16 @@ def media_language_filter(body: dict = Body(default={})):
         res = medialang.apply_filter(m)
     except Exception as e:
         raise HTTPException(500, "language filter failed: %s" % e)
-    _run_script("media_choose.py", timeout=900)   # re-pick now survivors changed
+    # The (ok, err) used to be dropped on the floor, so a re-pick that never ran returned
+    # the PREVIOUS pass's chosen art as though it were the result of this filter — a
+    # stale answer wearing a fresh one's clothes. The filter itself did apply, so report
+    # both facts rather than failing the whole call.
+    ok, err = _run_script("media_choose.py", timeout=900)   # re-pick now survivors changed
+    res = dict(res or {})
+    res["repick_ok"] = bool(ok)
+    if not ok:
+        print("language filter: re-pick failed: %s" % (err or "")[:200], file=sys.stderr)
+        res["error"] = ("re-pick failed, the chosen art is unchanged: %s" % (err or ""))[:300]
     return res
 
 
@@ -2867,15 +2988,27 @@ def media_scan_local(body: dict = Body(default={})):
         raise HTTPException(400, "no ROM path to scan for art")
 
     def run(should_stop):
+        # Both children used to be bare subprocess.run calls with the result discarded, so
+        # a media_index.py that died on the first root still finished as a clean "Indexing
+        # local art" job and the user was left wondering why no covers appeared. And the
+        # stop flag was only read BETWEEN two half-hour processes — check it before each.
+        errs = []
         for r in roots:
-            subprocess.run([sys.executable, os.path.join(PKG, "media_index.py"),
-                            "--gamelist", r], timeout=1800, cwd=DIR)
             if should_stop():
                 return
+            ok, err = _run_script("media_index.py", args=["--gamelist", r], timeout=1800)
+            if not ok:
+                errs.append("media_index %s: %s" % (r, (err or "")[:120]))
+        if should_stop():
+            return
         # pick the winning asset per (game, kind) for the kinds gamelist supplies,
         # so the newly-indexed covers become the chosen art the UI shows.
-        subprocess.run([sys.executable, os.path.join(PKG, "media_choose.py"),
-                        "--kinds", "cover,screenshot,logo"], timeout=1800, cwd=DIR)
+        ok, err = _run_script("media_choose.py",
+                              args=["--kinds", "cover,screenshot,logo"], timeout=1800)
+        if not ok:
+            errs.append("media_choose: %s" % (err or "")[:120])
+        if errs:                              # -> the job record's `error`, not silence
+            raise RuntimeError("; ".join(errs)[:300])
 
     _start_job("artscan:%d" % dev_id, "artscan", "Indexing local art", run)
     return {"started": True, "roots": roots}
@@ -2948,9 +3081,16 @@ def ingest_hints_list(limit: int = 200):
 def ingest_hints_clear(system: str = None):
     """Drop hints and rebuild — the undo for an AI ingest pass."""
     n = ingesthints.clear(system)
-    subprocess.run([sys.executable, os.path.join(PKG, "build_library.py")],
-                   timeout=900, cwd=DIR)
-    return {"ok": True, "cleared": n}
+    # Through _run_script like every other rebuild. The bare subprocess.run here reported
+    # {"ok": True} on ANY exit code — an undo that had not undone anything looked
+    # identical to one that had — and it was the only rebuild that skipped the shared
+    # runner, so its stderr tail was thrown away too. The hints ARE cleared either way,
+    # so say both things: what was cleared, and whether the catalog caught up.
+    ok, err = _run_script("build_library.py", timeout=900)
+    if not ok:
+        print("ingest-hints undo: rebuild failed: %s" % (err or "")[:200], file=sys.stderr)
+    return {"ok": bool(ok), "cleared": n,
+            "error": None if ok else ("rebuild failed: %s" % (err or ""))[:300]}
 
 
 @app.post("/api/devices/managers")
@@ -3254,10 +3394,21 @@ def fs_transfer_ep(body: dict = Body(...)):
     b = body or {}
     src_dev, dst_dev = int(b.get("src_device") or 0), int(b.get("dst_device") or 0)
     src_dir, dst_dir = b.get("src_dir") or "", b.get("dst_dir") or ""
-    items = [i for i in (b.get("items") or []) if i and "/" not in i]
+    # `"/" not in i` blocked a slash and nothing else, so ".." named the PARENT of
+    # src_dir — copied away, and in move mode `rm -rf`'d afterwards. Ask devices for the
+    # real rule (plain name + realpath containment) and say no HERE rather than start a
+    # job that will refuse every item.
+    items = [i for i in (b.get("items") or []) if i]
     mode = b.get("mode") or "copy"
     if mode not in ("copy", "move"):
         raise HTTPException(400, "mode must be copy or move")
+    if not str(dst_dir).startswith("/"):
+        raise HTTPException(400, "dst_dir must be an absolute path")
+    for i in items:
+        try:
+            devices.transfer_item_path(src_dir, i)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
     if src_dev == dst_dev:
         raise HTTPException(400, "same-device operations use the runbook path")
     if not (src_dir and dst_dir and items):
@@ -3370,6 +3521,24 @@ def _start_job(jid, kind, label, fn, run_id=None, cancelable=False):
         _JOBS[jid] = rec
         t.start()
     return jid
+
+
+def _try_start_job(jid, kind, label, fn, run_id=None, cancelable=False):
+    """`_start_job`, but a busy job of the same name is reported, not raised.
+
+    `_start_job` answers an HTTP caller: 409 tells the browser its click was a no-op.
+    A BACKGROUND caller starting several sibling jobs has no such contract — the 409
+    escaped as an exception, became the parent job's `rec["error"] = "that job is
+    already running"`, and killed every sibling AFTER the busy one. Live, a Steam media
+    job from an earlier scan (timeout 7200s) was still alive, so a Heavy wand's score
+    refresh and AI consensus — the paid step the user picked the tier for — were never
+    started, and the scan reported itself failed. Returns the jid, or None when the
+    named job was already running."""
+    try:
+        return _start_job(jid, kind, label, fn, run_id=run_id, cancelable=cancelable)
+    except HTTPException:
+        print("job %s: already running, not started again" % jid, file=sys.stderr)
+        return None
 
 
 _MANIFEST_CTX = {}                 # run_id -> {op, scope, system, profile, dest}
@@ -3875,12 +4044,16 @@ def _ss_match(queries, systems, year=None):
         return None
     if isinstance(systems, str):
         systems = [systems]
+    # (label, sid) PAIRS, not bare ids. The candidate fit check below has to know which
+    # system the current search was FOR; with only the ids it asked `systems[0]` every
+    # time, so for a game on [snes, genesis] whose SNES search came back empty, every
+    # record the Genesis search returned was refused for being a Genesis record.
     sids = []
     for s in (systems or []):
         sid = ss.systeme_id(s)
-        if sid and sid not in sids:
-            sids.append(sid)
-    sids.append(None)                            # cross-system fallback, last
+        if sid and sid not in [x[1] for x in sids]:
+            sids.append((s, sid))
+    sids.append((None, None))                    # cross-system fallback, last
     # query variants: raw, (region)/[tag]/ext-stripped, and subtitle-stripped (before a
     # ':' / ' - '), since SS name-search is picky about full subtitles. Dedup, keep order.
     raw = [q for q in (queries if isinstance(queries, (list, tuple)) else [queries]) if q]
@@ -3960,7 +4133,11 @@ def _ss_match(queries, systems, year=None):
     # turned "Castlevania: Lords of Shadow - Mirror of Fate HD" into a recorded miss while
     # ScreenScraper had it as id 11084.
     cross_only = len(sids) == 1
-    for sid in sids:
+    for slabel, sid in sids:
+        # What this pass may accept: the system being searched, or — on the cross-system
+        # fallback, which returns every system's records at once — any system the game
+        # is actually on.
+        fit_against = [slabel] if sid is not None else (list(systems or []) or [None])
         for q in (qlist if (sid is not None or cross_only) else qlist[:1]):
             if time.time() > deadline:
                 print("ss match %r: budget exhausted, giving up" % (queries,),
@@ -3985,7 +4162,7 @@ def _ss_match(queries, systems, year=None):
                 # cross-system pass (sid=None) returns every system's records, and
                 # nothing here rejected them. Refuses only when both sides state a
                 # system and they disagree, so PC keeps matching as before.
-                if not ss.system_fits(systems[0] if systems else None, j):
+                if not any(ss.system_fits(p, j) for p in fit_against):
                     continue
                 yr = ss.jeu_year(j)
                 # Scored against the OWNED titles, never against `q`. `q` may be a
@@ -3996,6 +4173,8 @@ def _ss_match(queries, systems, year=None):
                     best = (score, j, ss.jeu_name(j), yr)
             if best and best[0] >= 1.7:          # near-exact (qc≈1 + nc≈1) — stop
                 break
+        if not completed:                        # the budget is spent for the whole match,
+            break                                # not just for this system — one message
         if best:                                 # matched on this system — done
             break
     if not best:
@@ -4164,9 +4343,28 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                     if (match_prov and m.get("suggested_title")):
                         title, yr = m.get("suggested_title"), m.get("suggested_year")
                         sys0 = (ctx.get("systems") or [None])[0]
-                        pms = [p for p in (
-                            _provider_match(title, yr, consoles=_emulation_consoles(nk)),
-                            _ss_match([title, ctx.get("title")], ctx.get("systems"), yr)) if p]
+                        # ONE PROVIDER'S FAILURE IS NOT THE GAME'S FAILURE. Both calls used
+                        # to sit in a list comprehension inside the per-game try, and
+                        # `_ss_match` raises BY DESIGN when its search never completed
+                        # (budget spent, or every query errored) so the miss is not cached
+                        # as an answer. That exception skipped store_finding, which threw
+                        # away the ai.analyze_game result THE USER HAD ALREADY PAID FOR and
+                        # a good IGDB match with it, and marked the game errored — so the
+                        # next scan bought the same answer over again.
+                        pms = []
+                        for _who, _call in (
+                                ("igdb", lambda: _provider_match(
+                                    title, yr, consoles=_emulation_consoles(nk))),
+                                ("screenscraper", lambda: _ss_match(
+                                    [title, ctx.get("title")], ctx.get("systems"), yr))):
+                            try:
+                                _p = _call()
+                            except Exception as _pe:          # noqa: BLE001
+                                print("provider match %s %s: %s"
+                                      % (_who, nk, str(_pe)[:150]), file=sys.stderr)
+                                _p = None
+                            if _p:
+                                pms.append(_p)
                         # A store-locked title (Valve's Portal vs the 1986 ROMs) is no
                         # longer suppressed here — apply routes the match PER ENTRY to the
                         # era-compatible ROMs and leaves the store entry alone.
@@ -5107,20 +5305,22 @@ def _post_scan_media_scores(keys, opts):
 
     def _sm(_stop):
         _run_script("media_fetch.py", args=["--steam-media", "--keys", tk], timeout=7200)
-    _start_job("steammedia:wand", "steammedia", "Steam screenshots & trailers", _sm)
+    # _try_start_job, not _start_job: these three run on the SCAN's thread, where a
+    # 409 for one of them is not an answer to anybody and used to abort the other two.
+    _try_start_job("steammedia:wand", "steammedia", "Steam screenshots & trailers", _sm)
     if opts.get("pull_scores"):
         def _sc(_stop):
             # scoped to the scanned games — a Heavy wand on one game refreshes ONE
             # game's scores, never the whole library
             _run_script("scores_fetch.py", args=["all", "--keys", tk], timeout=3600)
-        _start_job("scores:wand", "scores", "Refreshing scores (heavy wand)", _sc)
+        _try_start_job("scores:wand", "scores", "Refreshing scores (heavy wand)", _sc)
         # Heavy-only AI adjudication, strictly scoped to the scanned keys (the tier
         # choice + scan click are the consent — no new confirmation, no runaway; the
         # ai.check_limit caps still gate every call). Consensus resolves scalar
         # attribute disagreements between providers; web_scores fills score-less games.
         def _cons(_stop):
             _heavy_ai_consensus(keys, _stop)
-        _start_job("consensus:wand", "supplement", "AI consensus (heavy)", _cons)
+        _try_start_job("consensus:wand", "supplement", "AI consensus (heavy)", _cons)
 
 
 @app.post("/api/aimeta/scan")
@@ -5177,11 +5377,10 @@ def _fetch_ref_text(url, max_bytes=500_000, max_chars=6000):
     exact sources the user found, instead of the model's own blind web search."""
     import re as _re
     import html as _html
-    import urllib.request
     try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "Mozilla/5.0 (ludodex reference fetcher)"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _safe_urlopen(
+                url, headers={"User-Agent": "Mozilla/5.0 (ludodex reference fetcher)"},
+                timeout=15) as resp:
             ctype = resp.headers.get("Content-Type", "")
             data = resp.read(max_bytes)
         text = data.decode("utf-8", "replace")
@@ -6384,9 +6583,17 @@ def _aimeta_apply(should_stop, only_ids=None):
     # applied), so the deferred rebuild reproduces them even after mark_applied.
     try:
         _apply_surgical_meta(touched)
-    except Exception as e:                 # never let the preview block the apply
-        print("aimeta apply: surgical preview failed (rebuild will apply): %s"
-              % str(e)[:200], file=sys.stderr)
+    except Exception as e:
+        # NOTHING ELSE APPLIES THIS. The old message here said "rebuild will apply" and
+        # then marked the findings applied anyway — but catalog_rebuild states plainly
+        # that wand applies no longer trigger a rebuild, so the surgical write IS the
+        # apply. Swallowing it left the catalog unchanged, took the findings out of
+        # pending where the user could retry them, and reported success. Raise instead:
+        # the accepted findings stay accepted, the job monitor shows why, and the
+        # identity work already paid for is durable in the caches written above, so a
+        # retry costs nothing.
+        raise RuntimeError("surgical apply failed, %d finding(s) left pending to retry: %s"
+                           % (len(only_ids or []), str(e)[:200]))
     # INSTANT media: fetch + choose art for JUST these games now, so a corrected/split
     # cover shows when this apply job finishes — not after the ~30-min whole-catalog art
     # tail: what this writes IS the result (a full rebuild only happens on request).
@@ -6714,9 +6921,9 @@ def _fetch_media_web(con, nk, title, now):
         if not (url or "").lower().startswith(("http://", "https://")):
             return None
         try:
-            req = urllib.request.Request(
-                url, headers={"User-Agent": "Mozilla/5.0 (ludodex media finder)"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with _safe_urlopen(
+                    url, headers={"User-Agent": "Mozilla/5.0 (ludodex media finder)"},
+                    timeout=15) as resp:
                 ctype = (resp.headers.get("Content-Type") or "").lower()
                 blob = resp.read(6_000_000)
             if "image" in ctype and len(blob) >= 2000:
@@ -7594,6 +7801,7 @@ _MEDIA_LOCK = threading.Lock()
 _MEDIA_Q = set()
 _MEDIA_SPEC = [True]
 _MEDIA_RUNNING = [False]
+_MEDIA_THREAD = [None]              # the drain that currently owns _MEDIA_RUNNING
 
 
 def _scoped_media_drain(should_stop):
@@ -7632,7 +7840,22 @@ def _enqueue_media_reconcile(touched, media):
                     _scoped_media_drain(cancel.is_set)
                 except Exception as e:      # noqa: BLE001 — surface to the monitor
                     rec["error"] = str(e)[:300]
+                finally:
+                    # THE FLAG IS THIS THREAD'S TO PUT BACK DOWN. Only the drain's clean
+                    # return cleared it, so one exception out of _media_finish left the
+                    # single-flight gate raised for the life of the process: every later
+                    # pin / art-apply / wand enqueue just appended to _MEDIA_Q and nothing
+                    # ever started it again, until a restart.
+                    #
+                    # ONLY if this thread is still the owner: the clean path clears the
+                    # flag before returning, so a newer drain may already have raised it,
+                    # and clearing it blindly here would let a third enqueue start a
+                    # second drain beside the running one.
+                    with _MEDIA_LOCK:
+                        if _MEDIA_THREAD[0] is threading.current_thread():
+                            _MEDIA_RUNNING[0] = False
             t = threading.Thread(target=worker, daemon=True)
+            _MEDIA_THREAD[0] = t                # claims the flag for this drain
             rec["thread"] = t
             with _JOBS_LOCK:
                 _JOBS["aimeta-media"] = rec
@@ -7670,12 +7893,17 @@ def _apply_drain(should_stop, media):
     not the old ~10-20 min. (A full re-derivation is available on demand via
     /api/catalog/rebuild and still runs on library scans.)"""
     all_touched = set()
-    while not should_stop():
-        ids = aimeta.accepted_ids()
-        if not ids:
-            break
-        all_touched |= _aimeta_apply(should_stop, only_ids=ids)
-    _enqueue_media_reconcile(all_touched, media)
+    try:
+        while not should_stop():
+            ids = aimeta.accepted_ids()
+            if not ids:
+                break
+            all_touched |= _aimeta_apply(should_stop, only_ids=ids)
+    finally:
+        # A pass that raised leaves its OWN findings pending (that is the point), but the
+        # passes that already succeeded still have games waiting on art — media for them
+        # is not the failed pass's to cancel.
+        _enqueue_media_reconcile(all_touched, media)
 
 
 @app.post("/api/aimeta/accept")
@@ -8860,10 +9088,19 @@ def set_pins(norm_key: str, body: dict = Body(...)):
     if kind in SCALAR_SET and ordered:
         wc = sqlite3.connect(INDEX_DB, timeout=30)
         try:
-            wc.execute("UPDATE media SET chosen=0 WHERE norm_key=? AND kind=?",
-                       (norm_key, kind))
-            wc.execute("UPDATE media SET chosen=1 WHERE id=?", (ordered[0],))
-            wc.commit()
+            # SCOPED TO THE PINNED ROW'S BUCKET. `chosen` is per (norm_key, SYSTEM,
+            # game_key, kind) — game_media says so, and an entry legitimately has one
+            # chosen row per bucket — but this cleared every row of the title+kind, so
+            # pinning the Genesis cover left every OTHER console's entry, and the
+            # platform-neutral store art, with no chosen cover at all.
+            _b = wc.execute("SELECT COALESCE(system,''), COALESCE(game_key,'') "
+                            "FROM media WHERE id=?", (ordered[0],)).fetchone()
+            if _b:
+                wc.execute("UPDATE media SET chosen=0 WHERE norm_key=? AND kind=? AND "
+                           "COALESCE(system,'')=? AND COALESCE(game_key,'')=?",
+                           (norm_key, kind, _b[0], _b[1]))
+                wc.execute("UPDATE media SET chosen=1 WHERE id=?", (ordered[0],))
+                wc.commit()
         finally:
             wc.close()
     return game_media(_ekey)
@@ -9053,10 +9290,13 @@ def add_media_from_url(norm_key: str, kind: str, body: dict = Body(...)):
     url = (body or {}).get("url", "").strip()
     if not url or not re.match(r"^https?://", url, re.I):
         raise HTTPException(400, "a valid http(s) URL is required")
-    import urllib.request
-    req = urllib.request.Request(url, headers={"User-Agent": "ludodex/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        _public_url_or_refuse(url)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    try:
+        with _safe_urlopen(url, headers={"User-Agent": "ludodex/1.0"},
+                           timeout=30) as resp:
             ct = resp.headers.get("content-type")
             data = resp.read(MAX_UPLOAD + 1)
     except Exception as e:
@@ -9497,9 +9737,23 @@ def _serve(path, ext, size):
     """Return a FileResponse, optionally downscaled to a cached thumbnail. PDFs get
     a rendered first-page image so manuals preview instead of showing a bare name."""
     if size == "thumb":
-        sha = os.path.splitext(os.path.basename(path))[0]
         is_pdf = ext.lower() == "pdf"
-        tpath = os.path.join(THUMBS, "%s_thumb.%s" % (sha, "jpg" if is_pdf else ext))
+        # KEYED ON THE FILE, NOT ITS NAME. The stem is a sha1 only for repo-materialized
+        # assets; a `ref_type == "file"` row is whatever the producing frontend called it,
+        # so two games whose local art is both "boxart.png" (or "Sonic 2.png") under
+        # different system folders shared one THUMBS entry and the grid showed the wrong
+        # game's cover. mtime+size are in the key too, so replacing the art on disk does
+        # not keep serving the old thumbnail.
+        try:
+            _st = os.stat(path)
+            _stamp = "%s|%d|%d" % (os.path.realpath(path), _st.st_mtime_ns, _st.st_size)
+        except OSError:
+            _stamp = os.path.realpath(path)
+        sha = hashlib.sha1(_stamp.encode("utf-8", "replace")).hexdigest()
+        # …and the extension has to name the bytes actually written: everything that is
+        # not a PNG is saved as JPEG, so a .webp/.gif thumbnail held JPEG bytes.
+        out_ext = "png" if (not is_pdf and ext.lower() == "png") else "jpg"
+        tpath = os.path.join(THUMBS, "%s_thumb.%s" % (sha, out_ext))
         if not os.path.exists(tpath):
             try:
                 if is_pdf:
@@ -9509,8 +9763,8 @@ def _serve(path, ext, size):
                     im = Image.open(path)
                     im.thumbnail((400, 400))
                     buf = io.BytesIO()
-                    fmt = "PNG" if ext.lower() == "png" else "JPEG"
-                    if fmt == "JPEG" and im.mode in ("RGBA", "P"):
+                    fmt = "PNG" if out_ext == "png" else "JPEG"
+                    if fmt == "JPEG" and im.mode in ("RGBA", "P", "LA"):
                         im = im.convert("RGB")
                     im.save(buf, fmt)
                     with open(tpath, "wb") as f:
@@ -9765,8 +10019,13 @@ def ai_config_set(body: dict):
 
 @app.get("/api/ai/usage")
 def ai_usage():
-    """Per provider/model token usage (lifetime + this month) + configured caps."""
-    return ai.usage_summary()
+    """Per provider/model token usage (lifetime + this month) + configured caps.
+
+    `unrecorded` lists calls the ledger could not write (a locked usage database under
+    the parallel match pool). A non-empty list means this month's totals are a FLOOR and
+    every dollar cap is under-measuring, which the caller has to be able to say out loud
+    rather than leaving it in stderr."""
+    return {**ai.usage_summary(), "unrecorded": ai.unrecorded_usage()}
 
 
 @app.get("/api/ai/usage/series")
@@ -10395,9 +10654,8 @@ def gog_connect(body: dict = Body(...)):
     if not code:
         raise HTTPException(400, "no login code found in what you pasted")
     try:
-        r = subprocess.run([sys.executable, os.path.join(PKG, "gog_owned.py"),
-                            "--code", code],
-                           capture_output=True, text=True, timeout=60, cwd=DIR)
+        # the code goes over stdin, not argv — see _SECRET_SHIM
+        r = _run_secret("gog_owned.py", ["--code"], code, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"ok": False, "account": None, "error": "Couldn't reach GOG: %s" % e}
     if r.returncode != 0 or not _gog_connected():
@@ -10427,7 +10685,9 @@ def nintendo_connect(body: dict = Body(...)):
     raw = (body or {}).get("cookie") or (body or {}).get("value") or ""
     if not str(raw).strip():
         raise HTTPException(400, "paste the Nintendo cookies first")
-    ok, err = _run_script("nintendo_owned.py", args=["--cookie", str(raw)], timeout=90)
+    # the whole pasted cookie jar used to be one argv element — see _SECRET_SHIM
+    ok, err = _run_script("nintendo_owned.py", args=["--cookie"], secret=str(raw),
+                          timeout=90)
     if not ok:
         raise HTTPException(400, "Nintendo connect failed: %s" % (err or "")[:200])
     return {"connected": True}
@@ -10447,9 +10707,8 @@ def psn_connect(body: dict = Body(...)):
     if not npsso:
         raise HTTPException(400, "no npsso token found in what you pasted")
     try:
-        r = subprocess.run([sys.executable, os.path.join(PKG, "psn_owned.py"),
-                            "--npsso", npsso],
-                           capture_output=True, text=True, timeout=60, cwd=DIR)
+        # an npsso is a session credential — stdin, never argv (see _SECRET_SHIM)
+        r = _run_secret("psn_owned.py", ["--npsso"], npsso, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"ok": False, "account": None, "error": "Couldn't reach PSN: %s" % e}
     if r.returncode != 0 or not _psn_connected():
@@ -10475,9 +10734,8 @@ def xbox_connect(body: dict = Body(...)):
     if not code:
         raise HTTPException(400, "no auth code found in what you pasted")
     try:
-        r = subprocess.run([sys.executable, os.path.join(PKG, "xbox_owned.py"),
-                            "--code", code],
-                           capture_output=True, text=True, timeout=90, cwd=DIR)
+        # stdin, not argv (see _SECRET_SHIM)
+        r = _run_secret("xbox_owned.py", ["--code"], code, timeout=90)
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"ok": False, "account": None, "error": "Couldn't reach Xbox: %s" % e}
     if r.returncode != 0 or not _xbox_connected():
@@ -10526,9 +10784,9 @@ def xbox_device_poll():
     if not code or time.time() > _XBOX_DEVICE.get("expires_at", 0):
         return {"status": "expired", "account": None}
     try:
-        r = subprocess.run([sys.executable, os.path.join(PKG, "xbox_owned.py"),
-                            "--device-poll", code],
-                           capture_output=True, text=True, timeout=30, cwd=DIR)
+        # the device_code is the secret half of this flow (the UI only ever sees the
+        # short user_code), so it goes over stdin like the rest — see _SECRET_SHIM.
+        r = _run_secret("xbox_owned.py", ["--device-poll"], code, timeout=30)
         d = json.loads(r.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return {"status": "pending", "account": None}   # transient — keep polling
@@ -10783,12 +11041,52 @@ def _script_path(script):
     return inpkg if os.path.exists(inpkg) else os.path.join(DIR, script)
 
 
-def _run_script(script, out=None, capture=False, timeout=300, args=None, job=None):
+# --------------------------------------------------------------------------- #
+#  Handing a credential to a child process.
+#
+#  ARGV IS WORLD-READABLE. Everything after `python3 x.py` lands in /proc/<pid>/cmdline —
+#  any account on the box can read it while the child lives, and `ps` prints it. These are
+#  live credentials: the GOG login code, the Microsoft auth code, the Xbox device_code,
+#  the PSN npsso, and the WHOLE pasted Nintendo cookie jar.
+#
+#  The fetchers read their secret from argv and are not this file's to change, so the
+#  secret is handed over on STDIN and the shim below puts it into the child's `sys.argv`
+#  — a Python list, which the kernel never publishes. The scripts run unchanged and see
+#  exactly what they saw before. `ps` still shows which fetcher is running, which is the
+#  only part of that command line anyone needed.
+# --------------------------------------------------------------------------- #
+_SECRET_SHIM = (
+    "import runpy,sys;"
+    "_p=sys.argv[1];"
+    "_s=sys.stdin.read();"
+    "sys.argv=[_p]+sys.argv[2:]+[_s[:-1] if _s.endswith(chr(10)) else _s];"
+    "runpy.run_path(_p, run_name='__main__')"
+)
+
+
+def _secret_argv(script, args):
+    """argv that runs `script` with `args` plus ONE more argument, read from stdin.
+    Resolved through `_script_path` like every other spawn — one place decides where the
+    pipeline scripts live."""
+    return [sys.executable, "-c", _SECRET_SHIM, _script_path(script)] + [
+        str(a) for a in (args or [])]
+
+
+def _run_secret(script, args, secret, timeout=60):
+    """subprocess.run for a script whose last argument is a CREDENTIAL. Same result as
+    passing it on the command line, without publishing it to the machine."""
+    return subprocess.run(_secret_argv(script, args), input=str(secret or ""),
+                          capture_output=True, text=True, timeout=timeout, cwd=DIR)
+
+
+def _run_script(script, out=None, capture=False, timeout=300, args=None, job=None,
+                secret=None):
     """Run a pipeline script; return (ok, error_tail). When `job` is given the
     child gets its own session (so it can be paused/stopped as a group), is
     registered on _SYNC for the pause/stop endpoints, and the timeout excludes
     paused time. stderr goes to a temp file (read for the failure tail) so a
-    chatty child can't deadlock on a full pipe."""
+    chatty child can't deadlock on a full pipe. `secret` is appended to the child's
+    argv from STDIN instead of from the command line — see _SECRET_SHIM."""
     if job is not None and not _sync_gate(job):
         return False, "cancelled"
     # RESOLVED AGAINST THE PACKAGE, NOT THE WORKING DIRECTORY. Callers pass a bare
@@ -10796,7 +11094,8 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None, job=Non
     # into ludodex/ and CWD stayed /app, so every one of these became
     # "can't open file '/app/steam_owned.py'": store syncs, media fetch, scores and the
     # catalog rebuild, all of them, silently until something tried to run.
-    argv = [sys.executable, _script_path(script)] + list(args or [])
+    argv = ([sys.executable, _script_path(script)] + list(args or []) if secret is None
+            else _secret_argv(script, args))
     errf = tempfile.TemporaryFile()
     outf = None
     dest = part = None
@@ -10823,7 +11122,13 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None, job=Non
             outf = open(part, "w", encoding="utf-8")
             stdout_dest = outf
         p = subprocess.Popen(argv, cwd=DIR, stdout=stdout_dest, stderr=errf,
+                             stdin=(subprocess.PIPE if secret is not None else None),
                              start_new_session=(job is not None))
+        if secret is not None:
+            # Small enough to fit the pipe buffer, so this never blocks; the child is
+            # waiting on exactly this read before it does anything else.
+            p.stdin.write(str(secret).encode("utf-8"))
+            p.stdin.close()
     except OSError as e:
         errf.close()
         if outf:
@@ -11884,7 +12189,18 @@ def art_apply(body: dict):
         raise HTTPException(400, "need id, norm_key, kind")
     wcon = sqlite3.connect(INDEX_DB)
     try:
-        wcon.execute("UPDATE media SET chosen=0 WHERE norm_key=? AND kind=?", (nk, kind))
+        # The id was never checked against the norm_key/kind it arrived with, so any row
+        # in the index could be marked as this game's cover. And the clear was title-wide
+        # rather than per (norm_key, SYSTEM, game_key, kind), so applying an art pick to
+        # one console blanked the chosen art of every other console for that title.
+        row = wcon.execute("SELECT COALESCE(system,''), COALESCE(game_key,'') FROM media "
+                           "WHERE id=? AND norm_key=? AND kind=?",
+                           (aid, nk, kind)).fetchone()
+        if not row:
+            raise HTTPException(400, "asset %r is not a %s of %r" % (aid, kind, nk))
+        wcon.execute("UPDATE media SET chosen=0 WHERE norm_key=? AND kind=? AND "
+                     "COALESCE(system,'')=? AND COALESCE(game_key,'')=?",
+                     (nk, kind, row[0], row[1]))
         wcon.execute("UPDATE media SET chosen=1 WHERE id=?", (aid,))
         wcon.commit()
     finally:
@@ -12365,10 +12681,21 @@ ORIGIN_KEY = "matchindex.origin"
 RELEASE_TOKEN_KEY = "matchindex.release_token"
 
 
-def _release_headers():
+# The only hosts the release token means anything to. It used to be attached to whatever
+# URL the user typed into Check/Download, which is not an SSRF but a credential handed to
+# a stranger — a private-repo token, posted to someone else's server.
+_GITHUB_HOSTS = ("github.com", "api.github.com", "objects.githubusercontent.com",
+                 "raw.githubusercontent.com", "codeload.github.com")
+
+
+def _release_headers(url=None):
     h = {"User-Agent": "ludodex", "Accept": "application/json"}
     tok = (config.get(RELEASE_TOKEN_KEY, "") or "").strip()
-    if tok:
+    host = (urllib.parse.urlsplit(url or "").hostname or "").lower()
+    # Exact host or a github.com subdomain — never a suffix test, or
+    # "github.com.attacker.example" collects the token.
+    fits = host in _GITHUB_HOSTS or host.endswith(".github.com")
+    if tok and url is not None and fits:
         h["Authorization"] = "Bearer " + tok
     return h
 
@@ -12529,8 +12856,7 @@ def matchindex_release(url: str = ""):
     # the published build. An empty field now means "use the default", not "do nothing".
     url = (url or "").strip() or matchindex.release_url()
     try:
-        req = urllib.request.Request(url, headers=_release_headers())
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with _safe_urlopen(url, headers=_release_headers(url), timeout=30) as r:
             data = json.load(r)
     except Exception as e:                       # noqa: BLE001
         return {"configured": True, "url": url, "error": str(e)[:200]}
@@ -12588,13 +12914,12 @@ def matchindex_download(body: dict = Body(...)):
         part = dest + ".part"
         try:
             os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-            h = _release_headers()
+            h = _release_headers(url)
             # The asset API returns metadata for Accept: application/json and the FILE
             # for octet-stream. Asking for the wrong one downloads a JSON description of
             # the database instead of the database.
             h["Accept"] = "application/octet-stream"
-            req = urllib.request.Request(url, headers=h)
-            with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+            with _safe_urlopen(url, headers=h, timeout=60) as r, open(part, "wb") as f:
                 st["total"] = st["total"] or int(r.headers.get("Content-Length") or 0)
                 while True:
                     chunk = r.read(1 << 20)
