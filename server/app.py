@@ -855,6 +855,11 @@ def _has_cover_sql(has_ek=True, has_gk=True):
 
 
 
+class UnknownFilter(ValueError):
+    """A filter token the query language does not define. Never a silent no-op: see
+    _fexpr, and the publish rule that copied a whole library because of one typo."""
+
+
 def _query_games(con, q=None, source=None, platform=None, has_kind=None,
                  include=None, exclude=None, sort=None, limit=60, offset=0,
                  status="owned", identified="only", query=None):
@@ -942,7 +947,12 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
             if not keys:
                 return "0", []
             return "g.norm_key IN (%s)" % ",".join("?" * len(keys)), list(keys)
-        return None, None
+        # A TOKEN NOBODY RECOGNISES IS NOT "NO CONDITION". Returning None here let both
+        # loops below drop the token silently, so the query ran with one fewer condition
+        # than the caller asked for. In the grid that shows too many games; in publish,
+        # where _rule_entries runs this same path, a rule saved as "sytem:snes" matched
+        # the ENTIRE catalog and the plan copied all of it to the device.
+        raise UnknownFilter("unknown filter %r" % tok)
     for f in (include or []):
         e, a = _fexpr(f)
         if e:
@@ -1132,6 +1142,8 @@ def games(
                             status=status if status in ("owned", "utilities", "wanted", "all") else "owned",
                             identified=identified if identified in ("only", "all", "unidentified") else "only",
                             query=query)
+    except UnknownFilter as e:
+        raise HTTPException(400, str(e))
     finally:
         con.close()
 
@@ -2518,6 +2530,16 @@ def publish_rule_save(dev_id: int, body: dict = Body(...)):
     b = body or {}
     if not (b.get("expr") or "").strip():
         raise HTTPException(400, "a rule needs an expression")
+    # CHECKED BEFORE IT IS STORED. A rule is evaluated later, unattended, against a
+    # device — so the moment to reject one nobody can read is while the person who
+    # typed it is still looking at it.
+    con = lib()
+    try:
+        _rule_entries(con, b["expr"].strip(), cap=1)
+    except UnknownFilter as e:
+        raise HTTPException(400, str(e))
+    finally:
+        con.close()
     rid = publish.rule_set(dev_id, b["expr"].strip(), label=b.get("label"),
                            rule_id=b.get("id"),
                            enabled=b.get("enabled", True), ord=b.get("ord", 0))
@@ -2535,6 +2557,10 @@ def _rule_entries(con, expr, cap=20000):
     """Entry keys a rule's filter expression matches. Uses the library's own query
     path, so a rule means exactly what the same text means in the grid."""
     toks = [t for t in (expr or "").split() if t]
+    if not toks:
+        # No tokens means no WHERE clause means every game. A rule is a SELECTION, so
+        # an empty one is a mistake to report, never a licence to copy the library.
+        raise UnknownFilter("a publish rule needs an expression")
     res = _query_games(con, include=toks, limit=cap)
     return [g["entry_key"] for g in res["items"] if g.get("entry_key")]
 
@@ -9622,7 +9648,11 @@ def ai_search(body: dict):
                 provider=provider, model=model)
         except Exception as e:
             raise HTTPException(502, "AI error: %s" % e)
-        result = _query_games(con, **query, limit=120)
+        try:
+            result = _query_games(con, **query, limit=120)
+        except UnknownFilter as e:
+            raise HTTPException(400, "AI produced a filter the library does not "
+                                     "define: %s" % e)
         return {"query": query, "explanation": explanation, "result": result}
     finally:
         con.close()
