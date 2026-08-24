@@ -189,10 +189,25 @@ def walk(max_requests=None, progress=True, until_id=None):
             if progress and reqs % 50 == 0:
                 print("tgdb_mirror: id %d | %d games | %d reqs | %.0fs"
                       % (cursor, found, reqs, time.time() - t0), file=sys.stderr)
-        why = ("complete" if (dead >= DEAD_RUN_STOP or cursor >= top)
-               else "budget")
-        if why == "complete":
+        # ONLY THE DEAD RUN PROVES THE CATALOGUE HAS ENDED. Without an explicit
+        # until_id, `top` is CEILING on the first pass — a number measured by sampling,
+        # i.e. my guess — so stopping there says the walk ran out of PERMISSION, not
+        # that the catalogue ran out of games. That wrote walk_complete="1" while the
+        # last block was still returning 20 live games. It healed itself on the next
+        # --walk (which extends `top` past the cursor), and in between the status lied:
+        # the same shape as the ~3,000-id gap that declared COMPLETE at 50,268 of
+        # 121,454 games.
+        #
+        # An until_id the CALLER gave is different — reaching it is doing what was
+        # asked, so the run is complete. It still proves nothing about the catalogue,
+        # so it does not write the mark either.
+        if dead >= DEAD_RUN_STOP:
+            why = "complete"
             put(con, "walk_complete", "1")
+        elif cursor >= top:
+            why = "complete" if until_id else "ceiling"
+        else:
+            why = "budget"
         return _finish(con, cursor, dead, reqs, found, t0, why)
     finally:
         con.close()

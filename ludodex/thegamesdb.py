@@ -9,9 +9,11 @@ missing something rather than as curated. It is a USER-CHOICE provider — selec
 never a default, and ranked below IGDB and ScreenScraper because its coverage genuinely
 is smaller.
 
-THE BUDGET IS THE WHOLE DESIGN. A free key grants 1,000 requests PER MONTH. Not per day
-— per month. ScreenScraper's free tier is roughly twenty thousand a day, so every habit
-learned there is wrong here:
+THE BUDGET IS THE WHOLE DESIGN, AND IT IS MONTHLY. A free key grants 1,000 requests PER
+MONTH; the paid $29 Developer tier grants 12,000 PER MONTH, which is the tier this
+deployment runs on and the number tgdb_mirror sizes its 6,900-request walk against.
+Either way it is per month, not per day. ScreenScraper's free tier is roughly twenty
+thousand a DAY, so every habit learned there is wrong here:
 
   * ONE CALL PER GAME IS A BUG. A 400-game library scraped naively is 400+ requests and
     the month is gone before the first sweep finishes. ByGameID, ByPlatformID and
@@ -27,15 +29,19 @@ learned there is wrong here:
     can be told.
 
 The configured limit is a CEILING WE IMPOSE, not our belief about the key. Those are
-different things and conflating them fails in both directions: a user who buys a higher
-Patreon tier and forgets to raise the setting would silently keep scraping at 1,000, and
-a user whose key is smaller than the setting would blow through it. So the effective
-budget is the smaller of the two, and when the server reports MORE than the configured
-limit we say so rather than quietly leaving it unused.
+different things and conflating them fails in both directions: a user who buys a bigger
+tier and forgets to raise the setting would silently keep scraping at 1,000, and a user
+whose key is smaller than the setting would blow through it. So the effective budget is
+the smaller of the two, and when the server reports MORE than the configured limit we
+say so rather than quietly leaving it unused.
 
-Increases are bought, not requested: patreon.com/thegamesdb (Bronze $1 / Silver $5 /
-Gold $15), and as of 2026-08 the tiers do not publish what limit each grants — ask
-support@thegamesdb.net first.
+Increases are bought, not requested. The $29/year DEVELOPER tier is the one worth
+naming: 12,000 requests a month, enough to walk the entire id space (6,900 requests) in
+one evening and still have most of the month left. The small Patreon tiers
+(patreon.com/thegamesdb) raise the free 1,000 by amounts they do not publish, so pointing
+a user at those was pointing them at the wrong product. Set the number you were granted
+in `thegamesdb_monthly_limit`; the server's own remaining_monthly_allowance is what
+actually decides.
 
 Nothing fetched here is ever redistributed. This is a per-user key against a per-user
 library; TheGamesDB data does not go into any shipped supplement.
@@ -97,6 +103,12 @@ MEDIA_KIND = {
     ("clearlogo", None): "logo",
     ("titlescreen", None): "title_screen",
 }
+
+
+# Endpoints that do NOT count against the monthly allowance — their docs say so, and a
+# live check confirmed it. Retrying one of these must not be charged either.
+LIMIT_PATH = "/v1/API/Limit"
+FREE_PATHS = (LIMIT_PATH,)
 
 
 class TGDBError(Exception):
@@ -194,7 +206,13 @@ def _request(path, params=None, timeout=30, attempts=3, key=None):
 
     Retries only on TIMEOUT. A 401 is a decision (bad key) and a 403 is the rate-limit
     cap; retrying either just spends the clock, and in the cap's case would spend the
-    allowance too."""
+    allowance too.
+
+    EVERY RETRY IS CHARGED. The callers spend one unit before calling in, and this made
+    up to three attempts against a budget that had been told about one — so a flaky day
+    could send three times the allowance the caller had computed, against a limit
+    measured in requests per MONTH. FREE_PATHS is the exception, and it is a property of
+    the endpoint rather than of the call site."""
     k = key if key is not None else api_key()
     if not k:
         raise TGDBError("badkey", "no TheGamesDB API key configured")
@@ -214,11 +232,22 @@ def _request(path, params=None, timeout=30, attempts=3, key=None):
                 raise
             last = e
         if attempt + 1 < attempts:
+            if path not in FREE_PATHS:
+                _spend()               # the retry we are about to make, seen by the budget
             time.sleep(2 * (attempt + 1))
     raise TGDBError("error", "timed out after %d attempts: %s" % (attempts, str(last)[:90]))
 
 
 def _read(req, timeout):
+    """One HTTP attempt. ONE CLASSIFICATION POLICY, SHARED WITH screenscraper._read by
+    convention rather than by code — the two live in different modules and neither may
+    import the other, so the rules are written out in both places and must agree:
+
+      * a timeout, however urllib wraps it, goes back up to _request to be RETRIED;
+      * a body we cannot parse is an ERROR, never an absence — returning "not found"
+        for a maintenance page is how a caller permanently retires a game;
+      * every attempt, retries included, is charged to the budget.
+    """
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             body = r.read().decode("utf-8", "replace")
@@ -268,7 +297,7 @@ def limit_status(force=False, key=None):
     err = None
     if stale:
         try:
-            p = _request("/v1/API/Limit", key=key)
+            p = _request(LIMIT_PATH, key=key)
             rem = int(p.get("remaining_monthly_allowance") or 0)
             extra = int(p.get("extra_allowance") or 0)
             checked = int(time.time())

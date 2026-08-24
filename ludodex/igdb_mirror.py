@@ -220,7 +220,7 @@ def backfill_game_platforms(con):
     return n
 
 
-def sweep_external(max_requests=None, pace=TARGET_PACE, progress=True):
+def sweep_external(max_requests=None, pace=TARGET_PACE, progress=True, full=False):
     """Pull IGDB's game<->store join table — ~676k rows across every store it knows,
     including ones ludodex has no importer for.
 
@@ -233,7 +233,12 @@ def sweep_external(max_requests=None, pace=TARGET_PACE, progress=True):
     One caveat this table makes visible: a store id identifies an EDITION, and one
     ludodex norm_key can span several. 'bioshock' owns appid 7670 (IGDB 20, 2007) and
     409710 (IGDB 34293, Remastered). Both are correct; they are answers to different
-    questions. Resolve from a SOURCE ROW, never from a norm_key."""
+    questions. Resolve from a SOURCE ROW, never from a norm_key.
+
+    INCREMENTAL, like the games sweep — `full=True` re-pulls everything. What it still
+    cannot see is a pairing DELETED upstream: IGDB reports those only through its own
+    deleted-entries endpoint, which nothing here calls, so a removed store id survives
+    in the mirror until a rebuild."""
     con = con_db()
     left = _Pacer.cooling(con)
     if left:
@@ -254,17 +259,31 @@ def sweep_external(max_requests=None, pace=TARGET_PACE, progress=True):
                     (s["id"], s.get("name")))
     con.commit()
 
+    started = int(time.time())
     cursor = int(get(con, "ext_cursor", 0) or 0)
+    # SAME WATERMARK DISCIPLINE AS THE GAMES SWEEP, which this had none of. Without it
+    # `ext_cursor` reset to 0 on completion and the next run re-pulled all ~1,352 pages
+    # of a table it already held — the exact cost the schema comment warns about — while
+    # still being unable to see that a pairing had CHANGED. The pass's start is recorded
+    # at cursor 0 and carried across resumes, for the reason sweep() explains.
+    if cursor == 0:
+        put(con, "ext_pass_started", started)
+        con.commit()
+    pass_started = int(get(con, "ext_pass_started", started) or started)
+    since = 0 if full else int(get(con, "ext_watermark", 0) or 0)
     reqs = rows_seen = 0
     t0 = time.time()
     try:
         while max_requests is None or reqs < max_requests:
+            where = "id > %d" % cursor + (
+                " & updated_at >= %d" % since if since else "")
             rows = igdb.query(
                 "external_games",
-                "fields id,game,uid,external_game_source,name; where id > %d; "
-                "sort id asc; limit %d;" % (cursor, PAGE), cid, tok, reauth=_reauth)
+                "fields id,game,uid,external_game_source,name; where %s; "
+                "sort id asc; limit %d;" % (where, PAGE), cid, tok, reauth=_reauth)
             reqs += 1
             if not rows:
+                put(con, "ext_watermark", pass_started)
                 put(con, "ext_cursor", 0)
                 put(con, "ext_done", int(time.time()))
                 con.commit()
@@ -272,8 +291,12 @@ def sweep_external(max_requests=None, pace=TARGET_PACE, progress=True):
             for r in rows:
                 if not (r.get("game") and r.get("uid")):
                     continue
+                # REPLACE, not IGNORE: a row already held could never be corrected, so a
+                # store entry that was renamed upstream kept our first copy forever.
+                # (A pairing that was DELETED upstream still cannot be seen — IGDB only
+                # reports that through its own deleted-entries endpoint.)
                 con.execute(
-                    "INSERT OR IGNORE INTO external_ids(game_id,source_id,uid,name) "
+                    "INSERT OR REPLACE INTO external_ids(game_id,source_id,uid,name) "
                     "VALUES(?,?,?,?)",
                     (r["game"], r.get("external_game_source"), str(r["uid"]),
                      r.get("name")))
@@ -376,6 +399,20 @@ def sweep(full=False, max_requests=None, pace=TARGET_PACE, progress=True):
         put(con, "cursor", 0)
         put(con, "full_started", started)
     cursor = int(get(con, "cursor", 0) or 0)
+    # THE WATERMARK BELONGS TO THE PASS, NOT TO THE RUN THAT HAPPENS TO FINISH IT.
+    #
+    # A pass is one walk of id 0 -> exhaustion under one `since` filter, and it may take
+    # several runs. Run 1 (start T1) covers ids 0..C and is interrupted; run 2 (start T2)
+    # resumes at C. A row with id < C edited between T1 and T2 was invisible to run 1 —
+    # it had already walked past that id — and is below run 2's cursor. Closing the
+    # window at T2 asks for `>= T2` next time and loses that edit until a --full. So the
+    # pass's start is recorded when the cursor is at 0, carried across resumes, and THAT
+    # is what the watermark advances to. Overlapping re-reads a few rows; gapping loses
+    # them.
+    if cursor == 0:
+        put(con, "pass_started", started)
+        con.commit()
+    pass_started = int(get(con, "pass_started", started) or started)
     since = 0 if full else int(get(con, "watermark", 0) or 0)
     sync_platforms(con, cid, tok)
 
@@ -394,9 +431,10 @@ def sweep(full=False, max_requests=None, pace=TARGET_PACE, progress=True):
             rows = igdb.query("games", body, cid, tok, reauth=_reauth)
             reqs += 1
             if not rows:
-                # Exhausted. Only NOW is the watermark advanced, and to this run's
-                # START — see the module docstring on overlapping rather than gapping.
-                put(con, "watermark", started)
+                # Exhausted. Only NOW is the watermark advanced, and to the PASS's
+                # start — see the module docstring on overlapping rather than gapping,
+                # and `pass_started` above for why the run's own start is not it.
+                put(con, "watermark", pass_started)
                 put(con, "cursor", 0)
                 put(con, "last_full" if full else "last_incremental", started)
                 con.commit()
@@ -436,6 +474,7 @@ def status():
            "first_release_dates": frd,
            "external_ids": ext, "game_platforms": gp,
            "ext_cursor": int(get(con, "ext_cursor", 0) or 0),
+           "ext_watermark": int(get(con, "ext_watermark", 0) or 0),
            "newest_updated_at": g["u"],
            "cursor": int(get(con, "cursor", 0) or 0),
            "watermark": int(get(con, "watermark", 0) or 0),
@@ -457,7 +496,9 @@ def main(argv):
     if "--rps" in argv:
         pace = max(TARGET_PACE, 1.0 / max(0.1, float(argv[argv.index("--rps") + 1])))
     if "--external" in argv:
-        res = sweep_external(max_requests=mx)
+        # --full re-pulls the whole join table (1,352 requests); without it the sweep
+        # asks only for what changed since the last completed pass.
+        res = sweep_external(max_requests=mx, full="--full" in argv)
         print("igdb_mirror: " + json.dumps(res), file=sys.stderr)
         return 0
     if "--backfill-platforms" in argv:

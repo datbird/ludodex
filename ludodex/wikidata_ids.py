@@ -24,6 +24,7 @@ ONE IGDB GAME CAN CARRY SEVERAL POINTERS. `bulletstorm` maps to both `bulletstor
 coordinates for the same identity. They are all attached; picking one would be inventing
 an opinion about someone else's catalogue.
 """
+import csv
 import io
 import os
 import sys
@@ -107,9 +108,15 @@ def fetch(force=False, timeout=180):
                   file=sys.stderr)
             continue
         n = 0
-        for line in body.splitlines()[1:]:          # skip the CSV header
-            slug, _, val = line.partition(",")
-            slug, val = slug.strip().strip('"'), val.strip().strip('"')
+        # THE csv MODULE, NOT partition(). Their CSV is real CSV: a value containing a
+        # comma arrives quoted, and splitting on the first comma tore it in half. The
+        # sibling tgdb_freemap already reads its map this way.
+        reader = csv.reader(io.StringIO(body))
+        next(reader, None)                          # the header
+        for parts in reader:
+            if len(parts) < 2:
+                continue
+            slug, val = parts[0].strip(), parts[1].strip()
             if slug and val:
                 rows.append((ns, slug, val))
                 n += 1
@@ -117,10 +124,13 @@ def fetch(force=False, timeout=180):
     if not rows:
         return CACHE if os.path.exists(CACHE) else None
     tmp = CACHE + ".part"
-    with io.open(tmp, "w", encoding="utf-8") as fh:
-        fh.write("ns,igdb_slug,value\n")
-        for ns, slug, val in rows:
-            fh.write("%s,%s,%s\n" % (ns, slug.replace(",", ""), val.replace(",", "")))
+    with io.open(tmp, "w", encoding="utf-8", newline="") as fh:
+        # `.replace(",", "")` was not an escape, it was an EDIT: any value holding a
+        # comma was silently rewritten into a pointer that resolves to nothing. Quoting
+        # is the csv module's job and it does it properly.
+        w = csv.writer(fh)
+        w.writerow(["ns", "igdb_slug", "value"])
+        w.writerows(rows)
     os.replace(tmp, CACHE)
     return CACHE
 
@@ -130,15 +140,12 @@ def rows(path=None):
     p = path or CACHE
     if not p or not os.path.exists(p):
         return
-    with io.open(p, encoding="utf-8", errors="replace") as fh:
-        first = True
-        for line in fh:
-            if first:
-                first = False
-                continue
-            parts = line.rstrip("\n").split(",")
+    with io.open(p, encoding="utf-8", errors="replace", newline="") as fh:
+        reader = csv.reader(fh)
+        next(reader, None)                          # the header
+        for parts in reader:
             if len(parts) < 3:
-                continue
+                continue                            # malformed: skipped, never fatal
             ns, slug, val = parts[0].strip(), parts[1].strip(), parts[2].strip()
             if ns and slug and val:
                 yield ns, slug, val

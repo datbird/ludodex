@@ -34,6 +34,7 @@ off and the walk never turns it on for you.
 
 Non-commercial terms on every tier: this data can never end up in anything sold.
 """
+import contextlib
 import json
 import os
 import sqlite3
@@ -154,30 +155,58 @@ def _note_request():
 
 
 _last = [0.0]
+_bulk = [False]
 
 
-def _pace():
+def bulk_mode(on):
+    """Declare the calls that follow a LONG JOB, which is what makes the reserve mean
+    something. A mirror walk turns this on; an interactive lookup never does."""
+    prev = _bulk[0]
+    _bulk[0] = bool(on)
+    return prev
+
+
+@contextlib.contextmanager
+def bulk_window():
+    """bulk_mode as a scope, for callers that can use one."""
+    prev = bulk_mode(True)
+    try:
+        yield
+    finally:
+        bulk_mode(prev)
+
+
+def _pace(bulk=None):
     """Go as fast as the hour allows, and no faster.
 
     THIS IS THE WHOLE POINT OF THE HOURLY MODEL. Even pacing at 5s is correct for a
     3,325-page walk, but it is five times too slow for a 100-game enrichment that would
     fit inside the burst allowance with room to spare. So: burst at 1/sec while the
-    rolling hour has headroom beyond the reserve, and fall back to even spacing once it
-    does not. A long job converges on 720/hour either way; a short one finishes five
-    times sooner.
+    rolling hour has headroom, and wait for the window to open once it does not. A long
+    job converges on 720/hour either way; a short one finishes five times sooner.
+
+    THE RESERVE IS ONLY FOR THE CALLER IT WAS HELD FOR. It used to apply to everybody:
+    every caller shared this function and the one persisted window, so at 648 requests
+    the interactive lookup the reserve exists for was made to wait exactly like the walk
+    that had spent them. That is not a reserve, it is a lower limit — the sustained rate
+    was 648/h and nobody could ever touch the last 72. So a BULK caller stops at
+    limit - reserve and an interactive one may spend into it. Both stop at the real
+    hourly limit, because that one is the server's.
 
     The window is PERSISTED rather than counted in memory, because a walk that restarts
     would otherwise believe it had spent nothing."""
+    if bulk is None:
+        bulk = _bulk[0]
     used, oldest = _spend_window()
-    budget = max(1, hourly_limit() - _reserve())
+    budget = max(1, hourly_limit() - (_reserve() if bulk else 0))
     if used < budget:
         gap = _burst_floor()                     # headroom: go at the burst ceiling
-    elif oldest:
-        # No headroom. Wait for the oldest request to age out of the rolling hour, which
-        # is exactly when one more becomes affordable — never a blind sleep.
-        gap = max(_burst_floor(), (oldest + 3600.0) - _last[0])
     else:
-        gap = _interval()
+        # No headroom. Wait for the oldest request to age out of the rolling hour, which
+        # is exactly when one more becomes affordable — never a blind sleep. `used` is at
+        # least 1 here, so the window is never empty and `oldest` is always set.
+        gap = max(_burst_floor(), (oldest + 3600.0) - _last[0]) if oldest \
+            else _interval()
     wait = gap - (time.time() - _last[0])
     if wait > 0:
         time.sleep(wait)
@@ -277,7 +306,14 @@ def games(offset=0, limit=PAGE, fmt="normal", platform=None, genre=None,
         if title:
             # Their 422 is explicit: the title filter must be <= 128 characters.
             q["title"] = title[:128]
-    return ((_get("/games", q) or {}).get("games")) or []
+    payload = _get("/games", q)
+    if payload is None:
+        # A 404 ON A LIST ENDPOINT IS NOT AN EMPTY PAGE. `_get` returns None for a 404
+        # because for /games/{id} a miss really is a result — but here it meant the
+        # request did not happen, and returning [] made the walk read it as "this
+        # platform has no more games", mark the platform finished and never come back.
+        raise MobyError("notfound", "/games returned 404 for %r" % (q,))
+    return (payload.get("games")) or []
 
 
 def game(game_id, fmt="normal"):

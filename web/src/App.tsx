@@ -6796,11 +6796,15 @@ function AttributeProvenance({ d, onChanged }: { d: GameDetail; onChanged: () =>
                 )}
                 {blank && !caps?.kinds?.[kind]?.unsupplied
                   && caps?.kinds?.[kind]?.providers?.length
-                  && !caps.kinds[kind].providers.some((p) => p.enabled && p.configured) && (
+                  && !caps.kinds[kind].providers.some((p) => p.wired && p.enabled && p.configured) && (
                   <span className="ap-cap off"
                         title={caps.kinds[kind].providers
-                          .map((p) => `${p.label} — ${p.note}`).join('; ')}>
-                    {caps.kinds[kind].providers.map((p) => p.label).join(', ')} can fill this
+                          .map((p) => `${p.label}${p.wired ? '' : ' (not wired in)'} — ${p.note}`)
+                          .join('; ')}>
+                    {/* only name providers something actually calls: the rest are a
+                        capability, not a promise this build can keep */}
+                    {caps.kinds[kind].providers.filter((p) => p.wired).map((p) => p.label).join(', ')
+                      || 'nothing'} can fill this
                   </span>
                 )}
                 <span className="ap-vals">

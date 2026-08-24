@@ -147,7 +147,9 @@ def walk(max_requests=None, progress=True, platform_ids=None):
     cur_off = int(get(con, "cursor_offset", 0) or 0)
 
     reqs = games = 0
+    failed = []                 # platforms that did not ANSWER; never marked finished
     t0 = time.time()
+    mg.bulk_mode(True)          # a full walk is the long job the burst reserve guards
     try:
         for pid in plats:
             if pid in done:
@@ -155,14 +157,25 @@ def walk(max_requests=None, progress=True, platform_ids=None):
             off = cur_off if pid == cur_plat else 0
             while True:
                 if max_requests and reqs >= max_requests:
-                    return _finish(con, pid, off, done, reqs, games, t0, "budget")
+                    return _finish(con, pid, off, done, reqs, games, t0, "budget",
+                                   failed)
                 try:
                     rows = mg.games(offset=off, limit=mg.PAGE, fmt=fmt, platform=pid)
                 except mg.MobyError as e:
+                    if e.kind == "notfound":
+                        # THE PLATFORM DID NOT ANSWER, so nothing is known about whether
+                        # it is finished. Recording it as done would truncate the walk
+                        # silently — which is what a bare 404 used to do. Leave it out of
+                        # `done`, say so, and move to the next one.
+                        failed.append(pid)
+                        print("moby_mirror: platform %s did not answer (%s) — left "
+                              "unfinished for the next run" % (pid, e), file=sys.stderr)
+                        break
                     if e.kind in ("quota", "error"):
                         # Stopping is free: the cursor is durable, so this costs time and
                         # nothing else. Recording where we were is the whole point.
-                        return _finish(con, pid, off, done, reqs, games, t0, e.kind)
+                        return _finish(con, pid, off, done, reqs, games, t0, e.kind,
+                                       failed)
                     raise
                 reqs += 1
                 if not rows:
@@ -179,16 +192,23 @@ def walk(max_requests=None, progress=True, platform_ids=None):
                           % (pid, off, games, reqs, time.time() - t0), file=sys.stderr)
                 if len(rows) < mg.PAGE:
                     break
+            if pid in failed:
+                continue                  # it never answered; it is not finished
             done.add(pid)
             put(con, "done_platforms", json.dumps(sorted(done)))
             put(con, "cursor_offset", 0)
             con.commit()
-        return _finish(con, None, 0, done, reqs, games, t0, "complete")
+        # "complete" is a claim about the WHOLE catalogue, so a platform that never
+        # answered forfeits it — otherwise the one silently-truncated platform reads
+        # exactly like a finished walk.
+        return _finish(con, None, 0, done, reqs, games, t0,
+                       "complete" if not failed else "incomplete", failed)
     finally:
+        mg.bulk_mode(False)     # the reserve is for interactive callers again
         con.close()
 
 
-def _finish(con, pid, off, done, reqs, games, t0, why):
+def _finish(con, pid, off, done, reqs, games, t0, why, failed=()):
     if pid is not None:
         put(con, "cursor_platform", pid)
         put(con, "cursor_offset", off)
@@ -196,8 +216,12 @@ def _finish(con, pid, off, done, reqs, games, t0, why):
     put(con, "last_run", int(time.time()))
     put(con, "last_reason", why)
     con.commit()
-    return {"stopped": why, "requests": reqs, "games": games,
-            "platforms_done": len(done), "elapsed": round(time.time() - t0, 1)}
+    out = {"stopped": why, "requests": reqs, "games": games,
+           "platforms_done": len(done), "elapsed": round(time.time() - t0, 1)}
+    if failed:
+        # Named, not counted: the next run needs to know WHICH platform to re-ask.
+        out["platform_errors"] = sorted(failed)
+    return out
 
 
 def status():

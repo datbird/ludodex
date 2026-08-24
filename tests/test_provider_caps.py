@@ -218,20 +218,29 @@ def main():
           or "yourself" in PC.tooltip("completion_status").lower())
 
     print()
-    print("6. ENABLED, CONFIGURED and CAPABLE are three different facts")
+    print("6. WIRED, ENABLED, CONFIGURED and CAPABLE are four different facts")
     config.set_("metadata_thegamesdb_enabled", "0")
     config.set_("thegamesdb_api_key", "")
     os.environ.pop("TGDB_API_KEY", None)
     check("capable but switched off", "thegamesdb" in PC.CAPS["esrb_rating"]
           and not PC.enabled("thegamesdb"))
-    check("the tooltip marks it off rather than promising it",
-          "(off)" in PC.tooltip("esrb_rating"))
+    # TheGamesDB is capable and switched off, but it is also not wired in for
+    # ATTRIBUTES (its ids reach matchindex; tgdb_normalize.to_attributes reaches
+    # nothing). Not-wired outranks off, because a provider nothing calls will not fill
+    # this however switched-on it is. Either way the tooltip must not promise it.
+    check("the tooltip marks it rather than promising it",
+          "(off)" in PC.tooltip("esrb_rating")
+          or "(not wired in)" in PC.tooltip("esrb_rating"))
+    check("and not being wired in is what it says, since that is the stronger fact",
+          not PC.wired("thegamesdb")
+          and "(not wired in)" in PC.tooltip("esrb_rating"))
 
     config.set_("metadata_thegamesdb_enabled", "1")
     check("switched on but with no key is NOT ready",
           PC.enabled("thegamesdb") and not PC.configured("thegamesdb"))
-    check("and the tooltip says which of the two is missing",
-          "no credentials" in PC.tooltip("esrb_rating"))
+    check("and the tooltip says which of the facts is missing",
+          "no credentials" in PC.tooltip("esrb_rating")
+          or "(not wired in)" in PC.tooltip("esrb_rating"))
 
     config.set_("thegamesdb_api_key", "0123456789abcdef")
     check("on and credentialled reads as ready",

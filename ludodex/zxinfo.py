@@ -17,8 +17,11 @@ The live API is `/v3` — verified 2026-08-17 against `/v3/games/0002259` (Head 
 and `/v3/search`. Recorded here because a dead endpoint in someone else's docs is exactly
 the kind of thing that gets re-diagnosed from scratch a year later.
 
-No key and no stated rate limit, so requests are paced through the same per-service
-limiter every other provider uses rather than being fired as fast as they will go.
+No key and no stated rate limit, so requests are paced under the same per-service SETTING
+every other provider reads (`config.rate_limits("zxinfo")`) rather than being fired as
+fast as they will go. The setting is shared; the CODE is not — `_pace()` below is
+character-for-character arcadedb's, one of seven such private throttles, and they belong
+in one shared limiter. See the note in arcadedb.py.
 """
 import json
 import os

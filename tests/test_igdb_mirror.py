@@ -106,7 +106,9 @@ def main():
     check("alt names came with them", st["alt_names"] == 1200)
     check("the platform table was fetched", st["platforms"] == 1)
     check("cursor reset for the next sweep", st["cursor"] == 0)
-    check("watermark set at or after the run's start", st["watermark"] >= before)
+    # The watermark belongs to the PASS, not to the run that happened to finish it:
+    # this pass began in test 1, so it is at or before this run's start, and never zero.
+    check("watermark set to the start of the pass", 0 < st["watermark"] <= before)
 
     print()
     print("4. the watermark is the run's START, so a mid-sweep edit is not lost")

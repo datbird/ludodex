@@ -226,7 +226,11 @@ def query(endpoint, body, client_id, token, retries=4, reauth=None):
                 delay *= 2
                 continue
             raise
-    return []
+    # UNREACHABLE, and it used to be `return []`. Every path out of the loop above
+    # returns or raises, so the only way here would be retries < 0 — and an empty list
+    # is the one answer that must never be invented: the mirror reads it as "the source
+    # is exhausted" and closes a sweep on it.
+    raise RuntimeError("igdb.query: retries=%r left the loop with no answer" % retries)
 
 
 def _names(items):

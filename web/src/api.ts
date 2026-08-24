@@ -470,10 +470,13 @@ export interface SsTier {
 }
 
 export interface AttrCapProvider {
-  id: string; label: string; note: string; enabled: boolean; configured: boolean
+  // `wired` is a fourth fact, and it outranks the other two: a provider no enrichment
+  // step calls will not fill this however switched-on and credentialled it is.
+  id: string; label: string; note: string; enabled: boolean; configured: boolean; wired: boolean
 }
 export interface AttrCapabilities {
-  kinds: Record<string, { providers: AttrCapProvider[]; unsupplied: boolean; tooltip: string }>
+  kinds: Record<string, { providers: AttrCapProvider[]; unsupplied: boolean
+                          unfilled_today: boolean; tooltip: string }>
   unsupplied_note: string
 }
 

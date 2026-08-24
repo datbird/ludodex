@@ -19,8 +19,15 @@ orientation (vertical cabinets are a real filter for anyone building a cab), the
 `history.dat` text, and a short-play VIDEO — free, unmetered, from their own host.
 
 No key, no documented rate limit. That is not licence to hammer it: this is a
-volunteer-run Italian arcade preservation site, so requests are paced through the same
-per-service limiter every other provider here uses, and its default is deliberately slow.
+volunteer-run Italian arcade preservation site, so requests are paced under the same
+per-service SETTING every other provider reads (`config.rate_limits("arcadedb")`), and
+its default is deliberately slow.
+
+The setting is shared; the CODE is not. `_pace()` below is one of seven byte-identical
+private throttles across these provider modules, and zxinfo's is character-for-character
+the same function. They belong in one shared limiter — which would be a new module, and
+new modules are outside what this pass may add — so the duplication is named here rather
+than described as sharing something it does not.
 """
 import json
 import os

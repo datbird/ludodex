@@ -168,11 +168,18 @@ def main(argv):
             if e.kind == "quota":
                 print("ss_scrape: quota exhausted — resume tomorrow.", file=sys.stderr)
                 break
-            if e.kind == "closed":
-                print("ss_scrape: API temporarily closed — backing off 60s.",
+            if e.kind in ("closed", "rate"):
+                # 'rate' is "you are going too fast", not "you are done for the day".
+                # Backing off and coming back to this game is the whole difference.
+                print("ss_scrape: API %s — backing off 60s."
+                      % ("temporarily closed" if e.kind == "closed" else "rate limited"),
                       file=sys.stderr)
                 time.sleep(60)
                 continue
+            # NO ROW IS WRITTEN HERE, deliberately. An error is not a 'notfound': the
+            # done set is built from status IN ('ok','notfound'), so recording a failed
+            # fetch as an absence would delete this game from the worklist forever. It
+            # simply comes round again on the next run.
             print("ss_scrape: error on %s/%s: %s" % (system, fn, e), file=sys.stderr)
             time.sleep(interval)
             continue

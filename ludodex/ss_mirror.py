@@ -23,11 +23,20 @@ not an error, and not a signal to stop. Bisecting for the ceiling is meaningless
 the same reason: the first probe of this mirror "found" a ceiling of 3 because id 4
 happens to be empty. The walk therefore ends on a long RUN of dead ids, never on one.
 
+AN ID HAS THREE ANSWERS, NOT TWO. A game, no game, and NO ANSWER — a timeout, a 5xx, a
+maintenance page, a throttle. Only the first two are facts about the catalogue. The walk
+used to advance its cursor over the third as well, and since the walk only ever looks
+forward, a moment of upstream weather became a permanent hole: exactly the 368 games
+that had to be recovered by hand from the web UI. Ids that never answered now go into
+the ss_gaps ledger and the next run re-asks them before it walks on, and they are kept
+out of the dead-run exhaustion proof, because an id that did not answer is not evidence
+that the catalogue has ended.
+
 QUOTA COMES FROM THE SERVER. Every response carries an ssuser block with
 requeststoday/maxrequestsperday. A local counter would drift the moment anything else
 scraped on the same account, so the server's number is the authority and the walk
-stops against it — leaving DAILY_RESERVE unspent so normal ludodex scraping still
-works while a multi-day walk is in progress.
+stops against it — leaving a reserve unspent (see tier_limits) so normal ludodex
+scraping still works while a multi-day walk is in progress.
 
   python3 ludodex/ss_mirror.py --walk                  # resume; stops at the daily quota
   python3 ludodex/ss_mirror.py --walk --max-requests N # bounded chunk
@@ -83,6 +92,16 @@ DEAD_RUN_STOP = 50000       # consecutive dead ids past TOP_ID_SEEN that mean "d
 BLOCK = 60                  # ids dispatched per round; cursor advances a whole block
 CLOSED_STRIKES = 8          # consecutive "api closed" rounds that mean stop for now
 
+# How many ledger ids a single run re-asks before it goes back to walking forward.
+#
+# The ledger has to be drained EAGERLY — a transient failure that waits for a manual
+# --ids run is not really being retried — but it must not starve the forward walk
+# either, or a bad afternoon leaves the cursor standing still for days.
+#
+# CLOSED_STRIKES blocks is the exact debt one outage can leave (a block that answers
+# nothing is a strike, and the run stops on the eighth), so one run repays one outage.
+GAP_DRAIN = BLOCK * CLOSED_STRIKES
+
 # EVERY LIMIT BELOW IS A FALLBACK, NOT A POLICY. ScreenScraper reports what an account
 # is actually granted — threads, requests per day, requests per minute — and those
 # numbers differ enormously between a free account and a financial contributor. Baking
@@ -109,10 +128,6 @@ FALLBACK_THREADS = 1        # what a free account typically gets
 FALLBACK_PER_MIN = 60       # deliberately timid when the server does not say
 RESERVE_FRACTION = 0.05     # keep 5% of the day back for the user's own scraping
 MIN_RESERVE = 200           # ...but always SOME, even on a tiny quota
-
-# Kept as a module attribute because the tests and older callers refer to it. It is now
-# a floor on the computed reserve rather than the reserve itself.
-DAILY_RESERVE = MIN_RESERVE
 
 
 def tier_limits(q, threads=None):
@@ -188,6 +203,14 @@ def con_db():
     CREATE TABLE IF NOT EXISTS ss_systems(
       id INTEGER PRIMARY KEY, name TEXT, names TEXT, company TEXT, type TEXT,
       igdb_platform INTEGER, mapped_by TEXT);
+    -- THE IDS THAT NEVER ANSWERED. Three timeouts, a 5xx, an HTML maintenance page, a
+    -- throttle: none of those is "there is no game at this id", but the cursor has
+    -- already moved past them and a walk only ever looks forward. Without this ledger
+    -- a transient failure is a PERMANENT hole — which is precisely how 368 games ended
+    -- up behind the cursor and had to be recovered by hand from the web UI.
+    CREATE TABLE IF NOT EXISTS ss_gaps(
+      id INTEGER PRIMARY KEY, kind TEXT, first_seen INTEGER, last_seen INTEGER,
+      tries INTEGER, note TEXT);
     CREATE TABLE IF NOT EXISTS state(k TEXT PRIMARY KEY, v TEXT);
     """)
     con.commit()
@@ -201,6 +224,20 @@ def get(con, k, d=None):
 
 def put(con, k, v):
     con.execute("INSERT OR REPLACE INTO state(k,v) VALUES(?,?)", (k, str(v)))
+
+
+def _note_gap(con, gid, err, now):
+    """Record an id we could not get an ANSWER for, so a later run re-asks it."""
+    con.execute(
+        "INSERT INTO ss_gaps(id,kind,first_seen,last_seen,tries,note) "
+        "VALUES(?,?,?,?,1,?) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, "
+        "last_seen=excluded.last_seen, tries=ss_gaps.tries+1, note=excluded.note",
+        (gid, getattr(err, "kind", "error"), now, now, str(err)[:120]))
+
+
+def _clear_gap(con, gid):
+    """A definite answer — a game, or a genuine hole — settles the id either way."""
+    con.execute("DELETE FROM ss_gaps WHERE id=?", (gid,))
 
 
 # --- the SS system -> IGDB platform map ------------------------------------- #
@@ -371,8 +408,46 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
         except Exception as e:                       # noqa: BLE001
             return gid, None, ss.SSError("error", str(e)[:120])
 
+    def spend(ids, mark):
+        """What that block really cost. _request retries up to 3 times per id and the
+        walk used to count one request per id, so a flaky day could send three times
+        the budget the daily quota had allowed for."""
+        return max(len(ids), ss.attempts_made() - mark)
+
     try:
         with ThreadPoolExecutor(max_workers=nthreads) as pool:
+            # THE LEDGER FIRST. An id that failed transiently is behind the cursor now,
+            # so nothing else will ever go back for it.
+            gap_ids = [r["id"] for r in con.execute(
+                "SELECT id FROM ss_gaps ORDER BY tries ASC, id ASC LIMIT ?",
+                (max(0, min(GAP_DRAIN, budget)),))]
+            for i in range(0, len(gap_ids), BLOCK):
+                chunk = gap_ids[i:i + BLOCK]
+                mark = ss.attempts_made()
+                now = int(time.time())
+                spent_today = None   # _really_out_of_quota costs a REQUEST: ask once
+                for gid, jeu, err in pool.map(fetch, chunk):
+                    if err is not None:
+                        if err.kind == "quota":
+                            # Same rule as the walk below: the ssuser counters decide
+                            # whether this is the day ending or just a throttle.
+                            if spent_today is None:
+                                spent_today = _really_out_of_quota(creds, tier)
+                            if spent_today:
+                                stop = "quota"
+                        elif err.kind == "badcreds":
+                            stop = "badcreds"
+                        _note_gap(con, gid, err, now)
+                        continue
+                    if jeu and jeu.get("id"):
+                        _store(con, gid, jeu, now, region)
+                        found += 1
+                    _clear_gap(con, gid)             # answered: game or genuine hole
+                reqs += spend(chunk, mark)
+                con.commit()
+                if stop is not None or reqs >= budget:
+                    break
+
             while reqs < budget and stop is None:
                 lo = cursor + 1
                 hi = min(lo + BLOCK - 1, lo + (budget - reqs) - 1)
@@ -383,8 +458,9 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
                     break
                 ids = list(range(lo, hi + 1))
                 block_started = time.time()
+                mark = ss.attempts_made()
                 results = list(pool.map(fetch, ids))
-                reqs += len(ids)
+                reqs += spend(ids, mark)
                 # THE PER-MINUTE CAP IS A REAL LIMIT AND WAS PREVIOUSLY IGNORED. On a
                 # generous tier the block is never fast enough to matter; on a free one
                 # it is the difference between scraping and being throttled.
@@ -394,37 +470,54 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
                     time.sleep(need - spent)
 
                 hard = None
+                spent_today = None       # _really_out_of_quota costs a REQUEST: ask once
+                errored = []             # ids this block could not get an answer for
+                answered = alive = 0
+                now = int(time.time())
                 for gid, jeu, err in results:
                     if err is not None:
                         if err.kind == "quota":
-                            # A 429 and "you are done for the day" arrive as the same
-                            # kind, and they are not the same thing. Six concurrent
-                            # threads produce the occasional transient throttle;
-                            # treating that as daily exhaustion killed a run that had
-                            # 77,000 requests left and parked it for half an hour.
-                            # The ssuser counters are the authority, as everywhere else.
-                            if _really_out_of_quota(creds, tier):
+                            # A 430 ("that is your day") and a 429 ("slow down") used to
+                            # arrive as one kind. The ssuser counters are the authority,
+                            # as everywhere else — but a block of 60 throttled ids asked
+                            # 60 times, against an API that had just refused us.
+                            if spent_today is None:
+                                spent_today = _really_out_of_quota(creds, tier)
+                            if spent_today:
                                 hard = err
                             else:
-                                hard = hard or ss.SSError("closed", "rate limited")
+                                hard = hard or ss.SSError("rate", "rate limited")
                         elif err.kind == "badcreds":
                             hard = err
-                        elif err.kind == "closed":
+                        elif err.kind in ("closed", "rate"):
                             hard = hard or err
+                        errored.append((gid, err))
                         continue
+                    answered += 1
                     if jeu and jeu.get("id"):
-                        _store(con, gid, jeu, int(time.time()), region)
+                        _store(con, gid, jeu, now, region)
                         found += 1
+                        alive += 1
 
                 # THE CURSOR ADVANCES A WHOLE BLOCK. Threads finish out of order, so
                 # advancing per result would leave holes that a resume never revisits.
                 if hard is not None and hard.kind in ("quota", "badcreds"):
                     stop = hard.kind
                     break
+                # ...and everything it could not ANSWER for goes in the ledger before it
+                # does, because after this line nothing looks back here again.
+                for gid, err in errored:
+                    _note_gap(con, gid, err, now)
                 cursor = hi
                 put(con, "cursor", cursor)
 
-                if hard is not None and hard.kind == "closed":
+                # A BLOCK THAT ANSWERED NOTHING IS A STRIKE WHATEVER IT SAID. Only
+                # 'closed' and 'rate' used to count, so a total outage that surfaced as
+                # timeouts (kind 'error') had no stop at all: the run would spend its
+                # whole daily budget on 95,000 ids that never answered and put every one
+                # of them in the ledger. Eight strikes bounds the debt at one drain.
+                if answered == 0 or (hard is not None
+                                     and hard.kind in ("closed", "rate")):
                     closed_strikes += 1
                     time.sleep(min(60, 5 * closed_strikes))
                     if closed_strikes >= CLOSED_STRIKES:
@@ -433,8 +526,10 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
                     closed_strikes = 0
 
                 # A hole is normal; a long RUN of them past the known ceiling is the end.
-                dead_run = 0 if found and any(j for _g, j, _e in results if j) \
-                    else dead_run + len(ids)
+                # ONLY IDS THAT ANSWERED COUNT. An id that timed out is not evidence of
+                # anything, and letting a flaky afternoon feed the exhaustion proof is
+                # how a walk that is 40% done writes walk_complete over itself.
+                dead_run = 0 if alive else dead_run + (answered - alive)
                 put(con, "dead_run", dead_run)
                 con.commit()
                 if cursor > TOP_ID_SEEN and dead_run >= DEAD_RUN_STOP:
@@ -452,11 +547,14 @@ def walk(max_requests=None, until_id=None, progress=True, threads=None):
     con.commit()
     total = con.execute("SELECT COUNT(*) FROM ss_games").fetchone()[0]
     roms = con.execute("SELECT COUNT(*) FROM ss_roms").fetchone()[0]
+    gaps = con.execute("SELECT COUNT(*) FROM ss_gaps").fetchone()[0]
     con.close()
     return {"requests": reqs, "games_found": found, "cursor": cursor,
             "stopped": stop or "budget", "elapsed": round(time.time() - t0, 1),
             "total_games": total, "total_roms": roms, "threads": nthreads,
-            "tier": tier}
+            # Owed retries, so a caller can tell "walked to the end" from "walked past
+            # some ids that never answered".
+            "gaps_pending": gaps, "tier": tier}
 
 
 def fetch_ids(ids, max_requests=None, progress=True):
@@ -512,7 +610,7 @@ def refresh_stale(days=90, max_requests=None, progress=True, ids=None):
         rows = rows[:budget]
         if not rows:
             con.close()
-            return {"requested": 0, "note": "empty id list"}
+            return {"requested": 0, "note": "empty id list", "complete": True}
     else:
         cutoff = time.time() - days * 86400
         deferred = 0
@@ -521,31 +619,54 @@ def refresh_stale(days=90, max_requests=None, progress=True, ids=None):
             "LIMIT ?", (cutoff, budget))]
         if not rows:
             con.close()
-            return {"stale": 0, "note": "nothing older than %d days" % days}
+            return {"stale": 0, "note": "nothing older than %d days" % days,
+                    "complete": True}
 
     nthreads = tier["threads"]
     now = int(time.time())
-    done = roms_before = 0
+    done = absent = failed = 0
+    stop = None
     roms_before = con.execute("SELECT COUNT(*) FROM ss_roms").fetchone()[0]
 
     def fetch(gid):
+        """-> (gid, jeu|None, err|None). AN ERROR IS NOT AN ABSENCE.
+
+        This used to be `except Exception: return gid, None`, so a spent quota, bad
+        credentials and three timeouts all arrived looking exactly like "ScreenScraper
+        does not have this game". The run then reported refreshed=0 with no failure
+        count, and ssmirror-loop.sh — which marked the job done whenever the output did
+        not say "skipped" — wrote its completion marker over a day on which all 739 ids
+        had failed, and never ran it again."""
         try:
             jeu, _ = ss.jeu_infos(creds, gameid=gid)
-            return gid, jeu
-        except Exception:                        # noqa: BLE001
-            return gid, None
+            return gid, jeu, None
+        except ss.SSError as e:
+            return gid, None, e
+        except Exception as e:                       # noqa: BLE001
+            return gid, None, ss.SSError("error", str(e)[:120])
 
-    from concurrent.futures import ThreadPoolExecutor
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=nthreads) as pool:
         for i in range(0, len(rows), BLOCK):
             chunk = rows[i:i + BLOCK]
             started = time.time()
-            for gid, jeu in pool.map(fetch, chunk):
+            for gid, jeu, err in pool.map(fetch, chunk):
+                if err is not None:
+                    failed += 1
+                    # Owed a retry, durably — the caller may never come back here.
+                    _note_gap(con, gid, err, now)
+                    if err.kind in ("quota", "badcreds"):
+                        stop = err.kind
+                    continue
                 if jeu and jeu.get("id"):
                     _store(con, gid, jeu, now, q.get("favregion") or "us")
                     done += 1
+                else:
+                    absent += 1
+                _clear_gap(con, gid)                 # a definite answer, either way
             con.commit()
+            if stop:
+                break
             need = tier["min_block_seconds"] * len(chunk) / max(1, nthreads)
             spent = time.time() - started
             if spent < need:
@@ -553,11 +674,23 @@ def refresh_stale(days=90, max_requests=None, progress=True, ids=None):
             if progress and (i // BLOCK) % 20 == 0:
                 print("ss_mirror: refreshed %d/%d stale games" % (done, len(rows)),
                       file=sys.stderr)
+    if stop == "quota":
+        # The walk cools down on exhaustion and this did not, so a scheduler could sit
+        # in a tight loop re-asking an API that had already said no for the day.
+        put(con, "cooldown_until", time.time() + QUOTA_RECHECK_SECS)
+        con.commit()
     roms_after = con.execute("SELECT COUNT(*) FROM ss_roms").fetchone()[0]
     con.close()
-    out = {"stale_examined": len(rows), "refreshed": done,
+    out = {"stale_examined": len(rows), "refreshed": done, "absent": absent,
+           "failed": failed,
            "new_rom_rows": roms_after - roms_before,
-           "elapsed": round(time.time() - t0, 1)}
+           "elapsed": round(time.time() - t0, 1),
+           # THE POSITIVE SIGNAL. A caller deciding "may I stop asking for these ids?"
+           # needs a statement that every one of them got an ANSWER — not the absence of
+           # the word "skipped" in a log line.
+           "complete": bool(not failed and not deferred and stop is None)}
+    if stop:
+        out["stopped"] = stop
     if deferred:
         # Not an error: the quota ran out before the list did. Saying so is what lets
         # the rest be run tomorrow instead of being mistaken for "all done".
@@ -588,13 +721,6 @@ def _really_out_of_quota(creds, tier):
     return used >= (limit - tier["reserve"])
 
 
-def _next_utc_midnight():
-    """Kept for reference and tests. NOT used to schedule a quota wait any more — see
-    QUOTA_RECHECK_SECS for why guessing the upstream reset time was a mistake."""
-    now = time.time()
-    return now + (86400 - (now % 86400)) + 60      # a minute past, to be safe
-
-
 def status():
     con = con_db()
     q = lambda s: con.execute(s).fetchone()[0]     # noqa: E731
@@ -607,6 +733,9 @@ def status():
                             "WHERE igdb_platform IS NOT NULL"),
         "cursor": int(get(con, "cursor", 0) or 0),
         "dead_run": int(get(con, "dead_run", 0) or 0),
+        # Ids that never ANSWERED and are owed a retry. A walk_complete with a non-zero
+        # debt here has not seen the whole catalogue, and this is where that shows.
+        "gaps": q("SELECT COUNT(*) FROM ss_gaps"),
         "cooldown_until": float(get(con, "cooldown_until", 0) or 0),
         "walk_complete": get(con, "walk_complete"),
         "db_bytes": os.path.getsize(DB) if os.path.exists(DB) else 0,

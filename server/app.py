@@ -10464,8 +10464,10 @@ SERVICES = [
              "people who already use it. Budgeted PER MONTH, not per day: a free key "
              "is 1,000 requests for the whole month, which is why ludodex batches 20 "
              "games per request and takes the boxart on the same call. Increases are "
-             "bought through their Patreon rather than granted on request — if you buy "
-             "one, raise the monthly limit below to match.",
+             "bought, and the one worth naming is the $29/year Developer tier: 12,000 "
+             "requests a month, enough to walk the whole id space in one evening. The "
+             "small Patreon tiers raise the free 1,000 by amounts they do not publish. "
+             "Raise the monthly limit below to whatever you were granted.",
      "creds": [
          {"key": "thegamesdb_api_key", "label": "API key", "secret": True},
          {"key": "thegamesdb_monthly_limit",

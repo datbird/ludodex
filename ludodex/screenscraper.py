@@ -18,6 +18,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -162,8 +163,36 @@ def _auth(creds):
 
 class SSError(Exception):
     def __init__(self, kind, msg=""):
-        self.kind = kind                # badcreds | quota | closed | error
+        # badcreds | quota | rate | closed | error
+        #
+        # `rate` and `quota` were ONE kind and they are not one thing. HTTP 429 means
+        # "slower"; HTTP 430 means "that is your day". Collapsing them made every
+        # transient throttle look like exhaustion, so the caller had to spend an
+        # ssuserInfos request to ask which it was — per throttled RESULT, on an API
+        # that had just told us to slow down.
+        self.kind = kind
         super().__init__("%s: %s" % (kind, msg))
+
+
+# HOW MANY HTTP ATTEMPTS THIS PROCESS HAS ACTUALLY MADE, retries included.
+#
+# A caller that budgets "one request per id" against a hard daily quota is wrong by up
+# to 3x on a flaky day, because _request retries and the caller never sees it. The
+# budget has to be able to ask the transport what it really spent.
+_attempts = 0
+_attempts_lock = threading.Lock()
+
+
+def _count_attempt():
+    global _attempts
+    with _attempts_lock:                 # the walk calls this from a thread pool
+        _attempts += 1
+
+
+def attempts_made():
+    """Total HTTP attempts made so far, retries included. Monotonic."""
+    with _attempts_lock:
+        return _attempts
 
 
 def _request(endpoint, creds, extra=None, timeout=90, attempts=3):
@@ -174,7 +203,15 @@ def _request(endpoint, creds, extra=None, timeout=90, attempts=3):
     36.9s for a search that succeeded, and 40.6s for one that did not. At the old
     timeout=40 with no retry, that put every call on a coin flip, and a lost flip was
     SILENT: the caller catches, returns 0, and the game keeps no ScreenScraper art with
-    nothing recorded to say it was ever attempted. Slow is not the same as absent."""
+    nothing recorded to say it was ever attempted. Slow is not the same as absent.
+
+    BOTH KINDS OF TIMEOUT, which is what this was missing. A read timeout arrives as
+    socket.timeout; a CONNECT timeout arrives as URLError(reason=TimeoutError) — and
+    _read used to swallow every URLError into SSError('closed'), so the branch below
+    never ran for the commonest failure of a slow server. The retry was live code that
+    could not fire: ss_scrape slept 60s and skipped the game, ss_mirror counted a closed
+    strike and moved its cursor on. _read now re-raises timeout URLErrors untouched so
+    the policy lives here, in one place."""
     params = _auth(creds)
     params.update(extra or {})
     url = API + endpoint + "?" + urllib.parse.urlencode(params)
@@ -182,29 +219,39 @@ def _request(endpoint, creds, extra=None, timeout=90, attempts=3):
         "User-Agent": "%s (ludodex)" % creds.get("softname", "ludodex")})
     last = None
     for attempt in range(max(1, attempts)):
+        _count_attempt()                           # the budget must see the RETRIES too
         try:
             return _read(req, timeout)
         except (socket.timeout, TimeoutError) as e:
             last = e
-            if attempt + 1 < attempts:
-                time.sleep(2 * (attempt + 1))      # brief linear backoff, then retry
-                continue
-            raise SSError("error", "timed out after %d attempts (%ss each)"
-                          % (attempts, timeout))
         except urllib.error.URLError as e:
-            if isinstance(getattr(e, "reason", None), (socket.timeout, TimeoutError)):
-                last = e
-                if attempt + 1 < attempts:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                raise SSError("error", "timed out after %d attempts (%ss each)"
-                              % (attempts, timeout))
-            raise
-    raise SSError("error", str(last)[:120])
+            if not _is_timeout(e):
+                raise
+            last = e
+        if attempt + 1 < attempts:
+            time.sleep(2 * (attempt + 1))          # brief linear backoff, then retry
+    raise SSError("error", "timed out after %d attempts (%ss each): %s"
+                  % (attempts, timeout, str(last)[:90]))
+
+
+def _is_timeout(e):
+    """A timeout however urllib chose to wrap it: read timeouts surface as
+    socket.timeout, connect timeouts as URLError(reason=TimeoutError)."""
+    return isinstance(e, (socket.timeout, TimeoutError)) or isinstance(
+        getattr(e, "reason", None), (socket.timeout, TimeoutError))
 
 
 def _read(req, timeout):
-    """One HTTP attempt; the classification the caller relies on stays here."""
+    """One HTTP attempt; the classification the caller relies on stays here.
+
+    ONE CLASSIFICATION POLICY, SHARED WITH thegamesdb._read by convention rather than by
+    code — the two live in different modules and neither may import the other, so the
+    rules are written out in both places and must agree:
+
+      * a timeout, however urllib wraps it, goes back up to _request to be RETRIED;
+      * a body we cannot parse is an ERROR, never an absence;
+      * every attempt, retries included, is charged to the budget.
+    """
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read().decode("utf-8", "replace")
@@ -219,6 +266,10 @@ def _read(req, timeout):
             return None                 # game simply not found
         raise SSError(kind, "HTTP %s %s" % (e.code, body[:120]))
     except urllib.error.URLError as e:
+        # A timeout goes back UP for _request to retry. Turning it into SSError('closed')
+        # here is what made _request's retry loop dead code for connect timeouts.
+        if _is_timeout(e):
+            raise
         raise SSError("closed", str(e))
     # A valid api2 response is JSON with a "response" object — parse it FIRST, so the
     # plaintext-error heuristics below can't false-positive on a good result (every
@@ -237,14 +288,27 @@ def _read(req, timeout):
         raise SSError("quota", raw[:120])
     if "erreur de login" in low or ("invalid" in low and "dev" in low):
         raise SSError("badcreds", raw[:120])
-    return None            # non-JSON body we couldn't classify → treat as not found
+    # AN UNREADABLE BODY IS NOT AN ABSENCE. This used to `return None`, which every
+    # caller reads as "ScreenScraper does not have this game": ss_scrape wrote
+    # status='notfound' and put the (game, system) in the permanently-done set, so ONE
+    # HTML maintenance page removed that game from the worklist forever. We do not know
+    # what this is, so the only honest answer is "ask again".
+    raise SSError("error", "unreadable body (%d bytes): %s"
+                  % (len(raw), raw[:90].replace("\n", " ")))
 
 
 def _classify(code, body):
     low = (body or "").lower()
     if code in (401, 403) or "login" in low or "password" in low:
         return "badcreds"
-    if code in (429, 430, 431) or "quota" in low:
+    # 429 and 430 are DIFFERENT ANSWERS and were one kind. ScreenScraper's api2 uses 429
+    # for "too fast, slow down" and 430 for "that is your allowance for today"; 431 is
+    # the per-minute variant of the same refusal. A caller told "quota" for a 429 either
+    # parks for half an hour with tens of thousands of requests still available, or
+    # spends an extra ssuserInfos request to find out which one it really was.
+    if code == 429:
+        return "rate"
+    if code in (430, 431) or "quota" in low:
         return "quota"
     if code in (423,) or "closed" in low or "ferm" in low or "member" in low:
         return "closed"

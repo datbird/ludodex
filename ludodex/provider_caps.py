@@ -210,10 +210,53 @@ CAPS = {
 UNSUPPLIED_NOTE = ("No enrichment provider supplies this — set it yourself, or let the "
                    "wand infer it.")
 
+# CAN FILL IT and WILL FILL IT ARE TWO CLAIMS, and this table was making the second one
+# with the first one's evidence.
+#
+# Everything in CAPS is measured against the provider's real mapper, so every row is
+# true about what the provider RETURNS. But a mapper nothing calls fills nothing, and
+# the tooltip — plus a switch in Settings that reads as an invitation — sent people to
+# turn on providers that no pipeline step ever consults. That is the failure this file's
+# own RULE is about, arriving by a different route: not an invented capability, a real
+# capability nobody asked for.
+#
+# Checked repo-wide (2026-08-23, and asserted by tests/test_prov_provider_wiring.py):
+#
+#   mobygames   `mobygames.extract_metadata` is imported by config.py (help text),
+#               moby_mirror.py (the local catalogue walk) and server/app.py (a status
+#               endpoint). No enrichment step calls it.
+#   arcadedb    `arcadedb.query` — the same three, plus the tests.
+#   zxinfo      `zxinfo.search` / `zxinfo.game` — the same.
+#
+# So the matrix states both facts and the tooltip says which. Wiring one of these in is
+# a product decision, not a defect fix; the fix is to stop promising it. When a step
+# does start consulting one, add it here and the promise becomes true.
+#
+# THEGAMESDB IS NOT WIRED FOR ATTRIBUTES, and this matrix is about attributes. Its ids
+# and its catalogue ARE wired, into matchindex, but that is IDENTITY, which is a
+# different promise. `tgdb_normalize.to_attributes` — the mapper every attribute claim
+# below is checked against — is called by nothing outside the tests, so a tooltip saying
+# TheGamesDB "can fill this" is the same promise nothing keeps that mobygames, arcadedb
+# and zxinfo were making. Move it back the moment an enrichment step calls that mapper.
+PIPELINE_WIRED = {
+    "igdb", "screenscraper", "steam", "steamspy", "ai", "ai_web",
+    "rom", "xbox", "ludodex",
+}
+NOT_WIRED_NOTE = ("no enrichment step consults it yet, so switching it on will not "
+                  "fill this")
+
 
 def providers_for(kind):
     """[(provider, note)] that can fill `kind`, in a stable order."""
     return sorted((CAPS.get(kind) or {}).items())
+
+
+def wired(provider):
+    """Does any pipeline step actually consult this provider for attributes?
+
+    Distinct from enabled() and configured(): a provider can be switched on, fully
+    credentialled, genuinely capable — and still never be asked."""
+    return provider in PIPELINE_WIRED
 
 
 def enabled(provider):
@@ -244,16 +287,20 @@ def configured(provider):
 def matrix(kinds=None):
     """The whole table, with live enabled/configured state, for the API and the UI.
 
-    Returns {kind: {"providers": [{id,label,note,enabled,configured}], "unsupplied":
-    bool}} — `unsupplied` is an explicit claim, not an empty list the caller has to
-    interpret."""
+    Returns {kind: {"providers": [{id,label,note,enabled,configured,wired}],
+    "unsupplied": bool, "unfilled_today": bool}} — both flags are explicit claims, not
+    empty lists the caller has to interpret. `unfilled_today` is the honest answer to
+    "will anything fill this row if I leave it alone?", which `unsupplied` alone could
+    not give once the table began listing providers nothing calls."""
     out = {}
     for kind in (kinds if kinds is not None else sorted(CAPS)):
         rows = []
         for pid, note in providers_for(kind):
             rows.append({"id": pid, "label": LABEL.get(pid, pid), "note": note,
-                         "enabled": enabled(pid), "configured": configured(pid)})
-        out[kind] = {"providers": rows, "unsupplied": not rows}
+                         "enabled": enabled(pid), "configured": configured(pid),
+                         "wired": wired(pid)})
+        out[kind] = {"providers": rows, "unsupplied": not rows,
+                     "unfilled_today": not any(r["wired"] for r in rows)}
     return out
 
 
@@ -266,12 +313,22 @@ def tooltip(kind):
     parts = []
     for pid, note in rows:
         label = LABEL.get(pid, pid)
-        if not enabled(pid):
+        if not wired(pid):
+            # Said FIRST, because it outranks the other two: a provider nothing calls
+            # will not fill this however switched-on and credentialled it is.
+            label += " (not wired in)"
+        elif not enabled(pid):
             label += " (off)"
         elif not configured(pid):
             label += " (no credentials)"
         parts.append("%s — %s" % (label, note))
-    return "Can be filled by: " + "; ".join(parts)
+    lead = "Can be filled by: "
+    if not any(wired(pid) for pid, _n in rows):
+        # Every provider that could fill this is one nothing consults, so the honest
+        # summary is the same as for a kind with no provider at all: set it yourself.
+        lead = ("Nothing fills this automatically — set it yourself, or let the wand "
+                "infer it. Capable but not wired in: ")
+    return lead + "; ".join(parts)
 
 
 def main(argv):

@@ -34,8 +34,12 @@ from titlenorm import norm      # same dedupe normalizer build_library keys on
 
 DB = os.path.join(DATA, "steam-tags.sqlite")
 API = "https://steamspy.com/api.php?request=appdetails&appid=%s"
-UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-      "Chrome/120.0 Safari/537.36")
+# WE IDENTIFY OURSELVES. This was a spoofed desktop Chrome string, which is the one
+# thing that gets a tool blocked from a free service run by one person: SteamSpy cannot
+# rate-limit or contact a client that is pretending to be a browser, so it blocks the
+# behaviour instead. Every other module in the stack says "ludodex" — see the same note
+# in wikidata_ids, which asks for contact details for exactly this reason.
+UA = "ludodex/1.0 (https://github.com/datbird/ludodex)"
 TOP_DEFAULT = 12
 TTL_DAYS = 30                    # re-fetch a game's tags at most this often
 DEFAULT_COOLDOWN_MS = 1100      # SteamSpy: <=1 req/sec

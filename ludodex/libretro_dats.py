@@ -90,21 +90,47 @@ def _cache_path(collection, name):
     return os.path.join(d, name)
 
 
-def systems(collection, timeout=60):
-    """Every .dat filename in a collection, from the repo tree. [] on failure."""
+# The recursive tree of libretro-database is one response covering EVERY collection, and
+# this used to be fetched once per collection — twice per --fetch, because main() lists
+# the systems and then stats() lists them again. One call answers for all of them.
+_tree_cache = {}
+
+
+def _tree(timeout=60):
+    """The repo's recursive tree, fetched at most once per process. [] on failure.
+
+    GITHUB TRUNCATES A LARGE TREE AND TELLS YOU SO. Ignoring `truncated` made a cut-off
+    listing look exactly like "this collection has fewer systems today" — a silent,
+    partial index with nothing recorded to say it was partial. A partial listing is
+    refused: yesterday's cached .dat files are still on disk and still true, and
+    all_rows() falls back to them when the listing is empty."""
+    if "tree" in _tree_cache:
+        return _tree_cache["tree"]
+    entries = []
     try:
         req = urllib.request.Request(TREE, headers={"User-Agent": "ludodex",
                                                     "Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             import json
-            tree = json.loads(r.read().decode("utf-8"))
-        pre = "metadat/%s/" % collection
-        return sorted(t["path"][len(pre):] for t in tree.get("tree", [])
-                      if t.get("path", "").startswith(pre)
-                      and t["path"].endswith(".dat"))
+            payload = json.loads(r.read().decode("utf-8"))
+        if payload.get("truncated"):
+            print("libretro_dats: GitHub TRUNCATED the tree listing — refusing it "
+                  "rather than reporting a short list of systems as complete",
+                  file=sys.stderr)
+        else:
+            entries = payload.get("tree") or []
     except Exception as e:                          # noqa: BLE001
         print("libretro_dats: tree listing failed (%s)" % str(e)[:110], file=sys.stderr)
-        return []
+    _tree_cache["tree"] = entries
+    return entries
+
+
+def systems(collection, timeout=60):
+    """Every .dat filename in a collection, from the repo tree. [] on failure."""
+    pre = "metadat/%s/" % collection
+    return sorted(t["path"][len(pre):] for t in _tree(timeout)
+                  if t.get("path", "").startswith(pre)
+                  and t["path"].endswith(".dat"))
 
 
 def fetch(collection, name, timeout=120):
