@@ -77,3 +77,6 @@ for i in range(13):                         # ~130s (scheduler sleeps 60s then f
 
 cleanup()
 print("RESULT:", "PASS — periodic auto-sync works" if ok else "FAIL — sentinel never pushed")
+# A RUNNER READS THE EXIT CODE, NOT THE WORD. Printing FAIL and returning 0 meant a
+# broken auto-sync passed the suite silently.
+sys.exit(0 if ok else 1)

@@ -70,6 +70,14 @@ PURCHASED_OP = {
 # PSN platform field -> catalog platform label (matches emulation's ps3/psx style)
 _PLAT = {"PS5": "ps5", "PS4": "ps4", "PS3": "ps3", "PSVITA": "psvita", "PSP": "psp"}
 
+# WHAT WE ASK FOR IS DERIVED FROM WHAT WE CAN MAP, so the two cannot drift apart. The
+# request used to name only ps3/ps4/ps5 while _PLAT claimed to understand PSVITA and PSP,
+# which meant either those purchases were silently missing from every pull or the map was
+# decoration. If Sony's persisted query rejects the wider list, fetch_owned falls back to
+# the three it has always accepted and says so — a narrower answer beats no answer.
+_REQ_PLATFORMS = sorted(k.lower() for k in _PLAT)
+_REQ_FALLBACK = ["ps3", "ps4", "ps5"]
+
 
 class _CaptureRedirect(urllib.request.HTTPRedirectHandler):
     """PSN returns the auth code as a 302 to a custom-scheme URL
@@ -108,8 +116,10 @@ def _extract_npsso(raw):
 
 
 def _save(tok):
+    # config.write_private_json, not a bare open(): the PSN refresh token cached here is
+    # good for about two months, and an unprotected write leaves it 0644 under Docker.
     tok["_saved_at"] = int(time.time())
-    json.dump(tok, open(TOKFILE, "w"))
+    config.write_private_json(TOKFILE, tok)
 
 
 def code_from_npsso(npsso):
@@ -203,13 +213,36 @@ def account_id(token):
         return ""
 
 
-def fetch_owned(token):
+def _dedupe(rows):
+    """Collapse exact repeats of the SAME title on the same console.
+
+    Keyed on the titleId, not the name. Two distinct titleIds can share a name — a
+    regional re-release, a PS4 and a PS5 SKU that both report `ps4`, "Hitman" the 2016
+    game and "Hitman" the 2000 one — and keying on the lowercased name threw the second
+    one away, so a purchase simply vanished from the library with nothing to show for it.
+    A row with no id at all still falls back to the name, because two nameless rows are
+    genuinely indistinguishable."""
+    seen, out = set(), []
+    for gid, title, plat in rows:
+        if not title:
+            continue
+        key = (gid or ("name:" + title.lower()), plat)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((gid, title, plat))
+    out.sort(key=lambda x: (x[1] or "").lower())
+    return out
+
+
+def fetch_owned(token, platforms=None):
     """Purchased (truly owned) games as (titleId, name) rows, paginated. Hits the
     PS App's whitelisted getPurchasedGameList; isActive filters to still-owned
     titles and subscriptionService=NONE excludes PS-Plus-catalog-only entries."""
+    platforms = platforms or _REQ_PLATFORMS
     rows, start, size = [], 0, 50
     while True:
-        variables = {"isActive": True, "platform": ["ps3", "ps4", "ps5"],
+        variables = {"isActive": True, "platform": list(platforms),
                      "start": start, "size": size, "subscriptionService": "NONE"}
         ext = {"persistedQuery": {"version": 1,
                                   "sha256Hash": PURCHASED_OP["hash"]}}
@@ -225,6 +258,13 @@ def fetch_owned(token):
         with urllib.request.urlopen(req, timeout=30) as r:
             data = json.load(r)
         if data.get("errors"):
+            # A rejected platform value must not cost the whole library. Retry once with
+            # the three consoles the query has always accepted, and say what was lost.
+            if start == 0 and list(platforms) != _REQ_FALLBACK:
+                print("# PSN: the wider platform list was refused (%s) — retrying with "
+                      "%s only" % (json.dumps(data["errors"])[:120],
+                                   "/".join(_REQ_FALLBACK)), file=sys.stderr)
+                return fetch_owned(token, _REQ_FALLBACK)
             raise SystemExit("PSN: %s" % json.dumps(data["errors"])[:300])
         block = (((data.get("data") or {}).get("purchasedTitlesRetrieve")) or {})
         for g in block.get("games") or []:
@@ -235,16 +275,8 @@ def fetch_owned(token):
         if info.get("isLast") or not block.get("games"):
             break
         start += size
-    # keep every console a title is owned on (cross-gen returns PS4 + PS5 rows);
-    # de-dup only exact (title, console) repeats
-    seen, out = set(), []
-    for gid, title, plat in rows:
-        key = ((title or "").lower(), plat)
-        if title and key not in seen:
-            seen.add(key)
-            out.append((gid, title, plat))
-    out.sort(key=lambda x: (x[1] or "").lower())
-    return out
+    # keep every console a title is owned on (cross-gen returns PS4 + PS5 rows)
+    return _dedupe(rows)
 
 
 def main(argv):
@@ -266,7 +298,7 @@ def main(argv):
     token = access_token()
     rows = fetch_owned(token)
     for gid, title, plat in rows:
-        print("%s\t%s\t%s" % (gid, title, plat))
+        print(config.tsv_row(gid, title, plat))
     print("# owned PSN games: %d" % len(rows), file=sys.stderr)
 
 

@@ -30,6 +30,7 @@ locally (they go into config.sqlite, never into git):
 
 For first-time onboarding with credential how-to guidance, run ./scripts/setup.sh instead.
 """
+import json
 import os
 import sqlite3
 import sys
@@ -54,10 +55,17 @@ SCHEMA = [
     ("itch_api_key", "",
      "itch.io API key stored locally (gitignored). Get one at "
      "https://itch.io/user/settings/api-keys. ITCH_API_KEY env overrides it."),
-    ("library_db", os.path.join(DATA, "game-library.sqlite"),
-     "Output path for the unified deduped catalog."),
-    ("roms_index_db", os.path.join(DATA, "roms-index.sqlite"),
-     "Path to the ROM index DB (emulation input, built by build_romdb.py)."),
+    # BLANK, not an absolute path. Seeding these with os.path.join(DATA, ...) baked the
+    # FIRST machine's data dir into config.sqlite forever: a config created on a checkout
+    # and later mounted at /data kept pointing at the checkout, so the container wrote its
+    # catalog somewhere nothing reads. Blank means "wherever the data dir is now", which
+    # is what the docs have always said. See _resolve_data_path.
+    ("library_db", "",
+     "Output path for the unified deduped catalog. Blank = game-library.sqlite in the "
+     "data dir, which is what you want unless you deliberately put it elsewhere."),
+    ("roms_index_db", "",
+     "Path to the ROM index DB (emulation input, built by build_romdb.py). Blank = "
+     "roms-index.sqlite in the data dir."),
     ("unraid_host", "",
      "ssh target where the ROM archive lives, e.g. root@192.168.1.10 "
      "(only needed for `scripts/update.sh --roms`)."),
@@ -180,8 +188,8 @@ SCHEMA = [
      "Env: TGDB_API_KEY."),
     ("thegamesdb_monthly_limit", "1000",
      "Requests ludodex will spend per month. 1000 is what a free key grants. Raise it "
-     "ONLY if you have bought a higher tier (increases are sold via "
-     "patreon.com/thegamesdb, not granted on request) — the live allowance reported by "
+     "ONLY if you have bought a higher tier — the $29/year Developer tier grants "
+     "12,000 a month, which is the one worth naming. The live allowance reported by "
      "the API always wins, so a value above your real key is ignored, never applied."),
     ("thegamesdb_reserve", "",
      "Requests held back from bulk sweeps so interactive lookups still work. Blank = "
@@ -318,10 +326,13 @@ SCHEMA = [
      "If 1, run only providers cleared for commercial use without a separate "
      "license (see 'config.py integrations'). Excludes ScreenScraper and "
      "community/publisher art until you have authorization. Default 0."),
-    # --- remote sync (push the catalog to a remote DB mirror) ---
+    # --- RETIRED. sync.py, the one-way "publish the catalog" mirror, is gone: nothing
+    #     ever read what it published and its name kept being confused with the two-way
+    #     backing store below, which is the one that protects your data. The key stays so
+    #     an existing config.sqlite does not look corrupt; nothing reads it. ---
     ("sync_target", "",
-     "Where `scripts/update.sh` pushes the catalog after a rebuild: blank (off), "
-     "'pocketbase', 'firebase', or 'both'."),
+     "RETIRED — has no effect. The one-way catalog mirror it controlled was removed; "
+     "use backingstore_backend (the two-way backing store) instead."),
     ("pocketbase_url", "",
      "PocketBase base URL, e.g. https://pb.example.com (no trailing slash)."),
     ("pocketbase_admin_email", "",
@@ -330,7 +341,7 @@ SCHEMA = [
      "PocketBase admin password, stored locally (gitignored). POCKETBASE_PASSWORD "
      "env wins."),
     # --- two-way BACKING STORE (dbsync.py): SQLite is the local cache, this backend the
-    #     durable truth. Pick one; fill its config. Distinct from sync_target (one-way mirror). ---
+    #     durable truth. Pick one; fill its config. ---
     ("backingstore_backend", "",
      "Two-way backing store backend: blank (off) | 'pocketbase' | 'postgres' | "
      "'supabase' | 'mysql' | 'firebase'. SQLite stays the fast local cache; this holds "
@@ -395,6 +406,33 @@ def init():
     con.close()
 
 
+# Keys whose value is a path that BELONGS IN THE DATA DIR, with the filename it takes
+# there. Earlier versions seeded these with an absolute path at first init, so the answer
+# was pinned to whatever the data dir happened to be on the machine that ran `init` —
+# and moving the install (a checkout later mounted as /data, the docker image, a restored
+# backup) left the stored value pointing at a directory that no longer exists.
+_DATA_PATH_KEYS = {"library_db": "game-library.sqlite",
+                   "roms_index_db": "roms-index.sqlite"}
+
+
+def _resolve_data_path(key, val):
+    """Honour a DELIBERATE custom path; heal a STALE one.
+
+    A stored value is kept when it is inside the current data dir, when the file is
+    actually there, or when its parent directory exists (a custom location that has not
+    been written to yet). Anything else is a path from another machine, and the answer is
+    the data dir — because a catalog written to a directory that does not exist here is
+    not a preference, it is a bug that presents as an empty library."""
+    default = os.path.join(DATA, _DATA_PATH_KEYS[key])
+    if not val:
+        return default
+    p = os.path.abspath(val)
+    if p.startswith(os.path.abspath(DATA) + os.sep) or os.path.exists(p) \
+            or os.path.isdir(os.path.dirname(p)):
+        return val
+    return default
+
+
 def get(key, default=None):
     """Return a config value, falling back to the SCHEMA default (or `default`).
 
@@ -406,6 +444,8 @@ def get(key, default=None):
         con.close()
         if row is not None:
             val = row[0]
+    if key in _DATA_PATH_KEYS:
+        return _resolve_data_path(key, val)
     if val:
         return val
     if default is not None:
@@ -438,6 +478,67 @@ def set_(key, value):
 
 # Credentials resolve env var > local config value only. ludodex never reads
 # 1Password (or any external secret store) at runtime — populate config.sqlite.
+# --------------------------------------------------------------------------- #
+#  Shared helpers for the store scripts. They live here rather than in a module of
+#  their own because config.py is the one thing every store script already imports,
+#  and both of these are rules that must hold for the NEXT store as well as the nine
+#  that exist.
+# --------------------------------------------------------------------------- #
+def write_private_json(path, obj):
+    """Write a cached credential: owner-only, and atomically.
+
+    A cached token IS a password. PSN's refresh token lasts about two months, GOG's
+    rotates but is equally live, and Xbox's mints Xbox Live tokens on demand — yet five
+    of these scripts wrote them with a bare `json.dump(tok, open(path, "w"))`, which
+    takes whatever the umask allows: group-readable on a shell, 0644 under Docker, where
+    every other container on the same /data can read it.
+
+    ATOMIC for a second reason: `open(path, "w")` truncates before it writes, so a crash
+    or a full disk in between leaves an EMPTY token file and the next run reports "not
+    connected" for a session that was perfectly good. Write beside it, chmod, rename.
+
+    The temp file is created 0600 from the start — chmod'ing after the write would leave
+    the credential world-readable for the length of the write."""
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)          # the directory listing alone says which stores are linked
+    except OSError:
+        pass
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh)
+    except BaseException:
+        try:
+            os.unlink(tmp)          # never leave a half-written credential lying around
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, path)
+    return path
+
+
+# A field separator cannot also be data. Every store script printed "%s\t%s" with no
+# escaping, and build_library's loader splits on \t and strips only \n — so a title
+# containing a tab lost its tail, and a stray \r rode into the catalog title, where it
+# joins the norm_key and forks one game into two entries. Collapsing the three
+# characters that mean something structural to a space keeps the row readable, loses
+# nothing a person would recognise in a game's name, and needs no loader change.
+_TSV_BREAKS = str.maketrans({"\t": " ", "\r": " ", "\n": " ", "\x00": " "})
+
+
+def tsv_field(value):
+    """One TSV cell: no tabs, no line breaks, no NULs, no leading/trailing space."""
+    return str("" if value is None else value).translate(_TSV_BREAKS).strip()
+
+
+def tsv_row(*fields):
+    """A whole TSV line (without the newline) from already-sanitised cells."""
+    return "\t".join(tsv_field(f) for f in fields)
+
+
 def steam_key():
     return os.environ.get("STEAM_API_KEY", "").strip() or get("steam_api_key")
 
@@ -525,10 +626,25 @@ def screenscraper_creds():
     return creds
 
 
-# Media providers: local mount-based (esde, steamgrid, playnite, launchbox) +
-# remote (steam, igdb, steamgriddb). Kept in sync with media.MEDIA_PROVIDERS.
-MEDIA_PROVIDERS = ("esde", "steamgrid", "playnite", "launchbox", "steam", "igdb",
-                   "steamgriddb")
+# Media providers: local mount-based (esde, steamgrid, playnite, launchbox) + remote
+# (steam, igdb, steamgriddb, thegamesdb, arcadedb, zxinfo, mobygames).
+#
+# TAKEN FROM media.py, not copied from it. The comment here used to CLAIM it was "kept in
+# sync with media.MEDIA_PROVIDERS" while listing four fewer providers, so every one of
+# them was invisible to `config.py enable <provider>` and to the per-provider scope
+# settings. A list that has to be kept in sync by hand is a list that drifts; importing
+# it means it cannot. media imports config, so this is deferred to avoid the cycle —
+# and the literal below is only the fallback for a CLI running without media's deps.
+def _media_providers():
+    try:
+        import media
+        return tuple(media.MEDIA_PROVIDERS)
+    except Exception:                            # noqa: BLE001
+        return ("esde", "steamgrid", "playnite", "launchbox", "steam", "igdb",
+                "steamgriddb", "thegamesdb", "arcadedb", "zxinfo", "mobygames")
+
+
+MEDIA_PROVIDERS = _media_providers()
 
 
 def media_enabled(name):
@@ -897,11 +1013,13 @@ INTEGRATIONS = [
          "A free key is 1,000 requests PER MONTH — not per day. ludodex batches 20 "
          "games per request and takes boxart on the same call, which is what makes "
          "that budget workable; leave it batching.",
-         "Increases are BOUGHT, not requested: patreon.com/thegamesdb (Bronze $1 / "
-         "Silver $5 / Gold $15). The tiers do not publish what limit each grants — "
-         "ask support@thegamesdb.net or their Discord before paying. If you buy one, "
-         "raise thegamesdb_monthly_limit to match; the live allowance the API reports "
-         "always wins, so setting it too high is ignored rather than overspent."],
+         "Increases are BOUGHT, not requested, and the one worth naming is the "
+         "$29/year DEVELOPER tier: 12,000 requests a month, enough to walk the whole "
+         "id space (about 6,900 requests) in one evening. The small Patreon tiers "
+         "raise the free 1,000 by amounts they do not publish, so they are the wrong "
+         "product to point at. Raise thegamesdb_monthly_limit to what you were "
+         "granted; the live allowance the API reports always wins, so setting it too "
+         "high is ignored rather than overspent."],
      "config_keys": ["thegamesdb_api_key", "thegamesdb_monthly_limit",
                      "thegamesdb_reserve"],
      "env": ["TGDB_API_KEY"],
@@ -1018,10 +1136,13 @@ INTEGRATIONS = [
          "Store: config.py set pocketbase_url <url>; config.py set "
          "pocketbase_admin_email <email>; config.py set pocketbase_admin_password "
          "<pw>  (or enter it in the web UI).",
-         "Enable auto-sync: config.py set sync_target pocketbase."],
+         "Point the BACKING STORE at it: config.py set backingstore_backend "
+         "pocketbase  (sync_target was the retired one-way mirror; dbsync.py is the "
+         "two-way store that actually protects your data)."],
      "config_keys": ["pocketbase_url", "pocketbase_admin_email",
                      "pocketbase_admin_password"],
-     "env": ["POCKETBASE_PASSWORD"], "verify": "python3 sync.py --dry-run"},
+     "env": ["POCKETBASE_PASSWORD"],
+     "verify": "python3 ludodex/dbsync.py pocketbase --dry-run"},
 
     {"id": "firebase", "name": "Firebase Firestore (sync)", "kind": "sync",
      "purpose": "Mirror the catalog to Firestore (alternative/addition to PocketBase).",
@@ -1031,10 +1152,10 @@ INTEGRATIONS = [
          "new private key (downloads a JSON).",
          "Store: config.py set firebase_project_id <project>; config.py set "
          "firebase_sa_json /path/to/service-account.json.",
-         "pip install -r requirements-firebase.txt; config.py set sync_target "
-         "firebase (or 'both')."],
+         "pip install -r requirements-firebase.txt; config.py set "
+         "backingstore_backend firebase."],
      "config_keys": ["firebase_project_id", "firebase_sa_json"], "env": [],
-     "verify": "python3 sync.py firebase --dry-run"},
+     "verify": "python3 ludodex/dbsync.py firebase --dry-run"},
 ]
 
 NO_AUTH_NOTE = ("emulation/archive (local ROM index + crawl mounts), Steam-grid "

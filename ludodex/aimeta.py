@@ -14,6 +14,7 @@ This module does the sqlite work only — the AI call itself lives in server/ai.
 import glob
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -38,7 +39,56 @@ SUPPLEMENT_KINDS = ["release_year", "genres", "developers", "publishers",
                     "description", "themes", "game_modes", "player_perspectives"]
 
 # text sidecars small enough to peek at when identifying (id-helpful, not media blobs)
-_SIDECAR_EXTS = {"nfo", "txt", "dat", "xml", "json", "md", "ini"}
+# A SIDECAR IS QUOTED INTO A PAID PROMPT, so what counts as one is a security question,
+# not a convenience one. The old set included json / ini / xml / dat: the four extensions
+# most likely to be CONFIGURATION sitting in a ROM folder — an emulator's settings, a
+# scraper's api key, a saved login — and the least likely to say what the game is. The
+# ones kept are the ones people actually write release notes in.
+_SIDECAR_EXTS = {"nfo", "txt", "md"}
+
+# Names that announce themselves as secrets even with an allowed extension. Cheap, and
+# it costs nothing to be wrong: skipping a file named `token.txt` loses a hint at worst.
+_SECRET_NAME = re.compile(
+    r"(?i)(secret|credential|password|passwd|token|api[-_. ]?key|\bkey\b|auth|"
+    r"cookie|\.env|login)")
+
+# A value that LOOKS like a credential, wherever it appears inside an allowed file. A
+# 24+ character unbroken run of base64/hex is not prose, and a `key = …` line is not a
+# release note. One hit rejects the whole snippet rather than trying to redact it:
+# partial redaction of an unknown format is a guess, and this is a paid egress path.
+_SECRET_VALUE = re.compile(
+    r"(?i)(?:(?:api[-_ ]?key|secret|token|password|passwd|bearer)\s*[:=]\s*\S)"
+    r"|(?:\b[A-Za-z0-9+/_-]{24,}={0,2}\b)")
+
+# The whole file must be small AND the quoted slice smaller. Both bounds already existed
+# as magic numbers at the call site; named here so the limit on what leaves the machine
+# is one thing you can read.
+_SIDECAR_MAX_BYTES = 4096
+_SIDECAR_QUOTE_BYTES = 500
+_SIDECAR_MAX_FILES = 2
+
+
+def _sidecar_text(path, filename):
+    """The bounded, screened snippet of a ROM sidecar, or None to include nothing.
+
+    Everything this returns is sent to a model that bills per token and is operated by
+    somebody else. A ROM folder is a place users put arbitrary files, so "any small text
+    file next to a ROM" was an unbounded read of unknown content into a paid egress path.
+    The rules are: a describing extension, a name that is not announcing a secret, real
+    text, no credential-shaped content anywhere in the slice, and 500 bytes."""
+    if _SECRET_NAME.search(filename or ""):
+        return None
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(_SIDECAR_QUOTE_BYTES)
+    except OSError:
+        return None                # on the Deck / not mounted here — name only
+    if b"\x00" in raw:
+        return None                # binary wearing a .txt extension
+    text = raw.decode("utf-8", "replace").strip()
+    if not text or _SECRET_VALUE.search(text):
+        return None
+    return text
 
 
 def _rom_indexes():
@@ -137,13 +187,11 @@ def _rom_file_context(links, max_files=6, max_sibs=12):
                             continue
                         siblings.add(s["filename"])
                         if ((s["ext"] or "").lower() in _SIDECAR_EXTS
-                                and 0 < (s["size_bytes"] or 0) < 4096
-                                and len(sibling_text) < 2):
-                            try:
-                                with open(s["fullpath"], "r", errors="replace") as fh:
-                                    sibling_text[s["filename"]] = fh.read(500).strip()
-                            except OSError:
-                                pass       # on the Deck / not mounted here — name only
+                                and 0 < (s["size_bytes"] or 0) < _SIDECAR_MAX_BYTES
+                                and len(sibling_text) < _SIDECAR_MAX_FILES):
+                            txt = _sidecar_text(s["fullpath"], s["filename"])
+                            if txt:
+                                sibling_text[s["filename"]] = txt
         finally:
             rc.close()
     if not (files or folders or siblings):

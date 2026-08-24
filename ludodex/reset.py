@@ -27,6 +27,7 @@ asked about, and the caller is expected to take a safety snapshot beforehand.
 import glob
 import os
 import shutil
+import sys
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 # DIR is this package; DATA is the REPO ROOT above it, which is where local
@@ -147,6 +148,38 @@ def _repo_stats(root):
     return n, size, preserved
 
 
+def backing_store_warning(scope):
+    """Why a reset may not stick while a backing store is configured, or None.
+
+    THE RESET IS LOCAL ONLY. There is no "reset the remote" path, and `curation` deletes
+    both the curation databases AND `sync_cache.sqlite`, which is the merge SHADOW — the
+    record of which rows the backing store already knows about. With the shadow gone the
+    next sync sees local empty, shadow empty and remote full, reads that as "the remote
+    has rows I have never seen", and PULLS EVERYTHING BACK. With
+    `backingstore_auto_minutes > 0` that happens on a timer, unattended, minutes after
+    the user watched the reset report success.
+
+    This does not try to fix it — resetting someone's external database is not a thing to
+    do on their behalf. It says so, in the plan, before the button is pressed."""
+    if scope == "library":
+        return None                 # sync_cache is import-scope, but so is nothing curated
+    try:
+        import config
+        backend = (config.get("backingstore_backend") or "").strip()
+        auto = int(config.get("backingstore_auto_minutes") or 0)
+    except Exception:               # noqa: BLE001 — a CLI without the config module
+        return None
+    if not backend:
+        return None
+    when = ("automatically, in about %d minute(s)" % auto) if auto > 0 \
+        else "the next time you run a backing-store sync"
+    return ("A backing store (%s) is configured, and this reset only clears LOCAL data. "
+            "It also deletes sync_cache.sqlite, the shadow that records what the backing "
+            "store already holds — so %s the sync will see the remote's rows as new and "
+            "pull all of them back. Clear the remote collections yourself, or turn the "
+            "backing store off, before resetting." % (backend, when))
+
+
 def plan(scope="library"):
     """What run(scope) would remove — file names, counts and bytes. Pure: touches
     nothing. This is what a confirmation dialog should render."""
@@ -172,6 +205,7 @@ def plan(scope="library"):
         "media_preserved": media_kept,
         "token_dirs": tokens,
         "kept": sorted(KEEP_ALWAYS),
+        "warnings": [w for w in (backing_store_warning(scope),) if w],
         "total_bytes": db_bytes + tsv_bytes + rom_bytes + media_bytes,
     }
 
@@ -187,6 +221,8 @@ def run(scope="library"):
         raise ValueError("unknown scope %r" % scope)
     p = plan(scope)
     removed, failed = [], []
+    for w in p.get("warnings") or []:
+        print("reset: WARNING — %s" % w, file=sys.stderr)
 
     def _rm(path, label):
         try:
@@ -233,4 +269,5 @@ def run(scope="library"):
         except OSError as e:
             failed.append("%s: %s" % (d, e))
     return {"ok": not failed, "scope": scope, "removed": removed,
-            "failed": failed, "freed_bytes": p["total_bytes"]}
+            "failed": failed, "freed_bytes": p["total_bytes"],
+            "warnings": p.get("warnings") or []}

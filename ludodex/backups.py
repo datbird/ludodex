@@ -15,9 +15,18 @@ so "config nightly to the NAS" and "everything weekly to the Deck" can coexist.
 Snapshots use SQLite's ONLINE BACKUP api, so they're consistent even while the server is
 mid-write — a plain file copy of a live WAL database can land torn.
 
-Encryption is optional and off by default. When a passphrase is set the zip is AES-256
-(WinZip AES via pyzipper), which 7-Zip / Keka / WinRAR can open — a backup you can only
-read with the app that made it isn't much of a backup.
+Encryption is optional. When a passphrase is set the zip is AES-256 (WinZip AES via
+pyzipper), which 7-Zip / Keka / WinRAR can open — a backup you can only read with the app
+that made it isn't much of a backup.
+
+SECRETS ARE OPT-IN AND ENCRYPTION-ONLY. 'ALL' means "every database whose loss would cost
+you", and the databases holding credentials are not in it: an archive of every provider
+API key and every device password, written unencrypted and world-readable onto a NAS
+share, is a worse outcome than the data loss the backup was guarding against. Name one in
+a job's contents to include it anyway — but only in a job that has a passphrase, refused
+when you configure it rather than at 3am. `backups.sqlite` never travels at all, because
+it stores every job's passphrase in plaintext and would hand over the key to every
+ENCRYPTED job's archive.
 """
 import os
 import shutil
@@ -120,6 +129,10 @@ def set_job(body):
                 vals[f] = {"name": "Backup", "enabled": 1, "contents": "ALL",
                            "dest_kind": "local", "dest_path": "", "device_id": None,
                            "every_minutes": 0, "retention": 7, "passphrase": ""}[f]
+        # Validate the RESOLVED job, not the body: a partial update that only clears the
+        # passphrase must be judged against the contents already stored.
+        _guard_contents(vals["contents"], vals["passphrase"])
+        _guard_destination(vals["dest_kind"], vals["device_id"])
         if cur is not None:
             con.execute("UPDATE jobs SET %s WHERE id=?"
                         % ",".join("%s=?" % f for f in FIELDS),
@@ -163,40 +176,115 @@ def _mark(job_id, ok, error="", fname="", size=0):
 # file on disk. Name one explicitly in a job's contents to back it up anyway.
 DERIVED = {"igdb-catalog.sqlite", "ss-catalog.sqlite", "match-index.sqlite"}
 
+# Databases whose rows ARE credentials: provider API keys, the device passwords
+# connections.sqlite stores in the clear, session tokens. Excluded from 'ALL' so the
+# default job cannot write every secret in the install to a share in plaintext. Naming
+# one explicitly still works — see _guard_contents, which requires a passphrase for it.
+SECRET = {"config.sqlite", "connections.sqlite", "auth.sqlite"}
+
+# Never in any archive, named or not, encrypted or not. backups.sqlite holds each job's
+# passphrase as plaintext, so shipping it inside job B's zip hands whoever can open that
+# zip the key to every ENCRYPTED job's archive at the same destination.
+NEVER = {"backups.sqlite"}
+
 
 def db_files(contents):
     """Resolve a job's content selection to real files present in DATA. 'ALL' (stored as
-    the literal string) means every *.sqlite that is not a rebuildable mirror — including
-    ones added by future features, which is what you want from a backup."""
+    the literal string) means every *.sqlite that is not a rebuildable mirror and not a
+    credential store — including ones added by future features, which is what you want
+    from a backup."""
     try:
         present = sorted(f for f in os.listdir(DATA)
                          if f.endswith(".sqlite") and os.path.isfile(os.path.join(DATA, f)))
     except OSError:
         return []
+    present = [f for f in present if f not in NEVER]
     if contents == "ALL" or not contents:
-        return [f for f in present if f not in DERIVED]
+        return [f for f in present if f not in DERIVED and f not in SECRET]
     want = {c.strip() for c in contents.split(",") if c.strip()}
     return [f for f in present if f in want]
 
 
+def _guard_contents(contents, passphrase):
+    """Refuse a selection that would write credentials in the clear.
+
+    Checked when the job is SAVED and again when it RUNS: the save is where a person can
+    fix it, but rows written before this rule existed are already on disk and the
+    scheduler runs them unattended."""
+    if contents == "ALL" or not contents:
+        return
+    named = {c.strip() for c in contents.split(",") if c.strip()}
+    if named & NEVER and not (named - NEVER):
+        # Otherwise this fails later as the unhelpful "nothing selected to back up".
+        raise ValueError(
+            "%s cannot be backed up: it stores every job's passphrase in plaintext, so "
+            "putting it in an archive hands over the key to every encrypted job's "
+            "backup. Re-create your jobs by hand after a restore."
+            % ", ".join(sorted(named & NEVER)))
+    leaking = sorted(named & SECRET)
+    if leaking and not (passphrase or "").strip():
+        raise ValueError(
+            "%s hold credentials in the clear; a job that backs them up needs a "
+            "passphrase, because the archive is written to a destination this server "
+            "does not control" % ", ".join(leaking))
+
+
+def _guard_destination(dest_kind, device_id):
+    """A device destination with no device selected is not a destination.
+
+    push_file(None, ...) writes to the path LOCALLY and returns happily, so the job
+    reported ok and the user believed the archive was offsite when it never left the
+    server — the failure mode a backup can least afford."""
+    if dest_kind == "device" and not device_id:
+        raise ValueError("this job pushes to a device but no device is selected")
+
+
+def _is_sqlite(path):
+    """True when the file really is a SQLite database, by its magic header."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(16) == b"SQLite format 3\x00"
+    except OSError:
+        return False
+
+
 def _snapshot(files, dest_dir):
-    """Consistent copies of `files` into dest_dir via SQLite's online backup."""
+    """Consistent copies of `files` into dest_dir via SQLite's online backup.
+
+    RAISES on any file it cannot capture. The old code fell back to `shutil.copy2` on
+    sqlite3.Error and `continue`d on OSError, so a database that was locked hard was
+    copied WITHOUT its -wal — the torn copy this module's docstring exists to prevent —
+    and a database it could not read at all simply vanished from the archive. Both
+    reported as a successful backup, which is the one outcome a backup must never
+    produce: you find out at restore time. A job that fails loudly can be re-run.
+
+    The one surviving copy2 is for a file that is not a SQLite database at all, where
+    there is no online backup to do and a byte copy is the correct answer."""
     os.makedirs(dest_dir, exist_ok=True)
+    os.chmod(dest_dir, 0o700)        # the staged copies are the same secrets as the originals
     out = []
     for fname in files:
         src, dst = os.path.join(DATA, fname), os.path.join(dest_dir, fname)
+        s = d = None
         try:
             s = sqlite3.connect(src, timeout=15)
             d = sqlite3.connect(dst)
             with d:
                 s.backup(d)
-            s.close()
-            d.close()
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            if _is_sqlite(src):
+                raise RuntimeError("could not snapshot %s: %s" % (fname, e))
             try:
-                shutil.copy2(src, dst)          # not a sqlite file, or locked hard
-            except OSError:
-                continue
+                shutil.copy2(src, dst)          # not a sqlite database — a byte copy IS right
+            except OSError as oe:
+                raise RuntimeError("could not copy %s: %s" % (fname, oe))
+        finally:
+            for c in (s, d):
+                if c is not None:
+                    try:
+                        c.close()
+                    except sqlite3.Error:
+                        pass
         out.append(dst)
     return out
 
@@ -204,6 +292,12 @@ def _snapshot(files, dest_dir):
 def _zip(paths, zip_path, passphrase=""):
     """Zip the snapshot. AES-256 when a passphrase is given (openable by 7-Zip/Keka), a
     plain deflate zip otherwise."""
+    # Create the file 0600 BEFORE anything is written into it, then let the zip writer
+    # open the existing path — "w" does not reset an existing file's mode. Creating it
+    # under the process umask and chmod'ing afterwards would leave the whole archive
+    # world-readable for as long as the zip takes to write. shutil.copy2 and `rsync -a`
+    # both carry this mode to the destination, so it is also what lands on the NAS.
+    os.close(os.open(zip_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600))
     if passphrase:
         try:
             import pyzipper
@@ -239,8 +333,13 @@ def run_job(job_id, log=lambda m: None):
     stage = os.path.join(STAGE, str(job_id))
     shutil.rmtree(stage, ignore_errors=True)
     os.makedirs(stage, exist_ok=True)
+    os.chmod(stage, 0o700)           # the staging dir holds the archive in the clear
     zip_path = os.path.join(stage, fname)
     try:
+        # Checked here as well as in set_job: jobs written before these rules existed are
+        # already in the table, and the scheduler runs them with nobody watching.
+        _guard_contents(job["contents"], job["passphrase"])
+        _guard_destination(job["dest_kind"], job["device_id"])
         files = db_files(job["contents"])
         if not files:
             raise RuntimeError("nothing selected to back up")
@@ -261,7 +360,10 @@ def run_job(job_id, log=lambda m: None):
             kept, pruned = _prune(devices, dev_id, dest, prefix, int(job["retention"]))
             log("retention: kept %d, removed %d" % (kept, pruned))
         _mark(job_id, True, "", fname, size)
-        return {"ok": True, "file": fname, "size": size, "databases": len(files),
+        # len(snaps), not len(files): report what is IN the archive. _snapshot raises
+        # rather than skipping now, so the two agree — and if that ever stops being
+        # true, the summary is the number that would have lied.
+        return {"ok": True, "file": fname, "size": size, "databases": len(snaps),
                 "pruned": pruned, "dest": dest, "device_id": dev_id}
     except Exception as e:
         _mark(job_id, False, str(e)[:400])

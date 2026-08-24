@@ -64,19 +64,61 @@ LOGIN_URL = ("%s?response_type=code&client_id=%s&display=originXWeb/login"
 SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION = 1 << 18
 
 
+class _NoCookieRedirect(urllib.request.HTTPRedirectHandler):
+    """Never carry the remid cookie across a host boundary.
+
+    urllib's redirect handler copies every header except Content-Length/Content-Type
+    onto the redirect target, so the DURABLE EA credential followed accounts.ea.com's
+    redirects to wherever they pointed. Akamai Bot Manager sits in front of that host and
+    redirecting a request it dislikes is exactly what it does, so the one place this
+    leaks is the one place it reliably happens."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and not _same_host(req.full_url, newurl):
+            for store in (new.headers, new.unredirected_hdrs):
+                for k in [k for k in store if k.lower() == "cookie"]:
+                    del store[k]
+        return new
+
+
+def _same_host(a, b):
+    return (urllib.parse.urlsplit(a).hostname or "").lower() == \
+        (urllib.parse.urlsplit(b).hostname or "").lower()
+
+
 def _opener():
     ctx = ssl.create_default_context()
     ctx.options |= SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
-    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx),
+                                       _NoCookieRedirect)
 
 
 OPENER = _opener()
 
 
+def _json(raw, url):
+    """Parse a reply that is SUPPOSED to be JSON, and explain it when it is not.
+
+    Akamai's challenge serves an HTML page with a 200, and a bare json.load raised a
+    JSONDecodeError from inside the transport — before any of this module's friendly
+    "your login expired, re-run --login" messages could be reached. The user got a
+    traceback about char 0 and no instruction."""
+    try:
+        return json.loads(raw.decode("utf-8", "replace")
+                          if isinstance(raw, bytes) else raw)
+    except ValueError:
+        raise SystemExit(
+            "ea: %s did not answer with JSON — this is almost always Akamai's bot "
+            "challenge, which EA serves as an HTML page with a 200. Re-run "
+            "`python3 ludodex/ea_owned.py --login`, or grab a browser token and pass "
+            "it with --token." % urllib.parse.urlsplit(url).hostname)
+
+
 def _get(url, headers=None, timeout=30):
     req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
     with OPENER.open(req, timeout=timeout) as r:
-        return json.load(r)
+        return _json(r.read(), url)
 
 
 def _post(url, body, headers=None, timeout=30):
@@ -86,7 +128,7 @@ def _post(url, body, headers=None, timeout=30):
         headers={"User-Agent": UA, "Content-Type": "application/json",
                  **(headers or {})})
     with OPENER.open(req, timeout=timeout) as r:
-        return json.load(r)
+        return _json(r.read(), url)
 
 
 # --------------------------------------------------------------------------- #
@@ -112,10 +154,7 @@ def cookie_header(cookies):
 
 
 def save_cookies(cookies):
-    os.makedirs(EA_DIR, exist_ok=True)
-    with open(COOKIES, "w") as f:
-        json.dump(cookies, f)
-    os.chmod(COOKIES, 0o600)
+    config.write_private_json(COOKIES, cookies)
 
 
 # --------------------------------------------------------------------------- #
@@ -129,10 +168,8 @@ def fetch_token(cookies):
         raise SystemExit("ea: could not get an access token (%s). Your EA login "
                          "likely expired — re-run: python3 ludodex/ea_owned.py --login"
                          % data.get("error", data))
-    os.makedirs(EA_DIR, exist_ok=True)
     data["expires_at"] = int(time.time()) + int(data.get("expires_in", 3600)) - 60
-    with open(TOKEN, "w") as f:
-        json.dump(data, f)
+    config.write_private_json(TOKEN, data)
     return data["access_token"]
 
 
@@ -157,7 +194,9 @@ def gql(query, variables, cookies, tok):
         errs = res.get("errors")
         if errs and attempt == 1 and any("token" in json.dumps(e).lower()
                                          for e in errs):
-            tok = fetch_token(cookies)        # stale token -> refresh and retry
+            # token(force=True), not fetch_token: one place decides how a token is
+            # obtained, and `force` had no caller while this open-coded the same thing.
+            tok = token(cookies, force=True)  # stale token -> refresh and retry
             continue
         if errs:
             raise SystemExit("ea: GraphQL error: %s" % errs)
@@ -233,15 +272,36 @@ def do_login():
           % (player.get("displayName"), player.get("pd"), COOKIES), file=sys.stderr)
 
 
+def parse_pasted_token(raw, default_ttl=14400):
+    """(access_token, ttl) from whatever was pasted — the whole JSON, or the bare value.
+
+    A bare value says nothing about its own lifetime, so the ~4h default stands. When
+    the paste IS the JSON, its `expires_in` is authoritative and discarding it (as this
+    did) meant a 15-minute token was trusted for four hours: every call in between fails
+    with an auth error that reads like a broken login rather than an expired token."""
+    ttl = default_ttl
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            raw = obj.get("access_token", raw)
+            if obj.get("expires_in"):
+                ttl = int(obj["expires_in"])
+    except (ValueError, TypeError):
+        pass
+    return str(raw).strip(), ttl
+
+
 def save_token(access_token, ttl=14400):
     """Cache a browser-minted access token (EA's Akamai shield blocks the
     headless cookie->token refresh, so a token grabbed from the logged-in
-    browser is the reliable way in)."""
-    os.makedirs(EA_DIR, exist_ok=True)
-    with open(TOKEN, "w") as f:
-        json.dump({"access_token": access_token,
-                   "expires_at": int(time.time()) + int(ttl) - 60}, f)
-    os.chmod(TOKEN, 0o600)
+    browser is the reliable way in).
+
+    `ttl` defaults to EA's usual ~4h ONLY because a bare pasted token says nothing about
+    its own lifetime. When the paste is the whole JSON its `expires_in` is authoritative
+    and the caller passes it: trusting a 15-minute token for four hours means every call
+    in between fails with an auth error that looks like a broken login."""
+    config.write_private_json(TOKEN, {"access_token": access_token,
+                                     "expires_at": int(time.time()) + int(ttl) - 60})
 
 
 def main(argv):
@@ -252,11 +312,7 @@ def main(argv):
         i = argv.index("--token")
         raw = argv[i + 1]
         del argv[i:i + 2]
-        try:                                  # accept the whole JSON or just the value
-            raw = json.loads(raw).get("access_token", raw)
-        except (ValueError, AttributeError):
-            pass
-        save_token(raw.strip())
+        save_token(*parse_pasted_token(raw))
         print("ea: saved access token. Pulling…", file=sys.stderr)
     if not config.source_enabled("ea"):
         # NON-ZERO, NOT return. The caller redirects stdout into ea_games.tsv, so a
@@ -281,7 +337,7 @@ def main(argv):
     for oid in offers:
         t = titles.get(oid)
         if t:
-            print("%s\t%s" % (oid, t))
+            print(config.tsv_row(oid, t))
             n += 1
     print("ea: %d owned games (%d offers, %d unresolved)"
           % (n, len(offers), len(offers) - n), file=sys.stderr)

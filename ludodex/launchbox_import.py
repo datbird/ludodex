@@ -22,6 +22,7 @@ import xml.etree.ElementTree as ET
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 import launchbox as lb
+import media_index
 from titlenorm import norm
 
 # LaunchBox <Game> multi-value tag -> interchange list field (semicolon-split)
@@ -85,8 +86,12 @@ def parse_platforms(root):
 
 
 def scan_images(con, root, owned, now):
-    """Index Images/<Platform>/<MediaType>/<Title>.<ext> as provider 'launchbox'."""
-    con.execute("DELETE FROM media WHERE provider='launchbox'")
+    """Index Images/<Platform>/<MediaType>/<Title>.<ext> as provider 'launchbox'.
+
+    NO BLANKET DELETE. Wiping the provider's rows first and re-inserting them is the
+    same loss as INSERT OR REPLACE: the surviving files come back as brand-new rows with
+    no sha1, no measurements, no ai_pick. Rows this run did not touch are swept at the
+    end instead, which still drops assets that are genuinely gone."""
     idir = os.path.join(root, "Images")
     rows = matched = 0
     if not os.path.isdir(idir):
@@ -114,14 +119,20 @@ def scan_images(con, root, owned, now):
                     if not nk:
                         continue
                     is_match = nk in owned
-                    con.execute(
-                        "INSERT OR REPLACE INTO media(norm_key,system,kind,provider,"
-                        "mount,ref_type,ref,ext,matched,indexed_at) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                        (nk, system, kind, "launchbox", "launchbox", "file",
-                         os.path.join(dirpath, fn), ext, int(is_match), now))
-                    rows += 1
-                    matched += int(is_match)
+                    # media_index.put_local, not INSERT OR REPLACE: REPLACE deletes the
+                    # existing row, taking its sha1 (the pointer to bytes already in the
+                    # media repo), the measured width/height, the PAID ai_pick verdict
+                    # and the `hidden` flag with it — so every import re-copied,
+                    # re-measured and re-purchased all of it. put_local also honours the
+                    # ban list, which this bypassed entirely: a banned LaunchBox image
+                    # came straight back on the next import.
+                    if media_index.put_local(con, nk, kind, "launchbox",
+                                             os.path.join(dirpath, fn), ext, now,
+                                             system=system, mount="launchbox",
+                                             matched=int(is_match)):
+                        rows += 1
+                        matched += int(is_match)
+    media_index.sweep(con, "launchbox", now)     # assets that disappeared, and only those
     con.commit()
     return rows, matched
 
@@ -145,7 +156,6 @@ def main(argv):
 
     if do_media:
         import time
-        import media_index
         owned = {norm(r["name"]) for r in records}
         db = config.get("library_db")
         if db and os.path.exists(db):

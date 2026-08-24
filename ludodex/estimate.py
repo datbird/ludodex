@@ -103,11 +103,21 @@ def plan(tier="lite", workers=None, total=None, fresh=False):
     if fresh:
         need_match = need_sgdb = need_steam = need_media = need_vision = total
     else:
-        # only what is not already recorded — the whole point
+        # only what is not already recorded — the whole point.
+        #
+        # A RECORDED MISS IS NOT A MATCH. `ss_resolution` holds a row with id 0 for every
+        # game a search failed on (that is the negative cache, deliberately), so
+        # COUNT(*) counted "we looked and found nothing" as "done". A library where the
+        # last pass mostly missed therefore estimated a full match pass at zero work and
+        # the UI advertised "under a minute" for an hour of it. Only a positive id is an
+        # identity; DISTINCT because a row-count that can exceed the game count is what
+        # made `max(0, ...)` clamp the difference away instead of showing it.
         have_match = _count("metadata-cache.sqlite",
-                            "SELECT COUNT(*) FROM ss_resolution")
+                            "SELECT COUNT(DISTINCT norm_key) FROM ss_resolution "
+                            "WHERE COALESCE(ss_id,0)>0")
         have_sgdb = _count("metadata-cache.sqlite",
-                           "SELECT COUNT(*) FROM sgdb_resolution")
+                           "SELECT COUNT(DISTINCT norm_key) FROM sgdb_resolution "
+                           "WHERE COALESCE(sgdb_id,0)>0")
         have_steam = _count("steam-meta.sqlite", "SELECT COUNT(*) FROM steam_meta")
         have_vision = _count("media-index.sqlite",
                              "SELECT COUNT(*) FROM art_adjudicated")

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Pull owned games from an Xbox / Microsoft account — the 2nd console-store leg.
+"""Pull the game list for an Xbox / Microsoft account — the 2nd console-store leg.
+
+WHAT THIS ACTUALLY RETURNS IS TITLE HISTORY, NOT PURCHASES. It is the closest thing a
+third-party client can reach, and it is not the same claim: it includes Game Pass titles
+the account never bought and misses purchases it never launched. Every row carries a
+fourth column, `play-history`, saying so, and the run prints the same caveat — because
+docs/SOURCES.md defines a source as asserting ownership, and this one cannot.
 
 Xbox uses a self-contained Microsoft OAuth (no third party), then the Xbox Live
-token dance, to reach the Microsoft Store's *collections* service — true owned
-entitlements (not Game Pass play history). Auth is a one-time paste-code, like
-Epic:
+token dance. Auth is a one-time paste-code, like Epic:
 
   1. Click Get Xbox code (opens login.live.com), sign in.
   2. It lands on a blank oauth20_desktop.srf page — the code is in the browser
@@ -115,8 +119,10 @@ def _extract_code(raw):
 
 
 def _save(tok):
+    # config.write_private_json, not a bare open(): this refresh token mints Xbox Live
+    # tokens on demand, so its file mode is the whole of its protection.
     tok["_saved_at"] = int(time.time())
-    json.dump(tok, open(TOKFILE, "w"))
+    config.write_private_json(TOKFILE, tok)
 
 
 # --- Microsoft OAuth ------------------------------------------------------- #
@@ -165,30 +171,61 @@ def _auth_header(uhs, xsts):
     return "XBL3.0 x=%s;%s" % (uhs, xsts)
 
 
-# --- Owned games (titlehub) ------------------------------------------------ #
-# NOTE: the Microsoft Store *collections* API (true purchase entitlements) only
-# returns products registered to the querying app in Partner Center, so a generic
-# third-party client gets an EMPTY collection — verified against a live account.
-# titlehub (the account's title history: games launched/owned across Xbox + PC) is
-# the path every third-party Xbox tool uses; type==Game drops apps. It's play-
-# history-based, so it can include Game Pass titles and miss never-launched ones.
-def fetch_owned(ms_access):
-    """Owned/played Xbox games as (titleId, name) rows, via titlehub."""
-    user_tok = xbl_user_token(ms_access)
-    xsts, claims = xsts_token(user_tok, RP_XBOXLIVE)
-    xuid = claims.get("xid")
-    url = ("https://titlehub.xboxlive.com/users/xuid(%s)/titles/titlehistory/"
-           "decoration/detail" % xuid)
+# --- Played/owned games (titlehub) ----------------------------------------- #
+# THIS IS TITLE HISTORY, NOT AN ENTITLEMENT LIST, and the rows say so. The Microsoft
+# Store *collections* API (true purchase entitlements) only returns products registered
+# to the querying app in Partner Center, so a generic third-party client gets an EMPTY
+# collection — verified against a live account. titlehub is what every third-party Xbox
+# tool falls back to; type==Game drops apps. But it is play history: it INCLUDES Game
+# Pass titles the account never bought, and MISSES purchases the account never launched.
+#
+# docs/SOURCES.md defines a source as something that asserts ownership, so writing this
+# as plain ownership was a claim the data does not support. Every row therefore carries
+# a fourth column naming its evidence — `play-history` — so a consumer can tell a played
+# title from a purchase. build_library's loader reads three columns and ignores the
+# fourth today; recording it is the change that makes the distinction usable, and until
+# then the column is at least true and the stderr line says the same thing to the user.
+EVIDENCE = "play-history"
+PAGE_MAX = 1000        # titlehub truncates silently without maxItems
+
+
+def _get_json(url, headers):
     req = urllib.request.Request(url, method="GET")
-    req.add_header("Authorization", _auth_header(claims["uhs"], xsts))
-    req.add_header("x-xbl-contract-version", "2")
-    req.add_header("Accept-Language", "en-US")
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", UA)
+    for k, v in headers.items():
+        req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=30) as r:
-        data = json.load(r)
+        return json.load(r)
+
+
+def _titles(url, headers, get=None):
+    """Every page of a titlehub listing.
+
+    The request passed no maxItems and the reply's `pagingInfo` was ignored, so a large
+    account's history was silently cut off at whatever the service felt like returning —
+    and a truncated library is indistinguishable from a smaller one."""
+    get = get or _get_json
+    out, token, guard = [], None, 0
+    while guard < 50:                        # a bounded loop, not a trust exercise
+        guard += 1
+        page = "%s?maxItems=%d%s" % (url, PAGE_MAX,
+                                     ("&continuationToken=" +
+                                      urllib.parse.quote(token)) if token else "")
+        data = get(page, headers)
+        got = data.get("titles") or []
+        out.extend(got)
+        token = ((data.get("pagingInfo") or {}).get("continuationToken") or "")
+        if not token or not got:
+            break
+    return out
+
+
+def _rows(titles):
+    """(titleId, name, platform) per console a title appears on, deduped by titleId.
+
+    Keyed on the id rather than the lowercased name: two distinct titles can share a
+    name across generations, and name-keying dropped the second one."""
     seen, out = set(), []
-    for t in data.get("titles", []):
+    for t in titles:
         if t.get("type") != "Game":          # drop apps/media
             continue
         name = t.get("name") or ""
@@ -198,12 +235,27 @@ def fetch_owned(ms_access):
         # one row per console the title is available on (Xbox devices array)
         devs = [_DEV.get(d, None) for d in (t.get("devices") or [])]
         for plat in (sorted(set(p for p in devs if p)) or ["xbox"]):
-            key = (name.lower(), plat)
+            key = (tid or ("name:" + name.lower()), plat)
             if key not in seen:
                 seen.add(key)
                 out.append((tid, name, plat))
     out.sort(key=lambda x: (x[1] or "").lower())
     return out
+
+
+def fetch_owned(ms_access):
+    """Played/owned Xbox games as (titleId, name, platform) rows, via titlehub."""
+    user_tok = xbl_user_token(ms_access)
+    xsts, claims = xsts_token(user_tok, RP_XBOXLIVE)
+    xuid = claims.get("xid")
+    url = ("https://titlehub.xboxlive.com/users/xuid(%s)/titles/titlehistory/"
+           "decoration/detail" % xuid)
+    return _rows(_titles(url, {
+        "Authorization": _auth_header(claims["uhs"], xsts),
+        "x-xbl-contract-version": "2",
+        "Accept-Language": "en-US",
+        "Accept": "application/json",
+        "User-Agent": UA}))
 
 
 def connect(code):
@@ -272,8 +324,10 @@ def main(argv):
         return
     rows = fetch_owned(ms_access_token())
     for pid, title, plat in rows:
-        print("%s\t%s\t%s" % (pid, title, plat))
-    print("# owned Xbox games: %d" % len(rows), file=sys.stderr)
+        print(config.tsv_row(pid, title, plat, EVIDENCE))
+    print("# Xbox titles from title HISTORY: %d — this is play history, so it can "
+          "include Game Pass titles the account never bought and miss purchases it "
+          "never launched" % len(rows), file=sys.stderr)
 
 
 if __name__ == "__main__":

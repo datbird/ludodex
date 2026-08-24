@@ -75,18 +75,18 @@ def main():
 
     # ---- #10c: fs_delete ------------------------------------------------------ #
     for bad in ("/", "//", "/data", "/data/", "/etc", "/mnt", "/usr", "/var", "/home",
-                "<rom-share>/..", "relative/path", "", "/proc"):
+                "/srv/roms/..", "relative/path", "", "/proc"):
         del RAN[:]
         check("fs_delete refuses %r" % bad, refused(devices.fs_delete, 0, [bad]))
         check("  …and ran no command for %r" % bad, RAN == [])
 
     del RAN[:]
     check("one bad path poisons the whole call",
-          refused(devices.fs_delete, 0, ["<rom-share>/snes/x.sfc", "/etc"]))
+          refused(devices.fs_delete, 0, ["/srv/roms/snes/x.sfc", "/etc"]))
     check("  …so nothing at all was deleted", RAN == [])
 
     del RAN[:]
-    devices.fs_delete(0, ["<rom-share>/snes/Chrono Trigger.sfc"])
+    devices.fs_delete(0, ["/srv/roms/snes/Chrono Trigger.sfc"])
     check("a real file under a share still deletes",
           len(RAN) == 1 and "rm -rf --" in RAN[0] and "Chrono Trigger" in RAN[0])
 

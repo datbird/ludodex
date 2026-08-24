@@ -48,7 +48,8 @@ def main(argv):
         c.close()
 
     con = media_index.index_con()
-    con.execute("DELETE FROM media WHERE provider='playnite'")
+    # No blanket DELETE — see the same change in launchbox_import. Rows this run did not
+    # see are swept below, so a surviving file keeps its sha1/measurements/ai_pick.
     now = int(time.time())
     rows = matched = 0
     for r in (recs or []):
@@ -63,13 +64,15 @@ def main(argv):
                 continue
             ext = os.path.splitext(path)[1].lower().lstrip(".") or "jpg"
             is_match = nk in owned
-            con.execute(
-                "INSERT OR REPLACE INTO media(norm_key,system,kind,provider,mount,"
-                "ref_type,ref,ext,matched,indexed_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (nk, system, kind, "playnite", "playnite", "file", path, ext,
-                 int(is_match), now))
-            rows += 1
-            matched += int(is_match)
+            # media_index.put_local, not INSERT OR REPLACE — see the same change in
+            # launchbox_import: REPLACE drops sha1/width/height/ai_pick/hidden, and it
+            # ignored the ban list, so a banned Playnite image returned on every import.
+            if media_index.put_local(con, nk, kind, "playnite", path, ext, now,
+                                     system=system, mount="playnite",
+                                     matched=int(is_match)):
+                rows += 1
+                matched += int(is_match)
+    media_index.sweep(con, "playnite", now)
     con.commit()
     con.close()
     print("playnite_import: indexed %d art refs (%d matched) as 'playnite'"

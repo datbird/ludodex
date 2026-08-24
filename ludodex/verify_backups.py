@@ -15,6 +15,12 @@ import sys
 import tempfile
 import zipfile
 
+try:
+    import pyzipper                       # noqa: F401
+    HAVE_PYZIPPER = True
+except ImportError:                       # a declared requirement, but let the rest run
+    HAVE_PYZIPPER = False
+
 FAIL = []
 
 
@@ -63,8 +69,18 @@ check(backups.get_job(jid)["name"] == "Nightly renamed", "partial update applies
 
 print("2. content selection")
 check(backups.db_files("ALL") == sorted(f for f in os.listdir(scratch)
-                                        if f.endswith(".sqlite")),
+                                        if f.endswith(".sqlite")
+                                        and f not in backups.SECRET
+                                        and f not in backups.NEVER),
       "ALL picks up every database, including ones added later")
+# ALL deliberately stops short of the credential stores: the default job is unencrypted
+# and pushed to a share, so 'every database' would have meant 'every API key and every
+# device password, in the clear, offsite'. Naming one is still possible — with a
+# passphrase — and backups.sqlite is excluded even then, because it holds every OTHER
+# job's passphrase.
+check("config.sqlite" not in backups.db_files("ALL"), "ALL leaves the secrets out")
+check(backups.db_files("backups.sqlite") == [],
+      "backups.sqlite never travels, even named explicitly")
 check(backups.db_files("tags.sqlite") == ["tags.sqlite"], "explicit selection is honoured")
 check(backups.db_files("nope.sqlite") == [], "a selection that no longer exists is skipped")
 
@@ -115,26 +131,29 @@ print("7. encryption")
 enc = backups.set_job({"name": "Secret", "contents": ["tags.sqlite"], "dest_kind": "local",
                        "dest_path": dest, "passphrase": "hunter2", "retention": 1})
 check(backups.get_job(enc)["encrypted"] is True, "job reports itself encrypted")
-backups.run_job(enc)
-ez = os.path.join(dest, [f for f in os.listdir(dest) if f.startswith("ludodex-Secret-")][0])
-try:
-    with zipfile.ZipFile(ez) as zf:
-        zf.read("tags.sqlite")
-    check(False, "encrypted archive rejects reading without the passphrase")
-except RuntimeError:
-    check(True, "encrypted archive rejects reading without the passphrase")
-import pyzipper
-with pyzipper.AESZipFile(ez) as zf:
-    zf.setpassword(b"hunter2")
-    blob = zf.read("tags.sqlite")
-check(blob[:15] == b"SQLite format 3", "decrypts with the passphrase to a real database")
-with pyzipper.AESZipFile(ez) as zf:
-    zf.setpassword(b"wrong")
+if not HAVE_PYZIPPER:
+    print("  ..   skipped (pyzipper not installed here); the rest of the file still runs")
+else:
+    backups.run_job(enc)
+    ez = os.path.join(dest,
+                      [f for f in os.listdir(dest) if f.startswith("ludodex-Secret-")][0])
     try:
-        zf.read("tags.sqlite")
-        check(False, "wrong passphrase fails")
-    except Exception:
-        check(True, "wrong passphrase fails")
+        with zipfile.ZipFile(ez) as zf:
+            zf.read("tags.sqlite")
+        check(False, "encrypted archive rejects reading without the passphrase")
+    except RuntimeError:
+        check(True, "encrypted archive rejects reading without the passphrase")
+    with pyzipper.AESZipFile(ez) as zf:
+        zf.setpassword(b"hunter2")
+        blob = zf.read("tags.sqlite")
+    check(blob[:15] == b"SQLite format 3", "decrypts with the passphrase to a real database")
+    with pyzipper.AESZipFile(ez) as zf:
+        zf.setpassword(b"wrong")
+        try:
+            zf.read("tags.sqlite")
+            check(False, "wrong passphrase fails")
+        except Exception:
+            check(True, "wrong passphrase fails")
 
 print("8. failure is recorded, not swallowed")
 bad = backups.set_job({"name": "Bad", "contents": ["tags.sqlite"], "dest_kind": "local",
@@ -190,19 +209,22 @@ check(c.execute("SELECT v FROM t WHERE k='mario'").fetchone()[0] == "favourite",
 c.close()
 
 print("12. encrypted archive restore needs the passphrase")
-ej = backups.set_job({"name": "Enc", "contents": ["tags.sqlite"], "dest_kind": "local",
-                      "dest_path": rest_dest, "passphrase": "s3cret", "retention": 1})
-backups.run_job(ej)
-ea = backups.list_archives(backups.get_job(ej))[0]
-ejob = backups.get_job(ej, with_secret=True)
-ez2 = backups.fetch_archive(ejob, ea, os.path.join(scratch, "fetch2"))
-try:
-    backups.unpack(ez2, os.path.join(scratch, "u2"))
-    check(False, "unpacking an encrypted archive without a passphrase fails")
-except Exception:
-    check(True, "unpacking an encrypted archive without a passphrase fails")
-ok = backups.unpack(ez2, os.path.join(scratch, "u3"), "s3cret")
-check(ok == ["tags.sqlite"], "unpacks with the right passphrase")
+if not HAVE_PYZIPPER:
+    print("  ..   skipped (pyzipper not installed here)")
+else:
+    ej = backups.set_job({"name": "Enc", "contents": ["tags.sqlite"], "dest_kind": "local",
+                          "dest_path": rest_dest, "passphrase": "s3cret", "retention": 1})
+    backups.run_job(ej)
+    ea = backups.list_archives(backups.get_job(ej))[0]
+    ejob = backups.get_job(ej, with_secret=True)
+    ez2 = backups.fetch_archive(ejob, ea, os.path.join(scratch, "fetch2"))
+    try:
+        backups.unpack(ez2, os.path.join(scratch, "u2"))
+        check(False, "unpacking an encrypted archive without a passphrase fails")
+    except Exception:
+        check(True, "unpacking an encrypted archive without a passphrase fails")
+    ok = backups.unpack(ez2, os.path.join(scratch, "u3"), "s3cret")
+    check(ok == ["tags.sqlite"], "unpacks with the right passphrase")
 
 live.close()
 shutil.rmtree(scratch, ignore_errors=True)

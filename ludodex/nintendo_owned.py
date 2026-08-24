@@ -6,7 +6,8 @@
   python3 ludodex/nintendo_owned.py                               # TSV to stdout
   python3 ludodex/nintendo_owned.py --exclude-addons              # drop DLC-only cards
 
-VERIFIED against a live account 2026-08-22: 184 titles, matching the portal exactly.
+VERIFIED against a live account 2026-08-22: the pull matched that account's portal
+listing exactly.
 The call structure is read from `XenorPLxx/playnite-library-nintendo`, which does this
 for Playnite. Design: docs/superpowers/specs/2026-08-22-nintendo-vgc-design.md.
 
@@ -48,6 +49,7 @@ import urllib.request
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+import config                                             # noqa: E402
 
 NIN_DIR = os.path.join(DATA, ".nintendo")
 COOKIEFILE = os.path.join(NIN_DIR, "cookies.json")
@@ -157,15 +159,10 @@ def extract_cookies(raw):
 
 
 def save_cookies(cookie):
-    os.makedirs(NIN_DIR, exist_ok=True)
-    tmp = COOKIEFILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"cookie": cookie, "saved_at": int(time.time())}, fh)
-    os.replace(tmp, COOKIEFILE)
-    try:
-        os.chmod(COOKIEFILE, 0o600)
-    except OSError:
-        pass
+    # The atomic 0600 write this file already did by hand, now the one shared helper —
+    # so the next store cannot forget it the way five of the existing ones did.
+    config.write_private_json(COOKIEFILE,
+                              {"cookie": cookie, "saved_at": int(time.time())})
 
 
 def load_cookies():
@@ -190,11 +187,24 @@ def _get(url, cookie):
         return r.read().decode("utf-8", "replace")
 
 
-def _post_json(url, payload, headers, cookie):
+def _same_host(a, b):
+    return (urllib.parse.urlsplit(a).hostname or "").lower() == \
+        (urllib.parse.urlsplit(b).hostname or "").lower()
+
+
+def _post_json(url, payload, headers, cookie=None):
+    """POST JSON. The cookie is sent ONLY to the host it was captured from.
+
+    The GraphQL URL is read out of the portal page, so it is whatever Nintendo puts
+    there — and the whole accounts.nintendo.com cookie jar was being replayed to it.
+    That is a credential sent to a host that never asked for one: the actual credential
+    for this call is the idToken in the query variables, and the docstring above already
+    says the only header this endpoint needs is x-nintendo-savanna-client-id."""
     body = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
-    req.add_header("Cookie", cookie)
+    if cookie and _same_host(url, PORTAL_URL):
+        req.add_header("Cookie", cookie)
     req.add_header("User-Agent", UA)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
@@ -301,11 +311,11 @@ def platform_of(view):
 def is_addon_only(view):
     """The card holds DLC and no base game.
 
-    NOT junk, and NOT a reason to drop the title. Live on datbird's account these are
+    NOT junk, and NOT a reason to drop the title. On a real account these look like
     Breath of the Wild, Splatoon 3, Pokemon Shield, Mario + Rabbids and Capcom Arcade
-    Stadium: games he owns on a CART, whose expansion he bought digitally. The card is
-    therefore evidence he owns the base game in some form, which is precisely the fact an
-    ownership catalog exists to record.
+    Stadium: games owned on a CART whose expansion was bought digitally. The card is
+    therefore evidence the base game is owned in some form, which is precisely the fact
+    an ownership catalog exists to record.
 
     Excluding these by default is what made a 184-title portal import as 179. The Playnite
     client offers it as an opt-in setting; this copied it as the default, which was wrong.
@@ -331,6 +341,7 @@ def fetch_owned(cookie=None, exclude_addons=False):
     """
     params, cookie = bootstrap(cookie)
     rows, seen, offset = [], set(), 0
+    unknown = {}
     while True:
         views, total = _page(params, cookie, offset)
         if not views:
@@ -340,7 +351,16 @@ def fetch_owned(cookie=None, exclude_addons=False):
                 continue
             plat = platform_of(v)
             if not plat:
-                continue
+                # A CARD WITH AN UNRECOGNISED PLATFORM IS STILL OWNERSHIP. Dropping it
+                # was a silent shrink: the next Nintendo codename after NX/OUNCE would
+                # have quietly cut the library with nothing said, which is the exact
+                # failure this module's header says the design avoids. Emit it with an
+                # empty platform instead — build_library's loader already falls back to
+                # the source label for a blank third column — and tally the codename so
+                # the run says out loud that _PLAT needs an entry.
+                unknown[(v.get("apparentPlatform") or "?")] = \
+                    unknown.get(v.get("apparentPlatform") or "?", 0) + 1
+                plat = ""
             app = v.get("applicationId") or v.get("id") or ""
             key = (app, plat)
             if not app or key in seen:
@@ -350,6 +370,9 @@ def fetch_owned(cookie=None, exclude_addons=False):
         offset += PAGE_LIMIT
         if offset >= total:
             break
+    for name, n in sorted(unknown.items()):
+        print("# WARNING: %d card(s) report platform %r, which _PLAT does not map — "
+              "kept without a platform; add it to _PLAT" % (n, name), file=sys.stderr)
     return rows
 
 
@@ -372,7 +395,7 @@ def main(argv):
         return
     rows = fetch_owned(exclude_addons="--exclude-addons" in argv)
     for app, title, plat in rows:
-        print("%s\t%s\t%s" % (app, title, plat))
+        print(config.tsv_row(app, title, plat))
     print("# owned Nintendo games: %d" % len(rows), file=sys.stderr)
 
 

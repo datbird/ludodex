@@ -24,7 +24,7 @@ scratch = tempfile.mkdtemp(prefix="ludodex-import-")
 os.environ["LUDODEX_DATA"] = scratch
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "server"))
+sys.path.insert(0, os.path.join(os.path.dirname(ROOT), "server"))
 
 print("1. the suspect heuristic picks mangled titles and leaves good ones alone")
 import ingest_ai                                          # noqa: E402
@@ -109,7 +109,7 @@ check(len(ingest_ai.targets(mgr=9, take_all=True)) == 1,
 
 print("7. a hallucinated index can't corrupt a title")
 import ai                                                 # noqa: E402
-src_ai = open(os.path.join(ROOT, "server", "ai.py")).read()
+src_ai = open(os.path.join(os.path.dirname(ROOT), "server", "ai.py")).read()
 check("if not 1 <= n <= len(items):" in src_ai,
       "identify_roms() range-checks the model's row number")
 check("1950 <= yr <= 2100" in src_ai, "and sanity-checks the year")

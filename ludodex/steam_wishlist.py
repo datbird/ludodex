@@ -41,64 +41,93 @@ def api(host, path):
         return json.load(r)
 
 
-if not KEY:
-    sys.exit("set STEAM_API_KEY")
-if not who:
-    sys.exit("no SteamID — set it with: python3 ludodex/config.py set steam_id <id>")
-
-# resolve vanity -> steamid64 if needed
-if who.isdigit() and len(who) >= 16:
-    steamid = who
-else:
-    r = api("api.steampowered.com",
-            "ISteamUser/ResolveVanityURL/v1/?key=%s&vanityurl=%s" % (KEY, who))
-    res = r.get("response", {})
-    if res.get("success") != 1:
-        sys.exit("could not resolve vanity %r (%s)" % (who, res.get("message")))
-    steamid = res["steamid"]
-print("# steamid64:", steamid, file=sys.stderr)
-
-r = api("api.steampowered.com",
-        "IWishlistService/GetWishlist/v1/?key=%s&steamid=%s" % (KEY, steamid))
-items = (r.get("response") or {}).get("items") or []
-appids = [it["appid"] for it in items if it.get("appid")]
-if not items:
-    print("# wishlist empty, or the profile's wishlist isn't visible to this key",
-          file=sys.stderr)
-
-# --- resolve appid -> title via the batched StoreBrowse endpoint (persistent cache) ---
-cache = {}
-if os.path.exists(NAMECACHE):
-    try:
-        cache = json.load(open(NAMECACHE))
-    except ValueError:
-        cache = {}
-
-missing = [a for a in appids if str(a) not in cache]
-for i in range(0, len(missing), 100):            # batch 100 appids per call
-    chunk = missing[i:i + 100]
+def _batch(chunk):
+    """Names for one batch of appids. Raises whatever the transport raised."""
     inp = {"ids": [{"appid": a} for a in chunk],
            "context": {"language": "english", "country_code": "US", "steam_realm": 1},
            "data_request": {"include_basic_info": True}}
-    try:
-        d = api("api.steampowered.com", "IStoreBrowseService/GetItems/v1/?key=%s&input_json=%s"
-                % (KEY, urllib.parse.quote(json.dumps(inp))))
-        got = {it.get("appid"): it.get("name", "")
-               for it in (d.get("response") or {}).get("store_items") or []}
-    except Exception as e:                       # noqa: BLE001 — leave this chunk blank
-        print("# StoreBrowse batch failed (%s)" % str(e)[:100], file=sys.stderr)
-        got = {}
-    for a in chunk:
-        cache[str(a)] = got.get(a, "")
-if missing:
-    try:
-        json.dump(cache, open(NAMECACHE, "w"))
-    except OSError:
-        pass
+    d = api("api.steampowered.com",
+            "IStoreBrowseService/GetItems/v1/?key=%s&input_json=%s"
+            % (KEY, urllib.parse.quote(json.dumps(inp))))
+    return {it.get("appid"): it.get("name", "")
+            for it in (d.get("response") or {}).get("store_items") or []}
 
-rows = [(a, cache.get(str(a), "")) for a in appids]
-rows.sort(key=lambda x: (x[1] or "~").lower())    # named titles first, alphabetical
-for appid, name in rows:
-    print("%s\t%s" % (appid, name))
-print("# Steam wishlist: %d titles (%d unresolved names)"
-      % (len(rows), sum(1 for _, n in rows if not n)), file=sys.stderr)
+
+def resolve_names(appids, cache, fetch=None):
+    """Fill `cache` (appid-as-string -> title) for anything missing. Returns it.
+
+    A FAILED BATCH MUST NOT BE CACHED. The old loop wrote `cache[str(a)] = ""` for every
+    appid in the chunk even when the call had raised, and the next run's `missing` test
+    is `str(a) not in cache` — so the key was present, the retry never happened, and one
+    429 turned a hundred wishlist entries into permanently blank names.
+
+    An empty name is only recorded when the API ANSWERED and did not include that appid,
+    which is a real "Steam has no store item for this" and worth remembering: that is the
+    negative cache, and it is the only case where a blank is knowledge rather than a
+    failure to look."""
+    fetch = fetch or _batch
+    missing = [a for a in appids if str(a) not in cache]
+    wrote = False
+    for i in range(0, len(missing), 100):        # batch 100 appids per call
+        chunk = missing[i:i + 100]
+        try:
+            got = fetch(chunk)
+        except Exception as e:                   # noqa: BLE001 — retry this chunk next run
+            print("# StoreBrowse batch failed (%s) — %d name(s) left for the next run"
+                  % (str(e)[:100], len(chunk)), file=sys.stderr)
+            continue
+        for a in chunk:
+            cache[str(a)] = got.get(a, "")
+        wrote = True
+    if wrote:
+        try:
+            config.write_private_json(NAMECACHE, cache)
+        except OSError:
+            pass
+    return cache
+
+
+def main():
+    if not KEY:
+        sys.exit("set STEAM_API_KEY")
+    if not who:
+        sys.exit("no SteamID — set it with: python3 ludodex/config.py set steam_id <id>")
+
+    # resolve vanity -> steamid64 if needed
+    if who.isdigit() and len(who) >= 16:
+        steamid = who
+    else:
+        r = api("api.steampowered.com",
+                "ISteamUser/ResolveVanityURL/v1/?key=%s&vanityurl=%s" % (KEY, who))
+        res = r.get("response", {})
+        if res.get("success") != 1:
+            sys.exit("could not resolve vanity %r (%s)" % (who, res.get("message")))
+        steamid = res["steamid"]
+    print("# steamid64:", steamid, file=sys.stderr)
+
+    r = api("api.steampowered.com",
+            "IWishlistService/GetWishlist/v1/?key=%s&steamid=%s" % (KEY, steamid))
+    items = (r.get("response") or {}).get("items") or []
+    appids = [it["appid"] for it in items if it.get("appid")]
+    if not items:
+        print("# wishlist empty, or the profile's wishlist isn't visible to this key",
+              file=sys.stderr)
+
+    cache = {}
+    if os.path.exists(NAMECACHE):
+        try:
+            cache = json.load(open(NAMECACHE, encoding="utf-8"))
+        except ValueError:
+            cache = {}
+    resolve_names(appids, cache)
+
+    rows = [(a, cache.get(str(a), "")) for a in appids]
+    rows.sort(key=lambda x: (x[1] or "~").lower())   # named titles first, alphabetical
+    for appid, name in rows:
+        print(config.tsv_row(appid, name))
+    print("# Steam wishlist: %d titles (%d unresolved names)"
+          % (len(rows), sum(1 for _, n in rows if not n)), file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

@@ -50,5 +50,5 @@ while page <= 500:                       # safety bound; loop really ends on emp
 
 rows.sort(key=lambda x: x[1].lower())
 for gid, title in rows:
-    print("%s\t%s" % (gid, title))
+    print(config.tsv_row(gid, title))
 print("# total itch.io games owned: %d" % len(rows), file=sys.stderr)

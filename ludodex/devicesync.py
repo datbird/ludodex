@@ -352,8 +352,11 @@ def diff_ingest(device_mgr_id, archive_mgr_id, limit=None):
                 order.append(key)
             games[key]["files"].append({"relpath": r["relpath"], "filename": r["filename"],
                                         "ext": r["ext"], "disc": r["disc"]})
-            if limit and len(order) >= limit and key == order[-1]:
-                pass
+            # No early exit here, deliberately. `limit` counts GAMES, and the rows of the
+            # limit-th game keep arriving after it is first seen — breaking would hand
+            # back a game with half its discs. The slice at the end applies the limit
+            # once every file is accounted for. (This is where an `if …: pass` sat: a
+            # branch that read like an optimisation and did nothing at all.)
     finally:
         dc.close()
     out = [{"system": games[k]["system"], "game": games[k]["game"],
@@ -372,9 +375,16 @@ def device_free_bytes(dev, path):
                                  text=True, timeout=20).stdout
         else:
             import devices
-            out = devices._ssh(dev, cmd, timeout=20)
+            # devices._ssh returns a CompletedProcess, not a string. `.strip()` on it
+            # raised AttributeError straight into the bare except below, so free space
+            # was ALWAYS None for every SSH device — reported as "unknown", never as a
+            # bug, for as long as this has existed.
+            r = devices._ssh(dev, cmd, timeout=20)
+            out = getattr(r, "stdout", r)
         return int((out or "").strip() or 0) or None
-    except Exception:
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        # Narrow, and it says so: a bare `except Exception` is what hid the bug above.
+        print("devicesync: df failed on %s (%s)" % (path, str(e)[:120]), file=sys.stderr)
         return None
 
 

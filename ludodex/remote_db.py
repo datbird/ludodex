@@ -107,7 +107,11 @@ def pb_auth(url, email, pw):
         st, resp = http("POST", url + ep, body={"identity": email, "password": pw})
         if st == 200 and isinstance(resp, dict) and resp.get("token"):
             return resp["token"]
-    sys.exit("PocketBase auth failed (%s): %s" % (st, resp))
+    # RuntimeError, not sys.exit: pb_auth is the FIRST thing the backing-store job does,
+    # and that job runs in a server thread whose wrapper catches Exception. SystemExit is
+    # not one, so a wrong password killed the thread with the job's `last` never set —
+    # no error surfaced anywhere and the sync just stopped happening.
+    raise RuntimeError("PocketBase auth failed (%s): %s" % (st, resp))
 
 
 def pb_ensure_collection(url, hdr, name, fields):
@@ -130,7 +134,9 @@ def pb_ensure_collection(url, hdr, name, fields):
         if st in (200, 201):
             log("  created PocketBase collection %r" % name)
             return
-    sys.exit("could not create PocketBase collection %r (%s): %s" % (name, st, resp))
+    # RuntimeError, not sys.exit — same reason as pb_auth above.
+    raise RuntimeError("could not create PocketBase collection %r (%s): %s"
+                       % (name, st, resp))
 
 
 def _pb_body(coll, key, row):

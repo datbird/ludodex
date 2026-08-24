@@ -49,7 +49,7 @@ REFUSE = [
     ("http://localhost:8000/x.png", "localhost by name"),
     ("http://[::1]:8000/x.png", "IPv6 loopback"),
     ("http://10.1.2.3/roms", "a private 10/8 host"),
-    ("http://<docker-host>/x", "a private 172.16/12 host"),
+    ("http://172.16.0.1/x", "a private 172.16/12 host"),
     ("http://192.168.1.1/", "the usual router address"),
     ("http://169.254.169.254/latest/meta-data/", "the link-local metadata address"),
     ("http://0.0.0.0/", "the unspecified address"),

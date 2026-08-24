@@ -110,3 +110,5 @@ con.execute("DELETE FROM sync_state WHERE backend=? AND collection='user_tags' A
 con.commit(); con.close()
 
 print("RESULT:", "ALL 4 ROUND-TRIP TESTS PASS" if not fails else ("FAILS: " + ",".join(fails)))
+# see test_autosync: the runner reads the exit code, not the word.
+sys.exit(1 if fails else 0)

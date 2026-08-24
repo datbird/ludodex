@@ -1036,11 +1036,19 @@ def sync_device(dev_id):
                     argv.append("--all")     # heavy re-reads every title, not just
                 try:                         # the ones that look mangled
                     r = _run(argv, timeout=5400)
-                    out["ingest_ai"][mid] = ((r.stdout or "").strip().splitlines() or
-                                             [""])[-1][:200] if r.returncode == 0 \
-                        else "failed: " + (r.stderr or "")[:160]
+                    if r.returncode == 0:
+                        out["ingest_ai"][mid] = ((r.stdout or "").strip().splitlines()
+                                                 or [""])[-1][:200]
+                    else:
+                        out["ingest_ai"][mid] = "failed: " + (r.stderr or "")[:160]
+                        out["ingest_ai_failed"] = True
                 except (subprocess.TimeoutExpired, OSError) as e:
                     out["ingest_ai"][mid] = "failed: " + str(e)[:160]
+                    out["ingest_ai_failed"] = True
+            # A FAILURE HERE USED TO REACH NOBODY. The reason went into this dict and
+            # the report's `ok` never consulted it, so the sync said Done while the AI
+            # pass had not run at all — which is exactly how the wrong sys.path in
+            # ingest_ai.py survived unnoticed.
         # rebuild the catalog so pulled ROM titles (and any hints) appear —
         # build_library runs the consumer carry-over pass internally, so this is the
         # blessed rebuild path

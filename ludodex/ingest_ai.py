@@ -34,7 +34,12 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 # silently relocate an existing checkout's data.
 DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
-sys.path.insert(0, os.path.join(DIR, "server"))
+# ai.py lives in the REPO's server/, a sibling of this package — never DIR/server,
+# which does not exist. That typo only bit the PROCESS invocation (devices.py runs
+# this as a child during a device sync): in-process callers already had server/ on
+# sys.path, so `import ai` worked there and the breakage stayed invisible while the
+# sync reported "Done" with the AI tier never having run.
+sys.path.insert(0, os.path.join(os.path.dirname(DIR), "server"))
 import config                                              # noqa: E402
 import ingesthints                                         # noqa: E402
 # romtags, NOT build_library: build_library is a SCRIPT — importing it runs a full
@@ -231,12 +236,18 @@ def run(mgr=None, take_all=False, limit=0, min_conf=0.5, progress=False):
     if not total:
         return {"targets": 0, "hinted": from_index, "batches": 0,
                 "from_index": from_index}
+    # THE ESTIMATE AND THE SPEND MUST NAME THE SAME MODEL. _estimate() prices the
+    # "ingest" area and the hints are stamped with it, but identify_roms() defaults to
+    # the ACTIVE provider and its default model when it is handed neither — so a
+    # library configured to ingest on a cheap model was quoted that price and billed
+    # the default one. Resolving the area here is the whole fix.
+    provider = ai.provider_for_area("ingest")
     model = ai.model_for_area("ingest") or ""
     hinted = done = batches = 0
     for i in range(0, total, BATCH):
         chunk = items[i:i + BATCH]
         try:
-            res = ai.identify_roms(chunk)
+            res = ai.identify_roms(chunk, provider=provider, model=model or None)
         except Exception as e:                # noqa: BLE001
             # A budget cap trips here. Stop cleanly and keep what we already learned
             # rather than losing the whole pass to one refusal.

@@ -17,11 +17,15 @@ import os
 import sqlite3
 import sys
 
-DATA = os.environ.get("LUDODEX_DATA", "/data")
+DIR = os.path.dirname(os.path.abspath(__file__))
+# Resolved the way every other module resolves it — DIR is this package, the repo root is
+# above it. Hardcoding /data and /app made this the one check that could not be run on a
+# checkout, which is exactly where an invariant regression is cheapest to catch.
+DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 LIB = os.path.join(DATA, "game-library.sqlite")
 IDX = os.path.join(DATA, "media-index.sqlite")
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, "/app")
+sys.path.insert(0, DIR)
+sys.path.insert(0, os.path.dirname(DIR))
 import media                                            # noqa: E402
 import matchgate                                        # noqa: E402
 import media_choose                                     # noqa: E402
@@ -345,21 +349,29 @@ def main():
     except sqlite3.OperationalError:
         rows = []
     for nk, sid, sysname in rows:
-        row = g.execute("SELECT platform, canonical_title FROM games WHERE norm_key=?",
-                        (nk,)).fetchone()
-        if not row or not row["platform"]:
+        # EVERY PLATFORM THE norm_key IS OWNED ON, not an arbitrary one. The catalog
+        # keeps one row per (game, platform) while ss_resolution keeps ONE row per
+        # norm_key, so `fetchone()` picked whichever row SQLite happened to return first
+        # and then compared the match against it. A game owned on Genesis and Windows
+        # scored as violating whenever the arbitrary pick was the other platform — which
+        # is the structural reason this check reported noise instead of real mismatches.
+        # A match is wrong only when it fits NONE of the platforms the game is owned on.
+        plats = [r["platform"] for r in
+                 g.execute("SELECT DISTINCT platform FROM games WHERE norm_key=?", (nk,))
+                 if r["platform"]]
+        if not plats:
             continue
         # `system` holds ScreenScraper's own numeric id for rows written since this
         # was recorded, and one of our labels for anything older or hand-set.
-        want = _ss.systeme_id(row["platform"])
+        want = {s for s in (_ss.systeme_id(p) for p in plats) if s}
         got = (int(sysname) if str(sysname).strip().isdigit()
                else _ss.systeme_id(sysname))
-        if want and got and want != got:
+        if want and got and got not in want:
             # name the system rather than print its id — "a 21 record" tells nobody
             # that a Genesis entry is wearing Game Gear art
             label = _ss.system_label(got) or ("system %s" % got)
             bad.append("screenscraper %s — the game is %s, the match is a %s record"
-                       % (nk[:38], row["platform"], label))
+                       % (nk[:38], "/".join(sorted(plats)), label))
     _mc.close()
     report("I11 a provider match is for the same SYSTEM as the game", bad,
            "another system's release wears its own art and dates")

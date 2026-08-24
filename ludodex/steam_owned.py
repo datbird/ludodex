@@ -53,5 +53,5 @@ if games is None:
     sys.exit("no games returned — is the profile's Game-details set to Public?")
 games.sort(key=lambda g: g.get("name", "").lower())
 for g in games:
-    print("%s\t%s" % (g.get("appid"), g.get("name", "")))
+    print(config.tsv_row(g.get("appid"), g.get("name", "")))
 print("# total Steam games owned: %d" % len(games), file=sys.stderr)

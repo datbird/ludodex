@@ -9598,7 +9598,7 @@ def ops_reset(body: dict = Body(default={})):
         raise HTTPException(400, 'type DELETE (all caps) to confirm')
     safety = ops_backup()["id"]
     try:
-        out = reset.run(scope)
+        out = reset.run(scope)          # carries `warnings` for the caller to render
     except Exception as e:                      # noqa: BLE001
         raise HTTPException(500, "reset failed: %s" % e)
     out["safety_backup"] = safety
@@ -13050,6 +13050,12 @@ def backup_jobs():
     for f in sorted(present - known):          # auth.sqlite, backups.sqlite, anything new
         items.append({"file": f, "id": f[:-7], "name": f[:-7].replace("-", " ").title(),
                       "role": "durable", "size": os.path.getsize(os.path.join(DATA, f))})
+    # backups.sqlite can never go in an archive: it holds every job's passphrase in
+    # plaintext, so shipping it inside job B hands over job A's key. SECRET files can,
+    # but only with a passphrase, so the UI has to know which those are before it posts.
+    items = [it for it in items if it["file"] not in backups.NEVER]
+    for it in items:
+        it["secret"] = it["file"] in backups.SECRET
     return {"jobs": backups.all_jobs(), "available": items,
             "job": _BACKUP_JOB["job"],
             "devices": [{"id": d["id"], "name": d["name"], "transport": d["transport"]}
@@ -13058,7 +13064,13 @@ def backup_jobs():
 
 @app.post("/api/backups/jobs")
 def backup_job_set(body: dict = Body(...)):
-    return {"ok": True, "id": backups.set_job(body or {})}
+    try:
+        return {"ok": True, "id": backups.set_job(body or {})}
+    except ValueError as e:
+        # set_job refuses an unsafe job (a secret database with no passphrase, a
+        # device destination with no device). That is the user's mistake to correct,
+        # not a server fault, so it must not surface as a 500.
+        raise HTTPException(400, str(e))
 
 
 @app.delete("/api/backups/jobs/{job_id}")
