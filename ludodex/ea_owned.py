@@ -259,16 +259,17 @@ def main(argv):
         save_token(raw.strip())
         print("ea: saved access token. Pulling…", file=sys.stderr)
     if not config.source_enabled("ea"):
-        print("ea: source disabled (config.py enable ea)", file=sys.stderr)
-        return
+        # NON-ZERO, NOT return. The caller redirects stdout into ea_games.tsv, so a
+        # quiet return is exit 0 with empty stdout — which reads as "this account owns
+        # nothing" and wipes the EA library on the next rebuild.
+        sys.exit("ea: source disabled (config.py enable ea)")
     cookies = load_cookies()
     # a valid cached (browser-minted) token works even without the cookie jar
     have_token = os.path.exists(TOKEN) and json.load(open(TOKEN)).get(
         "expires_at", 0) > int(time.time())
     if not cookies and not have_token:
-        print("ea: not logged in — run: python3 ludodex/ea_owned.py --login (or pass "
-              "--token <browser access_token>)", file=sys.stderr)
-        return
+        sys.exit("ea: not logged in — run: python3 ludodex/ea_owned.py --login (or pass "
+                 "--token <browser access_token>)")
     tok = token(cookies) if cookies else json.load(open(TOKEN))["access_token"]
     if "--whoami" in argv:
         player, _ = whoami(cookies, tok)

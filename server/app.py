@@ -10727,12 +10727,28 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None, job=Non
     argv = [sys.executable, _script_path(script)] + list(args or [])
     errf = tempfile.TemporaryFile()
     outf = None
+    dest = part = None
+
+    def _discard():
+        """Throw away a partial pull. The previous list is the better answer."""
+        if part and os.path.exists(part):
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+
     try:
         stdout_dest = subprocess.DEVNULL
         if capture and out:
             # ownership/wishlist TSVs go in the DURABLE data dir, not the ephemeral
             # image layer — so store games survive a redeploy / catalog rebuild.
-            outf = open(os.path.join(DATA, out), "w", encoding="utf-8")
+            # WRITTEN BESIDE THE TARGET AND RENAMED ON SUCCESS. Opening the target
+            # itself truncated it the moment the sync started, so an expired session
+            # or a network blip left an EMPTY ownership list — which build_library
+            # reads as "you own nothing from this store" and the rebuild then acts on.
+            dest = os.path.join(DATA, out)
+            part = dest + ".part"
+            outf = open(part, "w", encoding="utf-8")
             stdout_dest = outf
         p = subprocess.Popen(argv, cwd=DIR, stdout=stdout_dest, stderr=errf,
                              start_new_session=(job is not None))
@@ -10740,6 +10756,7 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None, job=Non
         errf.close()
         if outf:
             outf.close()
+        _discard()
         return False, str(e)
     if job is not None:
         _SYNC["proc"] = p
@@ -10755,12 +10772,32 @@ def _run_script(script, out=None, capture=False, timeout=300, args=None, job=Non
     if outf:
         outf.close()
     if cancelled:
-        errf.close(); return False, "cancelled"
+        errf.close(); _discard(); return False, "cancelled"
     if timed_out:
-        errf.close(); return False, "timed out"
+        errf.close(); _discard(); return False, "timed out"
     if p.returncode != 0:
         errf.seek(0); tail = errf.read().decode("utf-8", "replace").strip()[-300:]
-        errf.close(); return False, (tail or "exit %d" % p.returncode)
+        errf.close(); _discard(); return False, (tail or "exit %d" % p.returncode)
+    if part:
+        # A CLEAN EXIT WITH NOTHING TO SAY IS NOT AN ANSWER. Several fetchers print
+        # "not logged in" to stderr and return, which is exit 0 with empty stdout and
+        # reads afterwards as "this account owns zero games". Refuse only when that
+        # would REPLACE a list that has rows: an empty wishlist is a real answer, and
+        # clearing one has to stay possible.
+        try:
+            fresh = os.path.getsize(part)
+            had = os.path.getsize(dest) if os.path.exists(dest) else 0
+        except OSError as e:
+            errf.close(); _discard(); return False, str(e)
+        if not fresh and had:
+            errf.seek(0); tail = errf.read().decode("utf-8", "replace").strip()[-300:]
+            errf.close(); _discard()
+            return False, ("returned an empty list, keeping the %d bytes already on "
+                           "disk%s" % (had, (": " + tail) if tail else ""))
+        try:
+            os.replace(part, dest)
+        except OSError as e:
+            errf.close(); _discard(); return False, str(e)
     errf.close()
     if os.path.basename(str(script)) == "build_library.py":
         _warm_spotlight_bg()          # prime the dashboard spotlight after a rebuild
