@@ -126,7 +126,7 @@ def remote_tags(be, cols):
 print("backend: %s   scratch: %s" % (BACKEND, SCRATCH))
 seed_local_schema()
 be = dbsync.BACKENDS[BACKEND]()
-_, COLS = dbsync._local_read(STORE)
+_, COLS, _PRESENT = dbsync._local_read(STORE)
 be.ensure(STORE, COLS)
 
 # start from a clean slate for our sentinel

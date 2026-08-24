@@ -88,27 +88,61 @@ def _ts(row):
 # --------------------------------------------------------------------------- #
 #  local store I/O (generic over any table with a natural key)
 # --------------------------------------------------------------------------- #
+class LocalReadError(RuntimeError):
+    """The local store could not be read. NEVER the same thing as "it holds no rows"."""
+
+
 def _local_read(store):
-    """{key: row_dict} for every row, plus the syncable column list. Absent db => empty."""
+    """({key: row_dict}, syncable columns, present).
+
+    `present` is False only when the database file or the table genuinely does not exist
+    yet — a store this machine has never used, which is a legitimate empty pull.
+
+    A read that FAILED is never reported as an empty store. The three-way merge cannot
+    tell "no rows" from "could not look", so it reads a locked or unreadable database as
+    the user having deleted every row, and pushes those deletes to the backing store. The
+    remote adapters have followed the opposite rule from the start ("MUST raise, never
+    return partial"); this is the same rule on the local side."""
     path = _db_path(store)
     if not os.path.exists(path):
-        return {}, list(store["key"])
-    con = sqlite3.connect(path)
+        return {}, list(store["key"]), False
+    try:
+        con = sqlite3.connect(path)
+    except sqlite3.Error as e:
+        raise LocalReadError("could not open the local store for %s (%s): %s"
+                             % (store["name"], path, e))
     con.row_factory = sqlite3.Row
     try:
+        con.execute("PRAGMA busy_timeout=8000")
         cols = _columns(con, store["table"])
         if not cols:
-            return {}, list(store["key"])
+            return {}, list(store["key"]), False
         sync_cols = [c for c in cols if c.lower() != "id" or c in store["key"]]
         rows = {}
         for r in con.execute("SELECT %s FROM %s" % (",".join(sync_cols), store["table"])):
             row = {c: r[c] for c in sync_cols}
             rows[_key_of(store, row)] = row
-        return rows, sync_cols
-    except sqlite3.OperationalError:
-        return {}, list(store["key"])
+        return rows, sync_cols, True
+    except sqlite3.Error as e:
+        raise LocalReadError("could not read the local store for %s (%s): %s"
+                             % (store["name"], path, e))
     finally:
         con.close()
+
+
+def _widen(cols, *rowmaps):
+    """The column list must cover every column EITHER side carries.
+
+    Falling back to the key columns alone (an absent local table) made a pull create a
+    key-only table and a push serialise key-only blobs over the remote's full rows — the
+    stripping overrides.py has to hand-heal with an ALTER-add."""
+    out = list(cols)
+    for rows in rowmaps:
+        for row in rows.values():
+            for c in row:
+                if c not in out:
+                    out.append(c)
+    return out
 
 
 def _local_apply(store, cols, upserts, deletes):
@@ -116,10 +150,16 @@ def _local_apply(store, cols, upserts, deletes):
     con = sqlite3.connect(path)
     try:
         con.execute("PRAGMA busy_timeout=8000")
-        # make sure the table exists (a store never used locally yet)
+        # make sure the table exists (a store never used locally yet) with EVERY column
+        # the incoming rows carry, and widen one an earlier narrow pull already created.
+        cols = _widen(cols, upserts)
         con.execute("CREATE TABLE IF NOT EXISTS %s (%s, PRIMARY KEY(%s))"
                     % (store["table"], ",".join("%s TEXT" % c for c in cols),
                        ",".join(store["key"])))
+        have = {r[1] for r in con.execute("PRAGMA table_info(%s)" % store["table"])}
+        for c in cols:
+            if c not in have:
+                con.execute("ALTER TABLE %s ADD COLUMN %s TEXT" % (store["table"], c))
         if upserts:
             ph = ",".join("?" * len(cols))
             con.executemany(
@@ -488,12 +528,32 @@ def sync_all(backend_id="pocketbase", dry_run=False, only=None):
     stores = [s for s in STORES if not only or s["name"] in only]
     report = {"backend": backend_id, "dry_run": dry_run, "stores": [], "at": int(time.time())}
     for store in stores:
-        local, cols = _local_read(store)
+        try:
+            local, cols, present = _local_read(store)
+        except LocalReadError as e:
+            # a read we could not make says nothing about what the store holds
+            report["stores"].append({"name": store["name"], "error": str(e),
+                                     "local": 0, "remote": 0, "pulled": 0,
+                                     "pulled_deleted": 0, "pushed": 0, "pushed_deleted": 0})
+            continue
         # union the local + key columns with a 'k' marker handled by the adapter
         if not dry_run:
             backend.ensure(store, cols)
-        remote = backend.read_all(store, cols) if BACKENDS else {}
+        remote = backend.read_all(store, cols)
         shadow = _shadow_load(shadow_key, store["name"])
+        if not present and shadow:
+            # The store was here at the last sync and its file or table is gone now. That
+            # is a bad mount or a wrong LUDODEX_DATA far more often than it is intent, and
+            # every remembered row would read as a deliberate delete. Refusing is
+            # recoverable; deleting the backing copy is not.
+            report["stores"].append({
+                "name": store["name"],
+                "error": "local store %s is missing but the last sync recorded %d row(s); "
+                         "refusing to treat that as a delete" % (store["db"], len(shadow)),
+                "local": 0, "remote": len(remote), "pulled": 0, "pulled_deleted": 0,
+                "pushed": 0, "pushed_deleted": 0})
+            continue
+        cols = _widen(cols, local, remote)
         lu, ld, ru, rd, new_shadow = merge(local, remote, shadow, cols)
         if not dry_run:
             _local_apply(store, cols, lu, ld)
@@ -525,8 +585,9 @@ def restore_from_remote(backend_id="pocketbase", only=None, dry_run=False):
     report = {"backend": backend_id, "dry_run": dry_run, "stores": [],
               "at": int(time.time()), "restored": 0}
     for store in stores:
-        local, cols = _local_read(store)
+        local, cols, _present = _local_read(store)   # raises on a failed read, never partial
         remote = backend.read_all(store, cols)       # raises on a failed read, never partial
+        cols = _widen(cols, local, remote)
         new_rows = {k: v for k, v in remote.items()
                     if k not in local or _hash(local[k], cols) != _hash(v, cols)}
         if not dry_run and remote:
