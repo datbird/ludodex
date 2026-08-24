@@ -145,6 +145,8 @@ A four-reviewer audit (media/vision · collections · identity/spend · server/U
 
 ## Top of queue
 
+- **2026-08-23 full-repo review: 50 ranked fixes, none shipped yet.** Tracked outside the repo (the list names hosts and unfixed holes). Batches in order: data loss, auth/security, paid-AI gating, identity/art, silent failure, dead scripts (`scripts/*.sh` have been broken since the 2026-08-13 move), frontend races, tests/packaging. Each fix lands with a `tests/` check.
+
 - ~~**Cover / hero loading spinner**~~ **DONE 2026-07-23.** `SpinImg` component (cache-race guarded,
   src-keyed) wired into the library grid covers and the detail hero. `.img-spin` reuses `sync-spin`.
 
