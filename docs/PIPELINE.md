@@ -33,7 +33,10 @@ crawl is deliberately split so a rescan is cheap:
    changed one is re-flagged.
 2. **`process.py`** — reads unprocessed files and extracts system, cleaned title, dedupe
    key, region, languages, version, revision, disc number and dump flags, plus whether
-   the file is a **variant of a game already in the catalog**. Marks each file processed,
+   the file is a **variant of a game already in the catalog** and, when it is, the game
+   key it is a variant OF (`base_norm_key`, left NULL otherwise). Both are per
+   (game, platform), not per title: a Genesis file is not a variant of a SNES game.
+   Marks each file processed,
    so the next run starts where this one stopped.
 
 A removable drive that isn't plugged in is skipped, not forgotten — its already-indexed
@@ -60,6 +63,11 @@ directions against the title you own:
   titles separated only by year are remakes, and a remake wearing its original's box art
   is a bug you notice for months.
 - **hardware** — a name that matches on the wrong machine is a different product.
+  Lives in the shared gate as `matchgate.hardware_ok` / `hardware_stated`. Unknown on
+  either side refuses nothing (NULL is not a mismatch); a caller that must not accept
+  without evidence pairs the two. TheGamesDB is the one path that cannot use it yet:
+  nothing locally names its platform ids, so it refuses ambiguity instead. Mirroring
+  `thegamesdb.platforms()` (one request, changes about never) would close that.
 
 A miss returns *no answer*, never a plausible neighbour. That distinction is enforced
 rather than assumed: a lookup that misses and gets read as consent is the single most

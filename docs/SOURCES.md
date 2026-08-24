@@ -78,10 +78,19 @@ shared acceptance gate:
 
 `matchgate.score` — the coverage / `numbering_variant` / `safe_aliases` scoring that
 `provider_ids.py`, `matchindex.py` and `ra_fetch.py` all run their candidates through —
-**is not** applied here. That is a real inconsistency, not a documentation shortcut, and
-unifying it is in flight; see `docs/TASKS.md`. Until it lands, "IGDB resolution goes
-through the acceptance gate" is not true, which is why this section spells the rule out
-instead.
+**is not** applied here, and after review it is staying that way for now. IGDB's rule is
+*stricter* than the shared one: exact normalized equality on the primary name and every
+alternate name, plus era, plus platform fit, plus uniqueness for store titles. Swapping
+in `score()` would LOOSEN the provider every other provider is joined against, which is
+the wrong direction. Unifying honestly means giving the shared gate an exact-name mode
+and a uniqueness mode, which is a redesign rather than a fix.
+
+What did change: `--era-reheal` no longer overwrites a manual or AI-decided identity,
+and it passes the platform through so the platform-fit branch actually runs. Hardware is
+now a leg of the shared gate (`matchgate.hardware_ok`), so the ScreenScraper and
+TheGamesDB paths check it instead of waiving it. So the accurate sentence is "IGDB
+resolves by its own exact-name resolver; the other providers go through the shared
+acceptance gate", not "everything goes through the gate".
 
 ```bash
 # one-time: a free Twitch app at https://dev.twitch.tv/console/apps
