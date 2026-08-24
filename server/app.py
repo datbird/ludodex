@@ -2220,6 +2220,21 @@ def _refresh_game_row(con, gid, new_source):
     con.execute("UPDATE games SET %s WHERE id=?" % sets, args + [gid])
 
 
+def _addressing_keys(nk, platform):
+    """The four keys build_library gives every catalog row: (platform, entry_key,
+    base_key, game_key).
+
+    THEY ARE NOT DECORATION. `entry_key` is the id the frontend opens a card by,
+    `base_key` is what collection credit, add-ons and "also owned on" join through, and
+    `game_key` is what the neutral-art gate matches. The two endpoints that insert into
+    `games` at runtime wrote none of them, so a manually added game arrived with
+    `entry_key: null` and stayed unopenable until someone happened to run a full rebuild.
+    An unidentified row's game_key is its title bucket, exactly as _game_key derives it
+    for an entry with no provider identity."""
+    plat = platform or ""
+    return plat, "%s@%s" % (nk, plat), nk, "title:%s" % nk
+
+
 def _insert_source_row(nk, title, source, platform, detail=""):
     """Add a source row to the live catalog (creating the game if new). Returns
     True if a brand-new game row was created."""
@@ -2243,12 +2258,16 @@ def _insert_source_row(nk, title, source, platform, detail=""):
         flags = {c: 0 for c in ("emulation", "steam", "gog", "epic", "itch", "archive")}
         if source in COLUMN_SOURCES:
             flags[source] = 1
+        plat, ekey, bkey, gkey = _addressing_keys(nk, platform)
         cur = con.execute(
-            "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,"
+            "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,"
+            "game_key,n_sources,n_kinds,"
             "sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
-            "has_archive,in_playnite,in_launchbox) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (title, nk, 1, 1, summary, flags["emulation"], flags["steam"],
-             flags["gog"], flags["epic"], flags["itch"], flags["archive"], 0, 0))
+            "has_archive,in_playnite,in_launchbox) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (title, nk, plat, ekey, bkey, gkey, 1, 1, summary, flags["emulation"],
+             flags["steam"], flags["gog"], flags["epic"], flags["itch"],
+             flags["archive"], 0, 0))
         con.execute("INSERT INTO sources(game_id,source,platform,source_id,title_raw,"
                     "detail) VALUES(?,?,?,?,?,?)",
                     (cur.lastrowid, source, platform, sid, title, detail))
@@ -5847,10 +5866,14 @@ def _provider_match_state(nk):
                                (nk,)).fetchone()
             except sqlite3.OperationalError:
                 r = None
+            # A PROVIDER ID IS NOT ALWAYS A NUMBER. mobygames, arcadedb and zxinfo
+            # store slugs, so `(r[0] or 0) > 0` raised TypeError and the caller's
+            # `except` turned the whole review card into no facts at all.
+            pid = r[0] if r is not None else None
             if r is None:
                 out["unattempted"].append(prov)
-            elif (r[0] or 0) > 0:
-                out["matched"].append({"provider": prov, "id": str(r[0])})
+            elif provider_ids.is_real_id(prov, pid):
+                out["matched"].append({"provider": prov, "id": str(pid)})
             else:
                 out["missed"].append(prov)
     finally:
@@ -8529,11 +8552,16 @@ def _apply_ownership_live(norm_key: str, title: str):
         row = con.execute("SELECT id FROM games WHERE norm_key=?", (norm_key,)).fetchone()
         if row is None:
             if facts and not any(f["state"] == "have" for f in facts) and title:
+                _wplat = next((f.get("platform") for f in facts if f.get("platform")),
+                              "")
+                _p, _ek, _bk, _gk = _addressing_keys(norm_key, _wplat)
                 con.execute(               # want-only for a not-yet-cataloged game
-                    "INSERT INTO games(canonical_title,norm_key,n_sources,n_kinds,"
+                    "INSERT INTO games(canonical_title,norm_key,platform,entry_key,"
+                    "base_key,game_key,n_sources,n_kinds,"
                     "sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
                     "has_archive,in_playnite,in_launchbox,wanted) "
-                    "VALUES(?,?,0,0,'',0,0,0,0,0,0,0,0,1)", (title, norm_key))
+                    "VALUES(?,?,?,?,?,?,0,0,'',0,0,0,0,0,0,0,0,1)",
+                    (title, norm_key, _p, _ek, _bk, _gk))
                 row = con.execute("SELECT id FROM games WHERE norm_key=?",
                                   (norm_key,)).fetchone()
             else:
