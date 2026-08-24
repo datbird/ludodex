@@ -1,10 +1,24 @@
 """Match ludodex games to RetroAchievements and pull achievements + progress.
 
-No ROM hashes on this host, so matching is console + normalized-title based:
-for each RA-supported platform in the catalog we pull RA's game list (only
-titles that actually have achievements) and match by norm_key. Then, for matched
-games, GetGameInfoAndUserProgress gives the full achievement set + which ones the
-configured user has earned. All RA calls are throttled by ra._throttle().
+Matching is console + title based, and it goes through the SAME acceptance gate every
+other provider does. It used not to: `ra_by_norm.setdefault(norm(Title), ...)` accepted a
+candidate on bare norm_key equality — no platform, no year, no gate — and three things
+followed from that.
+
+  * RA'S LIST IS NOT ALL GAMES. It carries `~Hack~`, `~Prototype~`, `~Demo~`,
+    `~Homebrew~` and `[Subset - ...]` entries, and `setdefault` meant whichever of them
+    normalised FIRST claimed the key and the real game could not have it.
+  * SEVERAL CANDIDATES IS NOT AN ANSWER. Two RA rows normalising to one key were not a
+    tie to break — nothing separates them — but first-wins broke it anyway.
+  * ONE ROW PER TITLE, AND TITLES SPAN CONSOLES. `ra_games` is keyed on norm_key alone
+    and the per-platform loop wrote `INSERT OR REPLACE`, so a game owned on two consoles
+    silently kept the LAST console's id. It is still one row per title — that is what
+    `ra_ach` and `ra_progress` are keyed by, and the server reads them that way — so the
+    first console to match holds the key, deterministically, and a second one is reported
+    rather than allowed to overwrite it.
+
+For matched games, GetGameInfoAndUserProgress gives the full achievement set + which ones
+the configured user has earned. All RA calls are throttled by ra._throttle().
 
 Data lands in ra.sqlite (gitignored). Usage:
     python ra_fetch.py match [--platform snes]     # build ra_games
@@ -14,10 +28,12 @@ Data lands in ra.sqlite (gitignored). Usage:
 
 import datetime
 import os
+import re
 import sqlite3
 import sys
 
 import config
+import matchgate
 import ra
 from titlenorm import norm
 
@@ -60,6 +76,59 @@ def _ra():
     return con
 
 
+# RA files things that are not the game under names that normalise like the game.
+# `~Hack~ Sonic 2 Delta` and `Sonic the Hedgehog 2 [Subset - Bonus]` are a romhack and an
+# achievement set, and neither is the cartridge anybody owns.
+_RA_NOT_A_GAME = re.compile(r"^\s*~[^~]+~|\[Subset\b", re.I)
+
+
+def ra_candidates(games):
+    """RA's console game list -> {norm_key: [(id, title), ...]}, non-games removed.
+
+    Every candidate for a key is KEPT rather than the first one winning: two rows under
+    one key is the absence of an answer, and only a list can say so."""
+    out = {}
+    for g in (games or []):
+        title = (g.get("Title") or "").strip()
+        if not title or _RA_NOT_A_GAME.search(title):
+            continue
+        nk = norm(title)
+        if not nk:
+            continue
+        out.setdefault(nk, []).append((g.get("ID"), title))
+    return out
+
+
+def ra_match(index, norm_key, title):
+    """The RA (id, title) for an owned game, or None. THROUGH THE GATE.
+
+    A normalised key that happens to be equal is not evidence — it is the input to the
+    judgement, not the judgement. `matchgate.score` measures the candidate against the
+    title the user actually owns, the same rule ScreenScraper, SteamGridDB and the index
+    merges are held to. No year is available from RA's list, and an absent year refuses
+    nothing (see matchgate.score)."""
+    cands = index.get(norm_key) or []
+    ok = [c for c in cands if matchgate.score([title or norm_key], c[1])[0]]
+    return ok[0] if len(ok) == 1 else None
+
+
+def record_match(rdb, norm_key, ra_id, ra_title, console_id):
+    """Write the match unless the key already belongs to ANOTHER console. -> written?
+
+    `ra_games`, `ra_ach` and `ra_progress` are all keyed on norm_key alone, so a title
+    owned on two consoles has exactly one slot and the two RA games cannot both have it.
+    The old `INSERT OR REPLACE` handed it to whichever console the loop reached last —
+    a silent, order-dependent answer. The first match holds it; the platform list is
+    sorted, so "first" is the same on every run."""
+    row = rdb.execute("SELECT ra_id, console_id FROM ra_games WHERE norm_key=?",
+                      (norm_key,)).fetchone()
+    if row is not None and row[1] != console_id:
+        return False
+    rdb.execute("INSERT OR REPLACE INTO ra_games VALUES(?,?,?,?,?)",
+                (norm_key, ra_id, ra_title, console_id, _now()))
+    return True
+
+
 def platforms_in_catalog(lib):
     rows = lib.execute(
         "SELECT DISTINCT platform FROM sources WHERE source='emulation' "
@@ -81,24 +150,26 @@ def match(only_platform=None):
         except Exception as e:
             print("RA game list %s (%s): %s" % (plat, cid, e), file=sys.stderr)
             continue
-        ra_by_norm = {}
-        for g in games:
-            ra_by_norm.setdefault(norm(g.get("Title", "")), (g["ID"], g["Title"]))
+        ra_by_norm = ra_candidates(games)
         owned = lib.execute(
             "SELECT DISTINCT g.norm_key, g.canonical_title FROM games g "
             "JOIN sources s ON s.game_id=g.id "
-            "WHERE s.source='emulation' AND s.platform=?", (plat,)).fetchall()
-        n = 0
+            "WHERE s.source='emulation' AND s.platform=? "
+            "ORDER BY g.norm_key", (plat,)).fetchall()
+        n = held = 0
         for row in owned:
-            hit = ra_by_norm.get(row["norm_key"])
-            if hit:
-                rdb.execute("INSERT OR REPLACE INTO ra_games VALUES(?,?,?,?,?)",
-                            (row["norm_key"], hit[0], hit[1], cid, _now()))
+            hit = ra_match(ra_by_norm, row["norm_key"], row["canonical_title"])
+            if not hit:
+                continue
+            if record_match(rdb, row["norm_key"], hit[0], hit[1], cid):
                 n += 1
+            else:
+                held += 1
         rdb.commit()
         total += n
-        print("%-16s %5d RA games / %5d owned -> %4d matched"
-              % (plat, len(ra_by_norm), len(owned), n))
+        print("%-16s %5d RA games / %5d owned -> %4d matched%s"
+              % (plat, len(ra_by_norm), len(owned), n,
+                 "  (%d already held by another console)" % held if held else ""))
     print("matched %d games total" % total)
     lib.close(); rdb.close()
 

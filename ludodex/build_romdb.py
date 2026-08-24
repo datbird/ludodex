@@ -83,7 +83,8 @@ CREATE TABLE meta (key TEXT, value TEXT);
         # finalize_games() below, which groups files into games accurately).
         for c in mid:
             if c.lower() not in GENERIC_DIRS:
-                gn, gr, gl, gv, grev, gd, gf, gt = parse_name(c)
+                # A FOLDER HAS NO EXTENSION: "Dr. Mario 64" is not "Dr" plus ".Mario 64".
+                gn, gr, gl, gv, grev, gd, gf, gt = parse_name(c, strip_extension=False)
                 region = region or gr
                 languages = languages or gl
                 version = version or gv

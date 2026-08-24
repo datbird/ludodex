@@ -650,6 +650,20 @@ def resolve(con, ns, val):
     return out
 
 
+def key_kind(con, ns, val):
+    """How a key was ESTABLISHED — 'exact' (the source published the pairing) or
+    'derived' (WE concluded it from a name). None when the key is not known here.
+
+    `resolve()` answers with handles alone, which is right for a lookup and wrong for a
+    caller deciding how far to trust one. A caller that cannot see the kind treats every
+    index answer as published — and the catalogue merges CONCLUDE a pairing with matchgate
+    and file it under the same namespace. Asking is what stops a name-derived bind wearing
+    a permanent exact badge (module header, "WHAT A ROW MEANS")."""
+    r = con.execute("WITH k AS (%s) SELECT kind FROM k WHERE ns=? AND val=? LIMIT 1"
+                    % _keys_sql(con), (ns, str(val))).fetchone()
+    return r["kind"] if r else None
+
+
 def resolve_name(con, title, year=None):
     """A title off a filename or a folder -> candidate identities, best first.
 
@@ -779,14 +793,26 @@ def build(progress=True):
         # cannot be accepted on a name alone.
         sysmap = {r["id"]: r["igdb_platform"] for r in
                   con.execute("SELECT id, igdb_platform FROM ss.ss_systems")}
+        # The SAME systeme -> canonical-platform map backfill_platforms uses, because
+        # ScreenScraper's own `igdb_platform` column is NULL for systems nobody ever
+        # mapped — 138, "PC Windows", above all — and the merge below used to WAIVE the
+        # hardware check for exactly those rather than resolve them another way.
+        syscanon = ss_system_canons(con)
+        plat_cache = {}
         for g in con.execute("SELECT id,name,norm_key,year,systeme FROM ss.ss_games"):
-            ident = _merge_ss(con, g, sysmap)
+            ident = _merge_ss(con, g, sysmap, syscanon, plat_cache)
             if ident >= SS_ID_BASE:
                 ss_own += 1
+                kind = "exact"          # the id and the identity are the same record
             else:
                 ss_merged += 1
+                # CONCLUDED, not published. `exact` means the SOURCE states this pairing;
+                # this one was reached by putting a name and a year through matchgate, and
+                # stamping it exact exempted it from the collision guard and from
+                # rescore() permanently (see the module header, "WHAT A ROW MEANS").
+                kind = "derived"
             con.execute("INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
-                        "VALUES('ss',?,?,'exact')", (str(g["id"]), ident))
+                        "VALUES('ss',?,?,?)", (str(g["id"]), ident, kind))
             for r in con.execute("SELECT crc,md5,sha1 FROM ss.ss_roms WHERE game_id=?",
                                  (g["id"],)):
                 for ns, v in (("crc", r["crc"]), ("sha1", r["sha1"])):
@@ -845,6 +871,58 @@ def build(progress=True):
     return st
 
 
+def ss_system_canons(con):
+    """ScreenScraper systeme id -> canonical ludodex platform token.
+
+    Resolved through the SAME ontology the contamination gate uses, so "Windows" and "pc"
+    compare equal here too. Shared with `_merge_ss`, because ScreenScraper's own
+    `igdb_platform` column is NULL for every system nobody ever mapped — 138, "PC Windows",
+    is the whole PC catalogue — and the merge used to read that NULL as "no hardware to
+    check" and accept on the name alone. A miss is not consent; this is what it can be
+    resolved with instead."""
+    import platmap
+    out = {}
+    for r in con.execute("SELECT id, name, names FROM ss.ss_systems"):
+        cands = []
+        try:
+            cands = list(json.loads(r["names"] or "[]"))
+        except Exception:                        # noqa: BLE001
+            pass
+        cands.append(r["name"] or "")
+        for nm in cands:
+            # A ScreenScraper system name is often a comma-joined blob of every alias it
+            # answers to. Each piece is tried, because the canonical token may be in any
+            # of them and the blob as a whole matches nothing.
+            for piece in str(nm).split(","):
+                c = platmap.canon(piece.strip())
+                # ONLY A RECOGNISED TOKEN. canon() falls back to the bare normalised
+                # string for anything it does not know, so "PC Windows" yields
+                # `pcwindows` — which matches no ludodex platform and would stamp every
+                # PC record with a label that silently excludes it from every filter.
+                # KNOWN is the set platmap actually maps, and "Windows" in the same
+                # alias list resolves correctly to `pc`.
+                if c in platmap.KNOWN:
+                    out[r["id"]] = c
+                    break
+            if r["id"] in out:
+                break
+    return out
+
+
+def identity_canons(con, identity_id, cache=None):
+    """The canonical platform tokens an IGDB identity says it released on."""
+    if cache is not None and identity_id in cache:
+        return cache[identity_id]
+    import platmap
+    out = {platmap.canon(r["name"]) for r in con.execute(
+        "SELECT p.name FROM ig.game_platforms gp JOIN ig.platforms p "
+        "ON p.id = gp.platform_id WHERE gp.game_id=?", (identity_id,)) if r["name"]}
+    out = {c for c in out if c in platmap.KNOWN}
+    if cache is not None:
+        cache[identity_id] = out
+    return out
+
+
 def backfill_platforms(con, progress=True):
     """Record WHICH PLATFORM each ScreenScraper key describes. -> rows filled.
 
@@ -870,7 +948,6 @@ def backfill_platforms(con, progress=True):
 
     Idempotent and safe to re-run: it only ever fills rows, and a row it cannot resolve
     stays NULL, which every reader treats as "unknown", never as "no platform"."""
-    import platmap
     filled = 0
     t0 = time.time()
     if "ss" not in _attach(con) or not _has_table(con, "ss", "ss_systems"):
@@ -878,33 +955,7 @@ def backfill_platforms(con, progress=True):
             print("matchindex: no ScreenScraper mirror, platforms not backfilled",
                   file=sys.stderr)
         return 0
-    # systeme id -> canonical ludodex platform, resolved through the SAME ontology the
-    # contamination gate uses, so "Windows" and "pc" compare equal here too.
-    sysmap = {}
-    for r in con.execute("SELECT id, name, names FROM ss.ss_systems"):
-        cands = []
-        try:
-            cands = list(json.loads(r["names"] or "[]"))
-        except Exception:                        # noqa: BLE001
-            pass
-        cands.append(r["name"] or "")
-        for nm in cands:
-            # A ScreenScraper system name is often a comma-joined blob of every alias it
-            # answers to. Each piece is tried, because the canonical token may be in any
-            # of them and the blob as a whole matches nothing.
-            for piece in str(nm).split(","):
-                c = platmap.canon(piece.strip())
-                # ONLY A RECOGNISED TOKEN. canon() falls back to the bare normalised
-                # string for anything it does not know, so "PC Windows" yields
-                # `pcwindows` — which matches no ludodex platform and would stamp every
-                # PC record with a label that silently excludes it from every filter.
-                # KNOWN is the set platmap actually maps, and "Windows" in the same
-                # alias list resolves correctly to `pc`.
-                if c in platmap.KNOWN:
-                    sysmap[r["id"]] = c
-                    break
-            if r["id"] in sysmap:
-                break
+    sysmap = ss_system_canons(con)
     for sid, canon in sysmap.items():
         cur = con.execute(
             "UPDATE identity_key SET platform=? WHERE ns='ss' AND platform IS NULL "
@@ -943,6 +994,7 @@ def _merge_tgdb_catalog(con, have, now, progress=True, t0=None):
             if gid in known:
                 continue
             ident = _match_tgdb(con, g)
+            kind = "derived" if ident is not None else "exact"   # see _merge_ss
             if ident is None:
                 ident = TGDB_CAT_ID_BASE + int(g["id"])
                 con.execute(
@@ -957,7 +1009,7 @@ def _merge_tgdb_catalog(con, have, now, progress=True, t0=None):
             else:
                 linked += 1
             con.execute("INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
-                        "VALUES('thegamesdb',?,?,'exact')", (gid, ident))
+                        "VALUES('thegamesdb',?,?,?)", (gid, ident, kind))
             if (linked + new) % 20000 == 0:
                 con.commit()
                 if progress:
@@ -982,12 +1034,22 @@ def _match_tgdb(con, g):
         "JOIN identity i ON i.id=k.identity_id "
         "WHERE k.ns IN ('name','alias') AND k.val=? AND k.identity_id < ?",
         (nk, SS_ID_BASE)).fetchall()
-    best, best_sc = None, 0.0
-    for c in cands:
-        ok, sc = matchgate.score([g["name"] or ""], c["name"], g["year"], c["year"])
-        if ok and sc > best_sc:
-            best, best_sc = c["identity_id"], sc
-    return best
+    passed = [c for c in cands
+              if matchgate.score([g["name"] or ""], c["name"], g["year"], c["year"])[0]]
+    if not passed:
+        return None
+    if len(passed) == 1:
+        return passed[0]["identity_id"]
+    # SEVERAL IDENTITIES IS NOT AN ANSWER. TheGamesDB's grain is (title, platform, REGION)
+    # and its platform is an id no local mirror can name, so hardware — the third leg of
+    # the acceptance rule — cannot separate these candidates at all. Ranking them by score
+    # picked a winner between candidates where only ONE can be right: Sonic 2 (Game Gear)
+    # binding to Sonic 2 (Genesis) on the name and 1992. A year is the only thing left
+    # that can decide, and the rule for that lives in matchgate. When it cannot, minting
+    # our own identity costs a duplicate; choosing wrong costs a wrong bind.
+    one = matchgate.pick_by_year(
+        [{"identity_id": c["identity_id"], "year": c["year"]} for c in passed], g["year"])
+    return one["identity_id"] if one else None
 
 
 def _merge_moby(con, have, now, progress=True, t0=None):
@@ -1012,8 +1074,9 @@ def _merge_moby(con, have, now, progress=True, t0=None):
         known = {r["val"] for r in
                  con.execute("SELECT val FROM identity_key WHERE ns='mobygames'")}
         # MobyGames platform id -> the IGDB platform it is. Built once; without it every
-        # candidate would be judged on its name alone.
-        platmap = {}
+        # candidate would be judged on its name alone. NOT named `platmap`: that shadowed
+        # the platmap MODULE, which `backfill_platforms` imports in this same file.
+        moby_plat = {}
         for r in con.execute("SELECT DISTINCT platform_id, platform_name "
                              "FROM mb.moby_platforms WHERE platform_name IS NOT NULL"):
             row = con.execute("SELECT id FROM ig.platforms WHERE LOWER(name)=? OR "
@@ -1021,7 +1084,7 @@ def _merge_moby(con, have, now, progress=True, t0=None):
                               (r["platform_name"].lower(),
                                _slug(r["platform_name"]))).fetchone()
             if row:
-                platmap[r["platform_id"]] = row["id"]
+                moby_plat[r["platform_id"]] = row["id"]
 
         for g in con.execute("SELECT id,title,norm_key,year FROM mb.moby_games"):
             gid = str(g["id"])
@@ -1029,7 +1092,8 @@ def _merge_moby(con, have, now, progress=True, t0=None):
                 continue                      # already anchored, by something better
             plats = [r["platform_id"] for r in con.execute(
                 "SELECT platform_id FROM mb.moby_platforms WHERE game_id=?", (g["id"],))]
-            ident = _match_moby(con, g, plats, platmap)
+            ident = _match_moby(con, g, plats, moby_plat)
+            kind = "derived" if ident is not None else "exact"   # see _merge_ss
             if ident is None:
                 ident = MOBY_ID_BASE + int(g["id"])
                 con.execute(
@@ -1044,7 +1108,7 @@ def _merge_moby(con, have, now, progress=True, t0=None):
             else:
                 linked += 1
             con.execute("INSERT OR IGNORE INTO identity_key(ns,val,identity_id,kind) "
-                        "VALUES('mobygames',?,?,'exact')", (gid, ident))
+                        "VALUES('mobygames',?,?,?)", (gid, ident, kind))
             if (linked + new) % 20000 == 0:
                 con.commit()
                 if progress:
@@ -1059,7 +1123,7 @@ def _merge_moby(con, have, now, progress=True, t0=None):
     return linked, new
 
 
-def _match_moby(con, g, plats, platmap):
+def _match_moby(con, g, plats, moby_plat):
     """The identity this MobyGames game already is, or None. Same gate as ScreenScraper."""
     nk = g["norm_key"]
     if not nk:
@@ -1069,7 +1133,7 @@ def _match_moby(con, g, plats, platmap):
         "JOIN identity i ON i.id=k.identity_id "
         "WHERE k.ns IN ('name','alias') AND k.val=? AND k.identity_id < ?",
         (nk, SS_ID_BASE)).fetchall()
-    want = sorted({platmap[p] for p in plats if p in platmap})
+    want = sorted({moby_plat[p] for p in plats if p in moby_plat})
     best, best_sc = None, 0.0
     for c in cands:
         if want:
@@ -1248,15 +1312,20 @@ def _merge_tgdb_freemap(con, now, progress=True, t0=None):
     return linked, new
 
 
-def _merge_ss(con, g, sysmap):
+def _merge_ss(con, g, sysmap, syscanon=None, plat_cache=None):
     """Which identity is this ScreenScraper game? An existing IGDB one when the gate
     accepts it, otherwise its own.
 
     A miss here must create a NEW identity, never fall through to a plausible-looking
     neighbour — the recurring bug in this codebase is a lookup that misses and gets read
-    as consent."""
+    as consent. `sysmap.get(systeme)` returning None is exactly such a miss, and it was
+    read as "no hardware constraint" for every record on a system ScreenScraper never
+    mapped to an IGDB platform — 138, "PC Windows", which is most of the catalogue. So
+    `syscanon` resolves the same system through the platform ONTOLOGY and the check is
+    made there instead of waived."""
     nk = g["norm_key"]
     plat = sysmap.get(g["systeme"])
+    ours = {syscanon.get(g["systeme"])} - {None} if syscanon else set()
     if nk:
         cands = con.execute(
             "SELECT DISTINCT k.identity_id, i.name, i.year FROM identity_key k "
@@ -1273,6 +1342,9 @@ def _merge_ss(con, g, sysmap):
                                  "AND platform_id=?", (c["identity_id"], plat)).fetchone()
                 if not on:
                     continue
+            elif ours and not matchgate.hardware_ok(
+                    ours, identity_canons(con, c["identity_id"], plat_cache)):
+                continue
             ok, sc = matchgate.score([g["name"] or ""], c["name"], g["year"], c["year"])
             if ok and sc > best_sc:
                 best, best_sc = c["identity_id"], sc

@@ -305,9 +305,6 @@ def main(argv):
     return 0
 
 
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
-
 
 def _ns_to_provider():
     """index namespace -> ludodex provider, INVERTED FROM provider_ids.
@@ -319,6 +316,24 @@ def _ns_to_provider():
     where the id form is decided."""
     import provider_ids
     return {ns: provider for provider, ns in provider_ids.INDEX_NS.items()}
+
+
+def entry_platform(system, title=None):
+    """The catalog's entry platform for a ROM found under folder `system`.
+
+    Composed from the same two rules build_library's `_emu_ep` composes — `norm_system`
+    for the console label and `platmap.platform_from_title` for filename-beats-folder — so
+    a hash identity is filed against the platform the catalog will actually give the
+    entry. It cannot simply CALL `_emu_ep`: build_library is a script that runs a whole
+    build on import.
+    """
+    from media import norm_system
+    import platmap
+    ep = norm_system((system or "").strip()) if system else ""
+    lbl = platmap.platform_from_title(title or "")
+    if lbl and platmap.canon(lbl) != platmap.canon(ep):
+        ep = norm_system(lbl)
+    return ep
 
 
 def enrich_from_hashes(rom_con, cat_con, limit=None, progress=True):
@@ -337,31 +352,55 @@ def enrich_from_hashes(rom_con, cat_con, limit=None, progress=True):
     A miss is a real answer and writes NOTHING. The index not knowing a hash means the
     name path should run, not that this game has no match — writing a miss here would
     suppress the search that would have found it.
+
+    THE HASH IS EVIDENCE ABOUT ONE FILE; THE CACHE IS KEYED BY TITLE. Those two facts do
+    not fit, and the old code resolved the mismatch by letting whichever row came first
+    stamp the whole title bucket — out of a query with no ORDER BY, so the winner changed
+    between runs, and across platforms, so a ~1994 Game Boy "Uno" recorded the identity a
+    Steam "UNO" entry then wore. So the evidence is COLLECTED first and written only where
+    every hashed file agrees:
+
+      * the key is `titlenorm.catalog_key(title, entry_platform)` — the key build_library
+        will actually give the entry, hardware tag stripped and merges applied;
+      * files sharing a key must agree on the provider id, or nothing is recorded for that
+        (key, provider) and the disagreement is reported. Disagreement IS the signal that
+        one title bucket holds two games;
+      * the platform is recorded alongside, so a wrong bind is auditable offline.
     """
     import time
     import matchindex
     import provider_ids
+    import titlenorm
+
+    # The tables must exist before anything is written to them. They did not have to, and
+    # each write sat inside `except Exception: continue` — so on a cache missing a column
+    # every write failed and the report still said `hash_hits: N`.
+    provider_ids.ensure_tables(cat_con)
 
     mi = matchindex.connect()
     ns_map = _ns_to_provider()
+    # ORDERED. Without this the winner of a contested key was sqlite's row order.
     rows = rom_con.execute(
         "SELECT r.relpath, r.game, r.system, h.crc, h.sha1 "
         "FROM rom_hashes h JOIN roms r ON r.relpath = h.relpath "
-        "WHERE h.crc IS NOT NULL" + (" LIMIT %d" % int(limit) if limit else "")
+        "WHERE h.crc IS NOT NULL ORDER BY r.relpath"
+        + (" LIMIT %d" % int(limit) if limit else "")
     ).fetchall()
 
-    from titlenorm import norm
-    hits = recorded = 0
-    seen_keys = set()
+    hits = 0
+    # (norm_key, provider) -> {id: platform}. A second distinct id is a CONFLICT.
+    proposed = {}
+    names = {}                                       # norm_key -> (name, year)
     for i, r in enumerate(rows, 1):
         got = identify(mi, crc=r["crc"], sha1=r["sha1"])
         if not got:
             continue
         hits += 1
-        nk = norm(r["game"] or "")
-        if not nk or nk in seen_keys:
+        plat = entry_platform(r["system"], r["game"])
+        nk = titlenorm.catalog_key(r["game"] or "", plat)
+        if not nk:
             continue
-        seen_keys.add(nk)
+        names.setdefault(nk, (got.get("_name"), got.get("_year")))
         for ns, provider in ns_map.items():
             vals = [v for v in (got.get(ns) or [])
                     if provider_ids._usable_id(provider, v)]
@@ -372,19 +411,40 @@ def enrich_from_hashes(rom_con, cat_con, limit=None, progress=True):
             # exact evidence, which nothing downstream would ever question.
             if len(vals) != 1:
                 continue
-            try:
-                provider_ids.record(cat_con, provider, nk, vals[0],
-                                    name=got.get("_name"), matched_by="hash",
-                                    year=got.get("_year"), system=r["system"])
-                recorded += 1
-            except Exception:                    # noqa: BLE001
-                continue
+            proposed.setdefault((nk, provider), {}).setdefault(str(vals[0]), plat)
         if progress and i % 20000 == 0:
             print("romhash: %d/%d examined, %d hash hits" % (i, len(rows), hits),
                   file=sys.stderr)
+
+    recorded = conflicts = write_errors = 0
+    first_error = None
+    for (nk, provider), byid in sorted(proposed.items()):
+        if len(byid) != 1:
+            # Two hashed files under one catalog key point at two different games. That is
+            # not a tie to break — it is the title bucket holding more than one game, and
+            # the identity cache has one row for it. Recording either would hand a whole
+            # title someone else's id under evidence exempt from every later re-judgement.
+            conflicts += 1
+            continue
+        pid, plat = next(iter(byid.items()))
+        nm, yr = names.get(nk, (None, None))
+        try:
+            provider_ids.record(cat_con, provider, nk, pid, name=nm, matched_by="hash",
+                                year=yr, system=plat or None, commit=False)
+            recorded += 1
+        except Exception as e:                       # noqa: BLE001 — counted, not hidden
+            write_errors += 1
+            if first_error is None:
+                first_error = str(e)[:200]
+    cat_con.commit()                                 # ONE commit, not one per write
     mi.close()
-    return {"examined": len(rows), "hash_hits": hits, "ids_recorded": recorded,
-            "distinct_games": len(seen_keys), "at": int(time.time())}
+    out = {"examined": len(rows), "hash_hits": hits, "ids_recorded": recorded,
+           "distinct_games": len({nk for nk, _p in proposed}),
+           "conflicts": conflicts, "write_errors": write_errors,
+           "at": int(time.time())}
+    if first_error:
+        out["write_error"] = first_error
+    return out
 
 
 # --- the pipeline entry point ---------------------------------------------- #
@@ -454,3 +514,7 @@ def hash_and_enrich(rom_db, progress=True):
                 con.close()
             except Exception:                    # noqa: BLE001
                 pass
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

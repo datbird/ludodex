@@ -22,8 +22,8 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 import config
-from titlenorm import norm      # shared dedupe normalizer (honors config prefs)
-import merges                   # durable user merges — fold duplicates into one
+import titlenorm                # shared dedupe normalizer (honors config prefs)
+from titlenorm import norm
 import compilations             # collections/compilations — materialize owned members (§13)
 import catalog_patch            # shared member-platform resolver (patched==rebuilt contract)
 import splits                   # durable "peel apart" — split a merged-away game out
@@ -32,7 +32,7 @@ import homebrew                 # ROM release-type classifier (homebrew/hack/pro
 import overrides                # durable per-attribute user corrections
 import platmap                  # platform ontology + filename-carried hardware tags
 import ingesthints              # AI ingest hints (lite/heavy import) — advisory
-_MERGE_ALIAS = merges.alias_map()
+_MERGE_ALIAS = titlenorm.merge_aliases()   # ONE load, shared with titlenorm.catalog_key
 _PEEL = splits.overrides()      # {(source, source_id): (to_key, to_title)}
 # {(system, game): (title, platform, year)} — what an AI ingest pass read off the
 # file paths. Applied to folder-based ROMs only, and only where the algorithmic
@@ -46,8 +46,7 @@ def _mkey(title, platform=None):
     merged-away entry folds into its canonical one on every rebuild. Pass the entry
     platform so a ROM whose title bakes in the console name ("Doom 32X") keys the same
     as the plain title ("Doom") on that platform (titlenorm strips the hardware tag)."""
-    k = norm(title, platform)
-    return _MERGE_ALIAS.get(k, k)
+    return titlenorm.catalog_key(title, platform)
 from playnite import LIST_KINDS, SCALAR_KINDS
 from igdb import map_record as igdb_map   # IGDB metadata-provider record mapping
 from media import norm_system             # canonical console labels (gb->gameboy, …)
@@ -82,19 +81,14 @@ def _rom_indexes():
         paths.append(p)
     return paths
 
-# Extensions that indicate an actual ROM/disc image (to skip box-art/manuals/etc).
-ROM_EXTS = {
-    "sfc", "smc", "nes", "fds", "unf", "gba", "gb", "gbc", "n64", "z64", "v64",
-    "nds", "dsi", "3ds", "cia", "cci", "nsp", "xci", "iso", "chd", "cue", "bin",
-    "img", "mdf", "nrg", "ccd", "wbfs", "rvz", "gcm", "gcz", "wad", "cso", "pbp",
-    "vpk", "pkg", "gdi", "cdi", "32x", "md", "gen", "smd", "sms", "gg", "pce",
-    "a26", "a52", "a78", "lnx", "ws", "wsc", "ngp", "ngc", "col", "int", "vec",
-    "d64", "adf", "ipf", "dsk", "tap", "z80", "rom", "vb", "min", "sv", "j64",
-    "jag", "lto", "sg", "sc", "zip", "7z", "rar", "chd", "elf", "dol", "wud",
-    "wux", "wua", "nkit", "m3u", "supercard",
-}
-MEDIA_GAMES = {"images", "manuals", "videos", "media", "screenshots", "snaps",
-               "box", "wheel", "marquee", "covers", "", "downloaded_media"}
+# What counts as a ROM, and what is a media folder rather than a game. romtags owns both
+# and the ROM indexer groups games by them; restating them here is how a format gets added
+# in one place and silently ignored in the other — romhash.py:39 says the same thing about
+# the same set. The copy that was here listed "chd" twice and had drifted from
+# romtags.MEDIA_DIRS by a dozen entries.
+import romtags                   # noqa: E402
+ROM_EXTS = romtags.ROM_EXTS
+MEDIA_GAMES = romtags.MEDIA_DIRS
 
 
 games = {}   # norm_key -> dict(title, store_title, sources=[])
@@ -364,8 +358,13 @@ try:
     for _nk, _t, _src, _plat, _state, _note in _ownership.all_facts(DATA):
         if _t:
             add(_t, _src, _plat or _src, "own:%s:%s" % (_src, _plat), _note, _state)
-except Exception:
-    pass
+except Exception as _e:          # noqa: BLE001 — the build continues, but NOT in silence
+    # These are hand-entered facts: physical copies and per-platform wants, the one class
+    # of ownership no importer can re-derive. A bare `except: pass` here dropped every one
+    # of them from the build and said nothing, and the next rebuild would do it again.
+    print("build_library: OWNERSHIP MERGE FAILED (%s) — every physical-copy and per-format"
+          " want fact is MISSING from this build" % _e, file=sys.stderr)
+    print("# ownership merge failed: %s" % _e)
 
 
 # ---- crawled local archives (crawl.py -> process.py -> extracted) ----
@@ -695,7 +694,10 @@ if _m2o_refused:
 # is not owned keeps parent_key NULL and stays in the grid, because hiding something you
 # own under something you do not is strictly worse.
 _by_igdb = {}
-for _nk, _iid in _ids.items():
+# SORTED, because `_ids` comes from a SELECT with no ORDER BY and first-wins. When two
+# norm_keys legitimately share one IGDB id, which of them became an add-on's `parent_key`
+# was decided by sqlite's row order and could change between rebuilds.
+for _nk, _iid in sorted(_ids.items()):
     _by_igdb.setdefault(_iid, _nk)
 _ADDON = {}                      # norm_key -> (kind, parent_norm_key or None)
 for _nk, _iid in _ids.items():
@@ -903,9 +905,13 @@ for (_gk, _plat), _eks in _id_groups.items():
                 _have.add(_sig)
         if not _rg.get("store_title") and _og.get("store_title"):
             _rg["store_title"] = _og["store_title"]
-        if _ek[0] in games_attrs:               # fold attribute records onto the rep
-            games_attrs.setdefault(_rep[0], {"src": []})["src"].extend(
-                games_attrs.pop(_ek[0]).get("src", []))
+        # BY THE ENTRY KEY, which is `(norm_key, platform)`. `add_attrs` is called with
+        # add()'s return value — the entry tuple — so a bare norm_key matched nothing:
+        # every Playnite/LaunchBox attribute record on a merged-away entry was dropped,
+        # and the string key this created was never read by anything.
+        if _ek in games_attrs:                  # fold attribute records onto the rep
+            games_attrs.setdefault(_rep, {"src": []})["src"].extend(
+                games_attrs.pop(_ek).get("src", []))
         _merged_n += 1
 if _merged_n:
     print("# regional-dup merge: folded %d duplicate entr(y/ies) into their canonical "
@@ -1237,10 +1243,27 @@ if _coll_made or _coll_sat:
               c["coll_key"] for c in compilations.all_collections(DATA)})),
           file=sys.stderr)
 
+# The per-entry passes below run a correlated `NOT EXISTS (SELECT ... FROM sources WHERE
+# game_id=?)` and a `DELETE FROM metadata_links WHERE game_id=?` once per IDENTIFIED entry
+# — tens of thousands of times — and both full-scanned until these were created, which
+# only happened after every one of them had run. The comment further down recognises the
+# same cost for the split/(year) passes; it is the same cost here and it is paid first.
+cur.execute("CREATE INDEX IF NOT EXISTS ix_src_game ON sources(game_id)")
+cur.execute("CREATE INDEX IF NOT EXISTS ix_mlink_game ON metadata_links(game_id)")
+
 # ---- release type -> editable attribute (classification computed above) ----
 # gids of blocked entries, so the enrichment below skips them (no rename / no metadata
 # from the wrongly-matched commercial game); their game_key is already title:<nk>.
 blocked_gids = {key_to_gid[_e] for _e in blocked_entries if _e in key_to_gid}
+# A DETACHED entry is the same statement made by hand. `entry_res.set_detach` promises the
+# entry "never inherits the official game's metadata or art", and `_game_key` honoured it —
+# so its ART was safe while everything else was not. Metadata fans out by base_key, which a
+# detached entry still shares with the title, so the Atari 2600 homebrew "Doom" collected
+# id Software's igdb link, its match_confidence, its genres and its NAME, plus every
+# provider link `provider_links.sync()` writes. An entry that only LOOKS adjudicated is
+# worse than one never detached. Same set, because it is the same rule: this entry is not
+# that game.
+blocked_gids |= {key_to_gid[_e] for _e in _entry_detached if _e in key_to_gid}
 _rt_rows = []
 for (_base, _plat), _gid in key_to_gid.items():
     _rt = _entry_release_type(_base, _plat)

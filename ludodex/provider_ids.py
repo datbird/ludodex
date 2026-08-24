@@ -23,8 +23,10 @@ of a decision — cached so a sweep doesn't re-search 2000 titles every run, but
 stale, so a later and better-informed pass tries again. A miss must never become
 permanent by being written down.
 """
+import os
 import sqlite3
 import sys
+import threading
 import time
 
 # provider -> (table, id column). Adding one here is all a new provider needs from this
@@ -134,6 +136,24 @@ def cached(con, provider, norm_key):
     return (r[0] or ("" if _is_string_id(provider) else 0), r[1] or "", r[2] or 0)
 
 
+def is_real_id(provider, provider_id):
+    """Is this cached value a REAL id, as opposed to a recorded MISS?
+
+    A string id is identified when it is non-empty; a numeric one when it is positive.
+    `provider_id > 0` on a slug raises TypeError, and that is not hypothetical: `resolve`
+    and `unlinked` each wrote the comparison out by hand and each died on the first
+    mobygames/arcadedb/zxinfo row — for a hit AND for a miss. `server/app.py` sweeps every
+    provider through `unlinked`, so one string row killed the sweep for all of them.
+    The rule lives here so a fourth reader cannot get it wrong a fourth way.
+    """
+    if _is_string_id(provider):
+        return bool(str(provider_id or "").strip())
+    try:
+        return int(provider_id or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def is_identified(con, provider, norm_key):
     """True only for a REAL id. A recorded miss is not an identity — the whole point of
     the igdb:0 incident is that a falsy id used as a key makes every entry carrying it
@@ -141,9 +161,7 @@ def is_identified(con, provider, norm_key):
     row = cached(con, provider, norm_key)
     if not row:
         return False
-    # A string id is identified when it is non-empty; a numeric one when it is positive.
-    # `row[0] > 0` on a slug raises TypeError, which is how this went unnoticed.
-    return bool(str(row[0]).strip()) if _is_string_id(provider) else bool(row[0] > 0)
+    return is_real_id(provider, row[0])
 
 
 def holder(con, provider, provider_id, norm_key=None):
@@ -162,8 +180,14 @@ def holder(con, provider, provider_id, norm_key=None):
 
 
 def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
-           year=None, system=None):
+           year=None, system=None, commit=True):
     """Write an identity (or a miss, with a falsy provider_id). Idempotent.
+
+    `commit=False` for a BULK writer. This committed on every call, and the hash pass
+    calls it once per (game, provider) across hundreds of thousands of files — one fsync
+    each, while `romhash.scan()` directly above it batches 2,000 rows per commit. A
+    single-identity caller still commits by default, because for it the write and the
+    durability are the same act.
 
     A SEARCHED id that another game already holds is refused. One provider id is one
     game, so two titles arriving at the same id means at least one of them is wrong —
@@ -213,7 +237,8 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
         (norm_key, pid, name, yr, (system or None),
          matched_by if pid else ("collision" if matched_by == "collision" else "none"),
          int(time.time())))
-    con.commit()
+    if commit:
+        con.commit()
     return pid
 
 
@@ -266,6 +291,55 @@ def index_lookup(provider, anchors, systems=None):
     Anything the filter cannot settle is searched exactly as before. The index declining
     to answer costs one request; answering wrongly costs a wrong bind recorded as exact
     evidence, which nothing downstream would ever question.
+
+    THE ANCHOR BEING EXACT DOES NOT MAKE THE ANSWER EXACT. The key that carries the answer
+    may itself have been concluded — the index's ScreenScraper, MobyGames and TheGamesDB
+    merges reach an identity through matchgate — so `index_answer()` returns the key's
+    `kind` alongside the id and `resolve()` records the two cases differently. This
+    function keeps the plain answer for callers that only want the id.
+    """
+    return (index_answer(provider, anchors, systems=systems) or (None,))[0]
+
+
+# One match-index handle PER THREAD, held open. `matchindex.connect()` runs an
+# executescript that creates three tables and an index, commits, ATTACHes the ~1 GB index
+# and reads config — and `resolve()` asks the index once per game per provider, so opening
+# it per call paid all of that tens of thousands of times in a single sweep. Per thread
+# because a sqlite connection is not shareable across threads and the server is threaded.
+_IX = threading.local()
+
+
+def _ix_con():
+    """The cached index handle for this thread, reopened when the index appears or goes.
+
+    ABSENCE MUST STAY REACHABLE. A cached handle keeps a DELETED file open, so an index
+    that was removed would keep answering — the exact inverse of the fail-open rule this
+    module is built on, and something no caller could detect. The presence of the file is
+    therefore re-checked on every call (one stat, against three CREATE TABLEs and a 1 GB
+    ATTACH) and the handle is dropped whenever that answer changes.
+    """
+    import matchindex
+    have = os.path.exists(matchindex.index_path())
+    con = getattr(_IX, "con", None)
+    if con is not None and getattr(_IX, "had", None) != have:
+        try:
+            con.close()
+        except Exception:                        # noqa: BLE001
+            pass
+        con = None
+    if con is None:
+        con = matchindex.connect()
+        _IX.con, _IX.had = con, have
+    return con
+
+
+def index_answer(provider, anchors, systems=None):
+    """(id, kind, name, year) from the match index, or None. See index_lookup.
+
+    The KIND travels with the answer because it decides how the identity is recorded. An
+    index key is `exact` only when the source PUBLISHED the pairing; the catalogue merges
+    CONCLUDE one with matchgate and used to stamp that `exact` too, which exempted a
+    name-derived bind from the collision guard and from `rescore()` forever.
     """
     ns = INDEX_NS.get(provider)
     if not ns or not anchors:
@@ -274,9 +348,8 @@ def index_lookup(provider, anchors, systems=None):
         import matchindex
     except Exception:                            # noqa: BLE001 — the index is optional
         return None
-    con = None
     try:
-        con = matchindex.connect()
+        con = _ix_con()
         for a_ns, a_val in anchors.items():
             if not a_val:
                 continue
@@ -287,15 +360,10 @@ def index_lookup(provider, anchors, systems=None):
             if len(vals) > 1:
                 vals = _on_platform(con, ns, vals, systems) or vals
             if len(vals) == 1:
-                return vals[0]
+                return (vals[0], matchindex.key_kind(con, ns, vals[0]),
+                        hit.get("_name"), hit.get("_year"))
     except Exception:                            # noqa: BLE001
         return None
-    finally:
-        if con is not None:
-            try:
-                con.close()
-            except Exception:                    # noqa: BLE001
-                pass
     return None
 
 
@@ -356,7 +424,7 @@ def resolve(con, provider, norm_key, title, systems, search, force=False, anchor
     row = cached(con, provider, norm_key)
     if row and not force:
         pid, matched_by, at = row
-        if pid > 0 or matched_by == "manual":
+        if is_real_id(provider, pid) or matched_by == "manual":
             return pid                      # a decision — never re-search
         if (time.time() - at) < MISS_TTL:
             return 0                        # a fresh miss — don't hammer the provider
@@ -364,11 +432,20 @@ def resolve(con, provider, norm_key, title, systems, search, force=False, anchor
         # decision, not a permanent verdict (#25).
     # THE INDEX BEFORE THE NETWORK. If any exact handle we already hold identifies this
     # game, the index already knows every other provider's id for it. That costs one
-    # local lookup instead of a rate-limited round trip and an acceptance gate, and it
-    # cannot be a wrong bind because the pairing was published, not concluded.
-    from_ix = index_lookup(provider, anchors, systems=systems)
-    if from_ix:
-        return record(con, provider, norm_key, from_ix, None, "index", system=None)
+    # local lookup instead of a rate-limited round trip and an acceptance gate.
+    #
+    # AND IT IS ONLY AS EXACT AS THE KEY IT CAME FROM. `matched_by='index'` claims the
+    # pairing was published, which buys exemption from the collision guard and from
+    # rescore() — permanently, because nothing re-judges a decision already written down.
+    # The index's catalogue merges CONCLUDE a pairing with matchgate, so an answer off one
+    # of those is recorded as the name-derived judgement it is, and its name and year are
+    # carried across so rescore() has something to re-judge it against.
+    ix = index_answer(provider, anchors, systems=systems)
+    if ix and ix[0]:
+        from_ix, kind, ix_name, ix_year = ix
+        how = "index" if kind == "exact" else "name"
+        return record(con, provider, norm_key, from_ix, ix_name, how,
+                      year=ix_year, system=None)
 
     try:
         hit = search(title, systems)
@@ -390,7 +467,8 @@ def unlinked(con, provider, norm_keys):
         row = cached(con, provider, nk)
         if row is None:
             out.append(nk)
-        elif row[0] <= 0 and row[1] != "manual" and (now - row[2]) >= MISS_TTL:
+        elif (not is_real_id(provider, row[0]) and row[1] != "manual"
+                and (now - row[2]) >= MISS_TTL):
             out.append(nk)
     return out
 
@@ -516,7 +594,12 @@ def _main(argv):
     if "--scrub" not in argv:
         print(_main.__doc__.strip())
         return 2
-    data = os.environ.get("LUDODEX_DATA") or os.path.dirname(os.path.abspath(__file__))
+    # The package dir is NOT the data dir. Every sibling module says so in as many words:
+    # __file__ is this package, DATA is the REPO ROOT above it, which is where the
+    # databases live. Falling back to the package dir pointed the scrub at a directory
+    # holding no game-library.sqlite at all.
+    data = (os.environ.get("LUDODEX_DATA")
+            or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     lib = sqlite3.connect("file:%s?mode=ro" % os.path.join(data, "game-library.sqlite"),
                           uri=True)
     apply_it = "--apply" in argv

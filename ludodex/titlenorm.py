@@ -56,6 +56,37 @@ def _prefs():
     return _PREFS
 
 
+_ALIASES = None
+
+
+def merge_aliases():
+    """{merged-away key: canonical key} — the user's durable "Fix duplication" merges.
+
+    Loaded once. build_library and romhash both need it to arrive at the SAME key for the
+    same game, and a second load is a second chance for the two to disagree."""
+    global _ALIASES
+    if _ALIASES is None:
+        try:
+            import merges
+            _ALIASES = merges.alias_map()
+        except Exception:                   # noqa: BLE001 — no merges is a normal state
+            _ALIASES = {}
+    return _ALIASES
+
+
+def catalog_key(title, platform=None):
+    """The key the CATALOG files a (title, platform) under: norm() plus the merges.
+
+    THE ONE DERIVATION, because it had two. build_library's `_mkey` was the only place
+    that knew a catalog key is norm-with-platform PLUS the merge alias, so romhash wrote
+    hash identities under bare `norm(title)`: `norm("Doom 32X", "sega 32x")` is `doom`
+    while romhash wrote `doom 32x`, a norm_key no catalog row carries — and every
+    hash-identified ROM with an in-title hardware tag bought an identity nothing could
+    read. A merged-away title had the same problem for the same reason."""
+    k = norm(title, platform)
+    return merge_aliases().get(k, k)
+
+
 def norm(t, platform=None):
     preserve_years, strip_editions = _prefs()
     s = (t or "").lower()

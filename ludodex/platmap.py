@@ -21,7 +21,9 @@ _ALIASES = {
     "switch": ["switch", "nintendoswitch"],
     # Switch 2. Nintendo's own records call it OUNCE internally and the Virtual Game
     # Card portal reports that codename, which nintendo_owned maps to this label.
-    "switch2": ["switch2", "nintendoswitch2", "nintendoswitch 2", "ounce"],
+    # NB every alias here must ALREADY be normalised: _norm() strips non-alphanumerics
+    # before the lookup, so a key containing a space can never be matched.
+    "switch2": ["switch2", "nintendoswitch2", "ounce"],
     "snes": ["snes", "supernintendoentertainmentsystem", "superfamicom", "sfc"],
     "nes": ["nes", "nintendoentertainmentsystem", "familycomputer", "famicom",
             "familycomputerdisksystem", "fds"],

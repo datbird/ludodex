@@ -315,6 +315,39 @@ def score(owned, cand_name, year=None, cand_year=None):
     return best
 
 
+def hardware_stated(ours, theirs):
+    """True when BOTH sides name hardware, so `hardware_ok`'s answer is EVIDENCE.
+
+    Separate from the verdict on purpose. A caller that must not accept without evidence
+    asks this; a caller that must not refuse without evidence asks only `hardware_ok`.
+    Collapsing the two is how "we do not know" turns into "no", which is the fail-open
+    shape this codebase keeps paying for."""
+    return bool({c for c in (ours or ()) if c}) and bool({c for c in (theirs or ()) if c})
+
+
+def hardware_ok(ours, theirs):
+    """Is a candidate on hardware `theirs` acceptable for a game on hardware `ours`?
+
+    THE THIRD LEG OF THE RULE. docs/PIPELINE.md lists hardware beside coverage and era as
+    part of the single acceptance rule, and `score()` has no platform argument — so every
+    caller that wanted it wrote its own, and the ones that could not write it simply
+    skipped it. A name that matches on the wrong machine is a different product: Sonic 2
+    on the Game Gear is not Sonic 2 on the Genesis, and they agree on the name AND on 1992.
+
+    Both sides are sets of canonical platmap tokens (`platmap.canon`), because comparing
+    two unmapped labels is matching noise against noise.
+
+    An UNKNOWN platform is the absence of evidence, never a mismatch: reading NULL as "no
+    platform" would drop every candidate at once. So a side that states nothing refuses
+    nothing, and a caller that needs the answer to BE evidence pairs this with
+    `hardware_stated`."""
+    o = {c for c in (ours or ()) if c}
+    t = {c for c in (theirs or ()) if c}
+    if not o or not t:
+        return True
+    return bool(o & t)
+
+
 def game_era(lib_con, cache_con, norm_key):
     """The year THE GAME came out — which is not the year a STORE listed it.
 

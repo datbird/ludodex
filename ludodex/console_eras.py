@@ -70,13 +70,24 @@ HANDHELD_RETRO = {
 HANDHELD_MODERN = {"nds", "3ds", "psp", "psvita", "psp minis"}
 
 
+# The same two sets keyed by CANONICAL token, for exactly the reason spelled out for
+# `era()` twenty lines below: the catalog does not speak this table's dialect. These
+# tables say 'gameboy' and 'gba'; a store-owned or platmap-canonicalised entry carries
+# `gb`, and `is_handheld('gb')` was False — so the stray-handheld split in build_library
+# never saw the entries it exists to peel off.
+_RETRO_CANON = {platmap.canon(p) for p in HANDHELD_RETRO}
+_MODERN_CANON = {platmap.canon(p) for p in HANDHELD_MODERN}
+
+
 def is_retro_handheld(platform):
-    return (platform or "").strip().lower() in HANDHELD_RETRO
+    p = (platform or "").strip().lower()
+    return p in HANDHELD_RETRO or platmap.canon(p) in _RETRO_CANON
 
 
 def is_handheld(platform):
     p = (platform or "").strip().lower()
-    return p in HANDHELD_RETRO or p in HANDHELD_MODERN
+    return (p in HANDHELD_RETRO or p in HANDHELD_MODERN
+            or platmap.canon(p) in _RETRO_CANON or platmap.canon(p) in _MODERN_CANON)
 
 
 # The same table keyed by CANONICAL platform token, because the catalog does not speak

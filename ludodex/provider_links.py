@@ -47,8 +47,10 @@ PAGE_URL = {
 }
 
 
-# Providers whose identifier is a string. Anything outside this set must be numeric.
-STRING_ID_PROVIDERS = {"mobygames", "arcadedb", "zxinfo"}
+# Which providers id by string is decided in ONE place — the layer that stores the id.
+# A second copy here went stale the moment a provider joined or left the set, and this
+# module's whole job is to turn a stored id into a link, so disagreeing with the store
+# about the id's SHAPE drops every link for that provider without a word.
 # Conservative on purpose: a provider id goes straight into a URL we hand the user, so
 # anything that is not a plain slug is refused rather than escaped and hoped for.
 _SLUG_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
@@ -60,14 +62,20 @@ def page_url(provider, provider_id):
     Same rule the server's `_provider_page_url` applies — it delegates here for these
     providers rather than keeping a second copy of the templates.
     """
-    t = PAGE_URL.get((provider or "").lower())
+    import provider_ids                      # local: keeps this importable standalone
+
+    p = (provider or "").lower()
+    t = PAGE_URL.get(p)
     v = str(provider_id or "").strip()
     if not (t and v):
         return None
     # Not every provider ids by integer. A MobyGames id is a slug and an ArcadeDB id is a
     # MAME set name, so an isdigit() gate would silently drop every link for both — the
     # rule is that the id must be SAFE in a URL, not that it must be a number.
-    if provider in STRING_ID_PROVIDERS:
+    # Tested on the LOWERCASED name, like the template lookup above it: 'MobyGames' found
+    # a template and then failed this test, so it took the isdigit() branch and dropped
+    # every link for a provider whose ids are never digits.
+    if p in provider_ids.STRING_ID_PROVIDERS:
         return t % urllib.parse.quote(v, safe="") if _SLUG_OK.match(v) else None
     return t % v if v.isdigit() else None
 

@@ -509,6 +509,25 @@ def decided_identities(con):
         "OR (matched_by IN (%s) AND igdb_id>0)" % marks, AI_DECIDED)}
 
 
+def reheal_candidates(con):
+    """The resolved games `--era-reheal` may re-decide: [(norm_key, igdb_id)].
+
+    A REHEAL IS A DERIVATION, AND IT MUST NOT OVERWRITE A DECISION. The query behind this
+    excluded `matched_by='manual'` and nothing else, then `INSERT OR REPLACE`d — so it
+    destroyed exactly the AI-decided identities `decided_identities()` protects from a
+    full refresh. Each of those is a PAID judgment made because the deterministic search
+    could not settle the game; re-running that search and writing 0 when it fails again is
+    the same mistake, through a different door. Live, all 8 of them were games name
+    matching had already refused.
+
+    Same protected set as `decided_identities`, deliberately: two lists of what counts as
+    a decision is one list too many."""
+    decided = decided_identities(con)
+    return [(nk, iid) for nk, iid in con.execute(
+        "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0")
+        if nk not in decided]
+
+
 def era_reheal(argv):
     """Fix ALREADY-resolved games whose IGDB match is era-impossible for their
     console(s) — the same-name/different-era collisions that predate the era-aware
@@ -539,9 +558,7 @@ def era_reheal(argv):
     # candidates: resolved AND living on at least one era-bound emulation console
     # (store-only games are never era-gated, so skip them).
     cand = []                       # [(norm_key, igdb_id)]
-    for nk, iid in con.execute(
-            "SELECT norm_key, igdb_id FROM igdb_resolution "
-            "WHERE igdb_id>0 AND matched_by!='manual'"):   # never re-heal a hand pin
+    for nk, iid in reheal_candidates(con):     # never re-heal a hand pin or an AI verdict
         cs = consoles.get(nk)
         if cs and any(console_eras.era(c) for c in cs):
             cand.append((nk, iid))
@@ -590,7 +607,13 @@ def era_reheal(argv):
                 % title, cid, tok)
         except Exception:
             hits = []
-        new_iid, slug = _pick_era_aware(hits, nk, consoles.get(nk))
+        # WITH THE PLATFORM, when the game has exactly one. `_pick_era_aware` uses it to
+        # apply IGDB's own statement about which platforms a record released on — the
+        # check the title-level matcher never made, and the reason a genesis entry took a
+        # PC port's record. Several consoles state nothing single, so nothing is passed.
+        _cs = sorted(consoles.get(nk) or [])
+        new_iid, slug = _pick_era_aware(hits, nk, consoles.get(nk),
+                                        platform=_cs[0] if len(_cs) == 1 else None)
         cons = ",".join(sorted(consoles.get(nk) or []))
         print("  %-40s [%s] #%d(y%s) -> %s"
               % (nk[:40], cons, old_iid, y,
@@ -599,9 +622,15 @@ def era_reheal(argv):
         if new_iid:
             rebound.append(nk)
         if not dry:
+            # UPSERT, not INSERT OR REPLACE. Replace DELETES the row and re-inserts it with
+            # only these five columns, so `year`, `system` and `name` — everything the
+            # offline era/system audit reads — were silently emptied by a reheal.
             con.execute(
-                "INSERT OR REPLACE INTO igdb_resolution"
-                "(norm_key,igdb_id,slug,matched_by,resolved_at) VALUES(?,?,?,?,?)",
+                "INSERT INTO igdb_resolution"
+                "(norm_key,igdb_id,slug,matched_by,resolved_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(norm_key) DO UPDATE SET igdb_id=excluded.igdb_id, "
+                "slug=excluded.slug, matched_by=excluded.matched_by, "
+                "resolved_at=excluded.resolved_at",
                 (nk, new_iid or 0, slug, "era_reheal" if new_iid else "era_reject",
                  now))
     if not dry:

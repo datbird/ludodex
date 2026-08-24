@@ -37,8 +37,12 @@ _LANG_NAME = {n.lower(): n for n in set(_LANG_CODE.values())}
 # A fan translation / localization patch. The strongest, least-ambiguous signals:
 # a GoodTools [T+xx]/[T-xx] tag, a "(T-Eng)" tag, the word "translat(ed/ion)", or a
 # "(<Language> v1.01)" tag (a version pins it to a patch, not a mere region label).
+# THE +/- SIGN IS REQUIRED, in the parenthesised form as well as the bracketed one.
+# Optional, `\(t[+\-]?[a-z]{2,4}\)` matched "(Taito)", "(Tape)", "(Trial)" and "(Test)" —
+# and because Translation is the FIRST rule, a name carrying one of those had every later
+# rule masked, so a real "(Hack)" or "(Demo)" beside it was never seen.
 _TRANSLATION_RX = re.compile(
-    r"\[t[+\-]\s*[a-z]{2,4}|\(t[+\-]?[a-z]{2,4}\)|\btranslat\w*|"
+    r"\[t[+\-]\s*[a-z]{2,4}|\(t[+\-][a-z]{2,4}\)|\btranslat\w*|"
     r"\((?:english|french|german|spanish|italian|portuguese|dutch|russian|polish|"
     r"korean|chinese|swedish)\s+(?:v\.?\s*)?\d",
     re.I)
@@ -117,7 +121,7 @@ def extract_language(name):
     if not name:
         return None
     n = name.lower()
-    m = re.search(r"\[t[+\-]\s*([a-z]{2,4})|\(t[+\-]?([a-z]{2,4})\)", n)  # [T+Eng] / (T-Eng)
+    m = re.search(r"\[t[+\-]\s*([a-z]{2,4})|\(t[+\-]([a-z]{2,4})\)", n)  # [T+Eng] / (T-Eng)
     if m:
         code = m.group(1) or m.group(2)
         if code in _LANG_CODE:
