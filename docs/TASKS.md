@@ -145,7 +145,14 @@ A four-reviewer audit (media/vision · collections · identity/spend · server/U
 
 ## Top of queue
 
-- **2026-08-23 full-repo review: 50 ranked fixes. Batch 1 (data loss, 9 items) is done and pushed; 41 open.** Tracked outside the repo (the list names hosts and unfixed holes). Batches in order: data loss, auth/security, paid-AI gating, identity/art, silent failure, dead scripts (`scripts/*.sh` have been broken since the 2026-08-13 move), frontend races, tests/packaging. Each fix lands with a `tests/` check.
+- **2026-08-23 full-repo review: all 50 ranked fixes are done.** 47 fixed, 3 partial with the
+  reasoning recorded alongside each. Every fix landed with a regression test written first; the
+  suite went from 94 to 151 files, 0 failures. Three things were deliberately left: a git history
+  scrub (needs a maintainer decision, it rewrites every commit), grid windowing in the frontend
+  (needs a virtualisation dependency), and folding IGDB's exact-name resolver into the shared
+  acceptance gate (IGDB's rule is stricter, so folding it in would loosen everything joined to it).
+  Still open as follow-up: port the nine surviving `ludodex/verify_*.py` into `tests/`, since each
+  is the only coverage of a production symbol. Tracked outside the repo (the list names hosts and unfixed holes). Batches in order: data loss, auth/security, paid-AI gating, identity/art, silent failure, dead scripts (`scripts/*.sh` have been broken since the 2026-08-13 move), frontend races, tests/packaging. Each fix lands with a `tests/` check.
 
 - ~~**Cover / hero loading spinner**~~ **DONE 2026-07-23.** `SpinImg` component (cache-race guarded,
   src-keyed) wired into the library grid covers and the detail hero. `.img-spin` reuses `sync-spin`.
