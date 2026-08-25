@@ -1,6 +1,6 @@
 <div align="center">
 
-# ludodex
+<img src="docs/images/logo.png" alt="ludodex" width="360">
 
 **Every game you own. One library. Every platform.**
 
