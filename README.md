@@ -16,14 +16,21 @@
 
 ---
 
-Your games are scattered. Some on Steam, some on GOG, a shelf of cartridges, a NAS full
-of ROMs, and a few you own three times over without realising it. Every storefront shows
-you its own slice and none of them show you the whole.
+Every library tool builds its own catalog. Playnite, LaunchBox, ES-DE, RetroBat and the
+rest each scrape their own metadata, pick their own art, and get their own matches wrong.
+Fix a bad cover in one and the others still show it. Set up a second device and you sit
+through the whole scrape again.
 
-**ludodex is one local catalog of everything you own.** Emulation ROMs and digital
-storefronts, deduped into a single library, with one entry per game *and platform*, so
-"I own Rayman on PS1 and Steam" is a fact you can see and act on rather than something
-you half-remember.
+**ludodex sits above them rather than competing with them.** It holds the one catalog you
+correct, and then pushes that correction outward to everything you run: the ROM where
+that frontend expects it, the metadata it reads, and the art it displays, each in its own
+layout. Fix a game once, here, and it is fixed on the handheld, in the cabinet, and in
+every frontend on every machine. You stop re-scraping, and you stop fixing the same game
+five times.
+
+Everything you own lives in it, ROMs and storefronts alike, deduped into one library with
+one entry per game *and platform*. AI helps when a match is genuinely hard, and it is
+optional. The rest works without it.
 
 It runs on your own hardware. Nothing leaves it.
 
