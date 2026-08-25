@@ -146,6 +146,17 @@ def _grab_frame(src, when, timeout):
     return out.stdout if out.returncode == 0 and out.stdout else None
 
 
+def _whole_jpeg(data):
+    """Is this a COMPLETE JPEG? Truncation is the failure being detected.
+
+    A JPEG starts SOI (FF D8) and ends EOI (FF D9). A file cut short by a crash, a full
+    disk or a killed job keeps the start and loses the end, which is precisely the
+    half-sheet `os.path.exists` cannot tell apart from a good one. Cheap, and it needs
+    no decoder: this runs on every cache hit."""
+    return (len(data) > 4 and data[:2] == b"\xff\xd8"
+            and data[-2:] == b"\xff\xd9")
+
+
 def contact_sheet(src, repo, ref, px=320):
     """ONE JPEG tiling FRAME_COUNT frames from the video, cached by `ref`.
 
@@ -155,15 +166,19 @@ def contact_sheet(src, repo, ref, px=320):
     Returns None when ffmpeg is absent or no frame could be read — the caller skips the
     candidate rather than scoring it blind."""
     path = sheet_path(repo, ref)
-    # `os.path.exists` is only a sound guard because the write below is ATOMIC: the file
-    # cannot exist half-finished, so its presence really does mean a complete sheet. It
-    # was not always so — the sheet used to be written straight to this path, and a
-    # crash, a full disk or a killed job left a truncated JPEG that was handed to the
-    # vision model, and scored, on every call from then on.
+    # The write below is ATOMIC, so nothing this code writes can be half a sheet. That
+    # only covers sheets written from now on: the cache still holds whatever a crash, a
+    # full disk or a killed job left there BEFORE the write was fixed, and existence
+    # alone cannot tell those apart. So the bytes are checked, and a sheet that is not
+    # whole is deleted rather than handed to the vision model and scored — which is what
+    # happened on every call, forever, once one was written.
     if os.path.exists(path):
         try:
             with open(path, "rb") as fh:
-                return fh.read()
+                cached = fh.read()
+            if _whole_jpeg(cached):
+                return cached
+            os.unlink(path)         # poisoned; the next pass re-samples it
         except OSError:
             pass
     if not available():

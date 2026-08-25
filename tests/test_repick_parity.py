@@ -64,7 +64,7 @@ def main():
     add("game a", "steamgriddb", 600, 900)          # lower priority, five times the area
     con.commit()
     con.execute("DELETE FROM media WHERE id=?", (dead,))
-    media_choose._repick(con, "game a", "cover", "")
+    media_choose._repick(con, "game a", "cover")
     got = chosen_of("game a")
     check("exactly one cover is promoted", len(got) == 1)
     check("the 600x900 SteamGridDB cover wins over the 264x352 IGDB one",
@@ -75,7 +75,7 @@ def main():
     add("game b", "steamgriddb", 920, 430)          # landscape grid — never a cover
     con.commit()
     con.execute("DELETE FROM media WHERE id=?", (dead2,))
-    media_choose._repick(con, "game b", "cover", "")
+    media_choose._repick(con, "game b", "cover")
     check("no landscape asset is installed into the cover slot",
           chosen_of("game b") == [])
 
@@ -84,7 +84,7 @@ def main():
     c_un = add("game c", "screenscraper", None, None)
     con.commit()
     con.execute("DELETE FROM media WHERE id=?", (dead3,))
-    media_choose._repick(con, "game c", "cover", "")
+    media_choose._repick(con, "game c", "cover")
     got = chosen_of("game c")
     check("the unmeasured candidate is promoted", len(got) == 1)
     check("and it is the one that was left", got and got[0]["provider"] == "screenscraper")
@@ -96,7 +96,7 @@ def main():
     con.execute("UPDATE media SET hidden=1 WHERE id=?", (hid,))
     con.commit()
     con.execute("DELETE FROM media WHERE id=?", (dead4,))
-    media_choose._repick(con, "game d", "cover", "")
+    media_choose._repick(con, "game d", "cover")
     check("hidden stays out of contention", chosen_of("game d") == [])
 
     print("5. the promotion does not disturb any OTHER game or kind")
@@ -106,7 +106,7 @@ def main():
     add("game f", "igdb", 600, 900)
     con.commit()
     con.execute("DELETE FROM media WHERE id=?", (dead5,))
-    media_choose._repick(con, "game f", "cover", "")
+    media_choose._repick(con, "game f", "cover")
     check("another game's chosen cover is untouched",
           con.execute("SELECT chosen FROM media WHERE id=?", (keep,)).fetchone()[0] == 1)
     check("the same game's other kinds are untouched",
@@ -124,7 +124,7 @@ def main():
         "width,height,chosen) VALUES('game g','','title:x','cover','steamgriddb',"
         "'http://x/a.jpg','url',1,600,900,0);"]))
     plain.commit()
-    media_choose._repick(plain, "game g", "cover", "")
+    media_choose._repick(plain, "game g", "cover")
     check("a caller with no row_factory still gets a winner",
           plain.execute("SELECT COUNT(*) FROM media WHERE chosen=1").fetchone()[0] == 1)
 

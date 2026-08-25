@@ -18,8 +18,14 @@ import uuid
 
 # Stable GUID namespace so a game's LaunchBox <ID> is deterministic across
 # re-exports (idempotent: same norm_key -> same GUID, no dupes).
-NS = uuid.UUID("6c0f4b2e-9a1d-4e7c-8b3a-ludodex0lbox".replace("ludodex0lbox",
-                                                              "0b3a8b3a0b3a"))
+#
+# A FIXED, ARBITRARY UUID4 — it is a namespace seed, nothing is encoded in it, and it
+# must never change: every <ID> ludodex has ever written to a LaunchBox XML is derived
+# from it, so a new seed would re-key the whole library and duplicate every game on the
+# next export. It was written as `"...-8b3a-ludodex0lbox".replace(...)` — a spelling that
+# evaluates to exactly the literal below, but reads like the value is computed from
+# something, and invites someone to "fix" the placeholder.
+NS = uuid.UUID("6c0f4b2e-9a1d-4e7c-8b3a-0b3a8b3a0b3a")
 
 
 def game_guid(norm_key):

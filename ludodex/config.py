@@ -626,8 +626,9 @@ def screenscraper_creds():
     return creds
 
 
-# Media providers: local mount-based (esde, steamgrid, playnite, launchbox) + remote
-# (steam, igdb, steamgriddb, thegamesdb, arcadedb, zxinfo, mobygames).
+# Media providers: local mount-based (esde, steamgrid, playnite, launchbox, gamelist)
+# + remote (steam, igdb, steamgriddb, thegamesdb, arcadedb, zxinfo, mobygames,
+# screenscraper, web).
 #
 # TAKEN FROM media.py, not copied from it. The comment here used to CLAIM it was "kept in
 # sync with media.MEDIA_PROVIDERS" while listing four fewer providers, so every one of
@@ -635,13 +636,23 @@ def screenscraper_creds():
 # settings. A list that has to be kept in sync by hand is a list that drifts; importing
 # it means it cannot. media imports config, so this is deferred to avoid the cycle —
 # and the literal below is only the fallback for a CLI running without media's deps.
+# The fallback for a CLI running WITHOUT media's dependencies. It is the one copy that
+# cannot be derived, so it is the one that drifts: it was short by `gamelist`,
+# `screenscraper` and `web` — the same three providers that were already invisible here
+# once before. Named rather than inlined so tests/test_cleanup_config_fallback.py can
+# compare it against media.MEDIA_PROVIDERS and fail the moment a provider is added to
+# one and not the other.
+_MEDIA_PROVIDERS_FALLBACK = ("esde", "steamgrid", "playnite", "launchbox", "gamelist",
+                             "steam", "igdb", "steamgriddb", "thegamesdb", "arcadedb",
+                             "zxinfo", "mobygames", "screenscraper", "web")
+
+
 def _media_providers():
     try:
         import media
         return tuple(media.MEDIA_PROVIDERS)
     except Exception:                            # noqa: BLE001
-        return ("esde", "steamgrid", "playnite", "launchbox", "steam", "igdb",
-                "steamgriddb", "thegamesdb", "arcadedb", "zxinfo", "mobygames")
+        return _MEDIA_PROVIDERS_FALLBACK
 
 
 MEDIA_PROVIDERS = _media_providers()

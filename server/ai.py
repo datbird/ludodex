@@ -220,16 +220,29 @@ def _seed_prices(con):
     _SEEDED.add(USAGE_DB)
 
 
-# provider -> how to ask it which model an alias really is. A name like
-# `gemini-flash-latest` is a POINTER, not a model: it never appears in any price table,
-# any pricing feed, or any docs page, because the thing it points at keeps changing.
-# Every lookup for it misses, and a miss is what made a configured budget disappear.
-ALIAS_HINTS = ("-latest", "latest", "-preview", ":latest")
+# Words that mark a model id as a POINTER rather than a model. A name like
+# `gemini-flash-latest` never appears in any price table, any pricing feed, or any docs
+# page, because the thing it points at keeps changing. Every lookup for it misses, and a
+# miss is what made a configured budget disappear.
+ALIAS_WORDS = ("latest", "preview")
+
+# Model ids are DELIMITED, and the marker has to be a whole segment of one. The rule
+# used to be four substrings — ("-latest", "latest", "-preview", ":latest") — matched
+# with `in`, where the bare "latest" already subsumes the other two forms: the tuple
+# looked like it enumerated suffixes while actually testing "does this name contain
+# these six letters anywhere". Saying yes is not free, so a `translatest-9b` was billed
+# a real detect_model_version probe call for the letters in its name.
+_ALIAS_SPLIT = re.compile(r"[-:./_]+")
 
 
 def looks_like_alias(model):
-    m = (model or "").lower()
-    return any(h in m for h in ALIAS_HINTS)
+    """Is this model id a moving pointer (`gemini-flash-latest`) rather than a model?
+
+    True routes the caller into `detect_model_version`, which is a PAID provider call,
+    so a false positive costs money.
+    """
+    return any(seg in ALIAS_WORDS
+               for seg in _ALIAS_SPLIT.split((model or "").lower()))
 
 
 def detect_model_version(provider, model, timeout=30):

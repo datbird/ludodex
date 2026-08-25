@@ -73,9 +73,19 @@ def main():
     check("is a jpeg", p1.endswith(".jpg"))
 
     print("8. cache hit returns bytes WITHOUT invoking ffmpeg")
+    # A REAL JPEG, not a marker string: the cache is now validated on read, because a
+    # sheet truncated before the write was made atomic is otherwise served forever. Any
+    # stand-in that is not a whole JPEG is correctly rejected, so the fixture has to be
+    # one. What this section asserts is unchanged — cached bytes come back verbatim and
+    # nothing is executed.
+    import io as _io
+    from PIL import Image as _Image
+    _buf = _io.BytesIO()
+    _Image.new("RGB", (160, 120), (30, 90, 150)).save(_buf, "JPEG", quality=80)
+    sheet_bytes = _buf.getvalue()
     os.makedirs(os.path.dirname(p1), exist_ok=True)
     with open(p1, "wb") as fh:
-        fh.write(b"cached-sheet-bytes")
+        fh.write(sheet_bytes)
     calls = []
     real_run = media_video.subprocess.run
     media_video.subprocess.run = lambda *a, **k: calls.append(a)
@@ -83,7 +93,7 @@ def main():
         got = media_video.contact_sheet("ignored-src", repo, ref)
     finally:
         media_video.subprocess.run = real_run
-    check("returned the cached bytes", got == b"cached-sheet-bytes")
+    check("returned the cached bytes", got == sheet_bytes)
     check("no subprocess was launched", not calls)
 
     print("9. no ffmpeg -> None, never a fabricated sheet")

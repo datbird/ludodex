@@ -62,10 +62,13 @@ def main():
     print()
     print("2. the guard that keeps this safe is 'all pastes', not 'constant'")
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ludodex", "media_choose.py")).read()
+    # `filler` is the third term of the candidate tuple built in select() — index 2
+    # since the always-zero `bad_shape` term was removed from it. Same term, same
+    # assertion, one position left.
     check("select() still requires every candidate to be a paste",
-          "all(c[3] == 1 for c in cands)" in src)
+          "all(c[2] == 1 for c in cands)" in src)
     check("...and has not been widened to a constancy test",
-          "len({c[3] for c in cands}) == 1" not in src)
+          "len({c[2] for c in cands}) == 1" not in src)
 
     print()
     print("3. detail is only measured where it is meaningful")

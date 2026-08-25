@@ -306,13 +306,6 @@ def select(con, kinds=None, only=None):
         # excludes assets we have actually looked at.
         if not media.shape_ok(r["kind"], sw, sh):
             continue
-        # NOTE (audit): `bad_shape` is always 0 — a measured wrong shape is DISQUALIFIED
-        # by the `continue` above, so this term ranks nothing. It should come out of the
-        # sort key, but tests/test_detail_scale.py asserts the literal
-        # `all(c[3] == 1 for c in cands)` below, which pins filler to tuple index 3.
-        # Removing the term shifts it to 2 and breaks that assertion, so this is left for
-        # whoever owns that test to change in the same commit.
-        bad_shape = 0
         # A confirmed letterboxed paste loses to ANY authored cover, whoever supplied it
         # — this is where Steam's "authoritative for its own games" precedence has to
         # yield, because the asset isn't Steam's art, it's Steam's placeholder. Only a
@@ -326,11 +319,12 @@ def select(con, kinds=None, only=None):
         template = 1 if ((r["frame"] and r["frame"] in _templates)
                          or (r["sil"] and r["sil"] in _sils)) else 0
         px = -(mw * mh) if (mw and mh) else 0        # bigger wins; unknown stays neutral
-        # pin first (user authority), then shape, then authored-vs-placeholder, then
-        # the durable AI verdict (a paid vision pick must survive re-selects — but it
-        # ranks BELOW shape/filler evidence, because a later measurement can prove the
+        # pin first (user authority), then authored-vs-placeholder, then the durable AI
+        # verdict (a paid vision pick must survive re-selects — but it ranks BELOW the
+        # measured filler/template evidence, because a later measurement can prove the
         # AI's pick wrong), then provider priority, measured resolution, and the
-        # original tie-breakers.
+        # original tie-breakers. Shape is NOT a term here: a measured wrong shape is
+        # disqualified by the `continue` above, so ranking it would rank nothing.
         # The IMAGE wins, then the provider. Resolution BAND sits above provider
         # priority so a 600x900 cover beats a 264x352 one whoever supplied it — the
         # live case that exposed this had IGDB's thumbnail outranking a SteamGridDB
@@ -356,7 +350,7 @@ def select(con, kinds=None, only=None):
         # Held per bucket rather than reduced on the spot: whether `filler` DISCRIMINATES
         # is a property of the whole candidate set, and cannot be known one row at a time.
         best.setdefault(key, []).append(
-            (r, pin, bad_shape, filler, template, rrank, band, pr, px))
+            (r, pin, filler, template, rrank, band, pr, px))
 
     picked = {}
     for key, cands in best.items():
@@ -384,12 +378,12 @@ def select(con, kinds=None, only=None):
         # 264x352 IGDB thumbnail — reintroducing precisely the defect `res_band` was
         # added to stop. Detail is only meaningful where the difference it reads dwarfs
         # the scaling bias, which is the all-pastes case and nothing else.
-        _blind = len(cands) > 1 and all(c[3] == 1 for c in cands)
-        for (r, pin, bad_shape, filler, template, rrank, band, pr, px) in cands:
+        _blind = len(cands) > 1 and all(c[2] == 1 for c in cands)
+        for (r, pin, filler, template, rrank, band, pr, px) in cands:
             # -detail so more detail sorts first; unmeasured (NULL) must not win by being
             # unknown, so it sorts last within the blind bucket rather than neutral.
             dt = -(r["detail"] or 0.0) if _blind else 0
-            sk = (pin, bad_shape, filler, template, rrank, 0 if r["ai_pick"] else 1,
+            sk = (pin, filler, template, rrank, 0 if r["ai_pick"] else 1,
                   dt, band, pr, px, 0 if r["matched"] else 1,
                   0 if r["ref_type"] == "file" else 1, r["id"])
             if key not in picked or sk < picked[key][0]:
@@ -694,7 +688,7 @@ def serve_pick(con, base, platform, game_key, kind):
     return (r[0] if not hasattr(r, "keys") else r["id"]) if r else None
 
 
-def _repick(con, norm_key, kind, system=None):
+def _repick(con, norm_key, kind):
     """After a dead asset is removed, re-elect this game+kind.
 
     This used to carry a hand-copied sort key "same as select()", and the copy went
@@ -703,11 +697,12 @@ def _repick(con, norm_key, kind, system=None):
     defect fixed in the real ranker came back the instant a provider URL 404'd. Two
     implementations of one rule is the bug — call the ranker, scoped.
 
-    `system` is now unused: the scoped select re-elects every system bucket for this
-    game+kind, which is a superset of the old single-bucket behaviour and keeps the
-    per-platform siloing (DESIGN §11.4) that select() already implements.
+    There is deliberately NO `system` argument. The hand-rolled version took one and
+    re-elected a single bucket; the scoped select re-elects every system bucket for this
+    game+kind, a superset of that, and keeps the per-platform siloing (DESIGN §11.4)
+    that select() already implements. The parameter outlived its use and was accepted
+    and immediately discarded, which reads to a caller like the scope is theirs to set.
     """
-    del system                                          # noqa: F841 — see docstring
     select(con, kinds=[kind], only=[norm_key])
 
 
