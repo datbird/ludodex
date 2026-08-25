@@ -86,6 +86,62 @@ def clear_override(norm_key, kind):
     con.close()
 
 
+def set_overrides(rows, origin="manual", by="user"):
+    """`rows` = [(norm_key, kind, value)]. ONE connection, ONE commit.
+
+    The bulk attribute editor called set_override per key, and that function opens and
+    closes its own connection each time, so a 20,000-key edit did 20,000 connect+commit
+    cycles inside one synchronous request. Returns the number of rows WRITTEN, which is
+    not the number offered: the same rule applies as for a single write, so an automatic
+    pass still cannot overwrite a value a person chose."""
+    by = "user" if (by or "user") != "auto" else "auto"
+    rows = [(nk, k, v) for nk, k, v in (rows or [])
+            if nk and k and v not in (None, "")]
+    if not rows:
+        return 0
+    con = _con()
+    try:
+        if by == "auto":
+            keep = set()
+            for nk, k, _v in rows:
+                prev = con.execute("SELECT origin, set_by FROM overrides WHERE "
+                                   "norm_key=? AND kind=?", (nk, k)).fetchone()
+                if prev is not None:
+                    was = prev["set_by"] or ("user" if (prev["origin"] or "") == "manual"
+                                             else "auto")
+                    if was == "user":
+                        keep.add((nk, k))
+            rows = [r for r in rows if (r[0], r[1]) not in keep]
+            if not rows:
+                return 0
+        now = time.time()
+        con.executemany(
+            "INSERT INTO overrides(norm_key,kind,value,origin,created,set_by) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(norm_key,kind) DO UPDATE SET "
+            "value=excluded.value, origin=excluded.origin, created=excluded.created, "
+            "set_by=excluded.set_by",
+            [(nk, k, str(v), origin or "manual", now, by) for nk, k, v in rows])
+        con.commit()
+    finally:
+        con.close()
+    return len(rows)
+
+
+def clear_overrides(norm_keys, kind):
+    """Same, for the clear path. Returns the number of keys cleared."""
+    keys = [k for k in (norm_keys or []) if k]
+    if not (keys and kind):
+        return 0
+    con = _con()
+    try:
+        con.executemany("DELETE FROM overrides WHERE norm_key=? AND kind=?",
+                        [(k, kind) for k in keys])
+        con.commit()
+    finally:
+        con.close()
+    return len(keys)
+
+
 def overrides_for(norm_key):
     """{kind: {value, origin}} of the user's chosen canonical values for a game."""
     con = _con()

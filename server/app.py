@@ -3918,16 +3918,22 @@ def jobs_restart(jid: str):
                 "match_provider": bool(old.get("match_provider")),
                 "metadata_kinds": old.get("md_kinds"), "label": old.get("target"),
                 "pull_scores": bool(old.get("pull_scores"))}
-        # RESUME WITH THE OPTIONS THE USER CHOSE. Everything but want_media survives in
-        # scan_runs; want_media does not, and _aimeta_scan defaults it to True — so a scan
-        # deliberately run with media OFF came back with media fill ON, spending provider
-        # (and, with web, paid) calls the user had explicitly declined.
-        _prev = _AIMETA_OPTS.get(old_rid)
-        if _prev is not None and "want_media" in _prev:
-            opts["want_media"] = _prev["want_media"]
+        # RESUME WITH THE OPTIONS THE USER CHOSE. want_media now lives in scan_runs, so a
+        # scan deliberately run with media OFF stays that way even across a restart. It
+        # used to be held only in memory, and _aimeta_scan defaults it to True, so the
+        # scan came back with media fill ON and spent provider (and, with web, paid)
+        # calls the user had explicitly declined. The in-process memo is still consulted
+        # for a run that predates the column.
+        if old.get("want_media") is not None:
+            opts["want_media"] = bool(old.get("want_media"))
+        else:
+            _prev = _AIMETA_OPTS.get(old_rid)
+            if _prev is not None and "want_media" in _prev:
+                opts["want_media"] = _prev["want_media"]
         rid = aimeta.scan_new(old["target"], keys, opts["web"],
                               opts["match_provider"], opts["metadata_kinds"],
-                              1 if opts["pull_scores"] else 0)
+                              1 if opts["pull_scores"] else 0,
+                              want_media=bool(opts.get("want_media", True)))
         _start_aimeta_job(rid, keys, opts)
         # THE OLD RUN IS OVER. It was left exactly as it was, so it stayed `done < total`
         # and therefore restartable forever: pressing ▶ twice started two workers over the
@@ -5616,8 +5622,11 @@ def aimeta_scan(body: dict = Body(default={})):
         raise HTTPException(400, "no games to scan")
     # Heavy wand: refresh multi-source scores when this run's findings are applied.
     pull_scores = bool(body.get("scores"))
+    # want_media goes in the ROW, not just the in-process memo, so a resume after a
+    # restart still honours a scan the user ran with media off.
     run_id = aimeta.scan_new(label, keys, web, match_provider, md_kinds,
-                             pull_scores=pull_scores)
+                             pull_scores=pull_scores,
+                             want_media=bool(want_media))
     _start_aimeta_job(run_id, keys, {"web": web, "match_provider": match_provider,
                                      "metadata_kinds": md_kinds, "want_media": want_media,
                                      "label": label, "pull_scores": pull_scores})

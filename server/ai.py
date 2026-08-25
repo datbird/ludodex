@@ -1920,6 +1920,16 @@ def _repair_json(s):
     return tail + "".join(reversed(stack))
 
 
+def require_ready(provider=None, model=None):
+    """Public form of _resolve for a caller that only needs "is this usable".
+
+    Callers outside this module were reaching into _resolve to ask exactly that, which
+    also handed them the API KEY they had no use for. Returns (provider, model); raises
+    the same way _resolve does when nothing is configured."""
+    prov, _key, mdl = _resolve(provider, model)
+    return prov, mdl
+
+
 def _resolve(provider, model=None):
     """Validate provider + key, return (provider, key, model). Raises if unusable."""
     provider = provider or active_provider()

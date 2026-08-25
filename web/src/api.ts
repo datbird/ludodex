@@ -754,7 +754,9 @@ export interface MediaKind {
 
 export interface OpsService {
   id: string; name: string; state: string; pid: number
-  uptime_seconds: number; host: string; port: number
+  // host/port are null when the bind is not knowable: the server reports the socket
+  // it is actually listening on, rather than repeating a default it cannot verify.
+  uptime_seconds: number; host: string | null; port: number | null
 }
 export interface OpsDatabase {
   id: string; name: string; role: string; path: string

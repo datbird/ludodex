@@ -121,7 +121,7 @@ def _rom_index(mgr_id):
     return p if os.path.exists(p) else None
 
 
-def resolve_roms(mgr_id, system, game_name):
+def resolve_roms(mgr_id, system, game_name, con=None):
     """Find the ROM file(s) for one (system, game) in a source manager's ROM index.
     Returns [{fullpath, relpath, filename, ext, disc, region}] — a list because a
     multi-disc game is several files. `game_name` is matched against the index's
@@ -129,8 +129,13 @@ def resolve_roms(mgr_id, system, game_name):
     idx = _rom_index(mgr_id)
     if not idx:
         return []
-    con = sqlite3.connect(idx)
-    con.row_factory = sqlite3.Row
+    # `con` LETS A CALLER OPEN THE INDEX ONCE. sync_push_plan calls this per wanted
+    # game, so a 500-game wishlist opened and closed the ROM index 500 times inside one
+    # request. A caller that passes one owns closing it.
+    own = con is None
+    if own:
+        con = sqlite3.connect(idx)
+        con.row_factory = sqlite3.Row
     try:
         cols = "fullpath, relpath, filename, ext, disc, region, flags, name, game"
         rows = con.execute(
@@ -144,7 +149,8 @@ def resolve_roms(mgr_id, system, game_name):
     except sqlite3.OperationalError:
         return []
     finally:
-        con.close()
+        if own:
+            con.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -290,7 +296,7 @@ def pick_rom_files(hits, esde_sys):
 # --------------------------------------------------------------------------- #
 #  Chosen media → local repo files (to push into ES-DE downloaded_media)
 # --------------------------------------------------------------------------- #
-def chosen_media_files(media_index_db, repo_dir, norm_key, profile=None):
+def chosen_media_files(media_index_db, repo_dir, norm_key, profile=None, con=None):
     """{target_folder: (local_repo_path, ext)} for a game's chosen, materialized media —
     only kinds THIS TARGET has a folder for, only assets already pulled into the repo.
 
@@ -299,8 +305,10 @@ def chosen_media_files(media_index_db, repo_dir, norm_key, profile=None):
     skipping it."""
     if not os.path.exists(media_index_db):
         return {}
-    con = sqlite3.connect(media_index_db)
-    con.row_factory = sqlite3.Row
+    own = con is None                       # see resolve_roms: one open per plan, not per game
+    if own:
+        con = sqlite3.connect(media_index_db)
+        con.row_factory = sqlite3.Row
     out = {}
     try:
         for r in con.execute(
@@ -317,7 +325,8 @@ def chosen_media_files(media_index_db, repo_dir, norm_key, profile=None):
     except sqlite3.OperationalError:
         pass
     finally:
-        con.close()
+        if own:
+            con.close()
     return out
 
 

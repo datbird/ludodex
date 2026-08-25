@@ -6464,7 +6464,7 @@ function ServerOps() {
                 </div>
                 <div className="ops-svc-meta">
                   {restarting ? 'restarting…'
-                    : `pid ${s.pid} · up ${fmtUptime(s.uptime_seconds)} · :${s.port}`}
+                    : `pid ${s.pid} · up ${fmtUptime(s.uptime_seconds)}${s.port ? ` · :${s.port}` : ''}`}
                 </div>
               </div>
               <button className="ops-btn danger" disabled={!!busy} onClick={restart}>

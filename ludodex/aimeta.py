@@ -228,7 +228,17 @@ def _con():
                       ("complete", "INTEGER DEFAULT 0"), ("unmatched", "INTEGER DEFAULT 0"),
                       # heavy wand: refresh multi-source scores when this run's findings
                       # are applied (a light run leaves scores to the sync's scores phase)
-                      ("pull_scores", "INTEGER DEFAULT 0")):
+                      ("pull_scores", "INTEGER DEFAULT 0"),
+                      # the wand's MEDIA SCOPE. Held only in memory before, so a resume
+                      # after a restart silently turned media fill back on for a scan
+                      # the user had run with it off.
+                      #
+                      # NO DEFAULT, deliberately. A `DEFAULT 1` would backfill every
+                      # pre-existing row with "media on", making a row that never
+                      # recorded the choice indistinguishable from one that recorded
+                      # YES — the same unreadable-default shape this campaign kept
+                      # finding. NULL means "not recorded", and the caller falls back.
+                      ("want_media", "INTEGER")):
         if col not in cols:
             con.execute("ALTER TABLE scan_runs ADD COLUMN %s %s" % (col, decl))
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_nk ON findings(norm_key)")
@@ -613,6 +623,26 @@ def set_status(finding_id, status):
     con.close()
 
 
+def set_status_many(finding_ids, status):
+    """One transaction for a whole batch.
+
+    set_status commits per row, so a bulk accept that raised partway through left the
+    batch half applied with no record of how far it got."""
+    if status not in ("proposed", "accepted", "rejected", "applied"):
+        raise ValueError("bad status")
+    ids = [int(i) for i in (finding_ids or [])]
+    if not ids:
+        return 0
+    con = _con()
+    try:
+        con.executemany("UPDATE findings SET status=? WHERE id=?",
+                        [(status, i) for i in ids])
+        con.commit()
+    finally:
+        con.close()
+    return len(ids)
+
+
 def pending_count():
     """Findings accepted but not yet applied to the catalog (drives the Library
     'pending changes' banner)."""
@@ -810,15 +840,19 @@ def accepted_ss_matches():
 
 
 # --------------------------------------------------------------------- scan runs
-def scan_new(target, keys, web=0, match_provider=0, md_kinds=None, pull_scores=0):
+def scan_new(target, keys, web=0, match_provider=0, md_kinds=None, pull_scores=0,
+             want_media=None):
+    """`want_media=None` records nothing, which is not the same as recording False.
+    A caller that knows the user's choice must state it."""
     con = _con()
     cur = con.execute("INSERT INTO scan_runs(target,total,web,match_provider,"
-                      "keys_json,md_json,pull_scores,status,created) "
-                      "VALUES(?,?,?,?,?,?,?, 'running', ?)",
+                      "keys_json,md_json,pull_scores,want_media,status,created) "
+                      "VALUES(?,?,?,?,?,?,?,?, 'running', ?)",
                       (target, len(keys), 1 if web else 0, 1 if match_provider else 0,
                        json.dumps(keys),
                        json.dumps(md_kinds) if md_kinds is not None else None,
                        1 if pull_scores else 0,
+                       None if want_media is None else (1 if want_media else 0),
                        time.time()))
     rid = cur.lastrowid
     con.commit()
