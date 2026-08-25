@@ -67,8 +67,22 @@ CURATION_DBS = [
 ]
 # How to reach the outside world.
 CONFIG_DBS = ["config.sqlite", "connections.sqlite", "file-profiles.sqlite"]
-# Never removed by any scope: the way back in, and the way back.
-KEEP_ALWAYS = {"auth.sqlite", "backups.sqlite", "ai-usage.sqlite"}
+# Provider CATALOGUE MIRRORS. Regenerable in principle, but bought with somebody
+# else's quota rather than with local CPU: ScreenScraper allows 100,000 requests a day
+# and TheGamesDB 12,000 a MONTH, so a mirror thrown away is a mirror that takes weeks to
+# come back. backups.py already classes these as DERIVED for the same reason.
+#
+# THEY WERE KEPT BY ACCIDENT BEFORE THIS LIST EXISTED — named by none of the four
+# scopes, so a factory reset left up to ~1.7 GB behind and `plan()["kept"]`, which is
+# the user's only account of what survives, did not mention them. The outcome was
+# right; the silence was not.
+MIRROR_DBS = {
+    "igdb-catalog.sqlite", "match-index.sqlite", "moby-catalog.sqlite",
+    "mobygames-state.sqlite", "ss-catalog.sqlite", "tgdb-catalog.sqlite",
+    "thegamesdb-state.sqlite",
+}
+# Never removed by any scope: the way back in, the way back, and the mirrors above.
+KEEP_ALWAYS = {"auth.sqlite", "backups.sqlite", "ai-usage.sqlite"} | MIRROR_DBS
 
 # Store ownership/wishlist dumps. A rebuild treats these as truth, so a reset that
 # leaves them behind isn't a reset.
