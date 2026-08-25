@@ -49,7 +49,7 @@ source.
 | **LaunchBox** | source (frontend) | none (local/networked files) | a LaunchBox install folder | `launchbox_path`, `launchbox_media_mode` | — |
 | **Playnite** | source (frontend) | none (PowerShell bridge in-app) | your Playnite install | `playnite_import_json`, `playnite_media_overwrite`, `playnite_icon_source` | — |
 | **IGDB** | metadata | Twitch app Client ID+Secret | dev.twitch.tv/console/apps | `igdb_client_id/secret` | token auto-mints |
-| **ScreenScraper** | metadata + media | software `devid`/`devpassword` + account `ssid`/`sspassword` | forum (devid) + screenscraper.fr (account) | `screenscraper_devid/devpassword/ssid/sspassword` | no (devid is approval-gated) |
+| **ScreenScraper** | metadata + media | account `ssid`/`sspassword` (the software `devid`/`devpassword` ships embedded) | screenscraper.fr (account); dev forum only if you want your own devid | `screenscraper_devid/devpassword/ssid/sspassword` | no |
 | **SteamGridDB** | media | API key | steamgriddb.com/profile/preferences/api | `steamgriddb_api_key` | no |
 | **Open-web art discovery** | media (last resort) | none — uses your AI provider's grounded search | — | — | — |
 | **ES-DE / Steam-grid / Steam CDN / IGDB images** | media | none / reuses IGDB | — | media mounts | — |
@@ -231,7 +231,11 @@ players, rating, description) **and every media URL** (box, wheel/logo, fanart
 background, screenshots, title, marquee, video, manual). It fills the retro gaps
 IGDB misses and the backgrounds ES-DE lacks.
 
-**Auth = a software credential + your account** (both required):
+**Auth = a software credential + your account.** The software credential
+**ships with ludodex**, so there is nothing for you to request: `_ssauth.py`
+carries a `devid`/`devpassword` that identifies *the app*, and every deployment
+authenticates as that one recognisable client. You only supply your own account.
+
 1. **Account** — make a free account at screenscraper.fr; your login is `ssid`.
    Past contribution / a Patreon pledge raises your **tier** (more threads + a
    higher daily request cap). Store it:
@@ -239,15 +243,29 @@ IGDB misses and the backgrounds ES-DE lacks.
    python3 ludodex/config.py set screenscraper_ssid <login>
    python3 ludodex/config.py set screenscraper_sspassword <password>
    ```
-2. **`devid`/`devpassword`** — a *software* credential the API **requires** (you
-   cannot call it with only an account). Request one on the **dev forum**
+2. **`devid`/`devpassword`** — the *software* credential the API **requires**
+   (you cannot call it with only an account). **Already embedded; skip this step
+   unless you want your own identity.** It is obfuscated in the repo rather than
+   secret — a credential that ships inside a client can never be hidden, because
+   the key travels with it — and that is a deliberate trade for having
+   ScreenScraper see one app instead of a swarm of anonymous callers.
+
+   To use your own instead, request one on the **dev forum**
    **https://www.screenscraper.fr/forumsujets.php?frub=12** describing your free,
-   non-commercial use. ⚠️ Manual approval, **can take days–weeks — request early.**
+   non-commercial use. ⚠️ Manual approval, **days–weeks — request early.**
    ```
    python3 ludodex/config.py set screenscraper_devid <id>
    python3 ludodex/config.py set screenscraper_devpassword <pw>
    ```
-   (Env overrides: `SS_DEVID`, `SS_DEVPASSWORD`, `SS_SSID`, `SS_SSPASSWORD`.)
+   (Env overrides: `SS_DEVID`, `SS_DEVPASSWORD`, `SS_SSID`, `SS_SSPASSWORD`.
+   Resolution is env > config > embedded.)
+
+   Note there is **no rotation path** for the embedded credential, and none is
+   implied: a replacement is a fresh manual forum request that would reach only
+   installs which pull a new build. What bounds the risk instead is that the
+   devid selects the *software*, while tier and daily quota come from **your**
+   `ssid`/`sspassword` — so misuse of the shared identity spends the shared
+   software's allowance, never your account's.
 
 **Tiers & quota (the engine adapts to whatever you have):**
 

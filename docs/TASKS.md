@@ -864,10 +864,22 @@ selector did.
 
 ### Found while debugging — worth a look
 
-Media `ref` URLs for ScreenScraper embed the account's **devid, devpassword, ssid and
-sspassword in plaintext**, and those refs are stored in `media.ref`, in `pins.sqlite`, and
-are rendered into the media panel. Anything that exports or shares a pin or an asset
-reference leaks the ScreenScraper credentials with it. Not touched here.
+~~Media `ref` URLs for ScreenScraper embed the account's **devid, devpassword, ssid
+and sspassword in plaintext**~~ — **FIXED 2026-08-24.** ScreenScraper returns media URLs
+with the caller's own auth already in the query string, and `extract_media` stored
+`m["url"]` verbatim, so the credentials landed in `media.ref`, were copied into
+`pins.sqlite`, and were rendered into the media panel. On the live instance that was **747
+media rows and 7 pins holding the account password in cleartext**; anything that exported,
+shared or backed up a reference carried them along.
+
+`screenscraper.strip_auth()` now removes the auth params before a ref is recorded, and
+`media_url_with_auth()` strips before it appends — which makes re-auth idempotent and
+repairs a legacy ref by fetching it with the CURRENT credentials instead of whatever was
+captured months ago. Addressing params (`jeuid`, `systemeid`, `groupid`, `companyid`,
+`media`) are preserved, because a ref that no longer identifies its asset would be a worse
+bug than the leak. Both DB write paths (`media_fetch.py` and the server's inline scrape)
+go through `extract_media`, so the one fix covers both. Existing live rows were scrubbed.
+Covered by `tests/test_ss_refs_carry_no_credentials.py`.
 
 ## Five new id sources — SHIPPED, one rebuild still owed (2026-08-16/17)
 

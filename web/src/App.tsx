@@ -1086,9 +1086,19 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
         </div>
       </header>
 
+      {/* FILES IS ADMIN-ONLY, and the tab has to say so by not being there.
+          Every pane behind it — Browse, Operations, Profiles, History — calls
+          /api/fs/*, /api/fileops/* or /api/devices/browse, and all of those are
+          operator powers the auth middleware gates on role. A signed-in "user"
+          who opened this tab therefore got two panes each showing a bare
+          "⚠ 403" and "0 items", which reads as a broken app rather than as a
+          permission boundary. Same treatment as "Account & Users" in Settings:
+          filter it out of the list instead of rendering something that cannot
+          work. The render below is guarded too, so the panel can never mount
+          from a stale tab value. */}
       <ParticleTabs className="main-tabs" fill active={tab}
         onSelect={(id) => setTab(id as 'library' | 'dashboard' | 'files' | 'publish')}
-        tabs={[
+        tabs={([
           { id: 'dashboard', label: 'Dashboard',
             hint: 'An overview of the whole collection — how many games you own, where '
                 + 'they came from, what was added recently, and what still needs '
@@ -1109,7 +1119,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
                 + 'missing, converts anything that device cannot read, and copies the '
                 + 'right artwork and metadata alongside. Always shows you the plan '
                 + 'before it writes anything.' },
-        ]} />
+        ]).filter((t) => t.id !== 'files' || user?.role === 'admin')} />
 
       {tab === 'publish' && <PublishPanel onBrowse={() => setTab('library')} />}
 
@@ -1553,7 +1563,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       )}
       </>)}
 
-      {tab === 'files' && <FilesTab />}
+      {tab === 'files' && user?.role === 'admin' && <FilesTab />}
 
       {selected && <Detail nk={selected}
         onClose={() => { setSelected(null); setTrail([]); refreshStats() }}

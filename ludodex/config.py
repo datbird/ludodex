@@ -138,20 +138,23 @@ SCHEMA = [
      "[metadata] Days before a cached IGDB record is considered stale and "
      "re-fetched by igdb_enrich.py."),
     # --- ScreenScraper (screenscraper.fr) — emulation metadata AND media, in one
-    #     scrape per game. Needs a software devid/devpassword (request at
-    #     screenscraper.fr/forumsujets.php?frub=12) PLUS the end-user's account. ---
+    #     scrape per game. The software devid/devpassword SHIPS EMBEDDED
+    #     (_ssauth.py); the keys below only exist so you can substitute your own.
+    #     The end-user's account (ssid/sspassword) is what sets tier + quota. ---
     ("metadata_screenscraper_enabled", "1",
      "[metadata] Consult ScreenScraper for emulation game metadata + media "
      "(genres/dev/publisher/players/rating + box/wheel/fanart/screenshots). "
-     "No-ops without a devid. Drives both the metadata merge and SS media refs."),
+     "Drives both the metadata merge and SS media refs."),
     ("screenscraper_softname", "ludodex",
      "Your software name sent to the ScreenScraper API (they log by softname)."),
     ("screenscraper_devid", "",
-     "ScreenScraper developer id (software credential). Request one at "
-     "https://www.screenscraper.fr/forumsujets.php?frub=12 — free/non-commercial "
-     "software qualifies. Env: SS_DEVID."),
+     "ScreenScraper developer id (identifies the SOFTWARE, not you). Optional — "
+     "ludodex ships one, so leave blank unless you want your own identity, "
+     "requested at https://www.screenscraper.fr/forumsujets.php?frub=12. "
+     "Env: SS_DEVID."),
     ("screenscraper_devpassword", "",
-     "ScreenScraper developer password (pairs with the devid). Env: SS_DEVPASSWORD."),
+     "ScreenScraper developer password (pairs with the devid). Optional, same as "
+     "above. Env: SS_DEVPASSWORD."),
     ("screenscraper_ssid", "",
      "Your ScreenScraper account login (sets your tier/quota). Env: SS_SSID."),
     ("screenscraper_sspassword", "",
@@ -990,13 +993,14 @@ INTEGRATIONS = [
      "steps": [
          "Make a free account at screenscraper.fr (your login = ssid). Past "
          "contribution / Patreon raises your tier (threads + daily quota).",
-         "Request a software devid/devpassword on the dev forum "
-         "https://www.screenscraper.fr/forumsujets.php?frub=12 (free, "
-         "non-commercial use qualifies; can take days/weeks — request early). "
-         "This is MANDATORY and separate from your account.",
-         "Store dev creds: config.py set screenscraper_devid <id>; config.py set "
-         "screenscraper_devpassword <pw>. Store your account: "
-         "screenscraper_ssid / screenscraper_sspassword (or enter all in the web UI).",
+         "The software devid/devpassword the API also requires already ships "
+         "with ludodex, so there is nothing to request and no waiting: every "
+         "install authenticates as the same recognisable app.",
+         "Store your account: screenscraper_ssid / screenscraper_sspassword (or "
+         "enter it in the web UI). Only if you want your OWN software identity, "
+         "request one on the dev forum (days/weeks of manual approval) and set "
+         "screenscraper_devid / screenscraper_devpassword; they override the "
+         "embedded pair.",
          "Check tier/quota: python3 ludodex/ss_scrape.py --status. Scrape: python3 "
          "ss_scrape.py (resumable; stops at the daily cap). Tiers: free ≈1 "
          "thread / ~20k req-day; ~5€/mo +1 thread; ~10€/mo +5 threads / ~50k "

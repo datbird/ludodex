@@ -11,8 +11,21 @@ and out of the Settings UI. The end-user's ScreenScraper *account* login
 (ssid/sspassword, which raises the request quota) is a different thing entirely —
 it stays per-deployment in config/Settings and is never embedded here.
 
-Override at runtime any time with env SS_DEVID / SS_DEVPASSWORD, or config keys
-screenscraper_devid / screenscraper_devpassword (see config.screenscraper_creds).
+THERE IS NO ROTATION STORY, and nothing here should be read as implying one.
+This credential is a product identity, not a session secret. ScreenScraper issues
+a devid by manual approval on their dev forum, which takes days to weeks, and a
+replacement would reach only installs that pull a new build — every copy running
+the old one would simply stop scraping. So "rotate it" is not a mitigation that
+exists; the mitigations that DO exist are the two below.
+
+  * Blast radius is bounded by design. The devid sets which SOFTWARE is calling.
+    The request tier and daily quota come from the END USER's own ssid/sspassword,
+    which is never embedded. Someone abusing the shipped identity burns the
+    shared software's allowance, not any individual user's account.
+  * Anyone who wants a separate identity can supply one, without a code change:
+    env SS_DEVID / SS_DEVPASSWORD, or config keys screenscraper_devid /
+    screenscraper_devpassword. Resolution is env > config > embedded
+    (see config.screenscraper_creds).
 """
 import base64
 

@@ -108,10 +108,14 @@ def main(argv):
         return
     creds = config.screenscraper_creds()
     if not creds:
-        print("ss_scrape: no devid — request one at "
-              "https://www.screenscraper.fr/forumsujets.php?frub=12, then "
-              "config.py set screenscraper_devid/<devpassword>. Skipping.",
-              file=sys.stderr)
+        # ludodex ships a devid (_ssauth.py), so reaching here means the embedded
+        # pair failed to load or was overridden with something blank — not that the
+        # user forgot to request one. Say that, rather than sending them to a forum
+        # queue that takes weeks and that they almost certainly do not need.
+        print("ss_scrape: no software credential resolved. ludodex embeds one, so "
+              "check that ludodex/_ssauth.py is intact and that SS_DEVID / "
+              "SS_DEVPASSWORD (or the screenscraper_devid/devpassword config keys) "
+              "are not set to something empty. Skipping.", file=sys.stderr)
         return
 
     # The quota probe (ssuserInfos) needs a ScreenScraper USER account. The embedded dev

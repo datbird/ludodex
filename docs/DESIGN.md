@@ -585,7 +585,7 @@ predicate; `base_key` retained only for "also owned on").
 ### ✅ Built (foundation)
 - Canonical deduped catalog (`norm_key`); sources steam·gog·epic·itch·**ea**·emulation.
 - Frontends as meta-layers, **both ways incl. media**: Playnite, LaunchBox.
-- Metadata: IGDB (live); ScreenScraper (code done, blocked on devid).
+- Metadata: IGDB (live); ScreenScraper (live — the software devid ships embedded).
 - Media layer: index → choose → materialize, hybrid (reference + content-addressed
   repo), reference/symlink mode for shared storage.
 - Remote sync: PocketBase / Firestore.

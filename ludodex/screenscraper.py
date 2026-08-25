@@ -154,6 +154,38 @@ def system_fits(platform, jeu):
     return want == got
 
 
+# The auth query params. ScreenScraper bakes these into every media URL it hands
+# back, and they must be stripped before a URL is ever WRITTEN DOWN — see
+# strip_auth below.
+AUTH_PARAMS = ("devid", "devpassword", "softname", "output", "ssid", "sspassword")
+
+
+def strip_auth(url):
+    """A ScreenScraper URL with the credentials removed, addressing intact.
+
+    ScreenScraper returns media URLs with the caller's own auth already in the
+    query string. Storing one verbatim writes the END USER's screenscraper.fr
+    password into the database in cleartext, where it travels with every copy,
+    export, backup and pin of that reference, and gets rendered into the media
+    panel. The devid half is only an app identity and ships embedded anyway; the
+    ssid/sspassword half is the user's own login and has no business being
+    persisted at all.
+
+    So auth is stripped on the way IN and re-attached at fetch time by
+    `media_url_with_auth`. What survives is the addressing half (jeuid, systemeid,
+    groupid, companyid, media, ...), because a stripped URL that no longer
+    identifies the asset would be a worse bug than the leak.
+
+    Order-preserving, and a no-op on a URL that never carried auth.
+    """
+    if not url or "?" not in url:
+        return url
+    head, _, query = url.partition("?")
+    kept = [(k, v) for k, v in urllib.parse.parse_qsl(query, keep_blank_values=True)
+            if k not in AUTH_PARAMS]
+    return head + ("?" + urllib.parse.urlencode(kept) if kept else "")
+
+
 def _auth(creds):
     p = {"devid": creds["devid"], "devpassword": creds["devpassword"],
          "softname": creds.get("softname", "ludodex"), "output": "json"}
@@ -469,13 +501,22 @@ def extract_media(jeu):
                 _SEEN_UNKNOWN.add(raw)
                 print("screenscraper: unmapped media type %r -> 'other'" % raw,
                       file=sys.stderr)
-        out.append({"kind": kind, "type": raw, "url": m["url"],
+        # strip_auth, not m["url"]: this value is about to be persisted as a
+        # media ref, and ScreenScraper ships its own auth inside it.
+        out.append({"kind": kind, "type": raw, "url": strip_auth(m["url"]),
                     "region": m.get("region"), "format": m.get("format"),
                     "crc": m.get("crc")})
     return out
 
 
 def media_url_with_auth(url, creds):
-    """Append auth params so a ScreenScraper media URL is directly downloadable."""
+    """A ScreenScraper media URL made directly downloadable, with auth attached.
+
+    Strips first. That makes the call idempotent, and it repairs any ref stored
+    before `strip_auth` existed: a legacy row carrying stale credentials is
+    fetched with the CURRENT ones rather than with whatever was captured months
+    ago, and the params never appear twice.
+    """
+    url = strip_auth(url)
     sep = "&" if "?" in url else "?"
     return url + sep + urllib.parse.urlencode(_auth(creds))
