@@ -3,9 +3,10 @@
 **One-stop orientation** for picking ludodex back up. Covers what ludodex is, what's
 built, and where every document and script lives.
 
-Repo: `github.com/datbird/ludodex` — **public**. Nothing about the maintainer's own
-infrastructure belongs in this file; host addresses, credentials and operational notes
-live outside the repo.
+Repo: `github.com/datbird/ludodex`. Nothing about the maintainer's own infrastructure
+belongs in this file; host addresses, credentials and operational notes live outside the
+repo. That rule does not depend on whether the repo is public at any given moment: the
+day it flips is a bad day to start auditing.
 
 > **§6 of this document was a PLAN, and it shipped.** It described the AI-forward server
 > — FastAPI, the React UI, Docker, `requirements.txt` — as the last open task. All of it
