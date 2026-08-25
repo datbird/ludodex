@@ -61,6 +61,7 @@ import urllib.request
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config                      # noqa: E402
+import provider_rate               # noqa: E402 — shared pacing/timeout rules
 
 API = "https://api.thegamesdb.net"
 DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
@@ -228,25 +229,32 @@ def _request(path, params=None, timeout=30, attempts=3, key=None):
         except (socket.timeout, TimeoutError) as e:
             last = e
         except urllib.error.URLError as e:
-            if not isinstance(getattr(e, "reason", None), (socket.timeout, TimeoutError)):
+            # The timeout test is provider_rate's, shared with screenscraper — the two
+            # docstrings used to hold the same rule written out twice by hand, with a
+            # note saying they must be kept in agreement because neither module may
+            # import the other. A third module both import is what that note wanted.
+            if not provider_rate.is_timeout(e):
                 raise
             last = e
         if attempt + 1 < attempts:
             if path not in FREE_PATHS:
                 _spend()               # the retry we are about to make, seen by the budget
-            time.sleep(2 * (attempt + 1))
+            time.sleep(provider_rate.retry_delay(attempt))
     raise TGDBError("error", "timed out after %d attempts: %s" % (attempts, str(last)[:90]))
 
 
 def _read(req, timeout):
-    """One HTTP attempt. ONE CLASSIFICATION POLICY, SHARED WITH screenscraper._read by
-    convention rather than by code — the two live in different modules and neither may
-    import the other, so the rules are written out in both places and must agree:
+    """One HTTP attempt. ONE CLASSIFICATION POLICY, SHARED WITH screenscraper._read:
 
-      * a timeout, however urllib wraps it, goes back up to _request to be RETRIED;
+      * a timeout, however urllib wraps it, goes back up to _request to be RETRIED —
+        and that test is now provider_rate.is_timeout, one copy for both modules;
       * a body we cannot parse is an ERROR, never an absence — returning "not found"
         for a maintenance page is how a caller permanently retires a game;
       * every attempt, retries included, is charged to the budget.
+
+    The STATUS-CODE table below stays TheGamesDB's own: 403 and 429 are both "the
+    monthly allowance is gone" here, where ScreenScraper means two different things by
+    429 and 430. Sharing the codes would mean sharing a wrong answer.
     """
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:

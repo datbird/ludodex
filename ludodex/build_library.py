@@ -147,7 +147,8 @@ base_present = set()   # every base norm_key that has an owned/wanted entry (for
                        # wishlist "already owned?" check, which is title-level)
 
 
-def add(title, source, platform, sid, detail="", state="have", via_collection=None):
+def add(title, source, platform, sid, detail="", state="have", via_collection=None,
+        evidence=""):
     # "Peel apart": a specific source row the user split off a merged entry goes to
     # its OWN key + title, overriding the natural title-derived key. Applied first so
     # the row lands on the peeled-off game on every rebuild.
@@ -204,9 +205,16 @@ def add(title, source, platform, sid, detail="", state="have", via_collection=No
             if state == "have" and s[5] != "have":   # have wins over want
                 g["sources"][i] = s = s[:5] + ("have",) + s[6:]
             if via_collection and not s[6]:          # keep the collection provenance
-                g["sources"][i] = s[:6] + (via_collection,)
+                g["sources"][i] = s = s[:6] + (via_collection,) + s[7:]
+            # The WEAKER claim wins. Two rows for one (source, id) means two pulls said
+            # different things about the same purchase, and evidence only ever qualifies
+            # what a source asserts — dropping the qualifier because a later pull omitted
+            # it is how a played title launders itself into a purchase.
+            if evidence and not s[7]:
+                g["sources"][i] = s[:7] + (evidence,)
             return ekey
-    g["sources"].append((source, ep, str(sid), title, detail, state, via_collection))
+    g["sources"].append((source, ep, str(sid), title, detail, state, via_collection,
+                         evidence or ""))
     return ekey
 
 
@@ -263,12 +271,17 @@ if os.path.exists(OUT):
         _prev_cols = {r[1] for r in _prev.execute("PRAGMA table_info(sources)")}
         _st = "state" if "state" in _prev_cols else "'have'"
         _vc = "via_collection" if "via_collection" in _prev_cols else "NULL"
-        for src, plat, sid, title, detail, state, via in _prev.execute(
-                "SELECT source, platform, source_id, title_raw, detail, %s, %s "
-                "FROM sources" % (_st, _vc)):
+        # EVIDENCE IS PART OF THE ROW TOO, for the same reason state and via_collection
+        # are: the store TSV that qualified this row is long gone by the next rebuild, so
+        # re-seeding without it is what would launder an xbox play-history row into a
+        # purchase and leave nothing able to say otherwise.
+        _ev = "evidence" if "evidence" in _prev_cols else "''"
+        for src, plat, sid, title, detail, state, via, ev in _prev.execute(
+                "SELECT source, platform, source_id, title_raw, detail, %s, %s, %s "
+                "FROM sources" % (_st, _vc, _ev)):
             if src in _REGEN or not config.source_enabled(src):
                 continue                       # regenerated fresh, or turned off
-            add(title, src, plat, sid, detail or "", state or "have", via)
+            add(title, src, plat, sid, detail or "", state or "have", via, ev or "")
     except sqlite3.OperationalError:
         pass                                   # no prior library / schema mismatch
     try:                                       # wishlist-wanted games (may be absent in older DBs)
@@ -315,20 +328,24 @@ def load_tsv(path, source):
     if not os.path.exists(path):
         return
     for line in open(path, encoding="utf-8"):
-        line = line.rstrip("\n")
+        line = line.rstrip("\r\n")
         if not line:
             continue
         parts = line.split("\t")
         sid = parts[0]
         title = parts[1] if len(parts) > 1 else ""
         # optional 3rd column = specific console/platform (psn/xbox emit it);
-        # otherwise the platform is just the source label
-        # optional 3rd column = specific console/platform (psn/xbox emit it);
         # otherwise the platform is just the source label. Xbox's device value is
         # normalised into the store identity + os/device attributes inside add().
         platform = parts[2] if len(parts) > 2 and parts[2] else source
+        # optional 4th column = what the row actually PROVES, when the store cannot
+        # prove a purchase. `xbox_owned` writes 'play-history' on every row because
+        # titlehub returns title history: Game Pass titles the account never bought are
+        # in, purchases it never launched are out. Reading three columns dropped that
+        # qualifier on the floor and the catalog recorded a played title as ownership.
+        evidence = parts[3].strip() if len(parts) > 3 else ""
         if title:
-            add(title, source, platform, sid)
+            add(title, source, platform, sid, evidence=evidence)
 
 
 for _src in _STORE_SRCS:
@@ -1036,8 +1053,13 @@ CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
                           -- Discover can offer the base game as a want.
 CREATE TABLE sources (game_id INTEGER, source TEXT, platform TEXT,
   source_id TEXT, title_raw TEXT, detail TEXT, state TEXT DEFAULT 'have',
-  via_collection TEXT);
+  via_collection TEXT, evidence TEXT);
   -- state: 'have' (owned via this source) | 'want' (per-format wish)
+  -- evidence: what the store row actually PROVES, when that is weaker than a purchase.
+  -- Empty/NULL means the plain claim the source makes. `xbox` writes 'play-history':
+  -- titlehub returns title history, so its rows include Game Pass titles never bought
+  -- and miss purchases never launched. SOURCES.md defines a source as asserting
+  -- ownership, so the qualifier has to travel with the row or the distinction is gone.
   -- via_collection: coll_key of the compilation this copy comes from (DESIGN §13).
   -- state stays 'have' because it IS owned — §13 calls collection credit "a form of
   -- ownership" — so every existing owned/count/facet query keeps working untouched.
@@ -1119,7 +1141,8 @@ for (base, plat), g in games.items():
     base_to_gids.setdefault(bkey, []).append(gid)
     cur.executemany(
         "INSERT INTO sources(game_id,source,platform,source_id,title_raw,detail,state,"
-        "via_collection) VALUES(?,?,?,?,?,?,?,?)", [(gid,) + s for s in srcs])
+        "via_collection,evidence) VALUES(?,?,?,?,?,?,?,?,?)",
+        [(gid,) + s for s in srcs])
     _wrote += 1
     if _wrote % 200 == 0:
         print("PROG\t%d\t%d\t%s\tcatalog" % (_wrote, _wtotal, base), flush=True)

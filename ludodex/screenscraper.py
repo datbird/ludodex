@@ -28,6 +28,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config
 import platmap                    # canonical platform tokens (system-fit checks)
+import provider_rate              # shared pacing/timeout rules
 
 API = "https://www.screenscraper.fr/api2/"
 
@@ -225,32 +226,32 @@ def _request(endpoint, creds, extra=None, timeout=90, attempts=3):
         except (socket.timeout, TimeoutError) as e:
             last = e
         except urllib.error.URLError as e:
-            if not _is_timeout(e):
+            if not provider_rate.is_timeout(e):
                 raise
             last = e
         if attempt + 1 < attempts:
-            time.sleep(2 * (attempt + 1))          # brief linear backoff, then retry
+            # The backoff schedule is shared with thegamesdb (provider_rate.retry_delay);
+            # only ever reached after a TIMEOUT, so it stays linear — the call that timed
+            # out already spent 90s waiting and doubling on top of that is a stall.
+            time.sleep(provider_rate.retry_delay(attempt))
     raise SSError("error", "timed out after %d attempts (%ss each): %s"
                   % (attempts, timeout, str(last)[:90]))
-
-
-def _is_timeout(e):
-    """A timeout however urllib chose to wrap it: read timeouts surface as
-    socket.timeout, connect timeouts as URLError(reason=TimeoutError)."""
-    return isinstance(e, (socket.timeout, TimeoutError)) or isinstance(
-        getattr(e, "reason", None), (socket.timeout, TimeoutError))
 
 
 def _read(req, timeout):
     """One HTTP attempt; the classification the caller relies on stays here.
 
-    ONE CLASSIFICATION POLICY, SHARED WITH thegamesdb._read by convention rather than by
-    code — the two live in different modules and neither may import the other, so the
-    rules are written out in both places and must agree:
+    ONE CLASSIFICATION POLICY, SHARED WITH thegamesdb._read:
 
-      * a timeout, however urllib wraps it, goes back up to _request to be RETRIED;
+      * a timeout, however urllib wraps it, goes back up to _request to be RETRIED —
+        and that test is now provider_rate.is_timeout, one copy for both modules;
       * a body we cannot parse is an ERROR, never an absence;
       * every attempt, retries included, is charged to the budget.
+
+    The STATUS-CODE table below stays ScreenScraper's own, and deliberately: 429 means
+    "too fast" here and 430/431 mean "that is your allowance", while TheGamesDB folds
+    403 and 429 into one monthly cap. A shared classifier would have to be handed both
+    tables, which is what these two functions already are.
     """
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -268,7 +269,7 @@ def _read(req, timeout):
     except urllib.error.URLError as e:
         # A timeout goes back UP for _request to retry. Turning it into SSError('closed')
         # here is what made _request's retry loop dead code for connect timeouts.
-        if _is_timeout(e):
+        if provider_rate.is_timeout(e):
             raise
         raise SSError("closed", str(e))
     # A valid api2 response is JSON with a "response" object — parse it FIRST, so the

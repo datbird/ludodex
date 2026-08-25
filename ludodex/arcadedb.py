@@ -40,6 +40,7 @@ import urllib.request
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config                       # noqa: E402
+import provider_rate                # noqa: E402 — shared pacing rules
 
 # https, not http: the http endpoint 301-redirects and urllib will not follow a redirect
 # that changes scheme for some requests. Verified live 2026-08-17.
@@ -82,11 +83,11 @@ _last = [0.0]
 
 
 def _pace():
-    gap = _cooldown_ms() / 1000.0
-    wait = gap - (time.time() - _last[0])
-    if wait > 0:
-        time.sleep(wait)
-    _last[0] = time.time()
+    # The gap arithmetic lives in provider_rate, not here. This function and
+    # zxinfo's were byte-identical, and igdb's differed only in where the gap
+    # came from; three copies of five lines is three places for one of them to
+    # drift into not pacing at all.
+    provider_rate.min_gap(_last, _cooldown_ms() / 1000.0)
 
 
 def query(set_name, timeout=30):

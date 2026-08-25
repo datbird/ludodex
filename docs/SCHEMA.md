@@ -12,7 +12,7 @@ games(   id, canonical_title, norm_key, platform, entry_key, base_key, game_key,
          in_playnite, in_launchbox, wanted,
          parent_key, content_kind )                          -- add-ons; see below
 
-sources( game_id, source, platform, source_id, title_raw, detail, state, via_collection )
+sources( game_id, source, platform, source_id, title_raw, detail, state, via_collection, evidence )
 
 source_attrs(    game_id, source, source_id, attrs_json )    -- lossless, per SOURCE
 game_attributes( game_id, kind, value, origin )              -- the merged, queryable view
@@ -56,6 +56,10 @@ them is how a Genesis game ends up wearing Game Gear box art.
   rows and one kind.
 - `state` on a source is `have` or `want`, per format.
 - `via_collection` on a source is the `coll_key` of the compilation this copy came from.
+- `evidence` on a source records what the store row actually PROVES, when that is
+  weaker than a purchase. Empty means the plain claim. `xbox` writes `play-history`,
+  because titlehub returns what was launched, which can include Game Pass titles and
+  can miss games that were bought and never started.
   `state` stays `have`, because it *is* owned — collection credit is a form of ownership —
   so every existing owned/count/facet query keeps working and the provenance rides along
   beside it.

@@ -15,11 +15,16 @@ Attribute names map onto the same vocabulary as the Playnite interchange
 plus a few IGDB-specific kinds (themes, game_modes, player_perspectives).
 """
 import json
+import os
 import random
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import provider_rate                # noqa: E402 — shared pacing/timeout rules
 
 API = "https://api.igdb.com/v4"
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
@@ -154,11 +159,11 @@ def set_pace(seconds):
 
 
 def _throttle():
-    gap = max(MIN_INTERVAL, _pace[0])
-    dt = time.time() - _last[0]
-    if dt < gap:
-        time.sleep(gap - dt)
-    _last[0] = time.time()
+    # Only the GAP is IGDB's business; the waiting is provider_rate's, shared with
+    # arcadedb and zxinfo. MIN_INTERVAL stays the floor and set_pace() only ever
+    # raises it — a per-process pace that could lower the floor is a rate limit
+    # nobody enforces.
+    provider_rate.min_gap(_last, max(MIN_INTERVAL, _pace[0]))
 
 
 def get_token(client_id, client_secret):

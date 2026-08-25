@@ -15,6 +15,7 @@ merge/split is corrected by the next full rebuild; it never applies to normal du
 """
 import os
 import sqlite3
+import time
 
 
 def _load_resolutions(data_dir):
@@ -359,6 +360,67 @@ def resolve_member_key(con, member_title, member_key, siblings,
     return hk
 
 
+# --------------------------------------------------------------------------- #
+#  the member-ingest backlog
+# --------------------------------------------------------------------------- #
+# A member materialization CREATES is an identity-less stub — no provider match, no
+# media, no attributes — and the ingest that finishes the job is capped, because one
+# apply must never sweep the catalog. So the members over the cap have to survive the
+# run that skipped them, and `created_out` cannot carry them: it reports what THIS call
+# created, and by the next call those rows already exist, so materialize skips them long
+# before it reaches the report. The over-cap remainder was therefore offered exactly
+# once, dropped, and never mentioned again — while the caller's log said "deferred to the
+# next run". This table IS the deferral: enqueued when the row is created, drained by the
+# caller that actually ran the ingest, never by the act of creating the row.
+#
+# Losing it to a full rebuild is fine and deliberate: a rebuild puts every entry through
+# the ordinary phases, which is the very thing the backlog exists to arrange.
+_QUEUE_DDL = ("CREATE TABLE IF NOT EXISTS member_ingest_queue("
+              "norm_key TEXT NOT NULL, platform TEXT NOT NULL, queued_at INTEGER, "
+              "PRIMARY KEY(norm_key, platform))")
+
+
+def _ensure_queue(con):
+    con.execute(_QUEUE_DDL)
+
+
+def pending_members(con, limit=None):
+    """[(norm_key, platform)] materialization created and nobody has ingested yet.
+
+    Oldest first, so a capped caller drains the backlog in the order it accumulated
+    rather than re-taking the same slice every run. Joined against `games`, so a member
+    the reconcile pass deleted can never be handed back as a key with no entry behind it
+    — and that stale row is cleaned up here rather than left to accumulate.
+    """
+    _ensure_queue(con)
+    con.execute("DELETE FROM member_ingest_queue WHERE NOT EXISTS("
+                "SELECT 1 FROM games g WHERE g.base_key=member_ingest_queue.norm_key "
+                "AND g.platform=member_ingest_queue.platform)")
+    q = ("SELECT norm_key, platform FROM member_ingest_queue "
+         "ORDER BY queued_at, norm_key")
+    if limit:
+        q += " LIMIT %d" % int(limit)
+    rows = [(r[0], r[1]) for r in con.execute(q)]
+    con.commit()
+    return rows
+
+
+def member_ingested(con, keys):
+    """Drop `keys` — [(norm_key, platform)] — from the backlog.
+
+    Called when the ingest has RUN over them, not when it succeeded. A member whose name
+    resolves to nothing gets no identity and that is a legitimate answer; re-queueing on
+    it would spend a provider fetch on the same unanswerable stub on every apply forever.
+    """
+    if not keys:
+        return 0
+    _ensure_queue(con)
+    con.executemany("DELETE FROM member_ingest_queue WHERE norm_key=? AND platform=?",
+                    [(k, p) for k, p in keys])
+    con.commit()
+    return len(keys)
+
+
 def materialize_members(con, data_dir, created_out=None):
     """Make the catalog agree with the recorded collections — in BOTH directions.
 
@@ -382,10 +444,16 @@ def materialize_members(con, data_dir, created_out=None):
        inline pass writes it (same ownership test, same skip rule, same platform
        resolver, same game_key derivation via the metadata cache — bundle ids refused).
 
+    `created_out` gets what THIS call created, and nothing else — it is what an apply
+    merges into its own working set, so widening it would put already-ingested members
+    back through every phase on every apply. The members an ingest CAP deferred are a
+    different question and are read with `pending_members()`.
+
     Idempotent — safe to call after every apply/record/delete."""
     import compilations
     if not any(r[1] == "via_collection" for r in con.execute("PRAGMA table_info(sources)")):
         return 0                        # catalog predates the column; a rebuild will do it
+    _ensure_queue(con)
     title_ids, entry_ids = _load_resolutions(data_dir)
     # a collection is owned by its OWN purchase, never by a via-credit
     owned = {r[0] for r in con.execute(
@@ -533,6 +601,12 @@ def materialize_members(con, data_dir, created_out=None):
             # §13's "recording a collection needs no rebuild" property dies.
             if created_out is not None:
                 created_out.append((mk, mplat))
+            # And enqueue it, because `created_out` is a one-shot report and the ingest
+            # is capped. See the backlog block above: without this, everything past the
+            # cap stayed a stub forever.
+            con.execute("INSERT OR IGNORE INTO member_ingest_queue"
+                        "(norm_key,platform,queued_at) VALUES(?,?,?)",
+                        (mk, mplat, int(time.time())))
             made += 1
     con.commit()
     return made + changed
