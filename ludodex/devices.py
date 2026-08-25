@@ -159,15 +159,22 @@ def _mgr_rom_count(mgr_id):
         return None, None
     try:
         con = sqlite3.connect(p)
+    except sqlite3.Error:
+        return None, None
+    try:
+        # close() used to sit inside the try, so a half-written index — no `roms` table
+        # yet, which the except below exists to tolerate — leaked the handle. The Sync
+        # menu calls this once per ROM manager on every open.
         n = con.execute("SELECT COUNT(*) FROM roms").fetchone()[0]
         try:
             g = con.execute("SELECT SUM(games) FROM systems").fetchone()[0]
         except sqlite3.Error:
             g = None
-        con.close()
         return int(n), (int(g) if g is not None else None)
     except sqlite3.Error:
         return None, None
+    finally:
+        con.close()
 
 
 def rom_locations():

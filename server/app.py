@@ -31,6 +31,7 @@ import zipfile
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo root
 PKG = os.path.join(DIR, "ludodex")                                  # the modules
@@ -143,8 +144,13 @@ _AUTH_OPEN = ("/api/auth/", "/api/health")
 
 
 def _cf_cfg():
+    # Each config.get is its own sqlite connect, and this is on the per-request auth
+    # path: when Access is off (the default) the other two keys are never looked at, so
+    # reading them cost two connections per request to build a value nobody used.
+    if config.get("cf_access_enabled") != "1":
+        return {"enabled": False, "team_domain": "", "aud": ""}
     return {
-        "enabled": config.get("cf_access_enabled") == "1",
+        "enabled": True,
         "team_domain": config.get("cf_access_team_domain") or "",
         "aud": config.get("cf_access_aud") or "",
     }
@@ -225,7 +231,12 @@ def _admin_required_for(method, path):
 async def _auth_gate(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/") and not path.startswith(_AUTH_OPEN):
-        user = _current_user(request)
+        # OFF THE EVENT LOOP. This middleware runs on EVERY authenticated request and
+        # _current_user is all blocking work — a sqlite connect for the session, more for
+        # the Cloudflare settings, and on a cold cache an HTTPS fetch of Access's JWKS.
+        # Awaiting it inline stalled the whole server for the duration, so one slow JWKS
+        # round trip froze every other request in flight.
+        user = await run_in_threadpool(_current_user, request)
         if not user:
             return JSONResponse({"detail": "authentication required"}, status_code=401)
         if _admin_required_for(request.method, path) and user.get("role") != "admin":
@@ -388,6 +399,31 @@ def cf_access_unmap(request: Request, body: dict = Body(...)):
 
 
 # ----------------------------------------------------------------------------- db
+def _ai_ready(provider=None, model=None):
+    """Raise RuntimeError unless an AI provider is configured AND holds a key.
+
+    Callers here want the PRECONDITION, not the resolved triple, and were reaching into
+    `ai._resolve` — another module's private surface — to get it, so a change to that
+    helper's shape or name would break four endpoints silently. Written against ai's
+    public accessors; the messages match what _resolve raises, because they are surfaced
+    verbatim as the 400."""
+    provider = provider or ai.active_provider()
+    if not provider:
+        raise RuntimeError("no AI provider configured")
+    if not ai.key_for(provider):
+        raise RuntimeError("provider %r has no API key" % provider)
+    return provider, (model or ai.model_for(provider))
+
+
+def _int_or_none(v):
+    """int(v) or None — never an exception. For values that arrive from a REQUEST BODY,
+    where int() straight on a client string turns a bad request into a 500."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def ro(path):
     """Open a SQLite db read-only (one connection per request — cheap, thread-safe).
     busy_timeout: if a writer briefly holds the db (a pipeline pass mid-write), wait a
@@ -675,9 +711,13 @@ def stats():
         unmatched = con.execute(
             "SELECT COUNT(*) FROM games g WHERE NOT EXISTS("
             "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)" + and_w).fetchone()[0]
+        # The exact negation of FLAG_SQL["has_media"], because the card links straight to
+        # that filter. It used to look at m.media only, so a game whose only art is a USER
+        # UPLOAD was counted as having no media here and then vanished from the list the
+        # number opened — the dashboard and the filter disagreed by construction.
         no_media = con.execute(
-            "SELECT COUNT(*) FROM games g WHERE NOT EXISTS("
-            "SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key)" + and_w).fetchone()[0]
+            "SELECT COUNT(*) FROM games g WHERE NOT " + FLAG_SQL["has_media"]
+            + and_w).fetchone()[0]
         # matched-but-low-confidence identity (task #13) — its own review facet
         _thr = int(config.get("match_confidence_threshold") or 60)
         low_conf = con.execute(
@@ -689,13 +729,17 @@ def stats():
         cover_undecided = con.execute(
             "SELECT COUNT(*) FROM games g WHERE " + FLAG_SQL["cover_undecided"]
             + and_w).fetchone()[0]
+        # OWNED counts, like every other number on this card. Without the wanted=0
+        # filter a wishlist-only title counted as owned on its store, so the per-source
+        # totals could exceed `games` and disagreed with the source filter they link to.
         by_source = {}
         for s in COLUMN_SOURCES:
             by_source[s] = con.execute(
-                "SELECT COUNT(*) FROM games WHERE has_%s=1" % s).fetchone()[0]
+                "SELECT COUNT(*) FROM games g WHERE g.has_%s=1%s" % (s, and_w)).fetchone()[0]
         # dynamic sources (ea/playnite/etc.) live only in the sources table
-        for row in con.execute("SELECT source, COUNT(DISTINCT game_id) c "
-                               "FROM sources GROUP BY source"):
+        for row in con.execute("SELECT s.source, COUNT(DISTINCT s.game_id) c FROM sources s "
+                               "JOIN games g ON g.id=s.game_id" +
+                               (" WHERE g.wanted=0" if wcol else "") + " GROUP BY s.source"):
             by_source.setdefault(row["source"], row["c"])
         coverage = {}
         # "with art" = identified, non-wanted games that have a chosen COVER — a
@@ -1135,9 +1179,6 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         # a COALESCE fallback so a game with its own neutral art is byte-for-byte unchanged.
         _mc_gk = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.game_key=g.game_key "
                   "AND md.chosen=1 AND md.kind='cover' AND COALESCE(md.system,'')='' LIMIT 1)")
-        _neu_gk_ex = (" OR EXISTS(SELECT 1 FROM m.media md WHERE md.game_key=g.game_key AND "
-                      "md.chosen=1 AND md.kind='cover' AND COALESCE(md.system,'')='')"
-                      if _hasgk else "")
         _cv = [_um, _mc % _own, _mc % _neutral] + ([_mc_gk] if _hasgk else [])
         cover_v = "COALESCE(" + ",".join(_cv) + ") AS cover_v, "
         # has_cover reflects SERVABLE art (own console or gated neutral), so a card with
@@ -1318,22 +1359,15 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
     # neutral art also reachable by game identity across norm_keys (see _query_games note).
     _mc_gk = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.game_key=g.game_key "
               "AND md.chosen=1 AND md.kind='cover' AND COALESCE(md.system,'')='' LIMIT 1)")
-    _neu_gk_ex = (" OR EXISTS(SELECT 1 FROM m.media md WHERE md.game_key=g.game_key AND "
-                  "md.chosen=1 AND md.kind='cover' AND COALESCE(md.system,'')='')"
-                  if _hasgk else "")
     if has_ek:
         _cv = [_um, _mc % _own, _mc % _neutral] + ([_mc_gk] if _hasgk else [])
         cover_v = "COALESCE(" + ",".join(_cv) + ") AS cover_v "
-        has_cov = ("((EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
-                   "md.chosen=1 AND md.kind='cover'" + _own + ") OR EXISTS(SELECT 1 FROM "
-                   "m.media md WHERE md.norm_key=g.norm_key AND md.chosen=1 AND md.kind='cover'"
-                   + _neutral + ")" + _neu_gk_ex + ") OR EXISTS(SELECT 1 FROM u.user_media um "
-                   "WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
     else:
         cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v "
-        has_cov = ("(EXISTS(SELECT 1 FROM m.media md WHERE md.norm_key=g.norm_key AND "
-                   "md.chosen=1 AND md.kind='cover') OR EXISTS(SELECT 1 FROM u.user_media "
-                   "um WHERE um.norm_key=g.norm_key AND um.kind='cover')) AS has_cover, ")
+    # has_cover comes from _has_cover_sql, not from a sixth hand-written copy of the
+    # rule. Spotlight ranks its representative row BY has_cover, so a copy that drifts
+    # from the grid's definition puts a placeholder tile at the front of the showcase.
+    has_cov = _has_cover_sql(has_ek, _hasgk) + " AS has_cover, "
     # Collapse to ONE showcase row per GAME by resolved identity: igdb:<id> when the
     # entry is identified (so a title's platform ports — the five Doom ports — fold
     # together), else base_key (two UNidentified same-title entries can't be safely
@@ -1581,6 +1615,7 @@ _MEDIA_LOCK = threading.Lock()
 
 def _media_worker(mode):
     j = _MEDIA_JOB["job"]
+    con = None
     try:
         con = media_choose.con_index()
         # media_choose.con_index() does NOT carry the identity repair (media_fetch's
@@ -1603,11 +1638,15 @@ def _media_worker(mode):
         if ok:
             j["step"] = "Re-choosing with measured dimensions…"
             media_choose.select(con)
-        con.close()
         j.update({"ok": True, "downloaded": ok, "dead": dead, "step": "Done"})
     except Exception as e:
         j.update({"ok": False, "error": str(e)[:200], "step": "Failed"})
     finally:
+        # The close only ran on the success path, so every failed download left the
+        # media index handle open for the life of the process; a user who retries a
+        # failing job leaks one more each time.
+        if con is not None:
+            con.close()
         j["running"] = False
         j["finished"] = True
 
@@ -1651,10 +1690,18 @@ def _match_worker(force):
         if not force:
             # Only the games that have no recorded identity yet (or a stale miss) — the
             # rule for "still to do" lives in one place, not in this loop.
-            mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+            _mcp = os.path.join(DATA, "metadata-cache.sqlite")
+            # ensure_tables CREATES the file. The read-only handle was opened FIRST, so
+            # on a fresh install the very first non-forced provider match died with
+            # "unable to open database file" — and the write connection it was handed
+            # was never closed, leaking one per run on every other install.
+            _w = sqlite3.connect(_mcp)
             try:
-                provider_ids.ensure_tables(sqlite3.connect(
-                    os.path.join(DATA, "metadata-cache.sqlite")))
+                provider_ids.ensure_tables(_w)
+            finally:
+                _w.close()
+            mc = ro(_mcp)
+            try:
                 todo = set()
                 for prov in provider_ids.PROVIDERS:
                     todo.update(provider_ids.unlinked(mc, prov, keys))
@@ -2156,13 +2203,24 @@ _IGDB_FIELDS = ("fields id,name,slug,first_release_date,"
                 "platforms.abbreviation,cover.image_id;")
 
 
+def _apicalypse_str(s):
+    """Escape a title for an Apicalypse double-quoted string literal.
+
+    ONE definition, because there were three and only two of them were right:
+    `_igdb_search` stripped `"` alone, so a title ending in a backslash escaped its own
+    closing quote and the rest of the query became part of the string — a syntax error
+    at best, and a silently different query at worst. `*` goes too: it is Apicalypse's
+    wildcard, so a literal asterisk in a title changes what the clause means."""
+    return "".join(c for c in (s or "") if c not in '"\\*')
+
+
 def _igdb_search(name, limit=8):
     """IGDB free-text search -> candidate matches (id, name, year, platforms, cover)."""
     cid, tok = _igdb_token()
     if not tok:
         return []
     import igdb
-    body = 'search "%s"; %s limit %d;' % (name.replace('"', ""), _IGDB_FIELDS, limit)
+    body = 'search "%s"; %s limit %d;' % (_apicalypse_str(name), _IGDB_FIELDS, limit)
     try:
         return _igdb_hits(igdb.query("games", body, cid, tok))
     except Exception:
@@ -2181,7 +2239,7 @@ def _igdb_by_name(name, limit=15):
     if not tok:
         return []
     import igdb
-    safe = name.replace('"', "").replace("\\", "").replace("*", "")
+    safe = _apicalypse_str(name)
     # sort by release date asc so the ORIGINAL lands in the window (IGDB's default order
     # can push a modern re-release ahead of the 1986 original and cap it out at `limit`).
     body = ('%s where name ~ "%s"; sort first_release_date asc; limit %d;'
@@ -2389,21 +2447,43 @@ def identify_folder(body: dict = Body(...)):
                 files.append(os.path.join(root, fn))
     total = len(files)
     files = files[:limit]
-    seen, errs = {}, 0
-    for i in range(0, len(files), batch):
-        imgs = [im for im in (_image_file_scaled(fp) for fp in files[i:i + batch]) if im]
-        if not imgs:
-            continue
-        try:
-            for g in ai.identify_games(imgs):
-                k = (g.get("title") or "").strip().lower()
-                if k and k not in seen:
-                    seen[k] = g
-        except Exception:
-            errs += 1
+    # THIS SPENDS MONEY, tens of vision calls per run, and it ran with no record anywhere:
+    # nothing showed it was happening, nothing could stop it, and two clicks started two
+    # of them. It still answers in-band (the caller wants the games list), but it is now a
+    # single-flight job in the monitor with a working stop between batches.
+    rec = {"kind": "identify", "label": "Identify games in %s" % posixbase(path),
+           "cancel": threading.Event(), "thread": threading.current_thread(),
+           "error": None, "run_id": None, "cancelable": True, "started": time.time()}
+    with _JOBS_LOCK:
+        cur = _JOBS.get("identify")
+        if cur and cur["thread"] and cur["thread"].is_alive():
+            raise HTTPException(409, "a folder identification is already running")
+        _JOBS["identify"] = rec
+    seen, errs, stopped, scanned = {}, 0, False, 0
+    try:
+        for i in range(0, len(files), batch):
+            if rec["cancel"].is_set():
+                stopped = True
+                break
+            part = files[i:i + batch]
+            scanned += len(part)
+            imgs = [im for im in (_image_file_scaled(fp) for fp in part) if im]
+            if not imgs:
+                continue
+            try:
+                for g in ai.identify_games(imgs):
+                    k = (g.get("title") or "").strip().lower()
+                    if k and k not in seen:
+                        seen[k] = g
+            except Exception:
+                errs += 1
+    finally:
+        with _JOBS_LOCK:
+            if _JOBS.get("identify") is rec:
+                _JOBS.pop("identify", None)
     games = sorted(seen.values(), key=lambda g: (g.get("title") or "").lower())
-    return {"games": games, "count": len(games), "scanned": len(files),
-            "total_found": total, "batch_errors": errs}
+    return {"games": games, "count": len(games), "scanned": scanned,
+            "total_found": total, "batch_errors": errs, "stopped": stopped}
 
 
 # --------------------------------------------------------------------------- #
@@ -2744,6 +2824,7 @@ def publish_plan_compute(dev_id: int, body: dict = Body(default=None)):
 
 
 _PUBLISH_JOB = {"job": None}
+_PUBLISH_LOCK = threading.Lock()
 
 
 @app.post("/api/devices/{dev_id}/publish/apply")
@@ -2756,12 +2837,16 @@ def publish_apply_run(dev_id: int, body: dict = Body(...)):
     plan = b.get("plan")
     if not plan or not isinstance(plan, dict):
         raise HTTPException(400, "no plan supplied — review one first")
-    if _PUBLISH_JOB["job"] and _PUBLISH_JOB["job"].get("running"):
-        raise HTTPException(409, "a publish is already running")
     st = {"running": True, "device_id": dev_id, "done": 0,
           "total": len(plan.get("items") or []), "current": None, "report": None,
-          "error": ""}
-    _PUBLISH_JOB["job"] = st
+          "error": "", "started": time.time()}
+    # UNDER THE LOCK. The check and the set were separate statements, so two applies that
+    # arrived together both read "not running" and both started — two publishes writing
+    # the same device's ROM tree at once.
+    with _PUBLISH_LOCK:
+        if _PUBLISH_JOB["job"] and _PUBLISH_JOB["job"].get("running"):
+            raise HTTPException(409, "a publish is already running")
+        _PUBLISH_JOB["job"] = st
 
     def _run():
         try:
@@ -3060,7 +3145,7 @@ def sync_device_ep(dev_id: int):
                                          or "the budget cannot measure this model"}
                     return out
                 provider = ai.provider_for_area("metadata")
-                ai._resolve(provider, ai.model_for_area("metadata"))
+                _ai_ready(provider, ai.model_for_area("metadata"))
                 run_id = aimeta.scan_new("heavy import", keys, False, True, None)
                 _start_aimeta_job(run_id, keys,
                                   {"web": False, "match_provider": True,
@@ -3088,8 +3173,7 @@ def import_estimate(mgr: int = None, mode: str = "lite"):
     if mode == "algo":
         return dict(out, targets=0, cost_usd=0)
     try:
-        sys.path.insert(0, PKG)
-        import ingest_ai
+        import ingest_ai                    # PKG is on sys.path from module import
         n = len(ingest_ai.targets(mgr, take_all=(mode == "heavy")))
         out.update(ingest_ai._estimate(n))
     except Exception as e:                  # noqa: BLE001
@@ -3625,6 +3709,23 @@ def _jobs_list():
             "cancelable": bool(_run and not _pau),    # ⏸ pause
             "restartable": bool(_pau),                 # ▶ resume
             "deletable": True})                        # × stop (running) / dismiss
+    pj = _PUBLISH_JOB.get("job")
+    if pj:
+        # A publish writes a device's ROM tree for minutes and was in NO job feed at all,
+        # so there was nothing to watch it with and no way to dismiss a finished one — the
+        # only trace was /api/publish/job, which nothing but the publish screen polls.
+        _prun = pj.get("running")
+        out.append({
+            "id": "publish", "kind": "publish", "label": "Publish to device",
+            "status": ("running" if _prun else "error" if pj.get("error") else "done"),
+            "detail": pj.get("current") or "", "error": pj.get("error") or None,
+            "progress": {"done": pj.get("done") or 0,
+                         "total": pj.get("total") or 1, "failed": 0},
+            "when": pj.get("started"),
+            # publish_apply.apply_plan has no stop hook, so a running publish is watched,
+            # not interrupted. Saying otherwise would be a button that does nothing.
+            "cancelable": False, "restartable": False,
+            "deletable": not _prun})
     rj = _ROMSYNC.get("job")
     if rj:
         devs = rj.get("devices", {})
@@ -3729,7 +3830,10 @@ def _jobs_list():
             "target_key": _tkey,                       # single-game scan → clickable name
             "progress": {"done": s["done"], "total": s["total"], "failed": 0},
             "when": s["finished"] or s["created"],
-            "cancelable": live, "restartable": not live and s["done"] < s["total"],
+            "cancelable": live,
+            # 'resumed' means a later run already took over this one's remaining keys.
+            "restartable": (not live and s["done"] < s["total"]
+                            and s["status"] != "resumed"),
             "deletable": not live})
     # Orphaned reviews: proposed findings whose scan_run was deleted / aged past the
     # listed window still need reviewing, but nothing above points to them — so they'd
@@ -3764,7 +3868,8 @@ def _jobs_list():
             "status": "running" if live else "error",
             "detail": "", "error": rec.get("error"),
             "progress": {"done": 0, "total": 0, "failed": 0},
-            "when": rec.get("started"), "cancelable": False,
+            "when": rec.get("started"),
+            "cancelable": bool(live and rec.get("cancelable")),
             "restartable": False, "deletable": not live})
     return out
 
@@ -3804,18 +3909,60 @@ def jobs_restart(jid: str):
         old = aimeta.scan_get(int(jid.split(":", 1)[1]))
         if not old:
             raise HTTPException(404, "no such scan")
+        old_rid = int(jid.split(":", 1)[1])
         # resume exactly where it stopped, using the stored key set + options
         keys = (old.get("keys") or [])[old.get("done") or 0:]
         if not keys:
             raise HTTPException(400, "nothing left to scan")
         opts = {"web": bool(old.get("web")),
                 "match_provider": bool(old.get("match_provider")),
-                "metadata_kinds": old.get("md_kinds"), "label": old.get("target")}
+                "metadata_kinds": old.get("md_kinds"), "label": old.get("target"),
+                "pull_scores": bool(old.get("pull_scores"))}
+        # RESUME WITH THE OPTIONS THE USER CHOSE. Everything but want_media survives in
+        # scan_runs; want_media does not, and _aimeta_scan defaults it to True — so a scan
+        # deliberately run with media OFF came back with media fill ON, spending provider
+        # (and, with web, paid) calls the user had explicitly declined.
+        _prev = _AIMETA_OPTS.get(old_rid)
+        if _prev is not None and "want_media" in _prev:
+            opts["want_media"] = _prev["want_media"]
         rid = aimeta.scan_new(old["target"], keys, opts["web"],
-                              opts["match_provider"], opts["metadata_kinds"])
+                              opts["match_provider"], opts["metadata_kinds"],
+                              1 if opts["pull_scores"] else 0)
         _start_aimeta_job(rid, keys, opts)
+        # THE OLD RUN IS OVER. It was left exactly as it was, so it stayed `done < total`
+        # and therefore restartable forever: pressing ▶ twice started two workers over the
+        # same remaining keys, each paying for the same games.
+        try:
+            aimeta.scan_finish(old_rid, "resumed")
+        except Exception as e:              # noqa: BLE001 — the new run is already going
+            print("resume: could not close scan %d: %s" % (old_rid, str(e)[:120]),
+                  file=sys.stderr)
         return {"restarted": True, "id": "aimeta:%d" % rid}
     raise HTTPException(400, "start a library sync from the Library page")
+
+
+# How long a delete waits for a live worker to notice its cancel flag before giving up.
+# Long enough for a ScreenScraper search or a file copy in flight to return, short
+# enough that the button still feels like a button.
+_JOB_STOP_WAIT = 20.0
+
+
+def _stop_and_wait(rec, jid):
+    """Cancel a live worker and WAIT for it to actually stop. Raises 409 if it doesn't.
+
+    Deleting a job used to set the cancel flag and delete the run's database rows in the
+    next statement. Cancel is COOPERATIVE — the worker only sees it between steps — so it
+    went on writing progress and undo rows into a run that no longer existed, and the undo
+    entries for the files it had already moved were written where nothing would find them.
+    The rows are not the worker's to delete while the worker is still using them."""
+    t = rec.get("thread") if rec else None
+    if not (t and t.is_alive()):
+        return
+    rec["cancel"].set()
+    t.join(_JOB_STOP_WAIT)
+    if t.is_alive():
+        raise HTTPException(409, "%s is still stopping — its current step has to finish "
+                                 "before it can be removed" % jid)
 
 
 def _delete_one_job(jid):
@@ -3830,6 +3977,13 @@ def _delete_one_job(jid):
     if jid == "romsync":
         _ROMSYNC["job"] = None
         return True
+    if jid == "publish":
+        with _PUBLISH_LOCK:
+            pj = _PUBLISH_JOB.get("job")
+            if pj and pj.get("running"):        # never dismiss work still writing files
+                return True
+            _PUBLISH_JOB["job"] = None
+        return True
     if jid.startswith("xfer:"):
         rec = _JOBS.get(jid)
         if rec and rec["thread"] and rec["thread"].is_alive():
@@ -3839,23 +3993,22 @@ def _delete_one_job(jid):
         return True
     if jid.startswith("run:"):
         rid = int(jid.split(":", 1)[1])
-        rec = _JOBS.get(jid)
-        if rec and rec["thread"] and rec["thread"].is_alive():
-            rec["cancel"].set()
+        _stop_and_wait(_JOBS.get(jid), jid)     # before the rows go, not beside it
         fileops.run_delete(rid)
         _JOBS.pop(jid, None)
         return True
     if jid.startswith("aimeta:"):
         rid = int(jid.split(":", 1)[1])
-        rec = _JOBS.get(jid)
-        if rec and rec["thread"] and rec["thread"].is_alive():
-            rec["cancel"].set()
+        _stop_and_wait(_JOBS.get(jid), jid)     # before the rows go, not beside it
         aimeta.scan_delete(rid)                 # keeps the findings, drops the run
         _JOBS.pop(jid, None)
         return True
     if jid in _JOBS:                            # generic one-shot job (apply, undo…)
         rec = _JOBS.get(jid)
-        if not (rec and rec["thread"] and rec["thread"].is_alive()):
+        if rec and rec["thread"] and rec["thread"].is_alive():
+            if rec.get("cancelable"):           # × on a live cancelable job = stop it
+                rec["cancel"].set()
+        else:
             _JOBS.pop(jid, None)                # only dismiss finished/errored ones
         return True
     return False
@@ -3904,7 +4057,7 @@ def _igdb_raw_hits(title, limit=15):
     if not tok:
         return []
     import igdb
-    safe = title.replace('"', "").replace("\\", "").replace("*", "")
+    safe = _apicalypse_str(title)
     out, seen = [], set()
     for body in ('search "%s"; %s limit 8;' % (safe, _IGDB_FIELDS_ERA),
                  '%s where name ~ "%s"; sort first_release_date asc; limit %d;'
@@ -4248,7 +4401,6 @@ def _score_confidence_ai(nks, should_stop=lambda: False, chunk=20):
         hi = int(config.get("match_ai_band_hi") or 70)
     except (TypeError, ValueError):
         lo, hi = 40, 70
-    import matchconf
     mcpath = os.path.join(DATA, "metadata-cache.sqlite")
     band = []                                   # entries whose base confidence is gray-zone
     try:
@@ -4303,6 +4455,10 @@ def _score_confidence_ai(nks, should_stop=lambda: False, chunk=20):
     if not results:
         return {"scored": 0}
     now = int(time.time())
+    # The model that actually scored these rows. It was written as "" on every insert,
+    # so match_confidence_ai — an AUDIT table — could not say which model produced a
+    # score, and a later model change was indistinguishable from the old answers.
+    scored_by = ai.model_for_area("metadata") or ""
     lc, cc = sqlite3.connect(LIBRARY_DB, timeout=30), sqlite3.connect(mcpath, timeout=30)
     try:
         cc.execute("CREATE TABLE IF NOT EXISTS match_confidence_ai("
@@ -4311,7 +4467,7 @@ def _score_confidence_ai(nks, should_stop=lambda: False, chunk=20):
         for gid, (sc, reason, b) in results.items():
             cc.execute("INSERT OR REPLACE INTO match_confidence_ai"
                        "(norm_key,igdb_id,score,reason,model,at) VALUES(?,?,?,?,?,?)",
-                       (b["nk"], b["iid"], sc, reason, "", now))
+                       (b["nk"], b["iid"], sc, reason, scored_by, now))
             lc.execute("DELETE FROM game_attributes WHERE game_id=? AND "
                        "kind IN ('match_confidence','match_reason')", (gid,))
             lc.execute("INSERT INTO game_attributes(game_id,kind,value,origin) "
@@ -4369,7 +4525,6 @@ def _aimeta_scan(run_id, norm_keys, opts, should_stop):
                     # never regresses a good match to an arbitrary top hit.
                     if (match_prov and m.get("suggested_title")):
                         title, yr = m.get("suggested_title"), m.get("suggested_year")
-                        sys0 = (ctx.get("systems") or [None])[0]
                         # ONE PROVIDER'S FAILURE IS NOT THE GAME'S FAILURE. Both calls used
                         # to sit in a list comprehension inside the per-game try, and
                         # `_ss_match` raises BY DESIGN when its search never completed
@@ -4513,21 +4668,27 @@ def _steam_canon_map():
     if not os.path.exists(_sm):
         return canon, store_names
     try:
-        _smc = sqlite3.connect(_sm)
-        _cmap = {str(a): str(c or a) for a, c in _smc.execute(
-            "SELECT appid, canonical_appid FROM steam_meta")}
+        # ro() + finally: this reads, so it has no business holding a WRITE handle, and
+        # close() used to sit inside the try — an OperationalError out of the store_name
+        # query (a pre-migration cache, which the except below exists to tolerate) left
+        # the connection open. This runs on both the scan and the apply path.
+        _smc = ro(_sm)
         try:
+            _cmap = {str(a): str(c or a) for a, c in _smc.execute(
+                "SELECT appid, canonical_appid FROM steam_meta")}
             # The store name is the ONE place the bundle's real title survives:
             # an identity-refused entry is titled after a MEMBER ("Ys I"), so
             # without this the AI is asked whether a single game is a compilation
             # — the flagship scenario could never complete (and the spec captured
             # store_name for exactly this).
-            store_names = {str(a): n for a, n in _smc.execute(
-                "SELECT appid, store_name FROM steam_meta "
-                "WHERE store_name IS NOT NULL AND store_name!=''")}
-        except sqlite3.OperationalError:
-            store_names = {}                # cache predates the column
-        _smc.close()
+            try:
+                store_names = {str(a): n for a, n in _smc.execute(
+                    "SELECT appid, store_name FROM steam_meta "
+                    "WHERE store_name IS NOT NULL AND store_name!=''")}
+            except sqlite3.OperationalError:
+                store_names = {}            # cache predates the column
+        finally:
+            _smc.close()
         lc2 = ro(LIBRARY_DB)
         try:
             for _nk, _sid in lc2.execute(
@@ -4790,11 +4951,14 @@ def _materialize_collection_members(created_out=None, ingest=True):
                   file=sys.stderr)
         if _created and created_out is not None:
             created_out.extend(_created)
-        if _created and ingest:
-            # No run is going to take these — give them the standalone deterministic
-            # ingest. Inside an apply the caller passes ingest=False and merges the keys
-            # into the run's working set instead, so members ride the SAME phases as
-            # every other touched game rather than a parallel pass (#20).
+        if ingest:
+            # Unconditional, not `if _created`. The ingest works off the durable BACKLOG
+            # (member_ingest_queue), and a run that creates nothing is exactly the run
+            # that has to drain what the last cap deferred.
+            #
+            # Inside an apply the caller passes ingest=False and merges the keys into the
+            # run's working set instead, so members ride the SAME phases as every other
+            # touched game rather than a parallel pass (#20).
             _ingest_new_members(_created)
         return _made
     except Exception as e:                    # noqa: BLE001
@@ -4881,7 +5045,51 @@ def _member_identity(nk, plat, ai_rescue=False):
     return 1
 
 
-def _ingest_new_members(created):
+def _take_pending_members(cap=None):
+    """The next slice of the member-ingest BACKLOG, oldest first.
+
+    "%d deferred to the next run" was not true. The cap was applied to `created_out`,
+    which materialize_members fills on INSERT only — so on the next run those rows
+    already existed, `created_out` came back empty, and the members past the cap were
+    never handed to the ingest again: no identity, no art, forever. catalog_patch keeps
+    a durable queue for exactly this; take from that instead of from what one call
+    happened to create."""
+    import catalog_patch as _cp
+    cap = MEMBER_INGEST_CAP if cap is None else cap
+    con = sqlite3.connect(LIBRARY_DB)
+    try:
+        con.execute("PRAGMA busy_timeout=8000")
+        todo = _cp.pending_members(con, limit=cap)
+        left = len(_cp.pending_members(con)) - len(todo)
+    except Exception as e:                    # noqa: BLE001 — never block on the backlog
+        print("collections: member backlog unreadable: %s" % str(e)[:120],
+              file=sys.stderr)
+        return []
+    finally:
+        con.close()
+    if left > 0:
+        print("collections: member ingest capped at %d — %d still queued for the next "
+              "run" % (cap, left), file=sys.stderr)
+    return todo
+
+
+def _mark_members_ingested(done):
+    """Drop `done` from the backlog once the ingest has RUN over them."""
+    if not done:
+        return
+    import catalog_patch as _cp
+    con = sqlite3.connect(LIBRARY_DB)
+    try:
+        con.execute("PRAGMA busy_timeout=8000")
+        _cp.member_ingested(con, done)
+    except Exception as e:                    # noqa: BLE001 — a re-run is harmless
+        print("collections: member backlog not cleared: %s" % str(e)[:120],
+              file=sys.stderr)
+    finally:
+        con.close()
+
+
+def _ingest_new_members(created=()):
     """Give a freshly materialized member the ingest its parent got (#20).
 
     `materialize_members` creates a catalog ROW and stops — no identity, no media, no
@@ -4897,10 +5105,16 @@ def _ingest_new_members(created):
 
     Runs on a thread: the apply that triggered it is a request the reviewer is waiting
     on, and provider fetches are slow."""
-    todo = list(created)[:MEMBER_INGEST_CAP]
-    if len(created) > len(todo):
-        print("collections: member ingest capped at %d — %d deferred to the next run"
-              % (MEMBER_INGEST_CAP, len(created) - len(todo)), file=sys.stderr)
+    # `created` is what THIS materialize call made, and is only reported. The WORK LIST
+    # comes from the durable backlog, which already contains those keys plus whatever an
+    # earlier cap deferred — the old code took its slice from `created` alone, which is
+    # why "deferred to the next run" never happened (see _take_pending_members).
+    todo = _take_pending_members()
+    if not todo:
+        if created:
+            print("collections: %d member(s) materialized, none left to ingest"
+                  % len(created), file=sys.stderr)
+        return
 
     def run():
         got = 0
@@ -4909,6 +5123,7 @@ def _ingest_new_members(created):
                 got += _member_identity(nk, plat)
             except Exception as e:          # noqa: BLE001 — one bad member never stops the rest
                 print("member identity %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+        _mark_members_ingested(todo)        # RUN over, not necessarily resolved
         # Identity FIRST, then the one pipeline. This used to be a hand-rolled
         # fetch -> stamp -> select -> measure -> re-select copy living here, which is how
         # it ended up skipping prune and, before that, skipping the stamp entirely.
@@ -5203,7 +5418,19 @@ def resolve_per_entry_identity(nks, should_stop=lambda: False, threshold=None, a
     return result
 
 
+# run_id -> the opts the run was STARTED with. `scan_runs` persists web /
+# match_provider / md_kinds / pull_scores and nothing else, so `want_media` — the wand's
+# media scope — is only knowable from here. Bounded; a resume of a run this process never
+# started falls back to the stored columns (see jobs_restart).
+_AIMETA_OPTS = {}
+_AIMETA_OPTS_MAX = 64
+
+
 def _start_aimeta_job(run_id, keys, opts):
+    with _JOBS_LOCK:
+        _AIMETA_OPTS[run_id] = dict(opts)
+        while len(_AIMETA_OPTS) > _AIMETA_OPTS_MAX:
+            _AIMETA_OPTS.pop(next(iter(_AIMETA_OPTS)))
     web = bool(opts.get("web"))
     mp = bool(opts.get("match_provider"))
     label = "Metadata scan (%s%s%s)" % (opts.get("label", "scan"),
@@ -5358,7 +5585,7 @@ def aimeta_scan(body: dict = Body(default={})):
     ('unmatched'|'matched'|'missing'|'all')."""
     body = body or {}
     try:
-        ai._resolve(ai.provider_for_area("metadata"), ai.model_for_area("metadata"))
+        _ai_ready(ai.provider_for_area("metadata"), ai.model_for_area("metadata"))
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     provider = ai.provider_for_area("metadata")
@@ -5595,7 +5822,7 @@ def aimeta_refine(body: dict = Body(default={})):
     provider = ai.provider_for_area("metadata")
     try:
         model = (body.get("model") or "").strip() or ai.model_for_area("metadata")
-        ai._resolve(provider, model)
+        _ai_ready(provider, model)
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     web = bool(body.get("web", True)) and ai.supports_web(provider)
@@ -5618,7 +5845,6 @@ def aimeta_refine(body: dict = Body(default={})):
             and (m.get("status") in ("unmatched", "wrong", "unsure")
                  or not ctx.get("match"))):     # unlinked+identified still needs the link
         title, yr = m.get("suggested_title"), m.get("suggested_year")
-        sys0 = (ctx.get("systems") or [None])[0]
         pms = [p for p in (_provider_match(title, yr, consoles=_emulation_consoles(nk)),
                            _ss_match([title, ctx.get("title")], ctx.get("systems"), yr)) if p]
         if pms:            # store-locked titles apply per-entry at apply time (see _aimeta_apply)
@@ -6101,11 +6327,18 @@ def aimeta_finding_action(fid: int, action: str):
 def aimeta_accept_all(body: dict = Body(default={})):
     """Bulk-accept every proposed finding (optionally at/above a confidence)."""
     minc = float((body or {}).get("min_confidence") or 0)
+    # SELECT THE WHOLE BATCH BEFORE WRITING ANY OF IT. `confidence` is nullable and the
+    # rows come from SELECT *, so `f["confidence"] >= minc` raised TypeError on the first
+    # NULL — halfway through a loop whose set_status commits one row at a time, leaving
+    # the bulk accept half applied with no way to tell how far it got. Coercing the NULL
+    # (an unscored finding is confidence 0, which only a min of 0 accepts) fixes the
+    # crash; deciding every row first is what stops any later failure splitting the batch.
+    ids = [f["id"] for f in aimeta.findings_list(status="proposed", limit=5000)
+           if float(f["confidence"] or 0) >= minc]
     n = 0
-    for f in aimeta.findings_list(status="proposed", limit=5000):
-        if f["confidence"] >= minc:
-            aimeta.set_status(f["id"], "accepted")
-            n += 1
+    for fid in ids:
+        aimeta.set_status(fid, "accepted")
+        n += 1
     return {"accepted": n, "counts": aimeta.findings_counts()}
 
 
@@ -6520,17 +6753,16 @@ def _aimeta_apply(should_stop, only_ids=None):
     # there members ride the SAME scoped media reconcile as every other touched game —
     # same fetch, same select, and the same AI art pass — so they inherit the tier of
     # the run that created them with no tier parameter threaded anywhere.
-    _new_members = []
-    _materialize_collection_members(created_out=_new_members, ingest=False)
-    _new_members = _new_members[:MEMBER_INGEST_CAP]
-    if len(_new_members) == MEMBER_INGEST_CAP:
-        print("collections: member ingest capped at %d this apply" % MEMBER_INGEST_CAP,
-              file=sys.stderr)
+    _materialize_collection_members(ingest=False)
+    # From the durable BACKLOG, not from what this call created: the cap used to be
+    # applied to created_out, so anything past it was never offered again.
+    _new_members = _take_pending_members()
     for _mnk, _mplat in _new_members:
         try:
             _member_identity(_mnk, _mplat)
         except Exception as e:                  # noqa: BLE001 — one member never stops the apply
             print("member identity %s: %s" % (_mnk, str(e)[:120]), file=sys.stderr)
+    _mark_members_ingested(_new_members)        # RUN over, not necessarily resolved
     touched |= {_mnk for _mnk, _ in _new_members}
     mc = sqlite3.connect(cache)
     mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY "
@@ -6921,7 +7153,16 @@ def _reconcile_media_now(touched):
     background reconcile; this just makes the touched games right in seconds, not ~30 min."""
     if not touched:
         return
-    del now                                # the pipeline stamps its own timestamps
+    # NB: no `now` here — the pipeline stamps its own timestamps.
+    #
+    # This function used to TAKE `now` and `del` it on the first line. That was fine
+    # while `now` was a parameter. Dropping the parameter without dropping the `del`
+    # (this campaign, 2026-08-24) turned the name into an unbound LOCAL, so every call
+    # raised UnboundLocalError before doing any work — and all four call sites wrap it
+    # in `except: pass`, so the "instant media" an apply or a pin promises silently did
+    # nothing for the few hours that shape was in the tree. Two lessons worth keeping:
+    # removing a parameter means reading the whole body, and a bare `except: pass`
+    # around a call is what let a total failure look like a slow one.
     # The one pipeline, scoped to the touched games. This was IGDB-only with its own
     # stamp/select and no measure or prune — so the "immediate" result an apply showed
     # could be a blank or unmeasured asset that the background pass would later replace,
@@ -7202,15 +7443,22 @@ def _enrich_media(keys, con=None, web=False, provider=None, kinds=None,
     Returns {step: count} for the caller to report.
     """
     keys = [k for k in (keys or []) if k]
-    out = {"matched": 0, "fetched": 0, "measured": 0, "pruned": 0, "adjudicated": 0}
+    out = {"matched": 0, "fetched": 0, "measured": 0, "pruned": 0, "adjudicated": 0,
+           "web_added": 0}
     if not keys:
         return out
     import media_fetch as _mf
 
     # 1. identity for every provider
+    matched_here = False
     try:
         got = _match_providers(keys, should_stop)
         out["matched"] = sum(got.values())
+        # Only a COMPLETED batch match lets step 2 skip its own per-game one. A raised
+        # exception or an early stop means some keys were never matched, and a media
+        # pull from an unmatched provider is exactly the failure the per-game call is
+        # there to prevent.
+        matched_here = not should_stop()
     except Exception as e:                     # noqa: BLE001 — never fails the pipeline
         print("enrich match: %s" % str(e)[:150], file=sys.stderr)
 
@@ -7223,7 +7471,11 @@ def _enrich_media(keys, con=None, web=False, provider=None, kinds=None,
             if should_stop():
                 break
             try:
-                _pull_media_sources(con, nk, want_web=web, provider=provider, kinds=kinds)
+                # `web_added` is the open-web pass's own count of images it added, which
+                # _pull_media_sources has always returned and this dropped on the floor.
+                out["web_added"] += _pull_media_sources(
+                    con, nk, want_web=web, provider=provider, kinds=kinds,
+                    already_matched=matched_here) or 0
                 out["fetched"] += 1
             except Exception as e:             # noqa: BLE001 — one game never stops the rest
                 print("enrich fetch %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
@@ -7239,10 +7491,17 @@ def _enrich_media(keys, con=None, web=False, provider=None, kinds=None,
     want_ai = config.get_bool("ai_art_auto_pick", False) if ai_art is None else ai_art
     if want_ai:
         now = int(time.time())
+        # SCOPED, like every other step here. This read the WHOLE catalog — every title
+        # in the library — to look up the handful of keys this call was given; a wand run
+        # on one game loaded 33,000 rows to use one of them.
+        titles = {}
         lcon = ro(LIBRARY_DB)
         try:
-            titles = {r["norm_key"]: r["canonical_title"] for r in lcon.execute(
-                "SELECT norm_key, canonical_title FROM games")}
+            for _i in range(0, len(keys), 900):     # SQLITE_MAX_VARIABLE_NUMBER
+                _part = keys[_i:_i + 900]
+                titles.update({r["norm_key"]: r["canonical_title"] for r in lcon.execute(
+                    "SELECT norm_key, canonical_title FROM games WHERE norm_key IN (%s)"
+                    % ",".join("?" * len(_part)), _part)})
         finally:
             lcon.close()
         for nk in keys:
@@ -7415,37 +7674,38 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
     if not (sgdb_key or ss_creds):
         return out
     mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    # ONE library handle for the whole batch. Each key used to open TWO read-only
+    # connections of its own, in a loop the sweep drives with batches of five keys on up
+    # to six ScreenScraper threads — sixty sqlite opens per wave, all against one file
+    # that is only ever read here.
+    lc = ro(LIBRARY_DB)
     try:
         mc.execute("PRAGMA busy_timeout=15000")
         provider_ids.ensure_tables(mc)
         for nk in keys:
             if should_stop():
                 break
-            lc = ro(LIBRARY_DB)
-            try:
-                r = lc.execute("SELECT canonical_title FROM games WHERE norm_key=? "
-                               "LIMIT 1", (nk,)).fetchone()
-                title = ((r[0] if r else "") or "").strip()
-                ar = lc.execute(
-                    "SELECT s.source_id FROM games g JOIN sources s ON s.game_id=g.id "
-                    "WHERE g.norm_key=? AND s.source='steam' LIMIT 1", (nk,)).fetchone()
-                appid = ar[0] if ar and str(ar[0] or "").isdigit() else None
-                plats = [x[0] for x in lc.execute(
-                    "SELECT DISTINCT platform FROM games WHERE norm_key=? "
-                    "AND platform IS NOT NULL AND platform!=''", (nk,))]
-                # The release year, so the gate can tell a remake from its original.
-                # This call site passed no year at all while the other two did, which
-                # is how Resident Evil 4 (2023) came to hold ScreenScraper 4750 — the
-                # 2005 GameCube game — and display its box. Identical titles; the year
-                # is the only thing that separates them.
-                # The GAME's era, not the storefront listing date. `release_year` on a
-                # store entry is when Steam/GOG listed it, so Arcanum reads 2016 against
-                # a 2001 game — and this gate refuses a year disagreement outright, so
-                # feeding it a listing date refuses the CORRECT match for every
-                # re-released PC game. matchgate.game_era owns the distinction.
-                year = matchgate.game_era(lc, mc, nk)
-            finally:
-                lc.close()
+            r = lc.execute("SELECT canonical_title FROM games WHERE norm_key=? "
+                           "LIMIT 1", (nk,)).fetchone()
+            title = ((r[0] if r else "") or "").strip()
+            ar = lc.execute(
+                "SELECT s.source_id FROM games g JOIN sources s ON s.game_id=g.id "
+                "WHERE g.norm_key=? AND s.source='steam' LIMIT 1", (nk,)).fetchone()
+            appid = ar[0] if ar and str(ar[0] or "").isdigit() else None
+            plats = [x[0] for x in lc.execute(
+                "SELECT DISTINCT platform FROM games WHERE norm_key=? "
+                "AND platform IS NOT NULL AND platform!=''", (nk,))]
+            # The release year, so the gate can tell a remake from its original.
+            # This call site passed no year at all while the other two did, which
+            # is how Resident Evil 4 (2023) came to hold ScreenScraper 4750 — the
+            # 2005 GameCube game — and display its box. Identical titles; the year
+            # is the only thing that separates them.
+            # The GAME's era, not the storefront listing date. `release_year` on a
+            # store entry is when Steam/GOG listed it, so Arcanum reads 2016 against
+            # a 2001 game — and this gate refuses a year disagreement outright, so
+            # feeding it a listing date refuses the CORRECT match for every
+            # re-released PC game. matchgate.game_era owns the distinction.
+            year = matchgate.game_era(lc, mc, nk)
             if not title:
                 continue
             # Per-provider SCOPE: skip a provider this game is out of scope for. This is
@@ -7456,25 +7716,21 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
             _srcs = set()
             _store_ids = {}
             try:
-                _lc2 = ro(LIBRARY_DB)
-                try:
-                    # source_id comes back on the SAME read: it is the store's own
-                    # product id, which is an exact anchor for the match index.
-                    for _sr, _sid in _lc2.execute(
-                            "SELECT DISTINCT s.source, s.source_id FROM games g "
-                            "JOIN sources s ON s.game_id=g.id WHERE g.norm_key=?",
-                            (nk,)):
-                        if not _sr:
-                            continue
-                        _srcs.add(_sr)
-                        _ns = matchindex.STORE_NS.get(_sr)
-                        # One id per store. Two entries of the same store under one
-                        # norm_key is a base game and its edition, and picking either
-                        # would be a guess presented as an exact handle.
-                        if _ns and _sid:
-                            _store_ids[_ns] = None if _ns in _store_ids else str(_sid)
-                finally:
-                    _lc2.close()
+                # source_id comes back on the SAME read: it is the store's own
+                # product id, which is an exact anchor for the match index.
+                for _sr, _sid in lc.execute(
+                        "SELECT DISTINCT s.source, s.source_id FROM games g "
+                        "JOIN sources s ON s.game_id=g.id WHERE g.norm_key=?",
+                        (nk,)):
+                    if not _sr:
+                        continue
+                    _srcs.add(_sr)
+                    _ns = matchindex.STORE_NS.get(_sr)
+                    # One id per store. Two entries of the same store under one
+                    # norm_key is a base game and its edition, and picking either
+                    # would be a guess presented as an exact handle.
+                    if _ns and _sid:
+                        _store_ids[_ns] = None if _ns in _store_ids else str(_sid)
             except sqlite3.OperationalError:
                 pass
             _plat = plats[0] if plats else None
@@ -7584,11 +7840,13 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
             except Exception as e:              # noqa: BLE001 — a link never fails a run
                 print("provider link %s: %s" % (nk, str(e)[:110]), file=sys.stderr)
     finally:
+        lc.close()
         mc.close()
     return out
 
 
-def _pull_media_sources(con, nk, want_web=False, provider=None, kinds=None):
+def _pull_media_sources(con, nk, want_web=False, provider=None, kinds=None,
+                        already_matched=False):
     """Fetch (do NOT choose) media for ONE game from every configured provider — IGDB
     (incl. per-entry override ids), SteamGridDB (a huge community art DB), and ScreenScraper
     (media-rich for the retro/console long-tail) — plus AI open-web discovery (Wikimedia/
@@ -7625,10 +7883,14 @@ def _pull_media_sources(con, nk, want_web=False, provider=None, kinds=None):
     # this run takes any media from it. Doing it here rather than inside each fetcher is
     # the point — SGDB's fetcher skips games that already have art, so identity used to
     # depend on whether art happened to be missing.
-    try:
-        _match_providers([nk])
-    except Exception as e:                     # noqa: BLE001 — never fails a media pull
-        print("provider match %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
+    # `already_matched` is the caller saying it has ALREADY matched this key in this
+    # run — _enrich_media matches the whole batch in one call at step 1, and then this
+    # ran a second single-key match for every one of them.
+    if not already_matched:
+        try:
+            _match_providers([nk])
+        except Exception as e:                 # noqa: BLE001 — never fails a media pull
+            print("provider match %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
     def _want(p):
         return provider is None or provider == p
 
@@ -7671,8 +7933,10 @@ def _fetch_media_for(nk, want_web=False):
             (nk,))}
     finally:
         con.close()
+    # `fetched` counts GAMES touched, which is always 1 here, so this reported
+    # "1 web image added" on every refresh whether the web pass ran or not.
     return {"has_cover": bool(have.get("cover")), "chosen": have,
-            "web_added": res.get("fetched", 0)}
+            "web_added": res.get("web_added", 0)}
 
 
 def _wand_fill_media(nks, want_web, should_stop):
@@ -7761,13 +8025,6 @@ def _wand_fill_media(nks, want_web, should_stop):
 
 
 
-# --- background art job: coalesced queue drained on its own thread so metadata apply
-# never waits on media. _ART_RUNNING (under _ART_LOCK) is the single-flight gate; a new
-# apply that lands while art runs just adds its touched keys and the drain re-checks. ---
-_ART_LOCK = threading.Lock()
-_ART_QUEUE = set()
-_ART_MEDIA = [True]                         # latest media spec (True | [kinds])
-_ART_RUNNING = [False]
 
 
 
@@ -7832,8 +8089,10 @@ def _scoped_media_reconcile(touched, media, should_stop):
     # which is precisely how the two drifted apart.
 
 
-# --- scoped media reconcile job (apply path): its own single-flight queue, distinct from
-# the full rebuild+art drain (_ART_*) that the pin/scan paths still use. ---
+# --- scoped media reconcile job: the ONE single-flight queue every media onramp uses
+# (apply, pin, art-apply, wand). There is no second drain beside it — a `_ART_*` queue
+# was declared here once and never wired to anything, and this comment claimed the pin
+# and scan paths still used it, which sent readers looking for a job that did not run. ---
 _MEDIA_LOCK = threading.Lock()
 _MEDIA_Q = set()
 _MEDIA_SPEC = [True]
@@ -7984,7 +8243,7 @@ def _igdb_media_preview(igdb_ids):
     """One batched IGDB lookup → {igdb_id: [{kind, url}]} of the art a match would
     fetch on apply (cover, artwork→background, screenshots). Preview thumbnails; the
     real fetch (media_fetch) pulls the full-size versions. Empty on no creds/error."""
-    ids = sorted({int(i) for i in igdb_ids if i})
+    ids = sorted({v for v in (_int_or_none(i) for i in igdb_ids) if v is not None})
     if not ids:
         return {}
     cid, tok = _igdb_token()
@@ -8033,6 +8292,17 @@ def aimeta_media_diff(body: dict = Body(default={})):
                 if isinstance(it, dict) and it.get("norm_key")][:200]
     if not items_in:
         return {"items": [], "sgdb": False}
+    # A client-supplied id is validated here, before the batched IGDB call: int() on it
+    # raised ValueError out of the endpoint, so a typo'd or non-numeric igdb_id answered
+    # 500 ("the server is broken") for what is a bad request.
+    for _it in items_in:
+        if not _it.get("igdb_id"):
+            _it["igdb_id"] = None
+            continue
+        _gid = _int_or_none(_it["igdb_id"])
+        if _gid is None:
+            raise HTTPException(400, "igdb_id must be numeric, got %r" % (_it["igdb_id"],))
+        _it["igdb_id"] = _gid      # int everywhere below; _store_locked_igdb compares ints
     art_by_id = _igdb_media_preview([it.get("igdb_id") for it in items_in])
     try:
         import media_fetch as _mf
@@ -8056,10 +8326,10 @@ def aimeta_media_diff(body: dict = Body(default={})):
                 "SELECT DISTINCT kind FROM m.media md WHERE md.norm_key=? AND md.chosen=1",
                 (nk,))}
             added = [{"kind": a["kind"], "url": a["url"], "new": a["kind"] not in have_kinds}
-                     for a in art_by_id.get(int(it["igdb_id"]), [])] if it.get("igdb_id") else []
+                     for a in art_by_id.get(it["igdb_id"], [])] if it["igdb_id"] else []
             # store-locked: this match applies PER ENTRY to the ROMs only — the store
             # entry (pc/xbox) keeps its own identity + cover, so show it as unchanged.
-            store_locked = bool(it.get("igdb_id")) and _store_locked_igdb(nk, it.get("igdb_id"))
+            store_locked = bool(it["igdb_id"]) and _store_locked_igdb(nk, it["igdb_id"])
             rows = con.execute(
                 "SELECT id, %s, canonical_title%s FROM games WHERE norm_key=?"
                 % (eksel, gksel), (nk,)).fetchall()
@@ -9211,16 +9481,22 @@ def set_media_redist(norm_key: str, aid: int, body: dict = Body(default={})):
 @app.get("/api/media/banned")
 def banned_media():
     """Banned assets, annotated with the game title, for the Settings unban list."""
-    out = []
+    out = list(mediaflags.list_banned())
+    nks = list({b["norm_key"] for b in out if b.get("norm_key")})
+    titles = {}
     con = lib()
     try:
-        for b in mediaflags.list_banned():
-            g = con.execute("SELECT canonical_title FROM games WHERE norm_key=?",
-                            (b["norm_key"],)).fetchone()
-            b["title"] = g["canonical_title"] if g else b["norm_key"]
-            out.append(b)
+        # ONE lookup for the whole list. This ran a query per banned row, so the
+        # Settings unban list cost as many round trips as it had entries.
+        for i in range(0, len(nks), 900):           # SQLITE_MAX_VARIABLE_NUMBER
+            part = nks[i:i + 900]
+            titles.update({r["norm_key"]: r["canonical_title"] for r in con.execute(
+                "SELECT norm_key, canonical_title FROM games WHERE norm_key IN (%s)"
+                % ",".join("?" * len(part)), part)})
     finally:
         con.close()
+    for b in out:
+        b["title"] = titles.get(b["norm_key"]) or b["norm_key"]
     return {"banned": out}
 
 
@@ -9408,15 +9684,29 @@ def _db_info(db_id, name, fname, role):
             "size": os.path.getsize(path) if exists else 0}
 
 
+def _listen_bind(request):
+    """(host, port) uvicorn is ACTUALLY serving on, from the ASGI scope.
+
+    Server-ops used to report a hardcoded 0.0.0.0:8001 whatever the process was launched
+    with, so a `--port 9000` install was shown a port nobody could reach — a panel whose
+    whole job is to state where the server is must not be guessing. `scope["server"]` is
+    the server socket's own (host, port), set by uvicorn from the listening transport,
+    so it survives any --host/--port and is unaffected by a proxy in front."""
+    srv = (request.scope or {}).get("server") or (None, None)
+    host, port = (list(srv) + [None, None])[:2]
+    return host, port
+
+
 @app.get("/api/ops/status")
-def ops_status():
+def ops_status(request: Request):
     """Snapshot for the Server Operations panel: the running service + each database."""
+    _host, _port = _listen_bind(request)
     return {
         "services": [{
             "id": "server", "name": "Ludodex server (web + API)",
             "state": "running", "pid": os.getpid(),
             "uptime_seconds": int(time.time() - _STARTED),
-            "host": "0.0.0.0", "port": 8001,
+            "host": _host, "port": _port,
         }],
         "databases": [_db_info(*d) for d in DATABASES],
     }
@@ -9574,18 +9864,23 @@ def ops_backup():
     n = size = 0
     for fname in _all_db_files():
         src, dst = os.path.join(DATA, fname), os.path.join(dest, fname)
+        s = d = None
         try:
             s = sqlite3.connect(src, timeout=10)
             d = sqlite3.connect(dst)
             with d:
                 s.backup(d)
-            s.close()
-            d.close()
         except sqlite3.Error:
             try:
                 shutil.copy2(src, dst)          # fallback: plain copy
             except OSError:
                 continue
+        finally:
+            # the closes used to sit after s.backup(d), so a mid-backup error left both
+            # handles open — and this runs once per database, before every reset/restore.
+            for _c in (s, d):
+                if _c is not None:
+                    _c.close()
         n += 1
         size += os.path.getsize(dst)
     return {"ok": True, "id": bid, "count": n, "size": size}
@@ -10563,7 +10858,8 @@ def _ea_connected():
         return False
     try:
         import json as _json
-        t = _json.load(open(tokf))
+        with open(tokf) as f:               # polled every few seconds by the UI
+            t = _json.load(f)
         return bool(t.get("access_token")) and t.get("expires_at", 0) > time.time()
     except Exception:
         return False
@@ -10657,7 +10953,8 @@ def _epic_connected():
         return False
     try:
         import json as _json
-        return bool(_json.load(open(uf)).get("displayName"))
+        with open(uf) as f:                 # polled every few seconds by the UI
+            return bool(_json.load(f).get("displayName"))
     except Exception:
         return False
 
@@ -10683,8 +10980,8 @@ def epic_connect(body: dict = Body(...)):
                          "Get Epic code again for a fresh one and paste it."}
     try:
         import json as _json
-        name = _json.load(open(os.path.expanduser(
-            "~/.config/legendary/user.json"))).get("displayName")
+        with open(os.path.expanduser("~/.config/legendary/user.json")) as f:
+            name = _json.load(f).get("displayName")
     except Exception:
         name = None
     return {"ok": True, "account": name}
@@ -11310,7 +11607,7 @@ def _steam_meta_count():
         return 0
 
 
-def _sync_worker(job, services, media_ids=(), full=False):
+def _sync_worker(job, services, full=False):
     prev = _lib_keys()
     any_ok = False
     # progress across ALL phases, not just the ownership pulls: each source, the
@@ -11321,7 +11618,6 @@ def _sync_worker(job, services, media_ids=(), full=False):
     # media" toggle named. Without this, a game that matched IGDB cleanly never got
     # its Steam hero/cover/trailers — the whole matched library came out IGDB-only.
     planned_media = [sid for sid in services if sid in MEDIA_SYNC_PROVIDER]
-    _ = media_ids  # retained for API compatibility; media now always runs for Steam
     mode = config.get("media_mode") or "chosen"
     # + 4 fixed pipeline steps: Steam tags, catalog rebuild, IGDB enrich (with
     # its merge rebuild), and the multi-source scores pass. +1 more for the provider
@@ -11812,8 +12108,8 @@ def _sync_worker(job, services, media_ids=(), full=False):
                 if not keys:
                     _phase("supplement", "ok", "nothing left to fill")
                 else:
-                    ai._resolve(ai.provider_for_area("metadata"),
-                                ai.model_for_area("metadata"))
+                    _ai_ready(ai.provider_for_area("metadata"),
+                              ai.model_for_area("metadata"))
                     # Heavy: open-web gap-fill + score refresh + AI consensus, all
                     # scoped to `keys` (the games this import brought in). Lite stays
                     # provider-only (no web, no paid consensus).
@@ -11911,8 +12207,6 @@ def sync_run(body: dict = Body(default={})):
                        and config.source_enabled(sid) and _sync_ready(sid)]
         if not targets:
             raise HTTPException(400, "nothing ready to sync")
-        media = [sid for sid in ((body or {}).get("media") or [])
-                 if sid in MEDIA_SYNC_PROVIDER and sid in targets]
         # full=True re-checks EVERY game for upstream changes (re-resolve + refetch
         # IGDB metadata, re-fetch all scores), ignoring the freshness caches.
         # Default (new-games) only enriches/scores games not yet done.
@@ -11926,7 +12220,7 @@ def sync_run(body: dict = Body(default={})):
                             for sid in targets}}
         _SYNC["job"] = job
         _SYNC["proc"] = None
-    threading.Thread(target=_sync_worker, args=(job, targets, media, full),
+    threading.Thread(target=_sync_worker, args=(job, targets, full),
                      daemon=True).start()
     return job
 
