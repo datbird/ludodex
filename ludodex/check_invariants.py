@@ -303,9 +303,14 @@ def main():
     cat = {}                             # norm_key -> the GAME's era (lazily resolved)
     import matchgate as _mg
     import provider_ids as _pi
-    _mc = sqlite3.connect("file:%s?mode=ro"
-                          % os.path.join(DATA, "metadata-cache.sqlite"), uri=True)
-    for prov, (table, idcol) in sorted(_pi.PROVIDERS.items()):
+    # A FRESH INSTALL HAS NO METADATA CACHE, and this used to raise here rather than
+    # skip, which aborted the run and took every invariant BELOW it with it. An absent
+    # cache means there are no provider matches to check, which is "nothing to say",
+    # not a violation, and certainly not a reason to stop checking everything else.
+    _mcp = os.path.join(DATA, "metadata-cache.sqlite")
+    _mc = (sqlite3.connect("file:%s?mode=ro" % _mcp, uri=True)
+           if os.path.exists(_mcp) else None)
+    for prov, (table, idcol) in (sorted(_pi.PROVIDERS.items()) if _mc else []):
         try:
             rows = _mc.execute("SELECT norm_key, year FROM %s WHERE COALESCE(%s,0)>0 "
                                "AND year IS NOT NULL" % (table, idcol)).fetchall()
@@ -318,7 +323,8 @@ def main():
             if own and yr and abs(int(yr) - own) > matchgate.YEAR_TOLERANCE:
                 bad.append("%s %s — the game is from %d, the match is %s"
                            % (prov, nk[:38], own, yr))
-    _mc.close()
+    if _mc:
+        _mc.close()
     report("I10 a provider match is the same ERA as the game", bad,
            "a remake silently wears its original's art")
 
@@ -339,10 +345,10 @@ def main():
     # before the system was written down are unjudged, not violations.
     import screenscraper as _ss
     bad = []
-    _mc = sqlite3.connect("file:%s?mode=ro"
-                          % os.path.join(DATA, "metadata-cache.sqlite"), uri=True)
+    _mc = (sqlite3.connect("file:%s?mode=ro" % _mcp, uri=True)
+           if os.path.exists(_mcp) else None)
     try:
-        rows = _mc.execute(
+        rows = [] if _mc is None else _mc.execute(
             "SELECT norm_key, ss_id, system FROM ss_resolution "
             "WHERE COALESCE(ss_id,0)>0 AND system IS NOT NULL AND system<>''"
         ).fetchall()
@@ -372,9 +378,32 @@ def main():
             label = _ss.system_label(got) or ("system %s" % got)
             bad.append("screenscraper %s — the game is %s, the match is a %s record"
                        % (nk[:38], "/".join(sorted(plats)), label))
-    _mc.close()
+    if _mc:
+        _mc.close()
     report("I11 a provider match is for the same SYSTEM as the game", bad,
            "another system's release wears its own art and dates")
+
+    # ---------------------------------------------------------------- I12: cards
+    # Every entry belongs to exactly one card. A row whose card_key is NULL vanishes
+    # from a GROUPed grid with NO ERROR AT ALL, which is the failure mode worth an
+    # invariant: silent absence, not a crash. The second half catches a title: card
+    # that has swallowed two different identities, the one guess the fold design
+    # knowingly makes (2026-08-25-single-game-entry-design.md, Risks).
+    bad = []
+    _cols = [r[1] for r in g.execute("PRAGMA table_info(games)")]
+    if "card_key" in _cols:
+        for r in g.execute("SELECT entry_key FROM games "
+                           "WHERE card_key IS NULL OR card_key='' LIMIT 200"):
+            bad.append("%s has no card_key" % r["entry_key"])
+        for r in g.execute(
+                "SELECT card_key, COUNT(DISTINCT game_key) n FROM games "
+                "WHERE card_key LIKE 'title:%' GROUP BY card_key "
+                "HAVING n > 1 LIMIT 200"):
+            bad.append("%s spans %d identities" % (r["card_key"], r["n"]))
+        report("I12 every entry belongs to exactly one resolvable card", bad,
+               "a row with no card_key disappears from the grid without an error")
+    else:
+        print("  skipped   I12 cards (catalog predates card_key)")
 
     m.close()
     g.close()

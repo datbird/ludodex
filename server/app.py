@@ -702,33 +702,39 @@ def stats():
         wcol = _has_col(con, "games", "wanted")     # wishlist-only games: exclude from owned stats
         gw = " WHERE g.wanted=0" if wcol else ""
         and_w = " AND g.wanted=0" if wcol else ""
-        g = con.execute("SELECT COUNT(*) FROM games g" + gw).fetchone()[0]
-        ident = con.execute("SELECT COUNT(*) FROM games g" +
+        # COUNT CARDS, NOT ENTRIES (2026-08-25 design). Every number on this card links
+        # to a filtered library view, so counting entries here while the grid shows
+        # cards makes the dashboard disagree with the page it opens. `_ct` is the one
+        # definition; on an un-rebuilt catalog it is still COUNT(*).
+        _ct = ("COUNT(DISTINCT COALESCE(g.card_key, g.entry_key))"
+               if _has_col(con, "games", "card_key") else "COUNT(*)")
+        g = con.execute("SELECT %s FROM games g%s" % (_ct, gw)).fetchone()[0]
+        ident = con.execute("SELECT " + _ct + " FROM games g" +
                             (gw + " AND " if gw else " WHERE ") + IDENTIFIED_SQL).fetchone()[0]
-        wanted_ct = con.execute("SELECT COUNT(*) FROM games WHERE wanted=1").fetchone()[0] if wcol else 0
+        wanted_ct = con.execute("SELECT " + _ct + " FROM games g WHERE g.wanted=1").fetchone()[0] if wcol else 0
         # cross-source = owned on >1 source (n_sources), matching the facet/sort
         # definitions. NOT n_kinds (media-kind count) — that reads 0 library-wide.
-        cross = con.execute("SELECT COUNT(*) FROM games g WHERE g.n_sources>1" + and_w).fetchone()[0]
+        cross = con.execute("SELECT " + _ct + " FROM games g WHERE g.n_sources>1" + and_w).fetchone()[0]
         unmatched = con.execute(
-            "SELECT COUNT(*) FROM games g WHERE NOT EXISTS("
+            "SELECT " + _ct + " FROM games g WHERE NOT EXISTS("
             "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)" + and_w).fetchone()[0]
         # The exact negation of FLAG_SQL["has_media"], because the card links straight to
         # that filter. It used to look at m.media only, so a game whose only art is a USER
         # UPLOAD was counted as having no media here and then vanished from the list the
         # number opened — the dashboard and the filter disagreed by construction.
         no_media = con.execute(
-            "SELECT COUNT(*) FROM games g WHERE NOT " + FLAG_SQL["has_media"]
+            "SELECT " + _ct + " FROM games g WHERE NOT " + FLAG_SQL["has_media"]
             + and_w).fetchone()[0]
         # matched-but-low-confidence identity (task #13) — its own review facet
         _thr = int(config.get("match_confidence_threshold") or 60)
         low_conf = con.execute(
-            "SELECT COUNT(*) FROM games g WHERE EXISTS(SELECT 1 FROM game_attributes ga "
+            "SELECT " + _ct + " FROM games g WHERE EXISTS(SELECT 1 FROM game_attributes ga "
             "WHERE ga.game_id=g.id AND ga.kind='match_confidence' "
             "AND CAST(ga.value AS INT) < ?)" + and_w, (_thr,)).fetchone()[0]
         # covers the deterministic rules could not settle — every candidate flagged,
         # so the term ranked nothing and the winner came from a tiebreak
         cover_undecided = con.execute(
-            "SELECT COUNT(*) FROM games g WHERE " + FLAG_SQL["cover_undecided"]
+            "SELECT " + _ct + " FROM games g WHERE " + FLAG_SQL["cover_undecided"]
             + and_w).fetchone()[0]
         # OWNED counts, like every other number on this card. Without the wanted=0
         # filter a wishlist-only title counted as owned on its store, so the per-source
@@ -736,7 +742,7 @@ def stats():
         by_source = {}
         for s in COLUMN_SOURCES:
             by_source[s] = con.execute(
-                "SELECT COUNT(*) FROM games g WHERE g.has_%s=1%s" % (s, and_w)).fetchone()[0]
+                "SELECT " + _ct + " FROM games g WHERE g.has_%s=1%s" % (s, and_w)).fetchone()[0]
         # dynamic sources (ea/playnite/etc.) live only in the sources table
         for row in con.execute("SELECT s.source, COUNT(DISTINCT s.game_id) c FROM sources s "
                                "JOIN games g ON g.id=s.game_id" +
@@ -749,7 +755,7 @@ def stats():
         # ROMs, wishlist-wanted titles and non-cover assets, so it could exceed
         # `identified`.
         total_with = con.execute(
-            "SELECT COUNT(*) FROM games g WHERE " + IDENTIFIED_SQL + and_w +
+            "SELECT " + _ct + " FROM games g WHERE " + IDENTIFIED_SQL + and_w +
             " AND " + _has_cover_sql(_has_col(con, "games", "entry_key"),
                                      _has_col(con, "games", "game_key"))).fetchone()[0]
         for row in con.execute("SELECT kind, COUNT(DISTINCT norm_key) c "
@@ -781,10 +787,17 @@ def facets():
     try:
         sources = [r["source"] for r in con.execute(
             "SELECT DISTINCT source FROM sources ORDER BY source")]
+        # Ordered busiest-first by GAMES, not by source rows. This list carries no
+        # numbers to the UI, so nothing here was ever misreported; ordering by cards
+        # simply matches what the user sees, since a game owned twice on one platform
+        # is one tile.
+        _pc = ("COUNT(DISTINCT COALESCE(g.card_key, g.entry_key))"
+               if _has_col(con, "games", "card_key") else "COUNT(*)")
         platforms = [r["platform"] for r in con.execute(
-            "SELECT platform, COUNT(*) c FROM sources WHERE platform IS NOT NULL "
-            "AND platform!='' AND platform NOT IN (%s) "
-            "GROUP BY platform ORDER BY c DESC"
+            "SELECT s.platform AS platform, " + _pc + " c FROM sources s "
+            "JOIN games g ON g.id=s.game_id "
+            "WHERE s.platform IS NOT NULL AND s.platform!='' "
+            "AND s.platform NOT IN (%s) GROUP BY s.platform ORDER BY c DESC"
             % ",".join("?" * len(NON_SYSTEM_PLATFORMS)), NON_SYSTEM_PLATFORMS)]
         # every categorical attribute kind -> its values (busiest first). Free-text
         # kinds (description) aren't value-filterable, so they're skipped.
@@ -1420,8 +1433,15 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
     # gs.*; the CTE exposes them as sc_*).
     _bkey = ("g.base_key" if _has_col(con, "games", "base_key")
              else ("g.norm_key" if has_ek else None))
-    _grpkey = (("(CASE WHEN g.game_key LIKE 'igdb:%' THEN g.game_key ELSE " + _bkey + " END)")
-               if (_hasgk and _bkey) else (_bkey or "g.norm_key"))
+    if _has_col(con, "games", "card_key"):
+        # Group by the SAME key the grid groups by (2026-08-25 design). Spotlight already
+        # collapsed ports by resolved identity; card_key additionally folds editions, and
+        # a showcase that groups differently from the library offers as two tiles what the
+        # grid shows as one.
+        _grpkey = "COALESCE(g.card_key, g.entry_key)"
+    else:
+        _grpkey = (("(CASE WHEN g.game_key LIKE 'igdb:%' THEN g.game_key ELSE " + _bkey + " END)")
+                   if (_hasgk and _bkey) else (_bkey or "g.norm_key"))
     _order = order.replace("gs.", "sc_")
     sql = ("WITH base AS (SELECT g.norm_key, " + eksel + "g.canonical_title AS title, "
            "gs.universal AS sc_universal, gs.critic AS sc_critic, gs.user AS sc_user, "
@@ -1434,6 +1454,9 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
            "COUNT(*) OVER (PARTITION BY grpkey) AS n_platforms FROM base) "
            "SELECT * FROM ranked WHERE rn=1 ORDER BY " + _order + ", title LIMIT ?")
     return [{"norm_key": r["norm_key"], "entry_key": r["entry_key"],
+             # the CARD this showcase row stands for, so a click opens the same card the
+             # grid would and the two surfaces cannot disagree about what a game is
+             "card_key": r["grpkey"],
              "platform": r["platform"], "title": r["title"], "score": r["sc_universal"],
              "sources": r["sources"], "matched": bool(r["matched"]),
              "has_cover": bool(r["has_cover"]), "cover_v": r["cover_v"] or None,
