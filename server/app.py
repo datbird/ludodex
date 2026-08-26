@@ -8888,11 +8888,20 @@ def game_detail(norm_key: str):
                 if _p:
                     parent_of = {"entry_key": _p["entry_key"], "norm_key": _p["norm_key"],
                                  "platform": _p["platform"], "title": _p["canonical_title"]}
+        _cardk = (g["card_key"] if "card_key" in _keys and g["card_key"]
+                  else (g["entry_key"] if "entry_key" in _keys else base))
+        _copies = _card_copies(con, _cardk, g["canonical_title"])
         return {
             "norm_key": base,
             "entry_key": g["entry_key"] if "entry_key" in _keys else base,
             "platform": platform,
-            "also_owned_on": also,             # sibling platform entries (cross-ref)
+            # COPIES: every entry on this game's card, one per platform, each with the
+            # edition it is. Supersedes the base_key sibling strip, which answered "same
+            # title group" where a card answers "same game" — they differ exactly where
+            # an edition was filed under its own title.
+            "copies": _copies or also,
+            "also_owned_on": also,             # deprecated alias, retire after one release
+            "card_key": _cardk,
             "addons": addons,                  # DLC/expansions owned FOR this game
             "content_kind": (g["content_kind"] if "content_kind" in _keys else None),
             "extends": parent_of,              # set when THIS entry is the add-on
@@ -10138,10 +10147,68 @@ def _split_entry_key(key):
     return key, None
 
 
+def _card_key_lookup(key):
+    """`key` when it addresses a CARD rather than a platform entry, else None.
+
+    The two shapes cannot collide: an entry key is `<norm_key>@<platform>`, and a card
+    key is `igdb:<id>` or `title:<norm_key>`. A norm_key never carries one of those
+    prefixes, and a card key never carries an '@'.
+    """
+    if not key:
+        return None
+    return key if (key.startswith("igdb:") or key.startswith("title:")) else None
+
+
+def _edition_label(copy_title, card_title):
+    """Which edition a copy is, expressed as the part of its title the card's title does
+    not already carry. "DARK SOULS: REMASTERED" on a card titled "DARK SOULS" gives
+    "REMASTERED", so the detail page can say what you own on each platform instead of
+    printing the same title three times. Empty when the copy IS the card's title."""
+    if not copy_title or not card_title:
+        return ""
+    if copy_title.lower().startswith(card_title.lower()):
+        return copy_title[len(card_title):].lstrip(" :-\u2013")
+    return ""
+
+
+def _card_copies(con, card_key, card_title):
+    """Every owned copy on one card: one row per platform entry, each separately
+    addressable so the UI can open it, publish it, or fix it on its own.
+
+    This replaces the `also_owned_on` sibling strip. That strip grouped by `base_key`,
+    which answers "same title group"; a card groups by identity, which answers "same
+    game", and those differ exactly where an edition was filed under its own title.
+    """
+    if not _has_col(con, "games", "card_key"):
+        return []
+    out = []
+    for row in con.execute(
+            "SELECT entry_key, norm_key, platform, canonical_title, content_kind "
+            "FROM games WHERE COALESCE(card_key, entry_key)=? "
+            "ORDER BY COALESCE(platform,''), id", (card_key,)):
+        out.append({
+            "entry_key": row["entry_key"], "norm_key": row["norm_key"],
+            "platform": row["platform"], "title": row["canonical_title"],
+            "edition": _edition_label(row["canonical_title"], card_title),
+        })
+    return out
+
+
 def _resolve_entry(con, key):
     """Resolve a URL key to (games row, base norm_key, platform). Accepts an entry_key
     `base@platform` or a bare base norm_key (legacy → the first/only entry for it).
     Tolerant of an un-rebuilt catalog with no entry_key column."""
+    # A CARD key addresses the game, not one platform of it (2026-08-25 design). Resolve
+    # it to the card's REPRESENTATIVE entry, using the same ordering the grid uses, so
+    # opening a card lands on the entry whose art the card was showing.
+    _card = _card_key_lookup(key)
+    if _card and _has_col(con, "games", "card_key"):
+        row = con.execute(
+            "SELECT * FROM games WHERE COALESCE(card_key, entry_key)=? "
+            "ORDER BY (has_emulation=0) DESC, n_sources DESC, "
+            "COALESCE(platform,'') ASC, id ASC LIMIT 1", (key,)).fetchone()
+        if row:
+            return row, row["norm_key"], row["platform"]
     base, platform = _split_entry_key(key)
     if _has_col(con, "games", "entry_key"):
         row = con.execute("SELECT * FROM games WHERE entry_key=?", (key,)).fetchone()
