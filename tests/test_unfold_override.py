@@ -65,8 +65,12 @@ def main():
     # rebuild. Read as source: build_library runs its whole build at module scope.
     bl = open(os.path.join(root, "ludodex", "build_library.py"), encoding="utf-8").read()
     check("build_library imports unfold", "import unfold" in bl)
-    check("build_library loads the pins", "unfold.load(" in bl)
-    check("build_library still honours _unfolded at the insert", "_ekey in _unfolded" in bl)
+    check("build_library loads the pins through the raising loader",
+          "unfold.load_all()" in bl)
+    check("build_library decides the card in ONE place",
+          bl.count("cardkey.card_key_for_entry(") == 3)
+    check("and no insert site inlines the pin test itself",
+          "in _unfolded" not in bl.split("_unfolded = unfold.load_all()")[-1])
 
     print("RESULT: %d checks, all passed" % len(PASS))
 

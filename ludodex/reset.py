@@ -64,6 +64,10 @@ CURATION_DBS = [
     "splits.sqlite", "framing.sqlite", "ownership.sqlite",
     "media-flags.sqlite",       # assets you banned / marked non-redistributable
     "identity-disable.sqlite",  # providers you turned off per game (tiered ingest)
+    "card-unfold.sqlite",       # cards you pinned apart from the game they fold onto.
+                                # A DECISION, so it is named here rather than left in
+                                # metadata-cache, which this file classes as an import
+                                # cache "no human decision is lost" to.
 ]
 # How to reach the outside world.
 CONFIG_DBS = ["config.sqlite", "connections.sqlite", "file-profiles.sqlite"]

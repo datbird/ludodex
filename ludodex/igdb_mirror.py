@@ -82,32 +82,49 @@ def fold_graph():
     con = _ro()
     if con is None:
         return {}
-    out = {}
+    # fetchall, then build. A `for row in execute(...)` that raises PART WAY THROUGH
+    # leaves a HALF-BUILT dict, and returning that is worse than returning nothing: some
+    # cards fold and some do not, differently on each run, with no error anywhere. This
+    # answer is complete or it is empty.
     try:
-        for iid, gt, vp, pg in con.execute(
-                "SELECT id, game_type, version_parent, parent_game FROM games"):
-            out[int(iid)] = (gt, vp, pg)
+        rows = con.execute(
+            "SELECT id, game_type, version_parent, parent_game FROM games").fetchall()
     except sqlite3.OperationalError:
-        pass                                # mirror predates the columns
+        return {}                           # mirror predates the columns
     finally:
         con.close()
-    return out
+    return {int(iid): (gt, vp, pg) for iid, gt, vp, pg in rows}
 
 
-def names():
-    """{igdb_id: name} from the mirror, for the card-title fallback."""
+def names(ids=None):
+    """{igdb_id: name} from the mirror, for the card-title rule.
+
+    PASS THE IDS YOU NEED. The whole table is 371,978 rows and costs 71 MB resident,
+    while a rebuild asks about the few thousand ids that are actually card roots. This
+    runs on hardware people self-host on, so the unfiltered load is the fallback, not
+    the default.
+    """
     con = _ro()
     if con is None:
         return {}
-    out = {}
     try:
-        for iid, nm in con.execute("SELECT id, name FROM games"):
-            out[int(iid)] = nm
+        if ids is None:
+            rows = con.execute("SELECT id, name FROM games").fetchall()
+        else:
+            want = sorted({int(i) for i in ids})
+            if not want:
+                return {}
+            rows = []
+            for i in range(0, len(want), 900):      # SQLite's variable limit is 999
+                chunk = want[i:i + 900]
+                rows += con.execute(
+                    "SELECT id, name FROM games WHERE id IN (%s)"
+                    % ",".join("?" * len(chunk)), chunk).fetchall()
     except sqlite3.OperationalError:
-        pass
+        return {}
     finally:
         con.close()
-    return out
+    return {int(iid): nm for iid, nm in rows}          # complete, or empty
 
 
 def title_index():
@@ -124,17 +141,15 @@ def title_index():
     con = _ro()
     if con is None:
         return {}
-    out = {}
     try:
-        for nk, iid in con.execute(
-                "SELECT norm_key, MIN(id) FROM games WHERE game_type=0 "
-                "AND norm_key IS NOT NULL AND norm_key!='' GROUP BY norm_key"):
-            out[nk] = int(iid)
+        rows = con.execute(
+            "SELECT norm_key, MIN(id) FROM games WHERE game_type=0 "
+            "AND norm_key IS NOT NULL AND norm_key!='' GROUP BY norm_key").fetchall()
     except sqlite3.OperationalError:
-        pass                                # mirror predates the column
+        return {}                           # mirror predates the column
     finally:
         con.close()
-    return out
+    return {nk: int(iid) for nk, iid in rows}          # complete, or empty
 
 
 def con_db():

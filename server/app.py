@@ -4108,7 +4108,7 @@ def card_unfold(body: dict = Body(...)):
     ekey = (body or {}).get("entry_key")
     if not ekey:
         raise HTTPException(400, "entry_key required")
-    mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    mc = unfold.con_db()
     try:
         unfold.set_unfold(mc, ekey)
         mc.commit()
@@ -4120,7 +4120,7 @@ def card_unfold(body: dict = Body(...)):
 @app.delete("/api/cards/unfold/{entry_key:path}")
 def card_refold(entry_key: str):
     """Let a pinned entry fold back onto its game's card on the next rebuild."""
-    mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    mc = unfold.con_db()
     try:
         unfold.clear_unfold(mc, entry_key)
         mc.commit()
@@ -4132,7 +4132,7 @@ def card_refold(entry_key: str):
 @app.get("/api/cards/unfold")
 def card_unfolds():
     """Every entry currently pinned to its own card."""
-    mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    mc = unfold.con_db()
     try:
         return {"entry_keys": sorted(unfold.load(mc))}
     finally:

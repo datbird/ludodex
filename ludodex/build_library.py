@@ -1107,22 +1107,12 @@ if _identity_refused:
 # separation `matchgate` has and keeps.
 _fold_graph = igdb_mirror.fold_graph()      # id -> (game_type, version_parent, parent_game)
 _title_index = igdb_mirror.title_index()    # norm_key -> id, MAIN GAMES only
-def _card_unfolds():
-    """{entry_key} the user pinned to its own card. Same store and the same durability
-    promise as `entry_res`: a rebuild reads it, and never writes over it."""
-    _cache = os.path.join(DATA, "metadata-cache.sqlite")
-    if not os.path.exists(_cache):
-        return set()
-    _c = sqlite3.connect(_cache)
-    try:
-        return unfold.load(_c)
-    except sqlite3.Error:
-        return set()
-    finally:
-        _c.close()
-
-
-_unfolded = _card_unfolds()                 # entry_keys the user pinned to their own card
+# The entry_keys the user pinned to their own card. `unfold.load_all()` distinguishes
+# "no pins" from "could not read the pins" and RAISES on the second, deliberately: an
+# empty set here would fold back every card the user had separated, silently. Letting it
+# propagate stops the rebuild, and build-to-temp-then-swap means the old catalog is
+# still there afterwards.
+_unfolded = unfold.load_all()
 
 key_to_gid = {}                 # (base_key, platform) -> gid   (per-entry attrs)
 base_to_gids = {}               # base_key -> [gid,...]         (title-level metadata fan-out)
@@ -1153,8 +1143,8 @@ for (base, plat), g in games.items():
            else _game_key(base, plat, bkey))
     # The CARD this entry lands on. Display grouping only: `_gk` above is still the
     # identity, and nothing here touches it, the provider link, or the art.
-    _ck = (_gk if _ekey in _unfolded
-           else cardkey.card_key_for_title(_gk, canonical, _title_index, _fold_graph))
+    _ck = cardkey.card_key_for_entry(_ekey, _gk, canonical, _title_index, _fold_graph,
+                                     _unfolded)
     cur.execute(
         "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,game_key,"
         "card_key,"
@@ -1189,7 +1179,8 @@ for key, w in wanted.items():
     stores = sorted({s[0] for s in w["stores"]})
     plat = "pc"                              # store wishlists (steam/gog) are PC
     _wgk = _game_key(key, plat, key)
-    _wck = cardkey.card_key_for_title(_wgk, w["title"], _title_index, _fold_graph)
+    _wck = cardkey.card_key_for_entry("%s@%s" % (key, plat), _wgk, w["title"],
+                                      _title_index, _fold_graph, _unfolded)
     cur.execute(
         "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,game_key,"
         "card_key,"
@@ -1286,8 +1277,9 @@ for _c in compilations.all_collections(DATA):
             _coll_sat += 1
             continue
         _mgk = _game_key(_mk, _mplat, _mk)
-        _mck = cardkey.card_key_for_title(_mgk, _m["member_title"], _title_index,
-                                          _fold_graph)
+        _mck = cardkey.card_key_for_entry("%s@%s" % (_mk, _mplat), _mgk,
+                                          _m["member_title"], _title_index,
+                                          _fold_graph, _unfolded)
         cur.execute(
             "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,"
             "game_key,card_key,n_sources,n_kinds,sources_summary,has_emulation,has_steam,"
@@ -1785,13 +1777,16 @@ con.commit()
 # the owner never bought it in. Instead the first copy's title is used, with a trailing
 # edition marker stripped only when the stripped form IS the root's name. That turns
 # "DARK SOULS: REMASTERED" into "DARK SOULS" and leaves "Mega Man 2" alone.
-_names = igdb_mirror.names()
 _card_rows = {}
 for _ck, _ct in cur.execute(
         "SELECT card_key, canonical_title FROM games "
         "WHERE card_key IS NOT NULL AND card_key!='' "
         "ORDER BY card_key, COALESCE(platform,''), id").fetchall():
     _card_rows.setdefault(_ck, []).append(_ct)
+# Ask the mirror only about the roots this catalog actually has. The whole name table is
+# 71 MB resident and a rebuild needs a few thousand of them.
+_root_ids = {int(k[5:]) for k in _card_rows if k.startswith("igdb:") and k[5:].isdigit()}
+_names = igdb_mirror.names(_root_ids)
 _titled = 0
 for _ck, _titles in _card_rows.items():
     _t = cardkey.card_title(_ck, _titles, _names)

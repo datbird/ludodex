@@ -136,23 +136,32 @@ def card_key_for_title(game_key, canonical_title, title_index, graph):
     return "igdb:%d" % fold_root(int(iid), graph)
 
 
-def assign(entries, graph, unfolded=(), title_index=None):
-    """{entry_key: card_key} for a whole catalog.
+def card_key_for_entry(entry_key, game_key, canonical_title, title_index, graph,
+                       unfolded=()):
+    """THE decision: which card one entry belongs to. `build_library` calls this at
+    every insert site, and `assign` is a loop over it, so the user's pin and the fold
+    are decided in exactly one place.
 
-    `entries` is an iterable of (entry_key, game_key, canonical_title). `unfolded` is
-    the set of entry_keys the user has pinned to their own card; those keep their
-    `game_key` and are never folded, which is the manual reverse for IGDB's looser
-    links. `title_index` maps norm_key -> igdb_id and is what lets an UNMATCHED edition
-    find its card; omit it and unmatched entries simply stay on their own cards.
+    It used to be inlined at the insert sites, with `assign` holding a second copy for
+    the tests. That is the two-derivations shape this codebase keeps paying for: the
+    copy the tests exercised was not the copy that ran.
+    """
+    if entry_key in unfolded:
+        return game_key                    # the user pinned this entry to its own card
+    return card_key_for_title(game_key, canonical_title, title_index, graph)
+
+
+def assign(entries, graph, unfolded=(), title_index=None):
+    """{entry_key: card_key} for a whole catalog. A LOOP over `card_key_for_entry` and
+    nothing else, so it cannot drift from what a rebuild does.
+
+    `entries` is an iterable of (entry_key, game_key, canonical_title). `title_index`
+    maps norm_key -> igdb_id and is what lets an UNMATCHED edition find its card; omit
+    it and unmatched entries simply stay on their own cards.
     """
     unfolded = set(unfolded or ())
-    out = {}
-    for ekey, gkey, title in entries:
-        if ekey in unfolded:
-            out[ekey] = gkey
-        else:
-            out[ekey] = card_key_for_title(gkey, title, title_index, graph)
-    return out
+    return {ekey: card_key_for_entry(ekey, gkey, title, title_index, graph, unfolded)
+            for ekey, gkey, title in entries}
 
 
 def card_title(card_key, copy_titles, root_names):

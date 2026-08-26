@@ -7727,9 +7727,19 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
   // `nk` is this platform entry's id (base_key@platform). The DETAIL is fetched by it
   // (per-platform view), but media candidates + title-level mutations key off the
   // base title key, so derive it for those.
-  const base = nk.includes('@') ? nk.slice(0, nk.lastIndexOf('@')) : nk
   const [mediaDirty, setMediaDirty] = useState(false)
   const [d, setD] = useState<GameDetail | null>(null)
+  // `base` is the BARE norm_key, and it must come from the detail the server returned,
+  // because only the server knows which entry a key resolved to. The wand, the resolve
+  // modal and the hero preference all key off it, and every one of them fails SILENTLY
+  // on a wrong value: aimeta resolves by bare norm_key, finds no row, and reports zero
+  // findings with no error.
+  //
+  // Parsing the URL key was the old way and it has now broken twice: first on an
+  // entry_key ("doom@gba", fixed 2026-07-15), then on a CARD key ("igdb:2155", which has
+  // no "@" at all, so the whole string came through as the title key). The parse stays
+  // only as the fallback for the moment before the detail loads.
+  const base = d?.norm_key ?? (nk.includes('@') ? nk.slice(0, nk.lastIndexOf('@')) : nk)
   // hero-expand reveal: the panel grows out of the clicked grid tile on open and
   // shrinks back into it on close (tile discovered live via its data-reveal-key).
   // Gated on `d` so it stays hidden until the detail loads, then grows the REAL

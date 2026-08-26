@@ -2090,9 +2090,10 @@ git commit -m "docs: one card per game, and the screenshot that shows it"
 The catalog rebuild is the maintainer's to run, from the UI, never from the CLI. After
 the code is merged:
 
-1. Build the image on bigboss (clean egress; the Mac's TLS inspection breaks npm and pip
-   inside `docker build`).
-2. Redeploy with `/boot/config/ludodex-redeploy.sh`, preserving all volumes.
+1. Build the image on a host with unfiltered egress. A network that inspects TLS breaks
+   npm and pip inside `docker build`.
+2. Redeploy with your own redeploy script, preserving every volume the container has.
+   Derive the binds from the running container; never hardcode a `-v` list.
 3. Rebuild the catalog from the UI.
 4. Run `check_invariants.py` immediately after, and confirm I12 is green.
 

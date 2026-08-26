@@ -126,7 +126,8 @@ rebuildable ones are deliberately excluded from `ALL` backups so a snapshot stay
 |---|---|
 | `game-library.sqlite` | the catalog itself |
 | `media-index.sqlite` | every known art reference |
-| `metadata-cache.sqlite` | provider resolution + payload cache. Also holds the two durable per-entry decisions a rebuild must never overwrite: `entry_resolution` (this entry's own identity, or a detach) and `card_unfold` (entry_key, pinned_at — this entry stays on its own card) |
+| `metadata-cache.sqlite` | provider resolution + payload cache. Also holds `entry_resolution` (this entry's own identity, or a detach), which is a DURABLE USER DECISION sitting in a store `reset.py` classes as an import cache. Worth moving. |
+| `card-unfold.sqlite` | `card_unfold(entry_key, pinned_at)`: entries you pinned apart from the game they fold onto. A decision, so it is a curation store, and a library reset keeps it |
 | `screenscraper-cache.sqlite` | ScreenScraper responses |
 | `crawl-index.sqlite` | the file-crawl inventory and extracted facts |
 | `steam-meta.sqlite` | Steam appdetails attribute cache |

@@ -628,10 +628,18 @@ term is total, so a rebuild cannot move it and churn the grid's art. It is picke
 the group, and every correlated subquery in the grid query is written against one row's
 `g.id`.
 
-**The reverse.** `card_unfold` in metadata-cache.sqlite pins an entry to its own card, and
+**The reverse.** `card_unfold` in its own `card-unfold.sqlite` pins an entry to its own card, and
 a rebuild never writes over it. Type 10 is the loosest link in the fold set and is the one
 carrying Scholar of the First Sin, so it stays in; the pin is how a user rejects the cases
 it gets wrong.
+
+It gets its own file rather than sharing `entry_res`'s, because `reset.py` classes
+metadata-cache as an import cache that costs "only the time to re-import, no human
+decision is lost". A pin is a decision, so a library reset must keep it, and
+`CURATION_DBS` is where a reset is told that. `build_library` reads the pins through
+`unfold.load_all()`, which returns an empty set for an ABSENT store and RAISES for an
+unreadable one: swallowing the difference would make a corrupt store look like "the user
+pinned nothing" and fold back every card they had separated, silently.
 
 **Invariant I12** asserts every entry has a resolvable card, because a row with a NULL
 `card_key` disappears from a grouped grid with no error at all.
