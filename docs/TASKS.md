@@ -925,3 +925,51 @@ tidy it the wrong way.
    exist; there is no scrape-script → cache-table → `build_library` merge path yet. It must go
    through the ONE chain, not a new onramp.
 3. **MobyGames product codes** — 260,337 disc serials, ~25 days of requests. Gated off.
+
+## Shipped 2026-08-25 — one card per game
+
+Spec: `docs/superpowers/specs/2026-08-25-single-game-entry-design.md`.
+Plan: `docs/superpowers/plans/2026-08-25-single-game-entry.md`.
+
+**The complaint, in the maintainer's words:** "we cannot have 4 entries in the library for
+dark souls showing all the systems/platforms I own it on... foundationally the goal is
+single game entry in ludodex library."
+
+**What was NOT done: a revert.** Going back to one row per `norm_key` would re-merge the
+1986 Amiga *Portal* into Valve's and the 1994 Game Boy *Uno* into the Steam one, which is
+the wrong-cover class §11 exists to prevent. Instead the per-platform rows stay exactly as
+they are, and a new `card_key` groups them for DISPLAY.
+
+| | count |
+|---|---:|
+| entries in the live catalog | 2,488 |
+| distinct `game_key`, ie. tiles after the platform collapse | 2,426 |
+| distinct card key after the edition fold | 2,388 |
+| owned IGDB ids the fold rule relabels | 252 |
+
+Read that honestly: about 4% on this mostly-PC library. It pays off on an emulation-heavy
+catalog, where the pre-reset 34,914 entries over 30,898 base games made the per-platform
+split the dominant duplicate.
+
+**The rule.** Ports, editions and remasters fold. A remake never does. IGDB carries the
+link on `version_parent` for editions and `parent_game` for remasters, expanded games and
+ports, and 6,877 plain type-0 games carry a `version_parent`, so the rule reads both
+columns and the type filter applies only to the `parent_game` branch. Full reasoning and
+the measured type table are in DESIGN §11.10.
+
+**Three things the measurement changed about the design.** The link is on two columns, not
+one. The card's title has to come from the owned copies, because the fold root is often
+the regional original and taking its name renamed 53 cards, several into Japanese. And an
+unmatched edition has no id to walk from, so it finds its card by stripped title instead,
+supplying the card only and never an identity.
+
+**Also fixed on the way:** `check_invariants.py` raised rather than skipped when a fresh
+install had no metadata cache, which aborted the run and took every invariant below I10
+with it. The new I12 sits below it, so on a new install it would never have run at all.
+
+**Owed after the deploy:** `docs/images/platforms.png` still shows the same SteamWorld
+titles listed once per platform, which is now the defect rather than the feature. Its
+README reference was REMOVED rather than relabelled, because a stale image under a "One
+card per game" heading is worse than no image. Retake it against the deployed build (one
+card showing its platforms and editions), drop it at the same path, and restore the
+`<div align="center">` block in that section.

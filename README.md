@@ -29,8 +29,8 @@ every frontend on every machine. You stop re-scraping, and you stop fixing the s
 five times.
 
 Everything you own lives in it, ROMs and storefronts alike, deduped into one library with
-one entry per game *and platform*. AI helps when a match is genuinely hard, and it is
-optional. The rest works without it.
+**one card per game** and every platform and edition you own listed on it. AI helps when a
+match is genuinely hard, and it is optional. The rest works without it.
 
 It runs on your own hardware. Nothing leaves it.
 
@@ -50,16 +50,18 @@ of its 33 attributes are still empty.
 <img src="docs/images/detail.png" alt="A game detail page: matched providers, scores, attributes and tags" width="820">
 </div>
 
-### One entry per game *and* platform
+### One card per game
 
-Not one row per title. *SteamWorld Dig* on Steam and *SteamWorld Dig* on Switch are
-different things you own, and flattening them is how libraries end up with a Switch game
-wearing Steam art. Sources that really are the same copy still merge, so a game you own
-on both GOG and Steam stays one entry.
+*Dark Souls* is one tile, not four. The Remastered edition, the Prepare To Die edition,
+the PC copy and the Switch copy are all the same game, so they share a card that tells
+you which platforms and which editions you actually own. A remake is not the same game
+and keeps its own card: *Resident Evil 2* from 1998 and the one from 2019 stay apart.
 
-<div align="center">
-<img src="docs/images/platforms.png" alt="The same SteamWorld titles listed once per platform" width="900">
-</div>
+Underneath, every platform is still its own record. That is what lets a Switch copy show
+Switch art instead of Steam art, and what lets you publish one platform's files to a
+handheld without dragging the others along. You see the game; the machine still sees
+each copy.
+
 
 ### Fixes itself in one click
 

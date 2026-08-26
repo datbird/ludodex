@@ -309,11 +309,19 @@ Two axes run through all of it: **`origin`** (detected vs manual) and **`actor`*
 
 ## 11. Per-platform library entries — the ports model
 
-**Decision (2026-07-15).** The library unit is **one entry per `(game, platform)`**, not
-one entry per game. Bubsy on Genesis, SNES, Game Boy, TurboGrafx and PC is **five
-entries**, cross-linked. This is the KISS fix for platform-blind media (a TurboGrafx
-entry can only ever hold TurboGrafx art) and matches what collectors expect — each
-platform is its own thing.
+**Decision (2026-07-15).** The STORAGE unit is **one row per `(game, platform)`**, not one
+row per game. Bubsy on Genesis, SNES, Game Boy, TurboGrafx and PC is **five rows**,
+cross-linked. This is the KISS fix for platform-blind media (a TurboGrafx row can only
+ever hold TurboGrafx art), and it is what lets publish push one platform's files to a
+device without dragging the others along.
+
+> **Superseded as the DISPLAY unit (2026-08-25).** Five rows meant five tiles, and a game
+> owned on four systems filled a shelf by itself. The library now groups by **`card_key`**:
+> one card per game, folding ports, editions and remasters onto the game they belong to.
+> A remake never folds. Everything in this section still describes the rows underneath,
+> which are unchanged and still carry ownership, art, identity and everything publish
+> addresses. See **§11.10** and
+> `docs/superpowers/specs/2026-08-25-single-game-entry-design.md`.
 
 ### 11.1 Identity — platform is the axis, source and OS are not
 
@@ -577,6 +585,58 @@ predicate; `base_key` retained only for "also owned on").
   assignment in one place, never a new serve rule). *Still open (bonus, §11.9 above):*
   keying the **metadata** fan-out on `game_key` too, so a stray port inherits its parent's
   score/description instead of staying bare.
+
+### 11.10 One card per game — the display unit (2026-08-25)
+
+**Decision.** The library shows **one card per game**. Every entry carries a **`card_key`**:
+`game_key` by default, rewritten to the IGDB fold root for ports, editions and remasters.
+`card_key` is display only. It never binds an identity, never gates media, and never
+spends a provider call, which is the same separation `matchgate` has and keeps.
+
+**The fold rule.** IGDB records the edition relationship over two columns and uses them
+inconsistently, so the rule reads both. Walk up while:
+
+- `version_parent` is set and `game_type` is not 8, or
+- `game_type` is 9 (remaster), 10 (expanded_game) or 11 (port) and `parent_game` is set.
+
+Cap the walk at depth 4 and stop on a cycle: a malformed provider graph must not hang a
+rebuild, and leaving an entry on its own card is the safe failure.
+
+**What never folds, each for its own reason.** Type 8 (remake) is a different game, and
+all 1,460 remake rows carry a `parent_game`, so without this clause every remake would
+fold into its original. Types 1 and 2 are add-ons, which already leave the grid under
+§ADD-ONS. Type 13 (pack) is a multi-game compilation the collections engine owns, and all
+8,915 carry a `parent_game`, so folding one would file several distinct games on one card.
+Note that 6,877 plain type-0 games carry a `version_parent`, which is why a `game_type`
+filter alone would miss most editions.
+
+**The card's key comes from the root; its TITLE comes from the copies.** The fold root is
+frequently the regional original: Mega Man 2 folds onto *Rockman 2: Dr. Wily no Nazo*,
+Streets of Rage 3 onto *Bare Knuckle III*. Taking the display title from the root renamed
+53 cards in the live library, several into Japanese. So the card takes its representative
+copy's title, stripping a trailing edition marker only when the stripped form is the
+root's own name.
+
+**An entry no provider matched** finds its card by title instead: strip a trailing edition
+marker and look the result up in the mirror's main-game index. That supplies the CARD only
+and leaves `game_key`, the provider link and `matched_by` untouched.
+
+**The representative row.** A card shows one cover, so one entry owns it, chosen by
+servable art first, then store source, then `n_sources`, then platform, then id. Every
+term is total, so a rebuild cannot move it and churn the grid's art. It is picked with
+`ROW_NUMBER`, not `GROUP BY`: SQLite's bare-column rule would return an arbitrary row in
+the group, and every correlated subquery in the grid query is written against one row's
+`g.id`.
+
+**The reverse.** `card_unfold` in metadata-cache.sqlite pins an entry to its own card, and
+a rebuild never writes over it. Type 10 is the loosest link in the fold set and is the one
+carrying Scholar of the First Sin, so it stays in; the pin is how a user rejects the cases
+it gets wrong.
+
+**Invariant I12** asserts every entry has a resolvable card, because a row with a NULL
+`card_key` disappears from a grouped grid with no error at all.
+
+Spec: `docs/superpowers/specs/2026-08-25-single-game-entry-design.md`.
 
 ---
 

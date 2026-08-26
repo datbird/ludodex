@@ -7,6 +7,7 @@ Everything is SQLite, on your disk, one file per concern. The catalog itself is
 
 ```sql
 games(   id, canonical_title, norm_key, platform, entry_key, base_key, game_key,
+         card_key,                                           -- the library grouping; see below
          n_sources, n_kinds, sources_summary,
          has_emulation, has_steam, has_gog, has_epic, has_itch, has_archive,
          in_playnite, in_launchbox, wanted,
@@ -26,7 +27,7 @@ wanted(          game_id, store, store_id, title_raw )       -- which store want
 The whole thing is rebuilt on every run, so nothing durable lives here — the durable
 stores are the separate files listed further down.
 
-### The keys, and why there are four
+### The keys, and why there are five
 
 This is the part worth understanding.
 
@@ -36,10 +37,17 @@ This is the part worth understanding.
 | `entry_key` | **the unit of identity**: this game, on this platform. One row per entry |
 | `base_key` | the game without its platform — groups the same game across hardware |
 | `game_key` | the grouping used for media and collections |
+| `card_key` | **the unit of DISPLAY**: one per game. `game_key`, folded onto the game an edition belongs to |
 
 *Sonic 2* on Genesis and *Sonic 2* on Game Gear share a `norm_key` and a `base_key`, and
 have different `entry_key`s. They are different games that share a name, and collapsing
 them is how a Genesis game ends up wearing Game Gear box art.
+
+`card_key` is the display half of the same idea, added 2026-08-25. The rows stay per
+platform, because that is what art, ownership and publish all address. The LIBRARY groups
+them, so *Dark Souls* is one tile whether you own it on two systems or in three editions.
+It folds ports, editions and remasters and never a remake. It is display only: it cannot
+bind an identity, gate media, or spend a provider call. See DESIGN §11.10.
 
 ### Column notes
 
@@ -118,7 +126,7 @@ rebuildable ones are deliberately excluded from `ALL` backups so a snapshot stay
 |---|---|
 | `game-library.sqlite` | the catalog itself |
 | `media-index.sqlite` | every known art reference |
-| `metadata-cache.sqlite` | provider resolution + payload cache |
+| `metadata-cache.sqlite` | provider resolution + payload cache. Also holds the two durable per-entry decisions a rebuild must never overwrite: `entry_resolution` (this entry's own identity, or a detach) and `card_unfold` (entry_key, pinned_at — this entry stays on its own card) |
 | `screenscraper-cache.sqlite` | ScreenScraper responses |
 | `crawl-index.sqlite` | the file-crawl inventory and extracted facts |
 | `steam-meta.sqlite` | Steam appdetails attribute cache |
