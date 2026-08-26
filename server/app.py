@@ -10174,10 +10174,65 @@ def _collection_with_links(con, base):
     return coll
 
 
+# Resolved card keys, so the twenty callers of _split_entry_key do not each open the
+# catalog. Keyed by the catalog's mtime as well, so a rebuild invalidates it for free.
+_CARD_ENTRY_CACHE = {"stamp": None, "map": {}}
+
+
+def _card_entry(key):
+    """(norm_key, platform) for a CARD key, or None when it names no owned entry.
+
+    Resolves to the card's REPRESENTATIVE entry, using the ordering the grid uses, so
+    the art the detail panel loads is the art the tile was showing.
+    """
+    try:
+        stamp = os.path.getmtime(LIBRARY_DB)
+    except OSError:
+        return None
+    if _CARD_ENTRY_CACHE["stamp"] != stamp:
+        _CARD_ENTRY_CACHE.update({"stamp": stamp, "map": {}})
+    hit = _CARD_ENTRY_CACHE["map"].get(key)
+    if hit is not None:
+        return hit or None                 # cached miss is stored as ()
+    con = ro(LIBRARY_DB)
+    try:
+        if not _has_col(con, "games", "card_key"):
+            return None
+        row = con.execute(
+            "SELECT norm_key, platform FROM games WHERE card_key=? "
+            "ORDER BY (has_emulation=0) DESC, n_sources DESC, "
+            "COALESCE(platform,'') ASC, id ASC LIMIT 1", (key,)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    got = (row["norm_key"], row["platform"]) if row else ()
+    _CARD_ENTRY_CACHE["map"][key] = got
+    return got or None
+
+
 def _split_entry_key(key):
+    """(base norm_key, platform) for ANY key the UI hands a route.
+
+    THREE shapes reach here, and every one of the twenty callers depends on getting a
+    real norm_key back:
+      * `<norm_key>@<platform>` — a per-platform entry
+      * `<norm_key>`            — a title, platform unknown
+      * `igdb:<id>` / `title:<nk>` — a CARD, which is what the grid navigates by since
+        2026-08-25. It has no "@", so this used to return the card key AS the title key,
+        and every media lookup then asked for art belonging to a game called
+        "igdb:2155". There is none, so detail pages lost their hero and background and
+        NOTHING reported an error.
+
+    An unknown card falls back to the old behaviour rather than inventing an entry.
+    """
     if "@" in key:
         b, p = key.rsplit("@", 1)
         return b, p
+    if _card_key_lookup(key):
+        hit = _card_entry(key)
+        if hit:
+            return hit
     return key, None
 
 
