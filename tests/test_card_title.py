@@ -95,6 +95,31 @@ def main():
     check("no copies and no root name yields an empty title",
           cardkey.card_title("igdb:999999", [], names) == "")
 
+    # --- a copy that IS the game outranks a copy that is an expansion of it ---
+    # Live defect 2026-08-26: the Dark Souls II card wore "Scholar of the First Sin",
+    # because that copy sorted first and "Scholar of the First Sin" is not a strippable
+    # edition marker. The base game was sitting right there on the same card.
+    names2 = {2368: "Dark Souls II"}
+    check("a copy matching the root wins over one that does not",
+          cardkey.card_title("igdb:2368",
+                             ["DARK SOULS II: Scholar of the First Sin", "Dark Souls II"],
+                             names2) == "Dark Souls II")
+    check("order does not matter for that",
+          cardkey.card_title("igdb:2368",
+                             ["Dark Souls II", "DARK SOULS II: Scholar of the First Sin"],
+                             names2) == "Dark Souls II")
+    check("a trademark symbol does not defeat the match",
+          cardkey.card_title("igdb:2368",
+                             ["DARK SOULS II: Scholar of the First Sin", "DARK SOULS\u2122 II"],
+                             names2) == "DARK SOULS\u2122 II")
+    check("a strippable copy still wins when no copy matches outright",
+          cardkey.card_title("igdb:2155",
+                             ["DARK SOULS: Prepare To Die Edition", "DARK SOULS: REMASTERED"],
+                             names) == "DARK SOULS")
+    check("and the first copy still wins when nothing matches or strips",
+          cardkey.card_title("igdb:170742", ["Mega Man 2", "Mega Man II"], names)
+          == "Mega Man 2")
+
     print("RESULT: %d checks, all passed" % len(PASS))
 
 

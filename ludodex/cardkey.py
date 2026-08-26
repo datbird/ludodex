@@ -156,13 +156,21 @@ def assign(entries, graph, unfolded=(), title_index=None):
 
 
 def card_title(card_key, copy_titles, root_names):
-    """The title to display on a card.
+    """The title to display on a card, in three tiers.
 
-    Rule: take the first owned copy's title, and strip a trailing edition marker ONLY
-    when the stripped form is the fold root's own name. That turns "DARK SOULS:
-    REMASTERED" into "DARK SOULS" (root: Dark Souls) while leaving "Mega Man 2" alone
-    (root: Rockman 2: Dr. Wily no Nazo). Falls back to the root's name when the card
-    has no copies, which happens only for a synthetic card.
+    1. A copy whose title IS the root's name wins outright. If you own the base game,
+       that is what the card is called. Without this tier the Dark Souls II card wore
+       "Scholar of the First Sin" while plain "Dark Souls II" sat on the same card, and
+       "Scholar of the First Sin" is not a strippable edition marker so tier 2 could not
+       save it. Found live on 2026-08-26.
+    2. Else a copy that STRIPS to the root's name, so "DARK SOULS: REMASTERED" becomes
+       "DARK SOULS" when nothing plainer is owned.
+    3. Else the first copy's title, untouched. This is what protects a regional root:
+       "Mega Man 2" folds onto "Rockman 2: Dr. Wily no Nazo" and must not be renamed
+       into Japanese.
+
+    Tiers 1 and 2 scan every copy, so the answer does not depend on which copy sorts
+    first. Falls back to the root's name only when the card has no copies at all.
     """
     root_name = ""
     if card_key and card_key.startswith("igdb:"):
@@ -173,12 +181,15 @@ def card_title(card_key, copy_titles, root_names):
     titles = [t for t in (copy_titles or []) if t]
     if not titles:
         return root_name
-    first = titles[0]
     if root_name:
-        stripped = strip_edition(first)
-        if stripped != first and _same_title(stripped, root_name):
-            return stripped
-    return first
+        for t in titles:                       # tier 1: a copy that IS the game
+            if _same_title(t, root_name):
+                return t
+        for t in titles:                       # tier 2: a copy that strips to it
+            stripped = strip_edition(t)
+            if stripped != t and _same_title(stripped, root_name):
+                return stripped
+    return titles[0]                           # tier 3: leave it alone
 
 
 def _same_title(a, b):
