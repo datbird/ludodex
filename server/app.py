@@ -55,6 +55,7 @@ import compilations    # noqa: E402  durable collections/compilations store (own
 import igdb_enrich      # noqa: E402  IGDB cache resolvers (cross-platform releases + systems)
 import console_eras     # noqa: E402  emulation platform era windows (year-plausibility gate)
 import entry_res        # noqa: E402  per-entry IGDB resolution overrides (same-title split)
+import unfold           # noqa: E402  per-entry "keep this on its own card" pins
 import medialang        # noqa: E402  per-asset media language classification + filter
 import framing         # noqa: E402  per-game/per-kind image framing (position + zoom)
 import mediaflags      # noqa: E402  durable per-asset ban / not-redistributable flags
@@ -4067,6 +4068,48 @@ def jobs_delete(jid: str):
     if not _delete_one_job(jid):
         raise HTTPException(400, "unknown job")
     return {"deleted": True}
+
+
+@app.post("/api/cards/unfold")
+def card_unfold(body: dict = Body(...)):
+    """Pin an entry to its own card, reversing an edition fold this user disagrees with.
+
+    DISPLAY ONLY. The entry's identity, its provider link and its art are untouched, so
+    this cannot be a way to bind or unbind a match. It takes effect on the next catalog
+    rebuild, like every other build-time decision here, which is what `rebuild_required`
+    in the response is telling the caller."""
+    ekey = (body or {}).get("entry_key")
+    if not ekey:
+        raise HTTPException(400, "entry_key required")
+    mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    try:
+        unfold.set_unfold(mc, ekey)
+        mc.commit()
+    finally:
+        mc.close()
+    return {"ok": True, "entry_key": ekey, "rebuild_required": True}
+
+
+@app.delete("/api/cards/unfold/{entry_key:path}")
+def card_refold(entry_key: str):
+    """Let a pinned entry fold back onto its game's card on the next rebuild."""
+    mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    try:
+        unfold.clear_unfold(mc, entry_key)
+        mc.commit()
+    finally:
+        mc.close()
+    return {"ok": True, "entry_key": entry_key, "rebuild_required": True}
+
+
+@app.get("/api/cards/unfold")
+def card_unfolds():
+    """Every entry currently pinned to its own card."""
+    mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    try:
+        return {"entry_keys": sorted(unfold.load(mc))}
+    finally:
+        mc.close()
 
 
 @app.post("/api/jobs/clear")

@@ -33,6 +33,7 @@ import overrides                # durable per-attribute user corrections
 import platmap                  # platform ontology + filename-carried hardware tags
 import ingesthints              # AI ingest hints (lite/heavy import) — advisory
 import cardkey                  # which CARD an entry sits on (display grouping only)
+import unfold                   # per-entry "keep this on its own card" pins
 import igdb_mirror              # local IGDB mirror: the fold graph + the title index
 _MERGE_ALIAS = titlenorm.merge_aliases()   # ONE load, shared with titlenorm.catalog_key
 _PEEL = splits.overrides()      # {(source, source_id): (to_key, to_title)}
@@ -1105,7 +1106,22 @@ if _identity_refused:
 # separation `matchgate` has and keeps.
 _fold_graph = igdb_mirror.fold_graph()      # id -> (game_type, version_parent, parent_game)
 _title_index = igdb_mirror.title_index()    # norm_key -> id, MAIN GAMES only
-_unfolded = set()                           # entry_keys the user pinned to their own card
+def _card_unfolds():
+    """{entry_key} the user pinned to its own card. Same store and the same durability
+    promise as `entry_res`: a rebuild reads it, and never writes over it."""
+    _cache = os.path.join(DATA, "metadata-cache.sqlite")
+    if not os.path.exists(_cache):
+        return set()
+    _c = sqlite3.connect(_cache)
+    try:
+        return unfold.load(_c)
+    except sqlite3.Error:
+        return set()
+    finally:
+        _c.close()
+
+
+_unfolded = _card_unfolds()                 # entry_keys the user pinned to their own card
 
 key_to_gid = {}                 # (base_key, platform) -> gid   (per-entry attrs)
 base_to_gids = {}               # base_key -> [gid,...]         (title-level metadata fan-out)
