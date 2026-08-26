@@ -481,6 +481,14 @@ function SpinVideo({ src, className, box, ...rest }: {
 
 // Cover image with graceful fallback: if the game has no cover, OR the cover
 // fails to load (e.g. a Deck-local file that 404s on this host), render the
+// The key that identifies a row in the grid: the CARD (one per game) when the server
+// sends one, falling back to the entry and then the title on an un-rebuilt catalog.
+// Use this for React keys, selection and navigation. NOT for art: a card shows its
+// representative ENTRY's cover, and that cover is gated on that entry's own system, so
+// `api.mediaUrl` keeps taking entry_key.
+const cardKeyOf = (g: { card_key?: string; entry_key?: string; norm_key: string }) =>
+  g.card_key ?? g.entry_key ?? g.norm_key
+
 // generated name-placeholder instead.
 function Cover({ g, compact }: {
   g: { norm_key: string; entry_key?: string; title: string; has_cover: boolean; identified?: boolean; framing_cover?: Frame; cover_v?: string | null }
@@ -512,7 +520,7 @@ const GameCard = memo(function GameCard({ g, selectMode, picked, onPick }: {
   g: GameRow; selectMode: boolean; picked: boolean; onPick: (g: GameRow) => void
 }) {
   return (
-    <button onClick={() => onPick(g)} data-reveal-key={g.entry_key ?? g.norm_key}
+    <button onClick={() => onPick(g)} data-reveal-key={cardKeyOf(g)}
       className={'card' + (selectMode && picked ? ' picked' : '')}>
       {selectMode && <span className="card-check">{picked ? '✓' : ''}</span>}
       <div className="cover">
@@ -918,9 +926,9 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
   }, [selectMode, wishDevs.length])
   // stable across renders so the memoised GameCard is not invalidated by every keystroke
   const onCard = useCallback((g: GameRow) => {
-    if (!selectMode) { setSelected(g.entry_key ?? g.norm_key); return }
+    if (!selectMode) { setSelected(cardKeyOf(g)); return }
     setPicked((p) => {                        // any game is selectable
-      const n = new Map(p); const k = g.entry_key ?? g.norm_key
+      const n = new Map(p); const k = cardKeyOf(g)
       n.has(k) ? n.delete(k) : n.set(k, g); return n
     })
   }, [selectMode])
@@ -1431,7 +1439,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
       {view === 'poster' ? (
         <div className={'grid' + (selectMode ? ' selecting' : '')}>
           {items.map((g) => {
-            const k = g.entry_key ?? g.norm_key
+            const k = cardKeyOf(g)
             return <GameCard key={k} g={g} selectMode={selectMode}
               picked={picked.has(k)} onPick={onCard} />
           })}
@@ -1456,8 +1464,8 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
           </thead>
           <tbody>
             {items.map((g) => (
-              <tr key={g.entry_key ?? g.norm_key} onClick={() => onCard(g)}
-                className={selectMode && picked.has(g.entry_key ?? g.norm_key) ? 'picked' : ''}>
+              <tr key={cardKeyOf(g)} onClick={() => onCard(g)}
+                className={selectMode && picked.has(cardKeyOf(g)) ? 'picked' : ''}>
                 {showCol('art') && <td className="gt-art"><Cover g={g} compact /></td>}
                 {showCol('score') && <td className="gt-num">
                   {g.ludodex_score != null
@@ -1547,7 +1555,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
               be <b>skipped</b> — they live in their own launcher (Steam, Epic, GOG…):</p>
             <ul className="skip-list">
               {pickedStore.map((r) => (
-                <li key={r.entry_key ?? r.norm_key}>
+                <li key={cardKeyOf(r)}>
                   <span className="skip-title">{r.title}</span>
                   <span className="dim">{r.sources_summary}</span></li>
               ))}
@@ -7851,7 +7859,7 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
         )}
         {resolve && d && (
           <ResolveModal nk={base} title={d.title} platform={d.platform}
-            alsoOwnedOn={d.also_owned_on}
+            alsoOwnedOn={d.copies ?? d.also_owned_on}
             onClose={() => setResolve(false)}
             onReload={() => reloadDetail()}
             onGone={() => { setResolve(false); onClose() }} />
@@ -7909,22 +7917,36 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
                       : <span className="also-on-cur">a game you don't own</span>}
                   </div>
                 )}
-                {(d.platform || (d.also_owned_on && d.also_owned_on.length > 0)) && (
-                  <div className="also-on">
-                    {d.platform && <span className="also-on-cur">{d.platform}</span>}
-                    {d.also_owned_on && d.also_owned_on.length > 0 && (
-                      <>
-                        <span className="also-on-label">also owned on</span>
-                        {d.also_owned_on.map((s) => (
-                          <button key={s.entry_key} className={'also-on-chip' + (s.via ? ' via' : '')} type="button"
-                            onClick={() => onNavigate?.(s.entry_key)}
-                            title={s.via ? `Owned via “${s.via}” (${s.platform})` : `View ${s.title} on ${s.platform}`}>
-                            {s.platform}{s.via ? ' 📦' : ''}</button>
-                        ))}
-                      </>
-                    )}
-                  </div>
-                )}
+                {/* THE COPIES YOU OWN of this game: one chip per platform entry, each
+                    labelled with the edition it is, so "Prepare To Die on PC, Remastered
+                    on Switch" reads off the page. Falls back to the older sibling strip
+                    when the server has not been redeployed yet. */}
+                {(() => {
+                  const copies = (d.copies && d.copies.length > 0)
+                    ? d.copies.filter((c) => c.entry_key !== d.entry_key)
+                    : (d.also_owned_on || [])
+                  if (!d.platform && copies.length === 0) return null
+                  return (
+                    <div className="also-on">
+                      {d.platform && <span className="also-on-cur">{d.platform}</span>}
+                      {copies.length > 0 && (
+                        <>
+                          <span className="also-on-label">also owned on</span>
+                          {copies.map((s) => {
+                            const ed = (s as { edition?: string }).edition
+                            return (
+                              <button key={s.entry_key} className={'also-on-chip' + (s.via ? ' via' : '')} type="button"
+                                onClick={() => onNavigate?.(s.entry_key)}
+                                title={s.via ? `Owned via “${s.via}” (${s.platform})`
+                                  : `View ${s.title} on ${s.platform}`}>
+                                {s.platform}{ed ? ` · ${ed}` : ''}{s.via ? ' 📦' : ''}</button>
+                            )
+                          })}
+                        </>
+                      )}
+                    </div>
+                  )
+                })()}
               </div>
             </div>
 
@@ -9129,8 +9151,8 @@ function SpotlightSection({ onOpen, prefsTick, mediaTick, onOpenSettings }: {
       </div>
       <div className={'sl-row' + (loading ? ' fading' : '')}>
         {sp.items.map((g, i) => (
-          <button key={g.entry_key ?? g.norm_key} className="sl-card"
-            onClick={() => onOpen(g.entry_key ?? g.norm_key)} title={g.title}>
+          <button key={cardKeyOf(g)} className="sl-card"
+            onClick={() => onOpen(cardKeyOf(g))} title={g.title}>
             <span className="sl-rank">{i + 1}</span>
             <div className="sl-art"><Cover g={g} compact /></div>
             {g.score != null && <span className={'sl-score ' + scoreClass(g.score)}>{g.score}</span>}

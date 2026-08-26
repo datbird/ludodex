@@ -8,6 +8,11 @@ export interface TagRef {
 export interface GameRow {
   norm_key: string
   entry_key?: string       // per-platform entry id (base_key@platform) — the addressable id
+  // The CARD this row stands for: ONE per game, folding its platforms, editions and
+  // remasters (2026-08-25 design). Key the grid and navigation on this. Art still comes
+  // from entry_key, because the card shows its representative ENTRY's art, and that art
+  // is gated on that entry's own system.
+  card_key?: string
   platform?: string | null // this entry's platform (pc / genesis / ps4 / …)
   title: string
   n_sources: number
@@ -71,6 +76,11 @@ export interface GameDetail {
   norm_key: string          // base title key (used for title-level mutations)
   entry_key?: string        // this platform entry's id (base_key@platform)
   platform?: string | null  // this entry's platform
+  card_key?: string         // the card this entry belongs to
+  // Every owned copy on this card, one per platform, with the edition each one is.
+  copies?: { entry_key: string; norm_key: string; platform: string; title: string
+             edition?: string; via?: string }[]
+  /** @deprecated superseded by `copies`; kept for one release. */
   also_owned_on?: { entry_key: string; platform: string; title: string; via?: string }[]
   // DLC / expansions owned FOR this game. Real entries, so each links to its own detail
   // page with its own release date, description and art.
