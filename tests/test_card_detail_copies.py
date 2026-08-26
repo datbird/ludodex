@@ -52,6 +52,18 @@ def main():
     check("an unrelated title has no label",
           srv._edition_label("Mega Man 2", "Dark Souls") == "")
     check("an empty title is safe", srv._edition_label("", "Dark Souls") == "")
+    # Live 2026-08-26: the Switch copy read "DARK SOULS: REMASTERED" while the card was
+    # "DARK SOULS(tm)", so a strict prefix match returned no label and the same edition
+    # showed labelled on one platform and blank on the other. Punctuation, trademark
+    # symbols and case must not decide whether a label appears.
+    check("a trademark symbol does not swallow the label",
+          srv._edition_label("DARK SOULS: REMASTERED", "DARK SOULS\u2122") == "REMASTERED")
+    check("case does not either",
+          srv._edition_label("dark souls: remastered", "DARK SOULS") == "remastered")
+    check("punctuation does not either",
+          srv._edition_label("Dark Souls - Remastered", "Dark Souls:") == "Remastered")
+    check("an equal title still has no label",
+          srv._edition_label("DARK SOULS\u2122", "DARK SOULS") == "")
 
     # --- copies ---
     con = sqlite3.connect(":memory:")

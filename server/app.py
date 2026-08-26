@@ -10194,15 +10194,34 @@ def _card_key_lookup(key):
 
 
 def _edition_label(copy_title, card_title):
-    """Which edition a copy is, expressed as the part of its title the card's title does
-    not already carry. "DARK SOULS: REMASTERED" on a card titled "DARK SOULS" gives
-    "REMASTERED", so the detail page can say what you own on each platform instead of
-    printing the same title three times. Empty when the copy IS the card's title."""
+    """Which edition a copy is: the part of its title the card's title does not already
+    carry. "DARK SOULS: REMASTERED" on a card titled "DARK SOULS" gives "REMASTERED", so
+    the detail page says what you own on each platform instead of printing the same title
+    three times. Empty when the copy IS the card's title.
+
+    The prefix is matched on ALPHANUMERICS ONLY. A strict prefix test shipped first and
+    was wrong live: the card read "DARK SOULS(tm)" and the Switch copy "DARK SOULS:
+    REMASTERED", so the same edition came back labelled on PC and blank on Switch.
+    Trademark symbols, punctuation, spacing and case must not decide whether a label
+    appears.
+    """
     if not copy_title or not card_title:
         return ""
-    if copy_title.lower().startswith(card_title.lower()):
-        return copy_title[len(card_title):].lstrip(" :-\u2013")
-    return ""
+    want = [c for c in card_title.lower() if c.isalnum()]
+    if not want:
+        return ""
+    i = 0                                  # index into `want`
+    for pos, ch in enumerate(copy_title):
+        if not ch.isalnum():
+            continue
+        if i >= len(want):
+            break
+        if ch.lower() != want[i]:
+            return ""                      # not a prefix of this card's title at all
+        i += 1
+        if i == len(want):
+            return copy_title[pos + 1:].lstrip(" :-\u2013\u2122\u00ae")
+    return ""                              # the copy title ran out before the card's did
 
 
 def _card_copies(con, card_key, card_title):
