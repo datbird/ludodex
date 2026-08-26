@@ -9228,6 +9228,10 @@ def _game_tags(con, gid, norm_key):
 @app.get("/api/games/{norm_key}/tags")
 def get_game_tags(norm_key: str):
     """All tags for a game (imported + user), each with its origin(s)."""
+    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
+    # norm_key; a fix if a CARD key ever arrives here, which is how the media
+    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
+    norm_key = _split_entry_key(norm_key)[0]
     con = lib()
     try:
         row = con.execute("SELECT id FROM games WHERE norm_key=?", (norm_key,)).fetchone()
@@ -9256,6 +9260,10 @@ def add_game_tag(norm_key: str, body: dict = Body(...)):
 @app.delete("/api/games/{norm_key}/tags/{tag}")
 def remove_game_tag(norm_key: str, tag: str):
     """Remove a user tag (imported-origin tags can't be removed here)."""
+    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
+    # norm_key; a fix if a CARD key ever arrives here, which is how the media
+    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
+    norm_key = _split_entry_key(norm_key)[0]
     tc = _tags_con()
     tc.execute("DELETE FROM user_tags WHERE norm_key=? AND tag=?", (norm_key, tag))
     tc.commit()
@@ -9267,6 +9275,10 @@ def remove_game_tag(norm_key: str, tag: str):
 def game_achievements(norm_key: str):
     """RetroAchievements for a game: full set + which the user earned.
     Populated by ra_fetch.py; empty/unmatched if never pulled."""
+    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
+    # norm_key; a fix if a CARD key ever arrives here, which is how the media
+    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
+    norm_key = _split_entry_key(norm_key)[0]
     if not os.path.exists(RA_DB):
         return {"matched": False, "num_ach": 0, "num_earned": 0, "achievements": []}
     con = ro(RA_DB)
@@ -13000,6 +13012,10 @@ def games_merge(nk: str, body: dict = Body(...)):
 def game_sources(nk: str):
     """Per-source rows of a game, for the 'Peel apart' picker (which source belongs
     to the OTHER same-named game)."""
+    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
+    # norm_key; a fix if a CARD key ever arrives here, which is how the media
+    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
+    nk = _split_entry_key(nk)[0]
     con = lib()
     try:
         g = con.execute("SELECT id, canonical_title FROM games WHERE norm_key=?",
@@ -13021,6 +13037,10 @@ def games_split(nk: str, body: dict = Body(...)):
     game (the inverse of merge). Body: {"rows":[{"source","source_id"}],
     "title":"Uno (2006)"}. The peeled rows get their own norm_key on every rebuild;
     identify the new entry (title/IGDB) afterward like any game."""
+    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
+    # norm_key; a fix if a CARD key ever arrives here, which is how the media
+    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
+    nk = _split_entry_key(nk)[0]
     body = body or {}
     rows = body.get("rows") or []
     title = (body.get("title") or "").strip()
@@ -13079,6 +13099,10 @@ def games_split_suggest(nk: str):
     """Agentic 'peel apart': ask the model whether this entry is really 2+ different
     same-named games and how its source rows split. Returns the suggested grouping
     (row indices are 1-based into the returned `sources`) for the user to confirm."""
+    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
+    # norm_key; a fix if a CARD key ever arrives here, which is how the media
+    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
+    nk = _split_entry_key(nk)[0]
     if not ai.area_available("split"):
         raise HTTPException(503, "split assist not configured (set a provider + API key)")
     con = lib()

@@ -140,6 +140,7 @@ thing is one container.
 | **[Backing store](docs/SYNC.md)** | Two-way sync of your durable data with PocketBase, Postgres, Supabase, MySQL or Firestore |
 | **[Running in Docker](docs/DOCKER.md)** | Volumes, media storage, shares, upgrades |
 | **[Design & roadmap](docs/DESIGN.md)** | Where this is going, and why it is built this way |
+| **[Testing](docs/TESTING.md)** | The offline suite, plus the contract and browser tests that catch what unit tests cannot |
 
 ## Status
 
