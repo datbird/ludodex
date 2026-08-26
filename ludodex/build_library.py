@@ -1041,6 +1041,7 @@ CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
   base_key TEXT,                   -- cross-ref group ("also owned on" + metadata fan-out); = norm_key unless era-separated
   game_key TEXT,                   -- resolved-identity key (DESIGN §11.9): igdb:<id> when the entry adopts a resolved identity (identified or stray retro-handheld port), else title:<norm_key> — SUFFIX-FREE, matching media_fetch.game_key (era-collision, detached or unidentified). Serve matches this against media.game_key (Phase 3).
   card_key TEXT,                   -- the LIBRARY GROUPING key (2026-08-25-single-game-entry-design.md): game_key by default, rewritten to the IGDB fold root for ports, editions and remasters so one game is one card. DISPLAY ONLY: it never binds identity and never gates media.
+  card_title TEXT,                 -- the name to SHOW on that card: the copies' title with a trailing edition marker stripped when the stripped form is the fold root's own name. NOT the root's name, which is often the regional original (Rockman 2, Bare Knuckle III).
   n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
   has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
   has_archive INT, in_playnite INT, in_launchbox INT,
@@ -1773,6 +1774,33 @@ CREATE INDEX IF NOT EXISTS ix_mlink_game ON metadata_links(game_id);
 CREATE INDEX IF NOT EXISTS ix_gtag_game ON game_tags(game_id);
 """)
 con.commit()
+
+# --------------------------------------------------------------------------- card title
+# The name to SHOW on each card. A POST-PASS, because the title is a property of the
+# whole card and the inserts above only ever see one row at a time.
+#
+# It comes from the OWNED COPIES, never from the fold root. The root is frequently the
+# regional original — Mega Man 2 folds onto "Rockman 2: Dr. Wily no Nazo", Streets of
+# Rage 3 onto "Bare Knuckle III" — so taking its name renames the card into a language
+# the owner never bought it in. Instead the first copy's title is used, with a trailing
+# edition marker stripped only when the stripped form IS the root's name. That turns
+# "DARK SOULS: REMASTERED" into "DARK SOULS" and leaves "Mega Man 2" alone.
+_names = igdb_mirror.names()
+_card_rows = {}
+for _ck, _ct in cur.execute(
+        "SELECT card_key, canonical_title FROM games "
+        "WHERE card_key IS NOT NULL AND card_key!='' "
+        "ORDER BY card_key, COALESCE(platform,''), id").fetchall():
+    _card_rows.setdefault(_ck, []).append(_ct)
+_titled = 0
+for _ck, _titles in _card_rows.items():
+    _t = cardkey.card_title(_ck, _titles, _names)
+    if _t and _t != _titles[0]:
+        _titled += 1
+    cur.execute("UPDATE games SET card_title=? WHERE card_key=?", (_t or _titles[0], _ck))
+con.commit()
+print("# card titles: %d card(s), %d shortened to the game's name"
+      % (len(_card_rows), _titled), file=sys.stderr)
 
 # Provider links for everything that isn't IGDB, rebuilt from the identity cache.
 #

@@ -77,6 +77,7 @@ export interface GameDetail {
   entry_key?: string        // this platform entry's id (base_key@platform)
   platform?: string | null  // this entry's platform
   card_key?: string         // the card this entry belongs to
+  card_title?: string       // the card's name (the game, not one of its editions)
   // Every owned copy on this card, one per platform, with the edition each one is.
   copies?: { entry_key: string; norm_key: string; platform: string; title: string
              edition?: string; via?: string }[]

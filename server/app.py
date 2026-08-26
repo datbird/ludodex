@@ -1244,8 +1244,12 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         plats = ("(SELECT group_concat(DISTINCT s.platform) FROM sources s "
                  "   WHERE s.game_id=g.id AND s.platform IS NOT NULL "
                  "   AND s.platform!='') AS platforms, ")
+    # The card's name, falling back to this entry's own title on an un-rebuilt catalog.
+    # A card that collapses three editions must not wear one edition's name.
+    _title = ("COALESCE(g.card_title, g.canonical_title) AS canonical_title, "
+              if _has_col(con, "games", "card_title") else "g.canonical_title, ")
     base = (
-        "SELECT g.norm_key, " + eksel + cksel + "g.canonical_title, " + nsrc + nkind +
+        "SELECT g.norm_key, " + eksel + cksel + _title + nsrc + nkind +
         "g.sources_summary, g.has_emulation AS is_emulation, " + wsel + plats +
         "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
         + IDENTIFIED_SQL + " AS identified, "
@@ -8913,7 +8917,13 @@ def game_detail(norm_key: str):
                                  "platform": _p["platform"], "title": _p["canonical_title"]}
         _cardk = (g["card_key"] if "card_key" in _keys and g["card_key"]
                   else (g["entry_key"] if "entry_key" in _keys else base))
-        _copies = _card_copies(con, _cardk, g["canonical_title"])
+        # The CARD's name. `title` below stays this ENTRY's own title on purpose: the
+        # wand, the metadata pipeline and every title-level mutation are keyed off it,
+        # and a card is a display grouping. The edition labels are computed against the
+        # card's name, which is what makes them read as "REMASTERED", not the whole title.
+        _cardt = (g["card_title"] if "card_title" in _keys and g["card_title"]
+                  else g["canonical_title"])
+        _copies = _card_copies(con, _cardk, _cardt)
         return {
             "norm_key": base,
             "entry_key": g["entry_key"] if "entry_key" in _keys else base,
@@ -8925,6 +8935,7 @@ def game_detail(norm_key: str):
             "copies": _copies or also,
             "also_owned_on": also,             # deprecated alias, retire after one release
             "card_key": _cardk,
+            "card_title": _cardt,
             "addons": addons,                  # DLC/expansions owned FOR this game
             "content_kind": (g["content_kind"] if "content_kind" in _keys else None),
             "extends": parent_of,              # set when THIS entry is the add-on

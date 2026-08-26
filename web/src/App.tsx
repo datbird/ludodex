@@ -7899,8 +7899,10 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
               <div className="hero-shade" />
               <div className="hero-fg">
                 {logo
-                  ? <SpinImg box className="hero-logo" src={logo.url} alt={d.title} />
-                  : <h2 className="hero-title">{d.title}</h2>}
+                  ? <SpinImg box className="hero-logo" src={logo.url} alt={d.card_title ?? d.title} />
+                  : <h2 className="hero-title">{d.card_title ?? d.title}</h2>}
+                {/* The heading names the GAME; the line under it names the copy you are
+                    looking at, so an edition is still visible without becoming the title. */}
                 <div className="hero-sub">{d.title}</div>
                 {/* This entry IS add-on content: say so, and link to what it extends. */}
                 {d.content_kind && (
