@@ -110,3 +110,80 @@ def strip_edition(title):
         if head:
             return head
     return title
+
+
+def card_key_for_title(game_key, canonical_title, title_index, graph):
+    """The card key for an entry no provider matched.
+
+    An unmatched edition has no id for `fold_root` to start from. The live catalog's
+    "DARK SOULS: Prepare To Die Edition" is exactly this: matchgate refused it, so its
+    game_key is `title:dark souls prepare to die`, and it still belongs on the Dark
+    Souls card. So the walk starts from the TITLE instead: strip a trailing edition
+    marker and look the result up by norm_key.
+
+    A hit supplies the CARD ONLY. The entry's game_key, its provider link and its
+    matched_by are untouched, and no provider is called. Grouping a card is a display
+    decision; binding an identity is matchgate's job and stays there.
+    """
+    if not game_key or not game_key.startswith("title:"):
+        return card_key_for(game_key, graph)
+    if not title_index or not canonical_title:
+        return game_key
+    stripped = strip_edition(canonical_title)
+    iid = title_index.get(norm(stripped))
+    if not iid:
+        return game_key
+    return "igdb:%d" % fold_root(int(iid), graph)
+
+
+def assign(entries, graph, unfolded=(), title_index=None):
+    """{entry_key: card_key} for a whole catalog.
+
+    `entries` is an iterable of (entry_key, game_key, canonical_title). `unfolded` is
+    the set of entry_keys the user has pinned to their own card; those keep their
+    `game_key` and are never folded, which is the manual reverse for IGDB's looser
+    links. `title_index` maps norm_key -> igdb_id and is what lets an UNMATCHED edition
+    find its card; omit it and unmatched entries simply stay on their own cards.
+    """
+    unfolded = set(unfolded or ())
+    out = {}
+    for ekey, gkey, title in entries:
+        if ekey in unfolded:
+            out[ekey] = gkey
+        else:
+            out[ekey] = card_key_for_title(gkey, title, title_index, graph)
+    return out
+
+
+def card_title(card_key, copy_titles, root_names):
+    """The title to display on a card.
+
+    Rule: take the first owned copy's title, and strip a trailing edition marker ONLY
+    when the stripped form is the fold root's own name. That turns "DARK SOULS:
+    REMASTERED" into "DARK SOULS" (root: Dark Souls) while leaving "Mega Man 2" alone
+    (root: Rockman 2: Dr. Wily no Nazo). Falls back to the root's name when the card
+    has no copies, which happens only for a synthetic card.
+    """
+    root_name = ""
+    if card_key and card_key.startswith("igdb:"):
+        try:
+            root_name = root_names.get(int(card_key[5:]), "") or ""
+        except ValueError:
+            root_name = ""
+    titles = [t for t in (copy_titles or []) if t]
+    if not titles:
+        return root_name
+    first = titles[0]
+    if root_name:
+        stripped = strip_edition(first)
+        if stripped != first and _same_title(stripped, root_name):
+            return stripped
+    return first
+
+
+def _same_title(a, b):
+    """Loose title equality for the strip check. Compares alphanumerics only, so
+    trademark symbols, punctuation, spacing and case cannot defeat the match —
+    "DARK SOULS" and "Dark Souls" are the same name."""
+    keep = lambda s: "".join(c for c in (s or "").lower() if c.isalnum())
+    return keep(a) == keep(b)
