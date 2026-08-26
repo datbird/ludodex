@@ -146,6 +146,18 @@ try {
     heroCount, hint: 'zero here is exactly what the 2026-08-26 media regression looked like',
   })
   if (heroCount > 0) {
+    // WAIT for the decode rather than sampling it. The panel opens before its art has
+    // arrived, so an immediate naturalWidth read is a coin flip, and a test that fails
+    // half the time gets ignored, which is worse than not having it. A genuinely broken
+    // image still fails: it simply never reaches naturalWidth > 0 and this times out.
+    await heroImgs.first().evaluate((el) => new Promise((resolve, reject) => {
+      if (el.tagName !== 'IMG' || el.naturalWidth > 0) return resolve()
+      const done = () => resolve()
+      el.addEventListener('load', done, { once: true })
+      el.addEventListener('error', () => reject(new Error('hero image failed to load')), { once: true })
+      setTimeout(() => (el.naturalWidth > 0 ? resolve() : reject(new Error('hero image never decoded'))), 20000)
+    })).catch((e) => check('the hero image loads', false, String(e).slice(0, 120)))
+
     // overlaid: the hero deliberately carries the title and tool buttons on top of it
     const p = await painted(heroImgs.first(), { overlaid: true })
     check('the hero image decoded, so its bytes really arrived', p.ok, p)
