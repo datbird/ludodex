@@ -32,6 +32,8 @@ import homebrew                 # ROM release-type classifier (homebrew/hack/pro
 import overrides                # durable per-attribute user corrections
 import platmap                  # platform ontology + filename-carried hardware tags
 import ingesthints              # AI ingest hints (lite/heavy import) — advisory
+import cardkey                  # which CARD an entry sits on (display grouping only)
+import igdb_mirror              # local IGDB mirror: the fold graph + the title index
 _MERGE_ALIAS = titlenorm.merge_aliases()   # ONE load, shared with titlenorm.catalog_key
 _PEEL = splits.overrides()      # {(source, source_id): (to_key, to_title)}
 # {(system, game): (title, platform, year)} — what an AI ingest pass read off the
@@ -1037,6 +1039,7 @@ CREATE TABLE games (id INTEGER PRIMARY KEY, canonical_title TEXT, norm_key TEXT,
   platform TEXT, entry_key TEXT,   -- one entry per (norm_key, platform); entry_key = norm_key@platform
   base_key TEXT,                   -- cross-ref group ("also owned on" + metadata fan-out); = norm_key unless era-separated
   game_key TEXT,                   -- resolved-identity key (DESIGN §11.9): igdb:<id> when the entry adopts a resolved identity (identified or stray retro-handheld port), else title:<norm_key> — SUFFIX-FREE, matching media_fetch.game_key (era-collision, detached or unidentified). Serve matches this against media.game_key (Phase 3).
+  card_key TEXT,                   -- the LIBRARY GROUPING key (2026-08-25-single-game-entry-design.md): game_key by default, rewritten to the IGDB fold root for ports, editions and remasters so one game is one card. DISPLAY ONLY: it never binds identity and never gates media.
   n_sources INTEGER, n_kinds INTEGER, sources_summary TEXT,
   has_emulation INT, has_steam INT, has_gog INT, has_epic INT, has_itch INT,
   has_archive INT, in_playnite INT, in_launchbox INT,
@@ -1093,6 +1096,17 @@ if _identity_refused:
     cur.executemany("INSERT INTO identity_review(norm_key,reason,detail) VALUES(?,?,?)",
                     _identity_refused)
 
+# --------------------------------------------------------------------------- cards
+# One card per GAME (2026-08-25-single-game-entry-design.md). Loaded ONCE here, because
+# every insert below asks the same two questions and the mirror holds 371,978 rows.
+#
+# Both are DISPLAY inputs. Nothing they decide reaches game_key, a provider link, or a
+# media row: a card grouping must never be able to bind an identity, which is the same
+# separation `matchgate` has and keeps.
+_fold_graph = igdb_mirror.fold_graph()      # id -> (game_type, version_parent, parent_game)
+_title_index = igdb_mirror.title_index()    # norm_key -> id, MAIN GAMES only
+_unfolded = set()                           # entry_keys the user pinned to their own card
+
 key_to_gid = {}                 # (base_key, platform) -> gid   (per-entry attrs)
 base_to_gids = {}               # base_key -> [gid,...]         (title-level metadata fan-out)
 _wtotal = len(games) + len(wanted)      # for the sync UI's live "N/total games" count
@@ -1117,14 +1131,20 @@ for (base, plat), g in games.items():
     # manual "want the ROM" fact) is wanted=1 so it lands in the Wanted view.
     owned = any(s[5] == "have" for s in srcs)
     bkey = sep_base.get((base, plat), base)     # cross-ref/metadata key (usually = base)
+    _ekey = "%s@%s" % (base, plat)
+    _gk = ("title:%s" % base if (base, plat) in blocked_entries
+           else _game_key(base, plat, bkey))
+    # The CARD this entry lands on. Display grouping only: `_gk` above is still the
+    # identity, and nothing here touches it, the provider link, or the art.
+    _ck = (_gk if _ekey in _unfolded
+           else cardkey.card_key_for_title(_gk, canonical, _title_index, _fold_graph))
     cur.execute(
         "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,game_key,"
+        "card_key,"
         "n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
         "has_archive,in_playnite,in_launchbox,wanted,content_kind,parent_key) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (canonical, base, plat, "%s@%s" % (base, plat), bkey,
-         ("title:%s" % base if (base, plat) in blocked_entries
-          else _game_key(base, plat, bkey)),
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (canonical, base, plat, _ekey, bkey, _gk, _ck,
          len(srcs), len(kinds), summary,
          int("emulation" in kinds), int("steam" in kinds),
          int("gog" in kinds), int("epic" in kinds), int("itch" in kinds),
@@ -1151,12 +1171,15 @@ for (base, plat), g in games.items():
 for key, w in wanted.items():
     stores = sorted({s[0] for s in w["stores"]})
     plat = "pc"                              # store wishlists (steam/gog) are PC
+    _wgk = _game_key(key, plat, key)
+    _wck = cardkey.card_key_for_title(_wgk, w["title"], _title_index, _fold_graph)
     cur.execute(
         "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,game_key,"
+        "card_key,"
         "n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,has_epic,has_itch,"
         "has_archive,in_playnite,in_launchbox,wanted) "
-        "VALUES(?,?,?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
-        (w["title"], key, plat, "%s@%s" % (key, plat), key, _game_key(key, plat, key),
+        "VALUES(?,?,?,?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,1)",
+        (w["title"], key, plat, "%s@%s" % (key, plat), key, _wgk, _wck,
          "wishlist:" + ",".join(stores)))
     gid = cur.lastrowid
     key_to_gid[(key, plat)] = gid
@@ -1245,13 +1268,16 @@ for _c in compilations.all_collections(DATA):
                         "WHERE id=?", (_gid,))
             _coll_sat += 1
             continue
+        _mgk = _game_key(_mk, _mplat, _mk)
+        _mck = cardkey.card_key_for_title(_mgk, _m["member_title"], _title_index,
+                                          _fold_graph)
         cur.execute(
             "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,"
-            "game_key,n_sources,n_kinds,sources_summary,has_emulation,has_steam,has_gog,"
-            "has_epic,has_itch,has_archive,in_playnite,in_launchbox,wanted) "
-            "VALUES(?,?,?,?,?,?,1,0,?,0,0,0,0,0,0,0,0,0)",
+            "game_key,card_key,n_sources,n_kinds,sources_summary,has_emulation,has_steam,"
+            "has_gog,has_epic,has_itch,has_archive,in_playnite,in_launchbox,wanted) "
+            "VALUES(?,?,?,?,?,?,?,1,0,?,0,0,0,0,0,0,0,0,0)",
             (_m["member_title"], _mk, _mplat, "%s@%s" % (_mk, _mplat), _mk,
-             _game_key(_mk, _mplat, _mk), "via:" + _c["name"]))
+             _mgk, _mck, "via:" + _c["name"]))
         _gid = cur.lastrowid
         key_to_gid[(_mk, _mplat)] = _gid
         base_to_gids.setdefault(_mk, []).append(_gid)

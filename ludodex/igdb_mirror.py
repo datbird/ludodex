@@ -56,6 +56,87 @@ FIELDS = ("id,name,slug,game_type,first_release_date,updated_at,platforms,"
           "parent_game,version_parent,alternative_names.name")
 
 
+def _ro():
+    """Read-only connection to the mirror, or None when it has not been built yet.
+
+    The write path (`con_db`) CREATEs its tables, which is wrong for a reader: a caller
+    asking a question of a mirror that does not exist should get "I don't know", not a
+    freshly created empty database on disk.
+    """
+    if not os.path.exists(DB):
+        return None
+    try:
+        return sqlite3.connect("file:%s?mode=ro" % DB, uri=True)
+    except sqlite3.Error:
+        return None
+
+
+def fold_graph():
+    """{igdb_id: (game_type, version_parent, parent_game)} for the whole mirror.
+
+    Feeds `cardkey.fold_root`, which decides which CARD an entry sits on. Read from the
+    mirror rather than metadata-cache for the same reason `build_library._igdb_addon_parents`
+    is: `igdb.GAME_FIELDS` never requested `version_parent`, so the cache cannot answer
+    this at all, and `version_parent` is the column that carries editions.
+    """
+    con = _ro()
+    if con is None:
+        return {}
+    out = {}
+    try:
+        for iid, gt, vp, pg in con.execute(
+                "SELECT id, game_type, version_parent, parent_game FROM games"):
+            out[int(iid)] = (gt, vp, pg)
+    except sqlite3.OperationalError:
+        pass                                # mirror predates the columns
+    finally:
+        con.close()
+    return out
+
+
+def names():
+    """{igdb_id: name} from the mirror, for the card-title fallback."""
+    con = _ro()
+    if con is None:
+        return {}
+    out = {}
+    try:
+        for iid, nm in con.execute("SELECT id, name FROM games"):
+            out[int(iid)] = nm
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        con.close()
+    return out
+
+
+def title_index():
+    """{norm_key: igdb_id} for MAIN GAMES only, so an entry no provider matched can
+    still find its card by title (`cardkey.card_key_for_title`).
+
+    Restricted to `game_type=0` on purpose. The index answers "which game is this the
+    edition OF", and an edition must never be the answer to that. A duplicate norm_key
+    keeps the LOWEST id, which is the earliest record and in practice the original.
+
+    This feeds the CARD only. It never binds an identity, so it is deliberately looser
+    than `matchgate`, which stays untouched.
+    """
+    con = _ro()
+    if con is None:
+        return {}
+    out = {}
+    try:
+        for nk, iid in con.execute(
+                "SELECT norm_key, MIN(id) FROM games WHERE game_type=0 "
+                "AND norm_key IS NOT NULL AND norm_key!='' GROUP BY norm_key"):
+            out[nk] = int(iid)
+    except sqlite3.OperationalError:
+        pass                                # mirror predates the column
+    finally:
+        con.close()
+    return out
+
+
 def con_db():
     con = sqlite3.connect(DB, timeout=30)
     con.row_factory = sqlite3.Row
