@@ -31,18 +31,16 @@ def main():
     # The docstrings NAME matchgate, deliberately, to say where identity binding lives.
     # What must not exist is an import of it, so check the import, not the word.
     code = [l for l in src.split("\n") if l.startswith(("import ", "from "))]
-    check("cardkey imports exactly one module", len(code) == 1)
-    check("and that module is titlenorm", code == ["from titlenorm import norm"])
-    check("cardkey never imports matchgate",
-          not any("matchgate" in l for l in code))
+    check("cardkey imports nothing at all", code == [])
+    check("so it cannot reach matchgate", not any("matchgate" in l for l in code))
 
-    graph = {2155: (0, None, None), 81085: (9, None, 2155)}
-    entries = [("dark souls@pc", "igdb:81085", "Dark Souls: Remastered")]
+    graph = {193359: (0, None, None), 1968: (11, None, 193359)}
+    entries = [("rayman legends@pc", "igdb:1968", "Rayman Legends")]
     before = [tuple(e) for e in entries]
     got = cardkey.assign(entries, graph)
     check("assign does not mutate its input", [tuple(e) for e in entries] == before)
-    check("the game_key is not rewritten", entries[0][1] == "igdb:81085")
-    check("only the card moves", got["dark souls@pc"] == "igdb:2155")
+    check("the game_key is not rewritten", entries[0][1] == "igdb:1968")
+    check("only the card moves", got["rayman legends@pc"] == "igdb:193359")
 
     print("RESULT: %d checks, all passed" % len(PASS))
 

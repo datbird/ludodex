@@ -7959,6 +7959,26 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
                     </div>
                   )
                 })()}
+
+                {/* WHAT THIS CARD SHOWS INSTEAD OF MERGING. The fold rule is narrow, so
+                    Remastered is its own card rather than hidden inside Dark Souls. The
+                    relationship still has to be visible, or it is simply lost.
+                    "Other versions" is another way to own THIS game; "Series" is the
+                    rest of the franchise. Owned games only. */}
+                {[
+                  { rows: d.versions || [], label: 'Other versions', cls: 'rel-version' },
+                  { rows: d.series || [], label: d.series_name || 'Series', cls: 'rel-series' },
+                ].map(({ rows, label, cls }) => rows.length > 0 && (
+                  <div className={'also-on ' + cls} key={label}>
+                    <span className="also-on-label">{label}</span>
+                    {rows.map((r) => (
+                      <button key={r.card_key} className="also-on-chip" type="button"
+                        onClick={() => onNavigate?.(r.card_key)}
+                        title={`${r.title}${r.platforms ? ' — ' + r.platforms : ''}`}>
+                        {r.title}</button>
+                    ))}
+                  </div>
+                ))}
               </div>
             </div>
 

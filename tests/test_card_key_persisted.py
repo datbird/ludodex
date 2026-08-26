@@ -39,8 +39,6 @@ def main():
 
     check("an absent mirror yields an empty graph, not a crash",
           igdb_mirror.fold_graph() == {})
-    check("an absent mirror yields an empty title index",
-          igdb_mirror.title_index() == {})
 
     mir = sqlite3.connect(os.path.join(data, "igdb-catalog.sqlite"))
     mir.executescript("""
@@ -68,17 +66,11 @@ def main():
     names = igdb_mirror.names()
     check("names are read from the mirror", names[2155] == "Dark Souls")
 
-    tindex = igdb_mirror.title_index()
-    check("the title index maps a main game", tindex.get("dark souls") == 2155)
-    check("the title index excludes editions", 21040 not in tindex.values())
-    check("the title index excludes remasters", 81085 not in tindex.values())
 
-    # the readers feed the pure rule, end to end
+    # the reader feeds the pure rule, end to end
     import cardkey
-    check("an unmatched edition finds its card through the mirror",
-          cardkey.card_key_for_title("title:dark souls prepare to die",
-                                     "DARK SOULS: Prepare To Die Edition",
-                                     tindex, graph) == "igdb:2155")
+    check("a remaster is NOT folded into the original",
+          cardkey.card_key_for("igdb:81085", graph) == "igdb:81085")
 
     # --- build_library, read as source (it cannot be imported: it builds on import) ---
     bl = open(os.path.join(root, "ludodex", "build_library.py"), encoding="utf-8").read()
@@ -88,7 +80,6 @@ def main():
     check("entry_key is untouched", "entry_key" in ddl)
     check("build_library imports the fold rule", "import cardkey" in bl)
     check("build_library loads the fold graph", "igdb_mirror.fold_graph()" in bl)
-    check("build_library loads the title index", "igdb_mirror.title_index()" in bl)
     check("every games INSERT names card_key",
           bl.count("INSERT INTO games(") == bl.count("card_key,")
           or all("card_key" in seg[:400]

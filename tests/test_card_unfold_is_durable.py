@@ -100,7 +100,6 @@ def main():
     check("names() answers a narrowed ask", igdb_mirror.names({2155}) == {2155: "Dark Souls"})
     check("names() of nothing is nothing", igdb_mirror.names(set()) == {})
     check("names() ignores an id the mirror lacks", igdb_mirror.names({999999}) == {})
-    check("and its title index reads", igdb_mirror.title_index().get("dark souls") == 2155)
 
     # a mirror predating the columns yields NOTHING, never a half-built graph
     os.remove(mir)
@@ -112,8 +111,6 @@ def main():
     m.close()
     check("an old mirror yields an empty graph, not a partial one",
           igdb_mirror.fold_graph() == {})
-    check("an old mirror yields an empty title index",
-          igdb_mirror.title_index() == {})
 
     print("RESULT: %d checks, all passed" % len(PASS))
 

@@ -1,43 +1,46 @@
 #!/usr/bin/env python3
 """Which card an entry belongs to.
 
-The library shows one card per GAME. An entry's `game_key` already answers "which game
-is this" for ports of one release, so it is the default. What it does not answer is
-"which game is this an EDITION of": Dark Souls: Remastered, Prepare To Die Edition and
-plain Dark Souls are three IGDB ids and one game.
+THE RULE: **the only axis that folds is PLATFORM.** A product is a card.
 
-IGDB records that relationship over TWO columns and uses them inconsistently:
+Own "Dark Souls: Prepare To Die Edition" on Xbox, PlayStation and Steam and that is ONE
+card listing three platforms. "Dark Souls: Remastered" is a DIFFERENT product, so it is
+its own card listing the platforms you own IT on. So is "Dark Souls II", and so is
+"Scholar of the First Sin".
 
-  * `version_parent` carries editions and bundles-of-one-game. 6,877 plain type-0 games
-    have one, so filtering on game_type before reading it misses most editions.
-  * `parent_game` carries remasters (9), expanded games (10) and ports (11) — and also
-    DLC (1), expansions (2), packs (13) and remakes (8), none of which may fold.
+The first version of this folded editions, remasters and expanded games onto the
+original, and that was wrong in a way only looking could show: it hid Remastered inside
+Dark Souls, and a user searching for the game they own could not find it. Corrected
+2026-08-26.
 
-So the rule reads both, and the type filter applies only to the `parent_game` branch.
+WHAT STILL FOLDS, and only this: IGDB's `port` type (11). A port is the SAME product with
+its own record, usually another platform or region, and collapsing those is exactly the
+platform axis. It is what makes "DOOM 2" and "DOOM II" one card, or "Into The Breach" and
+"Into the Breach", which are one game listed twice.
 
-WHAT NEVER FOLDS, each for its own reason:
-  * type 8, remake — a remake is a different game. All 1,460 remake rows carry a
-    parent_game, so without this clause every remake would fold into its original.
-  * types 1 and 2, dlc and expansion — add-ons already leave the grid and list under
-    their parent (2026-08-22-addons-design.md).
-  * type 13, pack — a pack is a multi-game compilation, which the collections engine
-    owns. All 8,915 carry a parent_game. Folding one would file several distinct games
-    under a single card.
+WHAT NEVER FOLDS, and why each is a product in its own right:
+  * 8 remake and 9 remaster — a different game, and a different thing to own.
+  * 3 bundle, 10 expanded_game — an edition. You bought THAT, not the original.
+  * 1 dlc and 2 expansion — add-ons, which already leave the grid and list under their
+    parent (2026-08-22-addons-design.md).
+  * 13 pack — a multi-game compilation, which the collections engine owns.
+
+None of those links is discarded. They become the "Other versions" and "Series" sections
+on the detail page, where a relationship belongs: shown, not merged.
 
 This module is PURE. It reads a graph dict and returns keys. It never opens a database,
 never calls a provider, and never writes an identity. A card grouping is a display
 decision; binding identity is `matchgate`'s job and stays there.
 """
-from titlenorm import norm
 
-# game_type values that fold through `parent_game`.
-FOLD_TYPES = frozenset((9, 10, 11))     # remaster, expanded_game, port
+# The ONE game_type that folds, and it folds through `parent_game`.
+FOLD_TYPES = frozenset((11,))           # port: the same product, its own record
 REMAKE = 8
 MAX_DEPTH = 4
 
 # Trailing edition markers, longest first so "Game of the Year Edition" wins over
-# "Edition". Matched case-insensitively against the end of a title, after an optional
-# ":" or "-" separator.
+# "Edition". These no longer decide what FOLDS: an edition is a product. They are used
+# only to name a card when a port merge leaves two spellings of one title.
 EDITION_SUFFIXES = (
     "Game of the Year Edition", "Prepare To Die Edition", "Definitive Edition",
     "Complete Edition", "Enhanced Edition", "Remastered Edition", "Deluxe Edition",
@@ -45,7 +48,7 @@ EDITION_SUFFIXES = (
     "Enhanced", "Definitive", "Complete", "Deluxe", "GOTY", "HD",
 )
 
-_SEPARATORS = (":", "-", "–")
+_SEPARATORS = (":", "-", "\u2013")
 
 
 def fold_root(igdb_id, graph, max_depth=MAX_DEPTH):
@@ -66,12 +69,10 @@ def fold_root(igdb_id, graph, max_depth=MAX_DEPTH):
         row = graph.get(cur)
         if not row:
             return cur
-        gtype, vparent, pparent = row
-        nxt = None
-        if vparent and gtype != REMAKE:
-            nxt = int(vparent)
-        elif not vparent and gtype in FOLD_TYPES and pparent:
-            nxt = int(pparent)
+        gtype, _vparent, pparent = row
+        # `version_parent` is DELIBERATELY not followed. It is the edition link, and an
+        # edition is a product. It feeds the "Other versions" section instead.
+        nxt = int(pparent) if (gtype in FOLD_TYPES and pparent) else None
         if nxt is None or nxt in seen:
             return cur
         seen.add(nxt)
@@ -112,32 +113,7 @@ def strip_edition(title):
     return title
 
 
-def card_key_for_title(game_key, canonical_title, title_index, graph):
-    """The card key for an entry no provider matched.
-
-    An unmatched edition has no id for `fold_root` to start from. The live catalog's
-    "DARK SOULS: Prepare To Die Edition" is exactly this: matchgate refused it, so its
-    game_key is `title:dark souls prepare to die`, and it still belongs on the Dark
-    Souls card. So the walk starts from the TITLE instead: strip a trailing edition
-    marker and look the result up by norm_key.
-
-    A hit supplies the CARD ONLY. The entry's game_key, its provider link and its
-    matched_by are untouched, and no provider is called. Grouping a card is a display
-    decision; binding an identity is matchgate's job and stays there.
-    """
-    if not game_key or not game_key.startswith("title:"):
-        return card_key_for(game_key, graph)
-    if not title_index or not canonical_title:
-        return game_key
-    stripped = strip_edition(canonical_title)
-    iid = title_index.get(norm(stripped))
-    if not iid:
-        return game_key
-    return "igdb:%d" % fold_root(int(iid), graph)
-
-
-def card_key_for_entry(entry_key, game_key, canonical_title, title_index, graph,
-                       unfolded=()):
+def card_key_for_entry(entry_key, game_key, graph, unfolded=()):
     """THE decision: which card one entry belongs to. `build_library` calls this at
     every insert site, and `assign` is a loop over it, so the user's pin and the fold
     are decided in exactly one place.
@@ -148,20 +124,20 @@ def card_key_for_entry(entry_key, game_key, canonical_title, title_index, graph,
     """
     if entry_key in unfolded:
         return game_key                    # the user pinned this entry to its own card
-    return card_key_for_title(game_key, canonical_title, title_index, graph)
+    return card_key_for(game_key, graph)
 
 
-def assign(entries, graph, unfolded=(), title_index=None):
+def assign(entries, graph, unfolded=()):
     """{entry_key: card_key} for a whole catalog. A LOOP over `card_key_for_entry` and
     nothing else, so it cannot drift from what a rebuild does.
 
-    `entries` is an iterable of (entry_key, game_key, canonical_title). `title_index`
-    maps norm_key -> igdb_id and is what lets an UNMATCHED edition find its card; omit
-    it and unmatched entries simply stay on their own cards.
+    `entries` is an iterable of (entry_key, game_key, canonical_title). The title is
+    accepted and ignored: it was needed when editions folded by name, and the shape is
+    kept so callers do not have to change.
     """
     unfolded = set(unfolded or ())
-    return {ekey: card_key_for_entry(ekey, gkey, title, title_index, graph, unfolded)
-            for ekey, gkey, title in entries}
+    return {ekey: card_key_for_entry(ekey, gkey, graph, unfolded)
+            for ekey, gkey, _title in entries}
 
 
 def card_title(card_key, copy_titles, root_names):

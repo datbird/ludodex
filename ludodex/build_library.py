@@ -1106,7 +1106,6 @@ if _identity_refused:
 # media row: a card grouping must never be able to bind an identity, which is the same
 # separation `matchgate` has and keeps.
 _fold_graph = igdb_mirror.fold_graph()      # id -> (game_type, version_parent, parent_game)
-_title_index = igdb_mirror.title_index()    # norm_key -> id, MAIN GAMES only
 # The entry_keys the user pinned to their own card. `unfold.load_all()` distinguishes
 # "no pins" from "could not read the pins" and RAISES on the second, deliberately: an
 # empty set here would fold back every card the user had separated, silently. Letting it
@@ -1143,8 +1142,7 @@ for (base, plat), g in games.items():
            else _game_key(base, plat, bkey))
     # The CARD this entry lands on. Display grouping only: `_gk` above is still the
     # identity, and nothing here touches it, the provider link, or the art.
-    _ck = cardkey.card_key_for_entry(_ekey, _gk, canonical, _title_index, _fold_graph,
-                                     _unfolded)
+    _ck = cardkey.card_key_for_entry(_ekey, _gk, _fold_graph, _unfolded)
     cur.execute(
         "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,game_key,"
         "card_key,"
@@ -1179,8 +1177,8 @@ for key, w in wanted.items():
     stores = sorted({s[0] for s in w["stores"]})
     plat = "pc"                              # store wishlists (steam/gog) are PC
     _wgk = _game_key(key, plat, key)
-    _wck = cardkey.card_key_for_entry("%s@%s" % (key, plat), _wgk, w["title"],
-                                      _title_index, _fold_graph, _unfolded)
+    _wck = cardkey.card_key_for_entry("%s@%s" % (key, plat), _wgk,
+                                      _fold_graph, _unfolded)
     cur.execute(
         "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,game_key,"
         "card_key,"
@@ -1278,7 +1276,6 @@ for _c in compilations.all_collections(DATA):
             continue
         _mgk = _game_key(_mk, _mplat, _mk)
         _mck = cardkey.card_key_for_entry("%s@%s" % (_mk, _mplat), _mgk,
-                                          _m["member_title"], _title_index,
                                           _fold_graph, _unfolded)
         cur.execute(
             "INSERT INTO games(canonical_title,norm_key,platform,entry_key,base_key,"

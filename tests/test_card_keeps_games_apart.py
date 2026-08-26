@@ -6,7 +6,8 @@ Three known-hard pairs, each a different mechanism:
     adventure its own igdb id, apart from Valve's 2007 game.
   * Uno — era separation gives the 1994 Game Boy game a title: key, apart from the
     identified Steam game.
-  * Tomb Raider — two Collector's Editions fold onto DIFFERENT roots, 1996 and 2013.
+  * Tomb Raider — the 1996 game and the 2013 reboot are different games, and each
+    Collector's Edition is a different PRODUCT again, so all four stay apart.
 """
 import os
 import sys
@@ -54,12 +55,18 @@ def main():
     check("the two Unos stay apart", got["uno@pc"] != got["uno@gameboy"])
     check("the era-separated Uno keeps its title key", got["uno@gameboy"] == "title:uno")
 
-    check("the 1996 Collector's Edition joins the 1996 game",
-          got["tomb raider collectors@pc"] == got["tomb raider@psx"] == "igdb:912")
-    check("the 2013 Collector's Edition joins the 2013 game",
-          got["tomb raider collectors 2013@pc"] == got["tomb raider@ps3"] == "igdb:1164")
+    # An edition is a product you bought, so it is its own card. It is not lost: it
+    # appears under "Other versions" on the game it is an edition of.
+    check("a Collector's Edition is its own card, not merged into the base game",
+          got["tomb raider collectors@pc"] != got["tomb raider@psx"])
+    check("and the 2013 one likewise",
+          got["tomb raider collectors 2013@pc"] != got["tomb raider@ps3"])
     check("the two Tomb Raiders stay apart",
           got["tomb raider@psx"] != got["tomb raider@ps3"])
+    check("all four are distinct cards",
+          len({got["tomb raider@psx"], got["tomb raider@ps3"],
+               got["tomb raider collectors@pc"],
+               got["tomb raider collectors 2013@pc"]}) == 4)
 
     print("RESULT: %d checks, all passed" % len(PASS))
 

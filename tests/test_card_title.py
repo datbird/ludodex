@@ -36,50 +36,30 @@ def main():
              21040: "Dark Souls: Prepare to Die Edition",
              1715: "Mega Man 2", 170742: "Rockman 2: Dr. Wily no Nazo"}
 
-    # --- the UNMATCHED edition, which has no id to walk from ---
-    # This is the live Prepare To Die row: matchgate refused it, so its game_key is a
-    # title bucket. The card still has to be Dark Souls, and finding that must not bind
-    # an identity.
-    tindex = {"dark souls": 2155, "mega man 2": 1715}
-    check("an unmatched edition folds by its stripped title",
-          cardkey.card_key_for_title(
-              "title:dark souls prepare to die",
-              "DARK SOULS: Prepare To Die Edition", tindex, graph) == "igdb:2155")
-    check("an unmatched title with no hit stays a title card",
-          cardkey.card_key_for_title(
-              "title:some rom", "Some ROM", tindex, graph) == "title:some rom")
-    check("an unmatched title that needs no strip still resolves",
-          cardkey.card_key_for_title(
-              "title:mega man 2", "Mega Man 2", tindex, graph) == "igdb:170742")
-    check("an already-identified key is not re-derived from its title",
-          cardkey.card_key_for_title(
-              "igdb:81085", "Dark Souls: Remastered", tindex, graph) == "igdb:2155")
-
     # --- assign ---
     entries = [("dark souls@pc", "igdb:81085", "DARK SOULS: REMASTERED"),
                ("dark souls@switch", "igdb:81085", "DARK SOULS: REMASTERED"),
                ("dark souls prepare to die@pc", "title:dark souls prepare to die",
-                "DARK SOULS: Prepare To Die Edition"),
+                "DARK SOULS: Prepare To Die Edition"),   # unmatched: never folds
                ("mega man 2@nes", "igdb:1715", "Mega Man 2"),
                ("some rom@snes", "title:some rom", "Some ROM")]
-    got = cardkey.assign(entries, graph, title_index=tindex)
-    check("both Dark Souls platforms land on one card",
-          got["dark souls@pc"] == got["dark souls@switch"] == "igdb:2155")
-    check("the unmatched edition lands on the same card",
-          got["dark souls prepare to die@pc"] == "igdb:2155")
-    check("Mega Man 2 folds onto the Rockman root", got["mega man 2@nes"] == "igdb:170742")
+    got = cardkey.assign(entries, graph)
+    check("the same product on two platforms is one card",
+          got["dark souls@pc"] == got["dark souls@switch"] == "igdb:81085")
+    check("an unmatched edition keeps its own card",
+          got["dark souls prepare to die@pc"] == "title:dark souls prepare to die")
+    check("an expanded game is its own card", got["mega man 2@nes"] == "igdb:1715")
     check("an unidentified entry keeps its title key",
           got["some rom@snes"] == "title:some rom")
-    check("assign works with no title index at all",
-          cardkey.assign(entries, graph)["dark souls@pc"] == "igdb:2155")
+    check("a remaster is never hidden inside the original",
+          cardkey.assign(entries, graph)["dark souls@pc"] == "igdb:81085")
 
     # --- unfold override ---
-    got2 = cardkey.assign(entries, graph, unfolded={"dark souls prepare to die@pc"},
-                          title_index=tindex)
+    got2 = cardkey.assign(entries, graph, unfolded={"dark souls prepare to die@pc"})
     check("an unfolded entry keeps its own card",
           got2["dark souls prepare to die@pc"] == "title:dark souls prepare to die")
     check("unfolding one entry does not disturb the others",
-          got2["dark souls@pc"] == "igdb:2155")
+          got2["dark souls@pc"] == "igdb:81085")
 
     # --- card_title ---
     check("the suffix is stripped when it lands on the root",

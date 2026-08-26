@@ -8924,6 +8924,10 @@ def game_detail(norm_key: str):
         _cardt = (g["card_title"] if "card_title" in _keys and g["card_title"]
                   else g["canonical_title"])
         _copies = _card_copies(con, _cardk, _cardt)
+        # What this card SHOWS instead of merging: other versions of the same game, and
+        # the rest of its series. The fold rule is narrow, so these relationships have to
+        # be visible somewhere or they are simply lost.
+        _related = _card_related(con, _cardk, _fold_graph_cached())
         return {
             "norm_key": base,
             "entry_key": g["entry_key"] if "entry_key" in _keys else base,
@@ -8936,6 +8940,9 @@ def game_detail(norm_key: str):
             "also_owned_on": also,             # deprecated alias, retire after one release
             "card_key": _cardk,
             "card_title": _cardt,
+            "versions": _related["versions"],       # other ways to own THIS game
+            "series": _related["series"],           # the rest of the franchise
+            "series_name": _related["series_name"],
             "addons": addons,                  # DLC/expansions owned FOR this game
             "content_kind": (g["content_kind"] if "content_kind" in _keys else None),
             "extends": parent_of,              # set when THIS entry is the add-on
@@ -10289,6 +10296,122 @@ def _edition_label(copy_title, card_title):
         if i == len(want):
             return copy_title[pos + 1:].lstrip(" :-\u2013\u2122\u00ae")
     return ""                              # the copy title ran out before the card's did
+
+
+_FOLD_GRAPH_CACHE = {"map": None}
+
+
+def _fold_graph_cached():
+    """IGDB's parent graph, loaded ONCE per process. It is 371,978 rows, so a per-request
+    read would be absurd, and it changes only when the mirror is swept."""
+    if _FOLD_GRAPH_CACHE["map"] is None:
+        try:
+            import igdb_mirror
+            _FOLD_GRAPH_CACHE["map"] = igdb_mirror.fold_graph()
+        except Exception:                   # noqa: BLE001  no mirror is not an error
+            _FOLD_GRAPH_CACHE["map"] = {}
+    return _FOLD_GRAPH_CACHE["map"]
+
+
+def _card_related(con, card_key, graph=None):
+    """What a card SHOWS instead of merging: other versions, and the series.
+
+    The fold rule is narrow on purpose, so "Dark Souls: Remastered" is its own card
+    rather than hidden inside "Dark Souls". That is the right call, and it would lose
+    something if the relationship simply vanished. So the links the fold does not follow
+    are displayed here instead.
+
+    TWO TIERS, because they answer different questions:
+
+      * `versions` — the same product lineage, walked through IGDB's `parent_game` and
+        `version_parent`. Prepare To Die Edition and Remastered both descend from Dark
+        Souls, so each lists the other. "Is there another way to own this game?"
+      * `series` — the franchise, from the `series` attribute the catalog already
+        carries on 820 games. "What else is part of this?"
+
+    OWNED GAMES ONLY. Listing what you do not have is Discover's job (DESIGN §12), and a
+    panel that quietly becomes a storefront is a panel nobody trusts.
+    """
+    out = {"versions": [], "series": [], "series_name": None}
+    if not card_key or not _has_col(con, "games", "card_key"):
+        return out
+
+    # OWNED ONLY. A wishlist entry is something you do not have, and listing it here
+    # turns the panel into a storefront. `wanted` is the same flag the grid filters on.
+    _owned = " AND COALESCE(g.wanted,0)=0" if _has_col(con, "games", "wanted") else ""
+
+    def _cards(where, args):
+        """One row per CARD, with its platforms unioned, never one row per copy."""
+        rows = con.execute(
+            "SELECT COALESCE(g.card_key, g.entry_key) AS card_key, "
+            "       COALESCE(g.card_title, g.canonical_title) AS title, "
+            "       MIN(g.entry_key) AS entry_key, "
+            "       group_concat(DISTINCT COALESCE(g.platform,'')) AS platforms "
+            "FROM games g WHERE (" + where + ")" + _owned +
+            " GROUP BY COALESCE(g.card_key, g.entry_key) ORDER BY title", args)
+        return [dict(r) for r in rows if r["card_key"] != card_key]
+
+    # ---------------------------------------------------------------- other versions
+    # Walk the OWNED cards, not the graph. The mirror holds 371,978 rows and scanning it
+    # per request to find a handful of relatives is absurd; the library holds a few
+    # thousand, and they are the only ones that can appear here anyway.
+    #
+    # An UNMATCHED card cannot take part: with no provider id there is no lineage to
+    # compare. That is why an unidentified "Prepare To Die Edition" shows no versions
+    # until something identifies it.
+    if graph and card_key.startswith("igdb:"):
+        try:
+            root = _version_root(int(card_key[5:]), graph)
+        except ValueError:
+            root = None
+        if root:
+            kin = []
+            for (k,) in con.execute(
+                    "SELECT DISTINCT COALESCE(card_key, entry_key) FROM games "
+                    "WHERE COALESCE(card_key, entry_key) LIKE 'igdb:%'"):
+                try:
+                    if _version_root(int(k[5:]), graph) == root:
+                        kin.append(k)
+                except ValueError:
+                    continue
+            if kin:
+                out["versions"] = _cards(
+                    "COALESCE(g.card_key, g.entry_key) IN (%s)"
+                    % ",".join("?" * len(kin)), kin)
+
+    # ---------------------------------------------------------------------- series
+    row = con.execute(
+        "SELECT ga.value FROM games g JOIN game_attributes ga ON ga.game_id=g.id "
+        "WHERE COALESCE(g.card_key, g.entry_key)=? AND ga.kind='series' LIMIT 1",
+        (card_key,)).fetchone()
+    if row and row[0]:
+        out["series_name"] = row[0]
+        out["series"] = _cards(
+            "EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
+            "AND ga.kind='series' AND ga.value=?)", [row[0]])
+    return out
+
+
+def _version_root(igdb_id, graph, max_depth=4):
+    """The oldest ancestor in IGDB's VERSION graph: the game an edition, remaster or
+    port is a version OF. Deliberately looser than `cardkey.fold_root`, which follows
+    only ports: this one is for SHOWING a relationship, never for merging one, so it may
+    follow links the fold refuses. A remake is still excluded, because a remake is a new
+    work rather than another way to own the same one."""
+    cur, seen = int(igdb_id), {int(igdb_id)}
+    for _ in range(max_depth):
+        row = graph.get(cur)
+        if not row:
+            return cur
+        gtype, vparent, pparent = row
+        if gtype == 8:                      # remake: a different work, stop here
+            return cur
+        nxt = vparent or pparent
+        if not nxt or int(nxt) in seen:
+            return cur
+        seen.add(int(nxt))
+        cur = int(nxt)
+    return cur
 
 
 def _card_copies(con, card_key, card_title):
