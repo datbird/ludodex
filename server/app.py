@@ -1032,6 +1032,13 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     where, args = [], []
     has_w = _has_col(con, "games", "wanted")
     has_ek = _has_col(con, "games", "entry_key")   # per-platform entries (DESIGN §11)
+    # ONE CARD PER GAME (2026-08-25-single-game-entry-design.md). card_key groups the
+    # per-platform entry rows by the GAME they are, folding ports, editions and
+    # remasters. The rows below it are untouched: they still carry ownership, art and
+    # everything publish addresses. Absent on an un-rebuilt catalog, and then every
+    # branch here falls back to exactly what it served yesterday.
+    has_ck = _has_col(con, "games", "card_key")
+    ckey = "COALESCE(g.card_key, g.entry_key)" if has_ck else None
     # ADD-ONS leave the grid. A DLC or expansion filed under an owned base game is
     # content for a game, not a game you own, so it must not inflate the library or its
     # counts. It keeps its full entry, attributes, media and detail page, and is listed
@@ -1137,14 +1144,15 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         args += _exargs
     clause = (" WHERE " + " AND ".join(where)) if where else ""
 
-    total = con.execute("SELECT COUNT(*) FROM games g" + clause, args).fetchone()[0]
+    _cnt = ("COUNT(DISTINCT %s)" % ckey) if has_ck else "COUNT(*)"
+    total = con.execute("SELECT %s FROM games g%s" % (_cnt, clause), args).fetchone()[0]
     # how many unidentified games the SAME search would surface if the hide toggle
     # were off — drives the "N matches hidden — show them" hint during a search.
     hidden = 0
     if identified == "only" and (q or query):
         hw = [w for w in where if w != IDENTIFIED_SQL] + ["NOT " + IDENTIFIED_SQL]
-        hidden = con.execute("SELECT COUNT(*) FROM games g WHERE " + " AND ".join(hw),
-                             args).fetchone()[0]
+        hidden = con.execute("SELECT %s FROM games g WHERE %s"
+                             % (_cnt, " AND ".join(hw)), args).fetchone()[0]
     # unified Ludodex score is precomputed per game (scores_fetch.py -> sco.game_scores)
     score = "(SELECT gs.universal FROM sco.game_scores gs WHERE gs.norm_key=g.norm_key)"
     wsel = "g.wanted AS wanted, " if has_w else ""
@@ -1187,11 +1195,44 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     else:
         cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v, "
         has_cov = _has_cover_sql(False, False) + " AS has_cover, "
+    # THE REPRESENTATIVE ROW OF A CARD. A card shows one cover, so one entry has to own
+    # it, and that choice must be stable across rebuilds or the grid's art churns for no
+    # reason. Order: an entry with SERVABLE art first (so a card never shows a
+    # placeholder while a sibling holds a real cover), then a store entry, then the
+    # richest, then platform, then id. Every term is total, so the order is total.
+    #
+    # Picked with ROW_NUMBER rather than GROUP BY on purpose: SQLite's bare-column rule
+    # would hand back "some row in the group", and every correlated subquery in this
+    # SELECT (art, attrs, tags, score) is written against ONE row's g.id. Choosing the
+    # row first keeps all of them correct and keeps the art rule intact by construction.
+    if has_ck:
+        rep_order = ("%s DESC, (g.has_emulation=0) DESC, g.n_sources DESC, "
+                     "COALESCE(g.platform,'') ASC, g.id ASC"
+                     % _has_cover_sql(has_ek, _has_col(con, "games", "game_key")))
+        rep = (" AND g.id IN (SELECT id FROM (SELECT g.id AS id, ROW_NUMBER() OVER ("
+               "PARTITION BY " + ckey + " ORDER BY " + rep_order + ") rn "
+               "FROM games g" + clause + ") WHERE rn=1)")
+        gclause = (clause + rep) if clause else (" WHERE" + rep[len(" AND"):])
+        gargs = args + args          # the inner copy of `clause` needs its own binds
+        # per-CARD aggregates: what you own across every copy, not just this row's
+        cksel = ckey + " AS card_key, "
+        nsrc = ("(SELECT SUM(g2.n_sources) FROM games g2 "
+                "   WHERE COALESCE(g2.card_key, g2.entry_key)=" + ckey + ") AS n_sources, ")
+        nkind = ("(SELECT MAX(g2.n_kinds) FROM games g2 "
+                 "   WHERE COALESCE(g2.card_key, g2.entry_key)=" + ckey + ") AS n_kinds, ")
+        plats = ("(SELECT group_concat(DISTINCT s.platform) FROM sources s "
+                 "   JOIN games g2 ON g2.id=s.game_id "
+                 "   WHERE COALESCE(g2.card_key, g2.entry_key)=" + ckey +
+                 "   AND s.platform IS NOT NULL AND s.platform!='') AS platforms, ")
+    else:
+        gclause, gargs, cksel = clause, args, ""
+        nsrc, nkind = "g.n_sources, ", "g.n_kinds, "
+        plats = ("(SELECT group_concat(DISTINCT s.platform) FROM sources s "
+                 "   WHERE s.game_id=g.id AND s.platform IS NOT NULL "
+                 "   AND s.platform!='') AS platforms, ")
     base = (
-        "SELECT g.norm_key, " + eksel + "g.canonical_title, g.n_sources, g.n_kinds, "
-        "g.sources_summary, g.has_emulation AS is_emulation, " + wsel +
-        "(SELECT group_concat(DISTINCT s.platform) FROM sources s "
-        "   WHERE s.game_id=g.id AND s.platform IS NOT NULL AND s.platform!='') AS platforms, "
+        "SELECT g.norm_key, " + eksel + cksel + "g.canonical_title, " + nsrc + nkind +
+        "g.sources_summary, g.has_emulation AS is_emulation, " + wsel + plats +
         "EXISTS(SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id) AS matched, "
         + IDENTIFIED_SQL + " AS identified, "
         + has_cov
@@ -1202,7 +1243,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "%s"
         "(SELECT group_concat('ludodex:'||ut.tag, char(31)) FROM t.user_tags ut "
         "   WHERE ut.norm_key=g.norm_key) AS usr_tags "
-        "FROM games g" + clause +
+        "FROM games g" + gclause +
         _order_by(sort, {"ludodex_score": (score, "DESC"),
                          # sort on the DISPLAY rule, same as the filter and the grid
                          "has_cover": (_has_cover_sql(
@@ -1212,9 +1253,9 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     imp = ("(SELECT group_concat(gt.origin||':'||gt.tag, char(31)) FROM game_tags gt "
            "   WHERE gt.game_id=g.id AND gt.origin<>'ludodex') AS imp_tags, ")
     try:
-        rows = con.execute(base % imp, args + [limit, offset]).fetchall()
+        rows = con.execute(base % imp, gargs + [limit, offset]).fetchall()
     except sqlite3.OperationalError:
-        rows = con.execute(base % "", args + [limit, offset]).fetchall()
+        rows = con.execute(base % "", gargs + [limit, offset]).fetchall()
 
     def _tags(r):
         keys = r.keys()
@@ -1246,6 +1287,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     items = [{
         "norm_key": r["norm_key"],
         "entry_key": r["entry_key"],
+        "card_key": (r["card_key"] if "card_key" in r.keys() else r["entry_key"]),
         "platform": r["platform"],
         "title": r["canonical_title"],
         "n_sources": r["n_sources"],
