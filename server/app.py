@@ -51,6 +51,7 @@ import identity_disable  # noqa: E402  disabled metadata-provider identities (ba
 import ownership       # noqa: E402  durable per-format ownership (physical + per-platform wants)
 import backups         # noqa: E402  scheduled snapshot backups (zip + push)
 import matchconf       # noqa: E402  identity-certainty scorer (pure, import-safe)
+import remakekin      # noqa: E402  which owned games are remakes of one another (pure rule)
 import compilations    # noqa: E402  durable collections/compilations store (ownership fan-out)
 import igdb_enrich      # noqa: E402  IGDB cache resolvers (cross-platform releases + systems)
 import console_eras     # noqa: E402  emulation platform era windows (year-plausibility gate)
@@ -1672,6 +1673,14 @@ def _startup_warm_spotlight():
         _place_provider_legacy()
     except Exception as _e:          # noqa: BLE001 — never block boot on a migration
         print("startup: provider identity placement failed: %s" % _e, file=sys.stderr)
+    # FREE, DETERMINISTIC AND IDEMPOTENT, so it does not wait for a paid wand. The bundles
+    # IGDB states are a fact already in the cache; gating them behind the AI detector would
+    # have made the cheaper source the one you only get when you pay. Skips everything
+    # already recorded or rejected, so on a settled library this does nothing.
+    try:
+        _igdb_declared_collections(None)
+    except Exception as _e:          # noqa: BLE001 — never block boot
+        print("startup: igdb collections failed: %s" % _e, file=sys.stderr)
 
 
 def _spotlight_catalog(con):
@@ -5114,6 +5123,112 @@ def _collection_candidates(nks):
     return out
 
 
+def _igdb_declared_collections(nks):
+    """Record the bundles IGDB STATES contain games you own. Free and deterministic.
+
+    Runs BEFORE the paid detector, and everything it records leaves the candidate pool
+    (`_collection_candidates` skips `known` keys), so the model is asked about fewer
+    titles rather than more. Same discipline as `store_type`: when a provider says what a
+    product IS, stop guessing at its name.
+
+    Only bundles you OWN become collections. A bundle absent from the library is not a
+    purchase, and recording one would invent an entry nothing owns.
+
+    Never touches a collection somebody curated: an `origin='manual'` key is skipped
+    outright, alongside the already-known and the already-rejected.
+
+    Returns [{norm_key, name, members}] recorded. Best-effort; never raises.
+    """
+    import bundlemap
+    recorded = []
+    try:
+        mcp = os.path.join(DATA, "metadata-cache.sqlite")
+        if not os.path.exists(mcp):
+            return recorded
+        mc = ro(mcp)
+        lc = ro(LIBRARY_DB)
+        try:
+            # owned: igdb_id -> (norm_key, title), scoped to the games in hand
+            # LIBRARY-WIDE ON PURPOSE, both sides. A scan of one member has to find the
+            # pack that holds it, and the pack is almost never in the same batch. `nks`
+            # scopes what the PAID pass is asked about; a fact IGDB already states costs
+            # nothing to read for the whole library.
+            owned = {}
+            for nk, iid in mc.execute("SELECT norm_key, igdb_id FROM igdb_resolution "
+                                      "WHERE COALESCE(igdb_id,0)>0"):
+                r = lc.execute(
+                    "SELECT COALESCE(card_title, canonical_title), platform FROM games "
+                    "WHERE norm_key=? LIMIT 1", (nk,)).fetchone()
+                if r:
+                    owned[iid] = (nk, r[0], r[1])
+            bundles = {}
+            for iid, payload in mc.execute(
+                    "SELECT igdb_id, payload_json FROM igdb_meta"):
+                if iid not in owned:
+                    continue
+                try:
+                    b = (json.loads(payload) or {}).get("bundles")
+                except Exception:             # noqa: BLE001 — a bad payload says nothing
+                    continue
+                if b:
+                    bundles[iid] = b
+        finally:
+            mc.close()
+            lc.close()
+        # A RECORDED AI REJECTION IS NOT A SKIP. `mark_rejected` says an `origin='ai'`
+        # verdict is a guess that "any later record clears", and a provider stating
+        # membership outright is exactly the later evidence it means. Only a MANUAL veto
+        # is binding, and `set_collection` enforces that one itself, so nothing here has
+        # to re-derive it. Live: 2 bundles the model had ruled out (Serious Sam Fusion,
+        # Metro 2033 Redux) that IGDB says are bundles.
+        #
+        # A MANUAL collection IS skipped: a person curated that member list and IGDB is
+        # not entitled to rewrite it.
+        existing = {c["coll_key"]: c for c in compilations.all_collections(DATA)}
+        skip = {k for k, c in existing.items() if (c.get("origin") or "") == "manual"}
+        found = bundlemap.collections_from_bundles(bundles, owned, skip=skip)
+        for coll_key, spec in sorted(found.items()):
+            members, name, how = spec["members"], spec["name"], "recorded"
+            prior = existing.get(coll_key)
+            if prior:
+                # EXTEND, NEVER REPLACE. `set_collection` rewrites the member set, so
+                # handing it IGDB's list alone would DELETE members the model or the user
+                # had already established. IGDB knows what is in a bundle; it does not
+                # know what else is. Live: DOOM 3 BFG gains "Doom + Doom II", Serious Sam
+                # Classics Revolution gains two, and nothing is lost.
+                have = compilations.get_collection(DATA, coll_key) or {}
+                keep = [{"title": m.get("member_title") or m.get("member_key"),
+                         "platform": m.get("member_platform"),
+                         "os": m.get("member_os"), "year": m.get("member_year"),
+                         "origin": m.get("origin")}
+                        for m in (have.get("members") or [])]
+                known_keys = {(m.get("member_key") or "") for m in
+                              (have.get("members") or [])}
+                added = [m for m in members if m["norm_key"] not in known_keys]
+                if not added:
+                    continue                  # nothing new to say
+                members, name = keep + added, prior.get("name") or name
+                how = "extended by %d" % len(added)
+            try:
+                compilations.set_collection(DATA, coll_key, name, members,
+                                            origin="igdb" if not prior
+                                            else (prior.get("origin") or "igdb"))
+                recorded.append({"norm_key": coll_key, "name": name,
+                                 "members": len(members), "how": how})
+            except Exception as e:            # noqa: BLE001 — counted, not hidden
+                print("igdb collection %s: %s" % (coll_key, str(e)[:120]),
+                      file=sys.stderr)
+        if recorded:
+            print("collections: IGDB declared %d bundle(s): %s"
+                  % (len(recorded), ", ".join("%s (%s)" % (r["name"], r["how"])
+                                              for r in recorded[:6])),
+                  file=sys.stderr)
+            _materialize_collection_members()
+    except Exception as e:                    # noqa: BLE001 — never abort a wand
+        print("igdb collections: %s" % str(e)[:150], file=sys.stderr)
+    return recorded
+
+
 def _auto_detect_collections(nks, should_stop=lambda: False, threshold=None, chunk=20):
     """Systematically detect COMPILATIONS among the scanned games and record their members
     (task #12).
@@ -5128,7 +5243,10 @@ def _auto_detect_collections(nks, should_stop=lambda: False, threshold=None, chu
     READ time, so a recorded collection takes effect with no rebuild.
     Returns [{norm_key, name, members}] recorded."""
     threshold = _auto_fix_threshold() if threshold is None else threshold
-    recorded = []
+    # FREE AND DETERMINISTIC FIRST, and note this runs even when AI is unavailable: a fact
+    # IGDB states does not need a model, and gating it behind one would have made the
+    # cheaper source the one you only get when you pay.
+    recorded = _igdb_declared_collections(nks)
     if not ai.area_available("metadata"):
         return recorded
     cands = _collection_candidates(nks)
@@ -9120,6 +9238,7 @@ def game_detail(norm_key: str):
             "card_key": _cardk,
             "card_title": _cardt,
             "versions": _related["versions"],       # other ways to own THIS game
+            "remakes": _related["remakes"],         # new works OF this game, kept apart
             "series": _related["series"],           # the rest of the sequel line
             "series_name": _related["series_name"],
             "addons": addons,                  # DLC/expansions owned FOR this game
@@ -10511,7 +10630,7 @@ def _card_related(con, card_key, graph=None):
     OWNED GAMES ONLY. Listing what you do not have is Discover's job (DESIGN §12), and a
     panel that quietly becomes a storefront is a panel nobody trusts.
     """
-    out = {"versions": [], "series": [], "series_name": None}
+    out = {"versions": [], "series": [], "series_name": None, "remakes": []}
     if not card_key or not _has_col(con, "games", "card_key"):
         return out
 
@@ -10557,6 +10676,38 @@ def _card_related(con, card_key, graph=None):
                 out["versions"] = _cards(
                     "COALESCE(g.card_key, g.entry_key) IN (%s)"
                     % ",".join("?" * len(kin)), kin)
+
+    # ---------------------------------------------------------------------- remakes
+    #
+    # A REMAKE IS A SEPARATE PRODUCT, AND SEPARATE IS NOT INVISIBLE. `versions` stops at a
+    # remake on purpose (datbird, 2026-08-26: a remake is a new work, not another way to
+    # own the same one), which left the two games with NO connection at all. You could own
+    # Half-Life and Black Mesa and neither page mentioned the other. Ten such pairs live.
+    #
+    # The edge needed no new data: the mirror already carries a remake as `game_type` 8
+    # with `parent_game` naming what it remakes. Nothing had read it.
+    if graph and card_key.startswith("igdb:"):
+        try:
+            _me = int(card_key[5:])
+        except ValueError:
+            _me = None
+        if _me is not None:
+            _owned_ids, _by_id = [], {}
+            for (k,) in con.execute(
+                    "SELECT DISTINCT COALESCE(card_key, entry_key) FROM games "
+                    "WHERE COALESCE(card_key, entry_key) LIKE 'igdb:%'"):
+                try:
+                    _i = int(k[5:])
+                except ValueError:
+                    continue
+                _owned_ids.append(_i)
+                _by_id[_i] = k
+            _kin = [_by_id[i] for i in remakekin.kin(_me, graph, _owned_ids)
+                    if i in _by_id]
+            if _kin:
+                out["remakes"] = _cards(
+                    "COALESCE(g.card_key, g.entry_key) IN (%s)"
+                    % ",".join("?" * len(_kin)), _kin)
 
     # ---------------------------------------------------------------------- series
     #

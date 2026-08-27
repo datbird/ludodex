@@ -83,8 +83,11 @@ export interface GameDetail {
   card_key?: string         // the card this entry belongs to
   card_title?: string       // the card's name (the game, not one of its editions)
   // What this card shows INSTEAD of merging. `versions` is the same game in another
-  // form (an edition, a remaster); `series` is the rest of the franchise. Owned only.
+  // form (an edition, a remaster, a port); `remakes` is a new work BUILT AGAIN from this
+  // one, which is why it keeps its own card; `series` is the rest of the franchise.
+  // Owned only.
   versions?: RelatedCard[]
+  remakes?: RelatedCard[]
   series?: RelatedCard[]
   series_name?: string | null
   // Every owned copy on this card, one per platform, with the edition each one is.

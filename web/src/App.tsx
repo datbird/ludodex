@@ -7368,14 +7368,19 @@ function showToast(msg: string) {
 // A long series collapses to one row with a count, because the point of moving it here
 // was to stop it eating the page. Opening it is one click and the choice sticks while
 // the panel is open.
-function RelatedGames({ versions, series, seriesName, onNavigate }: {
-  versions?: RelatedCard[]; series?: RelatedCard[]
+function RelatedGames({ versions, remakes, series, seriesName, onNavigate }: {
+  versions?: RelatedCard[]; remakes?: RelatedCard[]; series?: RelatedCard[]
   seriesName?: string | null; onNavigate?: (k: string) => void
 }) {
   const [openAll, setOpenAll] = useState<Record<string, boolean>>({})
   const groups = [
     { key: 'versions', label: 'Other versions', rows: versions || [],
       help: 'the same game in another form — an edition, a remaster, a port you own separately' },
+    // Its OWN tier, not part of Other versions. A remake is a new work rather than
+    // another way to own this one, so it keeps its own card — but keeping it separate
+    // had left it with no link at all.
+    { key: 'remakes', label: 'Remakes', rows: remakes || [],
+      help: 'built again from scratch, so a different game — you own both' },
     { key: 'series', label: seriesName ? `${seriesName} series` : 'Series', rows: series || [],
       help: 'the rest of the franchise, from the games you own' },
   ].filter((g) => g.rows.length > 0)
@@ -8137,7 +8142,8 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
                   <OwnershipEditor nk={d.norm_key} title={d.title} facts={d.ownership ?? []} onChanged={reloadDetail} />
                 </section>
 
-                <RelatedGames versions={d.versions} series={d.series}
+                <RelatedGames versions={d.versions} remakes={d.remakes}
+                  series={d.series}
                   seriesName={d.series_name} onNavigate={onNavigate} />
 
                 {d.collection && d.collection.members.length > 0 && (

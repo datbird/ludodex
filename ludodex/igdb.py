@@ -57,6 +57,11 @@ GAME_FIELDS = (
     # under collection 9750 and gave neither a franchise. Measured on the live library:
     # 656 owned games carry a franchise, 1,344 carry a collection, and 288 collections
     # hold two or more games that are owned. The Series section was showing the minority.
+    # `bundles` = the bundles CONTAINING this game. IGDB states membership outright, so a
+    # compilation no longer has to be guessed from its title and judged by a paid model.
+    # Live 2026-08-27: 106 pairs where both the game and the bundle are owned, 13 of which
+    # the AI pass had never found. See ludodex/bundlemap.py.
+    "bundles,"
     "collections.name,franchises.name,involved_companies.developer,"
     "involved_companies.publisher,involved_companies.company.name,"
     "platforms.name,platforms.abbreviation,"
