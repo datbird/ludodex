@@ -49,7 +49,15 @@ GAME_FIELDS = (
     "id,name,slug,summary,first_release_date,alternative_names.name,game_type,"
     "parent_game,"
     "genres.name,themes.name,game_modes.name,player_perspectives.name,"
-    "franchises.name,involved_companies.developer,"
+    # BOTH GROUPINGS, because they are different facts and only one was ever asked for.
+    # `collections` is the SEQUEL LINE (Mega Man, Baldur's Gate); `franchises` is the
+    # brand or licence above it (Dungeons & Dragons, Marvel). Only franchises was
+    # requested, so collections never appeared in a payload at all -- not empty, ABSENT --
+    # and Slay the Spire sat unassociated from Slay the Spire II while IGDB filed both
+    # under collection 9750 and gave neither a franchise. Measured on the live library:
+    # 656 owned games carry a franchise, 1,344 carry a collection, and 288 collections
+    # hold two or more games that are owned. The Series section was showing the minority.
+    "collections.name,franchises.name,involved_companies.developer,"
     "involved_companies.publisher,involved_companies.company.name,"
     "platforms.name,platforms.abbreviation,"
     "release_dates.y,release_dates.human,release_dates.platform.name,"
@@ -63,6 +71,23 @@ GAME_FIELDS = (
     "age_ratings.organization.name,age_ratings.rating_category.rating,"
     "age_ratings.rating_content_descriptions.description"
 )
+
+def fields_sig():
+    """A short fingerprint of GAME_FIELDS, stored beside every cached payload.
+
+    IGDB OMITS a field it was not asked for; it does not return it empty. So a record
+    fetched under an older field list is indistinguishable from a game that genuinely has
+    no value there, and a cache keyed only on age hands that record back for up to
+    `igdb_meta_ttl_days` after the field list changes. Adding `collections` on 2026-08-27
+    is what surfaced this: without a fingerprint the new grouping would have arrived game
+    by game over the following month, and Slay the Spire would have stayed unassociated
+    from Slay the Spire II while IGDB filed both under collection 9750 the whole time.
+
+    Any change to what is asked for changes this value, so every payload refetches once.
+    """
+    import hashlib
+    return hashlib.sha1(GAME_FIELDS.encode("utf-8")).hexdigest()[:12]
+
 
 # The rating bodies worth storing, and the order a badge should prefer them in.
 # ESRB is what this library is browsed by; the rest cost nothing to keep and make
@@ -251,7 +276,12 @@ def map_record(g):
     for kind, key in (("genres", "genres"), ("themes", "themes"),
                       ("game_modes", "game_modes"),
                       ("player_perspectives", "player_perspectives"),
-                      ("series", "franchises")):
+                      # SERIES IS THE COLLECTION. A franchise is a licence and gets
+                      # its own attribute rather than being merged in, because
+                      # "Dungeons & Dragons" sitting in the same field as "Baldur's
+                      # Gate" makes a brand read like a sequel line.
+                      ("series", "collections"),
+                      ("franchise", "franchises")):
         vals = _names(g.get(key))
         if vals:
             out[kind] = vals

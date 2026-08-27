@@ -179,6 +179,9 @@ def from_lb_platform(name):
 ATTR_TO_TAG = {
     "genres": ("Genre", True), "developers": ("Developer", True),
     "publishers": ("Publisher", True), "series": ("Series", True),
+    # LaunchBox has no franchise field of its own, so it rides the same Series element.
+    # Declared here so the kind is KNOWN rather than silently dropped on export.
+    "franchise": ("Series", True),
     "game_modes": ("PlayMode", True),
     "description": ("Notes", False), "release_date": ("ReleaseDate", False),
     "regions": ("Region", True),

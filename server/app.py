@@ -978,7 +978,8 @@ _QL_ATTR = {  # field alias -> game_attributes.kind
     "mode": "game_modes", "modes": "game_modes", "perspective": "player_perspectives",
     "dev": "developers", "developer": "developers", "developers": "developers",
     "pub": "publishers", "publisher": "publishers", "publishers": "publishers",
-    "series": "series", "os": "os", "device": "device", "region": "regions",
+    "series": "series", "franchise": "franchise", "franchises": "franchise",
+    "os": "os", "device": "device", "region": "regions",
 }
 
 
@@ -8680,6 +8681,9 @@ _EDITABLE_ATTR_KINDS = [
     "content_type",
     "release_type", "language", "release_year", "release_date", "platforms", "genres", "themes",
     "game_modes", "player_perspectives", "developers", "publishers", "series",
+    # The licence a game sits under, kept apart from `series` (the sequel line) because
+    # IGDB reports them as different fields and they mean different things.
+    "franchise",
     "features", "categories", "age_ratings", "esrb_rating", "content_descriptors",
     "regions", "os", "device",
     "version", "completion_status", "user_score", "critic_score",
@@ -9116,7 +9120,7 @@ def game_detail(norm_key: str):
             "card_key": _cardk,
             "card_title": _cardt,
             "versions": _related["versions"],       # other ways to own THIS game
-            "series": _related["series"],           # the rest of the franchise
+            "series": _related["series"],           # the rest of the sequel line
             "series_name": _related["series_name"],
             "addons": addons,                  # DLC/expansions owned FOR this game
             "content_kind": (g["content_kind"] if "content_kind" in _keys else None),

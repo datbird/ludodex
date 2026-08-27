@@ -1097,3 +1097,66 @@ Either a person marks the pairing `manual`, which every gate and scrub already r
 IGDB's alone. The second is the real fix and it is its own piece of work: `game_era` is
 consulted by the gate, the scrub and the invariant, so changing what it means changes all
 three at once.
+
+## Shipped 2026-08-27 — IGDB's series is `collections`, not `franchises` (#48)
+
+**The report, in the maintainer's words:** "looking at the game Slay the Spire, I see thers
+not association with the Slay the spire 2. This erodes my trust that we've got whats needed
+to have solid, thorough assocciations."
+
+He was right, and a fresh ingest would not have fixed it. Two separate causes, and the
+second is the one that would have hidden the first.
+
+### `collections` was never requested
+
+IGDB has two grouping fields. `franchises` is the brand or licence (Dungeons & Dragons,
+Marvel). `collections` is the SEQUEL LINE (Mega Man, Baldur's Gate). `GAME_FIELDS` asked
+for `franchises.name` and nothing else.
+
+**IGDB omits a field it was not asked for rather than returning it empty**, so a cached
+payload was indistinguishable from a game with no series. IGDB files Slay the Spire and
+Slay the Spire II under collection 9750 and gives neither a franchise, so the link was
+there, free, and never fetched.
+
+Measured over the 2,362 identified games before the fix:
+
+| | count |
+|---|---:|
+| with a **franchise** (what was fetched) | 656 |
+| with a **collection** (what was not) | 1,344 |
+| collections holding 2+ owned games | 288 |
+| owned games inside one of those | 973 |
+
+Mega Man, Final Fantasy, Resident Evil, Doom, Quake, Tomb Raider, Far Cry, Civilization,
+Sonic and Yakuza were all absent. The Series section was showing the minority case.
+
+**Two rows, not one** (datbird's call). `series` is the collection, `franchise` is a new
+attribute of its own. Merging them makes a licence read like a sequel line, which is the
+same distinction he drew when he ruled that a remaster is its own product. Registered in
+`_EDITABLE_ATTR_KINDS`, the query language, `provider_caps`, the LaunchBox vocabulary and
+`TAG_GROUPS`.
+
+### The payload cache did not know which fields filled it
+
+`igdb_meta` refetched on AGE alone, a 30-day TTL. Adding a field would therefore have
+reached each game only as its own cache lapsed, so a re-enrich run the same day would have
+changed nothing and the fix would have looked broken for a month.
+
+Every payload now stores `fields_sig`, a fingerprint of `GAME_FIELDS`, and a record fetched
+under a different one is stale. Existing rows carry NULL, which never matches, so they all
+refetch once. **Any future change to what is asked for now self-heals.** This is the general
+fix; the collection field was only what exposed it.
+
+### Live result
+
+2,362 of 2,363 payloads refetched, 1,242 now carry a collection where none did. After the
+rebuild: **1,288 games carry a series** (was 673), 674 carry a franchise, and **295 series
+values hold two or more games you own**. `GET /api/games/igdb:40477` returns
+`series_name: "Slay the Spire"` and lists Slay the Spire 2, and the reverse.
+
+Suite 188 passed / 0 failed / 6 skipped.
+
+**One lint fixed on the way:** `test_provider_caps` parsed `_EDITABLE_ATTR_KINDS` by
+flattening the block and splitting on commas, so a COMMENT containing a comma turned the
+entry below it into a junk token and the kind read as missing. The list is commented on
+purpose, so the parser now strips comments first.

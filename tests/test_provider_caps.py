@@ -63,6 +63,11 @@ def main():
     srv = os.path.join(root, "server", "app.py")
     src = open(srv, encoding="utf-8").read()
     block = src.split("_EDITABLE_ATTR_KINDS = [", 1)[1].split("]", 1)[0]
+    # STRIP THE COMMENTS FIRST. This used to flatten the block and split on commas, so a
+    # comment containing a comma turned the entry BELOW it into a token like
+    # "# ... they mean different things.    \"franchise\"" — and the kind it introduced
+    # read as missing. The list is commented on purpose, so the parser has to cope.
+    block = "\n".join(ln.split("#", 1)[0] for ln in block.splitlines())
     vocab = {x.strip().strip('"\'') for x in block.replace("\n", "").split(",")
              if x.strip().strip('"\'')}
     # `tags` is rendered by the library rather than the attribute editor, so it is a
@@ -88,6 +93,10 @@ def main():
         "genres": [{"name": "Platform"}], "themes": [{"name": "Action"}],
         "game_modes": [{"name": "Single player"}],
         "player_perspectives": [{"name": "Side view"}],
+        # BOTH groupings, because they are different claims. `collections` is the sequel
+        # line and becomes `series`; `franchises` is the licence and becomes `franchise`.
+        # A sample carrying only one of them makes the other read as an overclaim.
+        "collections": [{"name": "Sonic the Hedgehog"}],
         "franchises": [{"name": "Sonic"}],
         "involved_companies": [{"company": {"name": "Sega"}, "developer": True,
                                 "publisher": True}],

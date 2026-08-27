@@ -6609,6 +6609,7 @@ function systemLabel(source: string, platform: string): string | null {
 const TAG_GROUPS: [string, string][] = [
   ['genres', 'Genres'], ['themes', 'Themes'], ['game_modes', 'Modes'],
   ['player_perspectives', 'Perspective'], ['series', 'Series'],
+  ['franchise', 'Franchise'],
   ['os', 'OS'], ['device', 'Device'],
 ]
 

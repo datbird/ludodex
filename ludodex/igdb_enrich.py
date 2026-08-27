@@ -54,6 +54,14 @@ def cache_con():
     CREATE TABLE IF NOT EXISTS igdb_meta(igdb_id INTEGER PRIMARY KEY,
       payload_json TEXT, fetched_at INTEGER);
     """)
+    # WHICH FIELD LIST THIS PAYLOAD WAS FETCHED UNDER. IGDB omits a field it was not
+    # asked for instead of returning it empty, so a record cached under an older
+    # GAME_FIELDS looks exactly like a game that has no value there. Without this, adding
+    # a field only reached a game when its 30-day TTL happened to lapse. Existing rows
+    # get NULL, which never equals the current signature, so they all refetch once.
+    if "fields_sig" not in {r[1] for r in con.execute("PRAGMA table_info(igdb_meta)")}:
+        con.execute("ALTER TABLE igdb_meta ADD COLUMN fields_sig TEXT")
+        con.commit()
     return con
 
 
@@ -950,9 +958,24 @@ def main(argv):
     want = sorted({iid for iid in resolved.values() if iid})
     have = {}
     if not do_all:
-        for iid, ts in con.execute("SELECT igdb_id, fetched_at FROM igdb_meta"):
-            have[iid] = ts
-    need = [iid for iid in want if iid not in have or now - have[iid] > ttl]
+        for iid, ts, fp in con.execute(
+                "SELECT igdb_id, fetched_at, fields_sig FROM igdb_meta"):
+            have[iid] = (ts, fp)
+    sig = igdb.fields_sig()
+    need = [iid for iid in want
+            if iid not in have
+            or now - have[iid][0] > ttl
+            # A PAYLOAD IS ONLY AS COMPLETE AS THE FIELDS IT WAS ASKED FOR, and IGDB
+            # OMITS a field it was not asked for rather than returning it empty. So a
+            # cached record fetched under an older field list is INDISTINGUISHABLE from
+            # a game that genuinely has no value there, and the TTL alone made a new
+            # field arrive game by game over the following month.
+            #
+            # Live proof: `collections` was added to GAME_FIELDS on 2026-08-27, and
+            # without this every re-enrich would have kept serving payloads that never
+            # carried it. Slay the Spire and Slay the Spire II would have stayed
+            # unassociated while IGDB filed both under collection 9750 all along.
+            or have[iid][1] != sig]
     print("igdb: %d games linked to a record | fetching %d record(s)"
           % (len(want), len(need)), file=sys.stderr)
     for i in range(0, len(need), 200):
@@ -961,8 +984,8 @@ def main(argv):
                 % (igdb.GAME_FIELDS, ",".join(str(x) for x in batch)))
         for g in igdb.query("games", body, cid, tok, reauth=_reauth):
             con.execute("INSERT OR REPLACE INTO igdb_meta"
-                        "(igdb_id,payload_json,fetched_at) VALUES(?,?,?)",
-                        (g["id"], json.dumps(g, ensure_ascii=False), now))
+                        "(igdb_id,payload_json,fetched_at,fields_sig) VALUES(?,?,?,?)",
+                        (g["id"], json.dumps(g, ensure_ascii=False), now, sig))
         _commit(con)
         print("PROG\t%d\t%d\t\tfetch" % (min(i + 200, len(need)), len(need)), flush=True)
         print("igdb: fetched %d/%d" % (min(i + 200, len(need)), len(need)),

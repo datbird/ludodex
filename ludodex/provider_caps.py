@@ -152,7 +152,8 @@ CAPS = {
         "thegamesdb": "publisher companies",
         "zxinfo": "the publishing label",
         "ai": "inferred when no provider has the game", "ai_web": "found by searching the web, with the sources it used recorded against the finding"},
-    "series": {"igdb": "franchise / collection"},
+    "series": {"igdb": "collection"},
+    "franchise": {"igdb": "franchise"},
     "description": {
         "igdb": "the IGDB summary paragraph",
         "screenscraper": "the community-written synopsis",
