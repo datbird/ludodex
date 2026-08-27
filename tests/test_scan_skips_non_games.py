@@ -67,10 +67,11 @@ def main():
     lib.close()
 
     sco = sqlite3.connect(os.path.join(D, "scores.sqlite"))
-    sco.execute("CREATE TABLE IF NOT EXISTS steam_type("
-                "norm_key TEXT PRIMARY KEY, type TEXT, updated REAL)")
-    sco.execute("INSERT INTO steam_type VALUES('tool by steam type','application',0)")
-    sco.execute("INSERT INTO steam_type VALUES('game steam calls a tool','tool',0)")
+    sco.execute("CREATE TABLE IF NOT EXISTS store_type("
+                "norm_key TEXT, source TEXT, type TEXT, updated REAL, "
+                "PRIMARY KEY(norm_key, source))")
+    sco.execute("INSERT INTO store_type VALUES('tool by steam type','steam','application',0)")
+    sco.execute("INSERT INTO store_type VALUES('game steam calls a tool','steam','tool',0)")
     sco.commit()
     sco.close()
 

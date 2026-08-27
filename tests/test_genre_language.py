@@ -102,7 +102,7 @@ def main():
     ovp = os.path.join(d, "ov.sqlite")
     scp = os.path.join(d, "sco.sqlite")
     for p, ddl in ((ovp, "CREATE TABLE overrides(norm_key TEXT, kind TEXT, value TEXT)"),
-                   (scp, "CREATE TABLE steam_type(norm_key TEXT, type TEXT, at INT)")):
+                   (scp, "CREATE TABLE store_type(norm_key TEXT, source TEXT, type TEXT, at INT)")):
         c = sqlite3.connect(p); c.execute(ddl); c.commit(); c.close()
     con.execute("ATTACH DATABASE ? AS ov", (ovp,))
     con.execute("ATTACH DATABASE ? AS sco", (scp,))

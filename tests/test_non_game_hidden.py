@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The non-game filter must actually be able to fire (#23).
 
-Live, `sco.steam_type` held 0 rows for a 2208-game library, so the rule tested
+Live, `sco.store_type` held 0 rows for a 2208-game library, so the rule tested
 membership in an EMPTY table and hid nothing, ever — `hide_non_games` was on the whole
 time and did nothing. And even fully populated it could not catch fpsVR or Wallpaper
 Engine, because Steam SELLS those as `game`: their type is right by Steam's lights and
@@ -43,7 +43,7 @@ def main():
     ovp = os.path.join(d, "ov.sqlite")
     scp = os.path.join(d, "sco.sqlite")
     for p, ddl in ((ovp, "CREATE TABLE overrides(norm_key TEXT, kind TEXT, value TEXT)"),
-                   (scp, "CREATE TABLE steam_type(norm_key TEXT, type TEXT, at INT)")):
+                   (scp, "CREATE TABLE store_type(norm_key TEXT, source TEXT, type TEXT, at INT)")):
         c = sqlite3.connect(p); c.execute(ddl); c.commit(); c.close()
     con.execute("ATTACH DATABASE ? AS ov", (ovp,))
     con.execute("ATTACH DATABASE ? AS sco", (scp,))
@@ -54,7 +54,7 @@ def main():
             con.execute("INSERT INTO game_attributes(game_id,kind,value) VALUES(?,'genres',?)",
                         (cur.lastrowid, gname))
         if steam_type:
-            con.execute("INSERT INTO sco.steam_type VALUES(?,?,0)", (nk, steam_type))
+            con.execute("INSERT INTO sco.store_type VALUES(?,'steam',?,0)", (nk, steam_type))
         if override:
             con.execute("INSERT INTO ov.overrides VALUES(?,'content_type',?)", (nk, override))
 
@@ -75,7 +75,7 @@ def main():
     check("DisplayFusion hidden", "displayfusion" in hidden)
 
     print("2. the original type signal still works")
-    check("Wallpaper Engine hidden by steam_type=application",
+    check("Wallpaper Engine hidden by store_type=application",
           "wallpaper engine" in hidden)
 
     print("3. real games are untouched")
@@ -85,14 +85,14 @@ def main():
     check("override 'Game' rescues a Utilities-tagged real game", "rescued" not in hidden)
     check("override 'Utility' hides something nothing else flagged", "forced" in hidden)
 
-    print("5. an empty steam_type table no longer means 'hide nothing'")
-    # The live failure: with 0 rows in steam_type the whole rule evaluated false for
+    print("5. an empty store_type table no longer means 'hide nothing'")
+    # The live failure: with 0 rows in store_type the whole rule evaluated false for
     # every entry. Genre alone must still hide.
-    con.execute("DELETE FROM sco.steam_type")
+    con.execute("DELETE FROM sco.store_type")
     con.commit()
     hidden2 = {r[0] for r in con.execute(
         "SELECT g.norm_key FROM games g WHERE %s" % expr, args)}
-    check("fpsVR still hidden with steam_type empty", "fpsvr" in hidden2)
+    check("fpsVR still hidden with store_type empty", "fpsvr" in hidden2)
     check("DOOM still not hidden", "doom" not in hidden2)
 
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))

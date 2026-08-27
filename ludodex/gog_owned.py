@@ -11,8 +11,11 @@ the final redirect URL):
   https://auth.gog.com/auth?client_id=46899977096215655&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient&response_type=code&layout=client2
 
 Output: TSV  gog_id<TAB>title  to stdout; status to stderr.
+  The category goes to `gog-meta.sqlite` instead: it is what tells a real game
+  from a bonus pack (see `store_type`), and the TSV's third column is taken.
 """
 import os
+import sqlite3
 import sys
 import json
 import time
@@ -26,6 +29,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 import config
+import nongame
 
 # GOG Galaxy's public OAuth client (same values shipped in every GOG client/tool);
 # overridable via config, but the defaults work for everyone.
@@ -105,8 +109,56 @@ def _page_products(access, page, hidden=False):
     return http_get(url, token=access)
 
 
+# GOG's verdict on a product that is NOT a game. The rule lives in `nongame`, with the
+# rest of "what is not a game", and is re-exported here because this is the module that
+# knows GOG's field names.
+EXTRA = nongame.STORE_EXTRA
+store_type = nongame.store_type_from_gog_category
+
+
+def rows_from_products(products):
+    """[(gog_id, title, category)] from GOG's product objects.
+
+    The category comes along because throwing it away is what let a bonus pack become a
+    library entry, which AI enrichment then dressed up with Cyberpunk 2077's year,
+    genres, developer and description. GOG hands back 23 fields; this used to keep two.
+    """
+    out, seen = [], set()
+    for p in products:
+        gid = p.get("id")
+        if gid in seen:
+            continue
+        seen.add(gid)
+        out.append((gid, p.get("title", ""), (p.get("category") or "").strip()))
+    return out
+
+
+META_DB = os.path.join(DATA, "gog-meta.sqlite")
+
+
+def save_meta(rows):
+    """Cache what GOG said about each product, beside the ownership dump.
+
+    A SIDECAR, not a TSV column, and that is not a style choice: the third column of a
+    store TSV already means PLATFORM, so a category written there becomes the platform.
+    This mirrors `steam-meta.sqlite`, which is where Steam's appdetails verdicts are
+    cached and where `_sync_steam_type` reads them from.
+    """
+    con = sqlite3.connect(META_DB)
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS gog_meta("
+                    "gog_id TEXT PRIMARY KEY, title TEXT, category TEXT, updated REAL)")
+        con.executemany(
+            "INSERT OR REPLACE INTO gog_meta(gog_id,title,category,updated) "
+            "VALUES(?,?,?,?)",
+            [(str(g), t, c, time.time()) for g, t, c in rows])
+        con.commit()
+    finally:
+        con.close()
+
+
 def fetch_owned(access):
-    """[(gog_id, title)] for the account, hidden products included.
+    """[(gog_id, title, category)] for the account, hidden products included.
 
     TWO PASSES, and the second is deliberately fail-soft. `hiddenFlag=1` is the
     documented-by-observation way to ask GOG for hidden products and is what every other
@@ -125,7 +177,8 @@ def fetch_owned(access):
                 if gid in seen:
                     continue
                 seen.add(gid)
-                rows.append((gid, p.get("title", "")))
+                rows.append((gid, p.get("title", ""),
+                             (p.get("category") or "").strip()))
             total = data.get("totalPages", 1) or 1
             if page >= total:
                 break
@@ -153,7 +206,12 @@ def main(argv):
         sys.exit("no cached GOG token — run once with --code <code> "
                  "(see login URL in this file)")
     rows = fetch_owned(access)
-    for gid, title in rows:
+    # The TSV STAYS TWO COLUMNS. Its third column already means PLATFORM (psn and xbox
+    # emit it), so putting a category there would set every GOG game's platform to
+    # "Role-playing". The category goes to the sidecar cache instead, which is where
+    # Steam's own verdicts live too.
+    save_meta(rows)
+    for gid, title, _cat in rows:
         print(config.tsv_row(gid, title))
     print("# owned GOG games: %d" % len(rows), file=sys.stderr)
 

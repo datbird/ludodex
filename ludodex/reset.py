@@ -56,6 +56,11 @@ IMPORT_DBS = [
     "crawl-index.sqlite",       # file crawl inventory + extracted facts (re-crawlable)
     "steam-meta.sqlite",        # Steam appdetails attribute cache (tiered ingest) —
                                 # regenerable from the next Steam-media pass
+    "gog-meta.sqlite",          # what GOG said each owned product IS (its `category`),
+                                # cached beside the ownership dump the way steam-meta is.
+                                # An IMPORT cache: the ownership TSV goes with a reset,
+                                # so leaving this behind would keep verdicts about games
+                                # that are no longer in the library.
 ]
 # What the user personally decided about their games.
 CURATION_DBS = [

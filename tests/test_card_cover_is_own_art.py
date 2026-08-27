@@ -57,7 +57,7 @@ def main():
     CREATE TABLE u.user_media(norm_key TEXT, kind TEXT, sha1 TEXT, created INT);
     CREATE TABLE t.user_tags(norm_key TEXT, tag TEXT);
     CREATE TABLE sco.game_scores(norm_key TEXT, universal REAL);
-    CREATE TABLE sco.steam_type(norm_key TEXT, type TEXT);
+    CREATE TABLE sco.store_type(norm_key TEXT, source TEXT, type TEXT);
     CREATE TABLE ov.overrides(norm_key TEXT, kind TEXT, value TEXT);
     """)
 

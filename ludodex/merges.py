@@ -33,7 +33,7 @@ _REKEY = [
     ("steam-tags.sqlite", "steam_tags"),
     ("scores.sqlite", "ratings"),
     ("scores.sqlite", "game_scores"),
-    ("scores.sqlite", "steam_type"),
+    ("scores.sqlite", "store_type"),
     ("attr-overrides.sqlite", "overrides"),
     ("connections.sqlite", "device_wants"),
     ("ai-metadata.sqlite", "findings"),

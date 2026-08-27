@@ -471,14 +471,13 @@ def _scores_con():
     con.execute("""CREATE TABLE IF NOT EXISTS game_scores(
         norm_key TEXT PRIMARY KEY, universal INTEGER, critic INTEGER,
         user INTEGER, n_sources INTEGER, updated REAL)""")
-    con.execute("""CREATE TABLE IF NOT EXISTS steam_type(
-        norm_key TEXT PRIMARY KEY, type TEXT, updated REAL)""")
+    nongame.ensure_store_type(con)      # + carries `steam_type` over on a live install
     con.row_factory = sqlite3.Row
     return con
 
 
 def _sync_steam_type():
-    """Populate `sco.steam_type` from the Steam appdetails extract we ALREADY hold.
+    """Populate `store_type` from the Steam appdetails extract we ALREADY hold.
 
     The table was created for `scores_fetch.py` to fill and that never produced a single
     row — 0 of 2255 — so the type-based non-game rule tested membership in an empty table
@@ -510,15 +509,78 @@ def _sync_steam_type():
         finally:
             sm.close()
     except sqlite3.OperationalError as e:
-        print("steam_type sync: %s" % str(e)[:120], file=sys.stderr)
+        print("store_type sync (steam): %s" % str(e)[:120], file=sys.stderr)
         return 0
     if not rows:
         return 0
     con = _scores_con()
     try:
         con.execute("PRAGMA busy_timeout=15000")
-        con.executemany("INSERT INTO steam_type(norm_key,type,updated) VALUES(?,?,?) "
-                        "ON CONFLICT(norm_key) DO UPDATE SET type=excluded.type, "
+        con.executemany("INSERT INTO store_type(norm_key,source,type,updated) "
+                        "VALUES(?,'steam',?,?) "
+                        "ON CONFLICT(norm_key,source) DO UPDATE SET type=excluded.type, "
+                        "updated=excluded.updated", rows)
+        con.commit()
+    finally:
+        con.close()
+    return len(rows)
+
+
+def _sync_gog_type():
+    """The same move for GOG, whose verdict is a MISSING field rather than a value.
+
+    GOG has no `type`. It has `category`, and it leaves that EMPTY for the things it
+    sells beside a game: probed live, exactly 1 of 60 owned products had an empty
+    category and it was "Cyberpunk 2077 Digital Goodies", which had been sitting in the
+    library as a game wearing Cyberpunk 2077's metadata.
+
+    `isGame` is NOT the field. GOG returns it TRUE for that pack.
+
+    Reads the sidecar `gog-meta.sqlite` that `gog_owned.py` writes beside its ownership
+    dump, for the same reason the Steam pass reads `steam-meta.sqlite`: a store verdict
+    is store data, and the ownership TSV's third column already means platform.
+
+    Only the extras are recorded. A real category is not a claim that something IS a
+    game, so writing "game" for it would be inventing a verdict GOG never gave.
+
+    The norm_key comes from the LIBRARY, matched on GOG's own product id, not from
+    re-normalizing the title here. Title normalization is platform-aware and belongs to
+    one place; a second copy of it would agree with the first until the day it did not,
+    and the disagreement would look like "GOG said nothing" rather than like a bug.
+    """
+    src = os.path.join(DATA, "gog-meta.sqlite")
+    if not os.path.exists(src) or not os.path.exists(LIBRARY_DB):
+        return 0
+    now = time.time()
+    try:
+        gm = ro(src)
+        try:
+            extras = {str(gid): v for gid, cat in
+                      gm.execute("SELECT gog_id, category FROM gog_meta")
+                      for v in (nongame.store_type_from_gog_category(cat),) if v}
+        finally:
+            gm.close()
+        if not extras:
+            return 0
+        lc = ro(LIBRARY_DB)
+        try:
+            rows = [(nk, extras[str(sid)], now) for nk, sid in lc.execute(
+                "SELECT g.norm_key, s.source_id FROM sources s JOIN games g "
+                "ON g.id=s.game_id WHERE s.source='gog' AND s.source_id IS NOT NULL")
+                if nk and str(sid) in extras]
+        finally:
+            lc.close()
+    except sqlite3.OperationalError as e:
+        print("store_type sync (gog): %s" % str(e)[:120], file=sys.stderr)
+        return 0
+    if not rows:
+        return 0
+    con = _scores_con()
+    try:
+        con.execute("PRAGMA busy_timeout=15000")
+        con.executemany("INSERT INTO store_type(norm_key,source,type,updated) "
+                        "VALUES(?,'gog',?,?) "
+                        "ON CONFLICT(norm_key,source) DO UPDATE SET type=excluded.type, "
                         "updated=excluded.updated", rows)
         con.commit()
     finally:
@@ -8704,11 +8766,9 @@ def game_detail(norm_key: str):
                     (_grp, g["entry_key"])):
                 also.append({"entry_key": row["entry_key"], "platform": row["platform"],
                              "title": row["canonical_title"]})
-        _st = ", state" if _has_col(con, "sources", "state") else ""
-        _vc = ", via_collection" if _has_col(con, "sources", "via_collection") else ""
-        sources = [dict(r) for r in con.execute(
-            "SELECT source, platform, source_id, title_raw, detail" + _st + _vc +
-            " FROM sources WHERE game_id=?", (gid,))]
+        # every copy on the CARD, not just the entry that was opened
+        sources = _card_sources(
+            con, (g["card_key"] if "card_key" in _keys and g["card_key"] else None), gid)
         osmap = _os_map()
         for s in sources:
             oss = osmap.get((s["source"], str(s["source_id"])))
@@ -10479,6 +10539,34 @@ def _version_root(igdb_id, graph, max_depth=4):
         seen.add(int(nxt))
         cur = int(nxt)
     return cur
+
+
+def _card_sources(con, card_key, gid):
+    """Every owned copy on this card, one row per store entry or console.
+
+    NOT just the entry you opened. The Dark Souls: Remastered page said "also owned on
+    Switch" in the hero and then listed a single `steam / pc` row beneath it, because
+    this read one entry's sources while the hero described the whole card. The Nintendo
+    purchase simply was not there.
+
+    It was right until the cards landed: a card USED to be one platform, so the two
+    lists were identical. Collapsing platforms split them apart. The table's own heading
+    promises "one row per format, store entry, or console", and a console you own the
+    game on is exactly that.
+
+    Falls back to the single entry when there is no card_key, so an un-rebuilt catalog
+    serves what it served before.
+    """
+    _st = ", state" if _has_col(con, "sources", "state") else ""
+    _vc = ", via_collection" if _has_col(con, "sources", "via_collection") else ""
+    cols = "source, platform, source_id, title_raw, detail" + _st + _vc
+    if card_key and _has_col(con, "games", "card_key"):
+        return [dict(r) for r in con.execute(
+            "SELECT " + cols + " FROM sources WHERE game_id IN ("
+            "  SELECT id FROM games WHERE COALESCE(card_key, entry_key)=?)"
+            " ORDER BY source, platform", (card_key,))]
+    return [dict(r) for r in con.execute(
+        "SELECT " + cols + " FROM sources WHERE game_id=?", (gid,))]
 
 
 def _card_copies(con, card_key, card_title):
@@ -12502,15 +12590,19 @@ def _sync_worker(job, services, full=False):
                     "WHERE norm_key IS NOT NULL AND norm_key!=''")]
             finally:
                 _lc2.close()
-            # Derive steam_type from the appdetails extract the media pass just
-            # refreshed. Offline, and the only thing that ever fills that table —
-            # scores_fetch was supposed to and produced 0 rows for the whole library.
-            try:
-                _nt = _sync_steam_type()
-                if _nt:
-                    print("steam_type: %d rows derived" % _nt, file=sys.stderr)
-            except Exception as e:              # noqa: BLE001 — never fails an import
-                print("steam_type sync: %s" % str(e)[:120], file=sys.stderr)
+            # Derive store_type from the store extracts we already cache. Offline, and
+            # the only thing that ever fills that table — scores_fetch was supposed to
+            # and produced 0 rows for the whole library. Both stores, because a verdict
+            # that only one shop can give is how a GOG bonus pack became a game.
+            for _store, _fn in (("steam", _sync_steam_type), ("gog", _sync_gog_type)):
+                try:
+                    _nt = _fn()
+                    if _nt:
+                        print("store_type: %d %s rows derived" % (_nt, _store),
+                              file=sys.stderr)
+                except Exception as e:          # noqa: BLE001 — never fails an import
+                    print("store_type sync (%s): %s" % (_store, str(e)[:120]),
+                          file=sys.stderr)
             _fin = _media_finish(_fk, measure=(mode != "ondemand"), should_stop=_stopped)
             if _fin.get("pruned"):
                 _phase("media", "running", "dropped %d blank assets" % _fin["pruned"])

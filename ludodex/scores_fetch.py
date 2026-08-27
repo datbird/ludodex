@@ -34,6 +34,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 import config          # noqa: E402
+import nongame         # noqa: E402
 import scoring         # noqa: E402
 
 SCORES_DB = os.path.join(DATA, "scores.sqlite")
@@ -54,14 +55,15 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS game_scores(
         norm_key TEXT PRIMARY KEY, universal INTEGER, critic INTEGER,
         user INTEGER, n_sources INTEGER, updated REAL)""")
-    con.execute("""CREATE TABLE IF NOT EXISTS steam_type(
-        norm_key TEXT PRIMARY KEY, type TEXT, updated REAL)""")
+    nongame.ensure_store_type(con)
     con.row_factory = sqlite3.Row
     return con
 
 
-# Steam appdetails `type` values that are NOT games — excluded from scoring/top lists.
-NON_GAME_TYPES = {"application", "tool", "music", "video", "hardware", "series", "mod"}
+# What a store says is NOT a game — excluded from scoring and top lists. Imported, not
+# restated: this module held its own copy of the list and the read sites held another,
+# so "not a game" had two definitions that were free to drift.
+NON_GAME_TYPES = set(nongame.NON_GAME_TYPES)
 
 
 def _put(con, norm_key, source, kind, score, votes, raw):
@@ -245,8 +247,8 @@ def fetch_steam_types(con, refresh=False, limit=None):
         if limit and done >= limit:
             break
         if not refresh:
-            r = con.execute("SELECT updated FROM steam_type WHERE norm_key=?",
-                            (nk,)).fetchone()
+            r = con.execute("SELECT updated FROM store_type WHERE norm_key=? "
+                            "AND source='steam'", (nk,)).fetchone()
             if r and (time.time() - r[0]) < FRESH_DAYS * 86400:
                 continue
         done += 1
@@ -255,7 +257,8 @@ def fetch_steam_types(con, refresh=False, limit=None):
                            "&filters=basic" % appid).get(str(appid), {})
             typ = (d.get("data") or {}).get("type") if d.get("success") else None
             if typ:
-                con.execute("INSERT OR REPLACE INTO steam_type VALUES(?,?,?)",
+                con.execute("INSERT OR REPLACE INTO store_type"
+                            "(norm_key,source,type,updated) VALUES(?,'steam',?,?)",
                             (nk, typ.lower(), time.time()))
                 n += 1
         except Exception as e:
@@ -313,7 +316,7 @@ def _params():
 def recompute(con):
     params = _params()
     non_games = {r[0] for r in con.execute(
-        "SELECT norm_key FROM steam_type WHERE type IN (%s)"
+        "SELECT norm_key FROM store_type WHERE type IN (%s)"
         % ",".join("?" * len(NON_GAME_TYPES)), tuple(NON_GAME_TYPES))}
     by_game = {}
     for r in con.execute("SELECT norm_key, kind, score, votes FROM ratings"):

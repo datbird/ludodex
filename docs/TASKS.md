@@ -187,6 +187,8 @@ shared with the long-standing one-way Firestore mirror.
 
 | # | Task | Commit |
 |---|---|---|
+| 45 | **`steam_type` -> `store_type(norm_key, source, type)`, and GOG gets a verdict.** "Cyberpunk 2077 Digital Goodies" sat in the library as a game and AI enrichment dressed it in Cyberpunk 2077's year, genres, developer and description. GOG DOES say: `isGame` is TRUE for that pack, but `category` is EMPTY, and `gog_owned.py` was discarding it along with 20 other fields. The table that holds "what does the store say this is" was Steam-only in its NAME, so the answer had nowhere to go. Renamed with an idempotent carry-over, `_sync_gog_type()` added beside `_sync_steam_type()`, and the category cached in a new `gog-meta.sqlite` sidecar. **The trap avoided:** the obvious place for the category was the ownership TSV's third column, which already means PLATFORM (psn and xbox emit it there) — that would have set every GOG game's platform to "Role-playing". Pinned by a test. | `HEAD` |
+| 46 | **"In your library" spans the card.** After the collapse a card's detail page still listed the sources of its REPRESENTATIVE entry alone, so a game owned on three platforms showed one. `_card_sources()` reads every entry on the card. | `HEAD` |
 | 2 | Firestore adapter protocol test + live round-trips vs Postgres / MySQL / Firestore emulator; fixed a real resource-name bug in Firestore writes | `21d7da3`, `HEAD` |
 | 3 | `auto_fix_confidence` setting driving all three AI-gated auto-fixes | `93982dc` |
 | 4 | Live cover preview before applying a smart art pick | `11b66c9` |

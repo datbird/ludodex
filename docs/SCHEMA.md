@@ -132,7 +132,8 @@ rebuildable ones are deliberately excluded from `ALL` backups so a snapshot stay
 | `crawl-index.sqlite` | the file-crawl inventory and extracted facts |
 | `steam-meta.sqlite` | Steam appdetails attribute cache |
 | `steam-tags.sqlite` | SteamSpy community tags (30-day TTL) |
-| `scores.sqlite` | fetched ratings |
+| `gog-meta.sqlite` | `gog_meta(gog_id, title, category, updated)`: what GOG said each owned product IS. The category is the field that tells a game from a bonus pack (`isGame` is TRUE for both), and it is cached HERE rather than in the ownership TSV because that file's third column already means platform |
+| `scores.sqlite` | fetched ratings, and `store_type(norm_key, source, type, updated)`: what a STORE says a product is, for every store. Was `steam_type`; renamed when GOG got a verdict of its own |
 | `os.sqlite` | per-appid OS support |
 | `ra.sqlite` | RetroAchievements cache |
 | `ai-metadata.sqlite` | AI scan findings |

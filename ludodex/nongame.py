@@ -22,11 +22,67 @@ The signals, in precedence order:
 import os
 import sqlite3
 
-# Steam appdetails `type`s that aren't games.
-NON_GAME_TYPES = ("application", "tool", "music", "video", "hardware", "series", "mod")
+# What a STORE says a product is, when what it says is "not a game".
+#
+# `extra` is not a Steam word. It is ours, for a product a store sells beside a game
+# rather than as one: GOG's "Cyberpunk 2077 Digital Goodies", an art book, a soundtrack
+# bundle. GOG has no `type` field at all, but it does have `category`, and it leaves that
+# EMPTY for exactly these. See `gog_owned.store_type`.
+STORE_EXTRA = "extra"
+NON_GAME_TYPES = ("application", "tool", "music", "video", "hardware", "series", "mod",
+                  STORE_EXTRA)
+
+def store_type_from_gog_category(category):
+    """GOG's verdict, which is a MISSING field rather than a value.
+
+    `isGame` IS NOT THE FIELD. GOG returns it TRUE for "Cyberpunk 2077 Digital Goodies".
+    What separates that pack from a game is an EMPTY `category`: probed against a live
+    account, exactly 1 of 60 owned products had one, and it was that pack.
+
+    Returning None for a real category is deliberate. This answers "did the store tell us
+    it is NOT a game", and a category is not a claim that it is one.
+
+    It lives here rather than in `gog_owned` so the server can ask without importing that
+    module, which reads GOG credentials at import time and would take the whole server
+    down on an install that has never connected a GOG account.
+    """
+    return STORE_EXTRA if not (category or "").strip() else None
+
+
+# ONE table for "what does the store say this is", across every store.
+#
+# It was `steam_type(norm_key, type, updated)`, which was the right mechanism wearing the
+# wrong name. A GOG verdict had nowhere to go, so on 2026-08-26 a GOG bonus pack sat in
+# the library as a game and AI enrichment dressed it in Cyberpunk 2077's year, genres,
+# developer and description. Naming the store makes the second store possible.
+STORE_TYPE_DDL = ("CREATE TABLE IF NOT EXISTS %sstore_type("
+                  "norm_key TEXT, source TEXT, type TEXT, updated REAL, "
+                  "PRIMARY KEY(norm_key, source))")
+
+
+def ensure_store_type(con):
+    """Create `store_type` on a WRITABLE scores connection, carrying `steam_type` over.
+
+    Called from both places that open scores.sqlite for writing, so a live install picks
+    the new table up the moment either one runs. The read path (`hidden_sql`) queries
+    `store_type` unconditionally: a missing table there is an error, not an empty answer,
+    which is the point. That is only safe because the server calls this at startup.
+
+    Idempotent. The copy runs once because the INSERT is a no-op the second time.
+    """
+    con.execute(STORE_TYPE_DDL % "")
+    try:
+        con.execute("INSERT OR IGNORE INTO store_type(norm_key,source,type,updated) "
+                    "SELECT norm_key,'steam',type,updated FROM steam_type")
+    except sqlite3.OperationalError as e:
+        # no steam_type at all is a fresh install, which needs no carry-over. Anything
+        # else is a real fault and must not pass for one.
+        if "no such table" not in str(e):
+            raise
+    return con
 
 # Steam GENRES that only ever belong to software, never to a game. A second, independent
-# signal for the same question — needed because `steam_type` is populated only by
+# signal for the same question — needed because `store_type` is populated only by
 # scores_fetch and was EMPTY for the whole library (0 of 2208 rows), which left the
 # type-based rule testing membership in an empty table and therefore hiding nothing, ever.
 # Genres are already on the entry, cost nothing to consult, and catch the case the type
@@ -70,7 +126,7 @@ def hidden_sql():
             "AND o.kind='content_type') "
             "THEN EXISTS(SELECT 1 FROM ov.overrides o WHERE o.norm_key=g.norm_key AND "
             "o.kind='content_type' AND lower(o.value)<>'game') "
-            "ELSE (g.norm_key IN (SELECT norm_key FROM sco.steam_type WHERE type IN (%s)) "
+            "ELSE (g.norm_key IN (SELECT norm_key FROM sco.store_type WHERE type IN (%s)) "
             "      OR EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
             "                AND ga.kind='genre_ids' AND ga.value IN (%s)) "
             "      OR EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
@@ -96,8 +152,7 @@ def attach(con, data_dir):
              "CREATE TABLE IF NOT EXISTS ov.overrides("
              "norm_key TEXT, kind TEXT, value TEXT, origin TEXT, created REAL)"),
             ("sco", "scores.sqlite",
-             "CREATE TABLE IF NOT EXISTS sco.steam_type("
-             "norm_key TEXT PRIMARY KEY, type TEXT, updated REAL)")):
+             STORE_TYPE_DDL % "sco.")):
         path = os.path.join(data_dir, fname)
         if os.path.exists(path):
             try:

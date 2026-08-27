@@ -3181,8 +3181,9 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
         <div className="pref-text">
           <span className="pref-name">Hide non-games</span>
           <span className="pref-hint">
-            Exclude Steam apps flagged as applications, tools, soundtracks, videos or
-            hardware (from the <code>steam_type</code> signal) everywhere in the library.
+            Exclude anything a store says is not a game: Steam applications, tools,
+            soundtracks, videos and hardware, and GOG bonus packs and goodies (from the
+            <code>store_type</code> signal) everywhere in the library.
           </span>
         </div>
       </div>
