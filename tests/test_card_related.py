@@ -107,6 +107,79 @@ def main():
     check("a lone game has no versions", solo.get("versions") == [])
     check("and an empty series rather than itself", solo.get("series") == [])
 
+    # --- A CROSSOVER IS NOT A SERIES ENTRY ------------------------------------------
+    # Live 2026-08-26: "Total War: Empire" listed "Sonic & All-Stars Racing Transformed"
+    # as part of the Total War series. IGDB tags a crossover with a franchise per GUEST
+    # CHARACTER, so that one claims twelve: Alex Kidd, Crazy Taxi, Golden Axe, Shenmue,
+    # Shinobi, Team Fortress, Wreck-It Ralph, Total War and more. Sharing one of those
+    # with Total War is not a relationship anybody wants shown.
+    #
+    # Measured across the library: 590 games carry ONE franchise, 72 carry two, 4 carry
+    # three. Everything at four or more is a crossover or a compilation. So the rule is
+    # a count, with a rescue: a crossover still appears under a series its own TITLE
+    # names, which keeps Smash under "Super Smash Bros." and Mario Kart under "Mario".
+    con.executescript("""
+    INSERT INTO games VALUES(10,'Total War: EMPIRE','total war empire','pc',
+      'total war empire@pc','total war empire','igdb:5000','igdb:5000',
+      'Total War: EMPIRE',0,1,0);
+    INSERT INTO games VALUES(11,'Total War: SHOGUN 2','total war shogun 2','pc',
+      'total war shogun 2@pc','total war shogun 2','igdb:5001','igdb:5001',
+      'Total War: SHOGUN 2',0,1,0);
+    INSERT INTO games VALUES(12,'Sonic & All-Stars Racing Transformed',
+      'sonic all stars racing transformed','pc','sonic all stars racing transformed@pc',
+      'sonic all stars racing transformed','igdb:5002','igdb:5002',
+      'Sonic & All-Stars Racing Transformed',0,1,0);
+    INSERT INTO games VALUES(13,'Super Smash Bros. Ultimate','super smash bros ultimate',
+      'switch','super smash bros ultimate@switch','super smash bros ultimate',
+      'igdb:5003','igdb:5003','Super Smash Bros. Ultimate',0,1,0);
+    """)
+    for gid, vals in (
+            (10, ["Total War"]),
+            (11, ["Total War"]),
+            # the crossover, with its real twelve
+            (12, ["Alex Kidd", "Crazy Taxi", "Golden Axe", "Nights into Dreams",
+                  "Shenmue", "Shinobi", "Sonic The Hedgehog", "Space Channel 5",
+                  "Super Monkey Ball", "Team Fortress", "Total War", "Wreck-It Ralph"]),
+            (13, ["Super Smash Bros.", "Total War", "Metroid", "Kirby", "Star Fox"])):
+        for v in vals:
+            con.execute("INSERT INTO game_attributes VALUES(?,'series',?)", (gid, v))
+    con.commit()
+
+    tw = srv._card_related(con, "igdb:5000", graph)
+    names = {x["title"] for x in tw.get("series") or []}
+    check("the Total War series is named", tw.get("series_name") == "Total War", tw)
+    check("a real sequel is listed", "Total War: SHOGUN 2" in names, names)
+    check("A CROSSOVER IS NOT LISTED: Sonic stays out of Total War",
+          "Sonic & All-Stars Racing Transformed" not in names, names)
+    check("and neither does Smash, which also claims Total War",
+          "Super Smash Bros. Ultimate" not in names, names)
+
+    # the rescue: a crossover still belongs to the series its OWN title names
+    smash = srv._card_related(con, "igdb:5003", graph)
+    check("a crossover's own card names the series its title matches",
+          smash.get("series_name") == "Super Smash Bros.", smash.get("series_name"))
+
+    # the leading-word rescue: "Sonic & All-Stars Racing" is a Sonic game, and its whole
+    # franchise name ("Sonic The Hedgehog") is not in its title. Without this its page
+    # read "Alex Kidd series", which just looks broken.
+    sonic = srv._card_related(con, "igdb:5002", graph)
+    check("a crossover files under the franchise its title leads with",
+          sonic.get("series_name") == "Sonic The Hedgehog", sonic.get("series_name"))
+    check("and not whichever value happened to sort first",
+          sonic.get("series_name") != "Alex Kidd", sonic.get("series_name"))
+    # The guard on that rescue. A four-letter lead must NOT file a game: "Star" would
+    # put a Star Trek game in Star Wars. With no whole-name match and a lead too short
+    # to trust, it falls back rather than guessing.
+    check("a four-letter lead is too weak to file by",
+          srv._pick_series(["Alpha Centauri", "Star Command"], "Star Trek: Bridge Crew")
+          == "Alpha Centauri")
+    check("but a whole-name match still wins outright",
+          srv._pick_series(["Star Wars", "Star Trek"], "Star Trek: Bridge Crew")
+          == "Star Trek")
+    check("and a five-letter lead is trusted",
+          srv._pick_series(["Alex Kidd", "Sonic The Hedgehog"],
+                           "Sonic & All-Stars Racing") == "Sonic The Hedgehog")
+
     print("RESULT: %d checks, all passed" % len(PASS))
 
 

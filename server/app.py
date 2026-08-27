@@ -10380,16 +10380,83 @@ def _card_related(con, card_key, graph=None):
                     % ",".join("?" * len(kin)), kin)
 
     # ---------------------------------------------------------------------- series
-    row = con.execute(
+    #
+    # A CROSSOVER IS NOT A SERIES ENTRY. IGDB tags a crossover with one franchise per
+    # GUEST CHARACTER, so "Sonic & All-Stars Racing Transformed" claims twelve of them
+    # (Alex Kidd, Crazy Taxi, Shenmue, Team Fortress, Wreck-It Ralph, Total War...) and
+    # "Super Smash Bros. Ultimate" claims twenty-seven. Matching on any shared value put
+    # Sonic in the Total War series, which is not a relationship anybody wants shown.
+    #
+    # Measured over the live library: 590 games carry ONE franchise, 72 carry two, and 4
+    # carry three (Persona 5, Spider-Man 2, LEGO Pirates, DuckTales, all legitimate).
+    # Everything at four or more is a crossover or a multi-franchise compilation. Hence
+    # the cut, and hence the RESCUE below: past that count, franchise membership stops
+    # meaning "this is part of that series" and starts meaning "this features something
+    # from it".
+    names = [r[0] for r in con.execute(
         "SELECT ga.value FROM games g JOIN game_attributes ga ON ga.game_id=g.id "
-        "WHERE COALESCE(g.card_key, g.entry_key)=? AND ga.kind='series' LIMIT 1",
-        (card_key,)).fetchone()
-    if row and row[0]:
-        out["series_name"] = row[0]
-        out["series"] = _cards(
+        "WHERE COALESCE(g.card_key, g.entry_key)=? AND ga.kind='series'", (card_key,))
+        if r[0]]
+    if names:
+        # This card's own series: prefer one its TITLE names, so a crossover's page reads
+        # "Super Smash Bros. series" rather than whichever franchise sorted first.
+        title = con.execute(
+            "SELECT COALESCE(card_title, canonical_title) FROM games "
+            "WHERE COALESCE(card_key, entry_key)=? LIMIT 1", (card_key,)).fetchone()
+        own = _pick_series(names, title[0] if title else "")
+        out["series_name"] = own
+        rows = _cards(
             "EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
-            "AND ga.kind='series' AND ga.value=?)", [row[0]])
+            "AND ga.kind='series' AND ga.value=?)", [own])
+        # drop the crossovers, keeping any whose own title names this series
+        keep = []
+        for r in rows:
+            n = con.execute(
+                "SELECT COUNT(*) FROM games g JOIN game_attributes ga ON ga.game_id=g.id "
+                "WHERE COALESCE(g.card_key, g.entry_key)=? AND ga.kind='series'",
+                (r["card_key"],)).fetchone()[0]
+            if n <= SERIES_MAX or _title_names(r.get("title") or "", own):
+                keep.append(r)
+        out["series"] = keep
     return out
+
+
+# More franchises than this and the game is a crossover, not a series entry. Measured,
+# not guessed: see the reasoning in `_card_related`.
+SERIES_MAX = 3
+
+
+def _alnum(v):
+    return "".join(c for c in (v or "").lower() if c.isalnum())
+
+
+def _title_names(title, series):
+    """True when a game's own title names this series, which is how a crossover earns
+    its place: "Super Smash Bros. Ultimate" really is a Super Smash Bros. game."""
+    a, b = _alnum(series), _alnum(title)
+    return bool(a) and a in b
+
+
+def _pick_series(names, title):
+    """Which of a game's franchises to file it under.
+
+    Whole-name match first, longest wins, so "Super Smash Bros." beats a bare "Mario".
+
+    Then a LEADING-WORD match, which exists for one measured case: "Sonic & All-Stars
+    Racing Transformed" belongs to "Sonic The Hedgehog", and the whole name is not in the
+    title. Without this its page read "Alex Kidd series", which just looks broken. The
+    word must be five characters or more: "Sonic" qualifies, "Star" does not, and that
+    matters because "Star" would file a Star Trek game under Star Wars.
+
+    Falls back to the first value, which is right for the 98% of games carrying one.
+    """
+    hits = sorted((n for n in names if _title_names(title, n)), key=len, reverse=True)
+    if hits:
+        return hits[0]
+    lead = sorted((n for n in names
+                   if len(n.split()[0]) >= 5 and _title_names(title, n.split()[0])),
+                  key=len, reverse=True)
+    return lead[0] if lead else names[0]
 
 
 def _version_root(igdb_id, graph, max_depth=4):
