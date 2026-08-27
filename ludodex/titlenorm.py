@@ -92,7 +92,13 @@ def norm(t, platform=None):
     s = (t or "").lower()
     s = _COMMA_ARTICLE.sub(" ", s)          # No-Intro "Title, The" -> "Title"
     s = _TRAIL_EXT.sub("", s)
-    s = re.sub(r"[™®©]", "", s)
+    # A SPACE, NOT NOTHING. Deleting the symbol joined the words it sat between:
+    # "Puyo Puyo(TM)Tetris(R)" became `puyo puyotetris` and "ACE COMBAT(TM)7" became
+    # `ace combat7`, neither of which matches the same game bought anywhere else. Live,
+    # that split Puyo Puyo Tetris into a Steam key and a Switch key which then BOTH
+    # claimed IGDB 6866 — invariant I9. A symbol that already had whitespace around it
+    # is unaffected, because the extra space collapses in the split() below.
+    s = re.sub(r"[™®©]", " ", s)
     if preserve_years:
         s = re.sub(r"\(([^)]*)\)",
                    lambda m: " %s " % m.group(1)

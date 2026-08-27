@@ -181,16 +181,33 @@ def main():
             configured.append("screenscraper")
         if _cfg.steamgriddb_key():
             configured.append("steamgriddb")
+        # A PER-SYSTEM PROVIDER IS ATTEMPTED PER (game, platform). ScreenScraper files
+        # one record per system, so "this game was attempted" is not a question that has
+        # one answer for a game owned on three platforms — two of them can still be
+        # unmatched behind a third that is not.
+        owned = {}
+        for _nk, _p in g.execute("SELECT DISTINCT norm_key, platform FROM games "
+                                 "WHERE platform IS NOT NULL AND platform<>''"):
+            owned.setdefault(_nk, []).append(_p)
         bad = []
         for prov in configured:
+            keyed = provider_ids.is_platform_keyed(prov)
+            unit = "(entry, platform) pairs" if keyed else "entries"
             try:
-                never = [k for k in keys
-                         if provider_ids.cached(mc, prov, k) is None]
+                if keyed:
+                    todo = [(k, p) for k in keys for p in owned.get(k) or []]
+                    never = ["%s on %s" % (k, p) for k, p in todo
+                             if provider_ids.cached(mc, prov, k, platform=p) is None]
+                    total = len(todo)
+                else:
+                    never = [k for k in keys
+                             if provider_ids.cached(mc, prov, k) is None]
+                    total = len(keys)
             except sqlite3.OperationalError:
-                never = keys            # table absent = nothing was ever matched
+                never, total = list(keys), len(keys)   # table absent = never matched
             if never:
-                bad.append("%s — %d of %d entries never attempted (e.g. %s)"
-                           % (prov, len(never), len(keys), ", ".join(never[:3])))
+                bad.append("%s — %d of %d %s never attempted (e.g. %s)"
+                           % (prov, len(never), total, unit, ", ".join(never[:3])))
         mc.close()
         report("I7 every configured provider is attempted for every game", bad,
                "a provider that is never asked can never be a provider")
@@ -310,19 +327,39 @@ def main():
     _mcp = os.path.join(DATA, "metadata-cache.sqlite")
     _mc = (sqlite3.connect("file:%s?mode=ro" % _mcp, uri=True)
            if os.path.exists(_mcp) else None)
+    # A PER-SYSTEM PROVIDER'S YEAR IS THAT PLATFORM'S RELEASE DATE, not the game's.
+    # ScreenScraper files one record per system, so the Switch record for a 2019 PC game
+    # is dated when the Switch port shipped. Reading that as an era disagreement
+    # reported 8 correct Switch matches as violations live on 2026-08-26 — Ape Out,
+    # Among Us, Bayonetta 2 and the rest, every one of them the right record.
+    #
+    # So when the record's system IS the platform its row is for, a LATER year is a port
+    # date and not evidence of anything. An EARLIER year still is: that is the harm this
+    # invariant was built for — Resident Evil 4 (2023) wearing the 2005 GameCube record —
+    # and the system agreeing does not excuse a record that predates the game.
+    import screenscraper as _ss10
     for prov, (table, idcol) in (sorted(_pi.PROVIDERS.items()) if _mc else []):
+        keyed = _pi.is_platform_keyed(prov)
+        cols = "norm_key, year, platform, system" if keyed else "norm_key, year"
         try:
-            rows = _mc.execute("SELECT norm_key, year FROM %s WHERE COALESCE(%s,0)>0 "
-                               "AND year IS NOT NULL" % (table, idcol)).fetchall()
+            rows = _mc.execute("SELECT %s FROM %s WHERE COALESCE(%s,0)>0 "
+                               "AND year IS NOT NULL" % (cols, table, idcol)).fetchall()
         except sqlite3.OperationalError:
             continue
-        for nk, yr in rows:
+        for row in rows:
+            nk, yr = row[0], row[1]
             if nk not in cat:
                 cat[nk] = _mg.game_era(g, _mc, nk)
             own = cat[nk]
-            if own and yr and abs(int(yr) - own) > matchgate.YEAR_TOLERANCE:
-                bad.append("%s %s — the game is from %d, the match is %s"
-                           % (prov, nk[:38], own, yr))
+            if not (own and yr):
+                continue
+            if int(yr) - own > matchgate.YEAR_TOLERANCE and keyed \
+                    and _ss10.system_id_fits(row[2], row[3]) and row[2] and row[3]:
+                continue                  # a later release on the system it is filed for
+            if abs(int(yr) - own) > matchgate.YEAR_TOLERANCE:
+                bad.append("%s %s%s — the game is from %d, the match is %s"
+                           % (prov, nk[:38],
+                              (" (%s)" % row[2]) if keyed and row[2] else "", own, yr))
     if _mc:
         _mc.close()
     report("I10 a provider match is the same ERA as the game", bad,
@@ -347,37 +384,32 @@ def main():
     bad = []
     _mc = (sqlite3.connect("file:%s?mode=ro" % _mcp, uri=True)
            if os.path.exists(_mcp) else None)
+    # ONE ROW PER (game, platform), so the record is judged against the platform it was
+    # matched FOR. This check used to build the wanted system ids from a game's whole
+    # platform set, which had two faults and both produced noise instead of findings:
+    # `ss_resolution` held one row for a multi-platform game so there was no platform to
+    # judge against, and `pc` contributes no system id, so it silently dropped out of the
+    # set rather than making the check abstain. Live 2026-08-26, 12 of 16 reported
+    # violations were PC records held by pc+switch games — every one of them correct.
+    # The rule itself now lives in `screenscraper.system_id_fits`, beside the one the
+    # matcher uses, so the two cannot drift again.
     try:
         rows = [] if _mc is None else _mc.execute(
-            "SELECT norm_key, ss_id, system FROM ss_resolution "
-            "WHERE COALESCE(ss_id,0)>0 AND system IS NOT NULL AND system<>''"
+            "SELECT norm_key, ss_id, system, platform FROM ss_resolution "
+            "WHERE COALESCE(ss_id,0)>0 AND system IS NOT NULL AND system<>'' "
+            "AND platform<>''"
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
-    for nk, sid, sysname in rows:
-        # EVERY PLATFORM THE norm_key IS OWNED ON, not an arbitrary one. The catalog
-        # keeps one row per (game, platform) while ss_resolution keeps ONE row per
-        # norm_key, so `fetchone()` picked whichever row SQLite happened to return first
-        # and then compared the match against it. A game owned on Genesis and Windows
-        # scored as violating whenever the arbitrary pick was the other platform — which
-        # is the structural reason this check reported noise instead of real mismatches.
-        # A match is wrong only when it fits NONE of the platforms the game is owned on.
-        plats = [r["platform"] for r in
-                 g.execute("SELECT DISTINCT platform FROM games WHERE norm_key=?", (nk,))
-                 if r["platform"]]
-        if not plats:
-            continue
-        # `system` holds ScreenScraper's own numeric id for rows written since this
-        # was recorded, and one of our labels for anything older or hand-set.
-        want = {s for s in (_ss.systeme_id(p) for p in plats) if s}
-        got = (int(sysname) if str(sysname).strip().isdigit()
-               else _ss.systeme_id(sysname))
-        if want and got and got not in want:
+    for nk, sid, sysname, plat in rows:
+        if not _ss.system_id_fits(plat, sysname):
+            got = (int(sysname) if str(sysname).strip().isdigit()
+                   else _ss.systeme_id(sysname))
             # name the system rather than print its id — "a 21 record" tells nobody
             # that a Genesis entry is wearing Game Gear art
             label = _ss.system_label(got) or ("system %s" % got)
-            bad.append("screenscraper %s — the game is %s, the match is a %s record"
-                       % (nk[:38], "/".join(sorted(plats)), label))
+            bad.append("screenscraper %s — the %s copy is on a %s record"
+                       % (nk[:38], plat, label))
     if _mc:
         _mc.close()
     report("I11 a provider match is for the same SYSTEM as the game", bad,

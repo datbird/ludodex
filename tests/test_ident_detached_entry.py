@@ -95,6 +95,7 @@ def main():
     # to fan out too.
     provider_ids.ensure_tables(cc)
     provider_ids.record(cc, "screenscraper", "doom", 4321, name="Doom",
+                        platform="pc",
                         matched_by="search")
     entry_res.set_detach(cc, "doom", "atari 2600")
     cc.commit()

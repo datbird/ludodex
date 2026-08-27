@@ -7,7 +7,7 @@ with nothing else to wire up.
 |---|---|---|
 | `library.png` | the main library grid, full of real box art. The hero shot. | 1600 |
 | `detail.png` | one game's detail page: matched providers, scores, attributes, tags | 1400 |
-| `platforms.png` | STALE since 2026-08-25, and unreferenced by the README: it shows one tile per platform, which the card collapse replaced. Retake as one card showing its platforms and editions | 1800 |
+| `platforms.png` | one card (SteamWorld Dig 2) showing the platforms it is owned on and every copy underneath | 1800 |
 | `wand.png` | the magic wand dialog, light vs heavy, showing the scope before it runs | 1600 |
 | `media.png` | the media classification matrix for one game | 1600 |
 | `dashboard.png` | the dashboard: counts, recent arrivals, what needs attention | 1800 |

@@ -80,14 +80,16 @@ def main():
                                   "Mass Effect 2", ["pc"], failing)
         check("it returns 0 for this run", rc == 0)
         check("but writes NO row, so the game is retried",
-              provider_ids.cached(con, "screenscraper", "mass effect 2") is None)
+              provider_ids.cached(con, "screenscraper", "mass effect 2",
+                                  platform="pc") is None)
 
         print("4. a genuine miss IS recorded (we must not re-search forever)")
         rc = provider_ids.resolve(con, "screenscraper", "nothing here",
                                   "Nothing Here", ["pc"], lambda t, s: None)
         check("returns 0", rc == 0)
         check("and records the miss",
-              provider_ids.cached(con, "screenscraper", "nothing here") is not None)
+              provider_ids.cached(con, "screenscraper", "nothing here",
+                                  platform="pc") is not None)
     finally:
         ss.jeu_recherche = real
 

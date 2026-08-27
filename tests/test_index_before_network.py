@@ -88,7 +88,7 @@ def main():
     check("returned the ScreenScraper id from the index: %r" % pid, pid == 9911)
     check("the provider was never called", not calls)
 
-    row = provider_ids.cached(con, "screenscraper", "bioshock")
+    row = provider_ids.cached(con, "screenscraper", "bioshock", platform="pc")
     check("recorded as matched_by='index': %r" % (row[1] if row else None),
           row and row[1] == "index")
 

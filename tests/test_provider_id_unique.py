@@ -34,19 +34,24 @@ def main():
     import provider_ids as P
     con=sqlite3.connect(":memory:"); P.ensure_tables(con)
     check("first searched match is recorded",
-          P.record(con,"screenscraper","ninja gaiden sigma 2",25266)==25266)
+          P.record(con,"screenscraper","ninja gaiden sigma 2",25266,
+                   platform="pc")==25266)
     check("a second game cannot take the same searched id",
-          P.record(con,"screenscraper","ninja gaiden ii black",25266)==0)
-    r=P.cached(con,"screenscraper","ninja gaiden ii black")
+          P.record(con,"screenscraper","ninja gaiden ii black",25266,
+                   platform="pc")==0)
+    r=P.cached(con,"screenscraper","ninja gaiden ii black",platform="pc")
     check("the refusal is recorded as a MISS, not as nothing (it WAS attempted)",
           r is not None and r[0]==0)
     check("...and it is tagged so the reason is legible", r[1]=="collision")
     check("the original keeps its id",
-          P.cached(con,"screenscraper","ninja gaiden sigma 2")[0]==25266)
+          P.cached(con,"screenscraper","ninja gaiden sigma 2",
+                   platform="pc")[0]==25266)
     check("re-recording the SAME game with the same id still works",
-          P.record(con,"screenscraper","ninja gaiden sigma 2",25266)==25266)
+          P.record(con,"screenscraper","ninja gaiden sigma 2",25266,
+                   platform="pc")==25266)
     check("a different id for a second game is fine",
-          P.record(con,"screenscraper","ninja gaiden ii black",99999)==99999)
+          P.record(con,"screenscraper","ninja gaiden ii black",99999,
+                   platform="pc")==99999)
     # appid + manual are exempt: a DLC appid legitimately resolves to its parent
     check("a steam_appid match may share an id",
           P.record(con,"steamgriddb","cult of the lamb",5294443,
@@ -58,7 +63,7 @@ def main():
           P.record(con,"steamgriddb","something else",5294443,
                    matched_by="manual")==5294443)
     check("a miss is never blocked by uniqueness",
-          P.record(con,"screenscraper","some other game",0)==0)
+          P.record(con,"screenscraper","some other game",0,platform="pc")==0)
     check("holder() names the game already holding an id",
           P.holder(con,"screenscraper",25266)=="ninja gaiden sigma 2")
     check("holder() ignores the asking game itself",

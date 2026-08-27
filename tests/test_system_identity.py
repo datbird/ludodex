@@ -60,8 +60,9 @@ def main():
 
     provider_ids.resolve(con, "screenscraper", "crash bandicoot 3 warped",
                          "Crash Bandicoot 3: Warped", ["ps1"], search_ps3)
-    row = con.execute("SELECT ss_id, system FROM ss_resolution WHERE norm_key=?",
-                      ("crash bandicoot 3 warped",)).fetchone()
+    row = con.execute("SELECT ss_id, system FROM ss_resolution "
+                      "WHERE norm_key=? AND platform=?",
+                      ("crash bandicoot 3 warped", "ps1")).fetchone()
     check("the system the provider reported is written down", row[1] == "59")
 
     # a provider that says nothing about the system leaves it unrecorded, not blank-true
@@ -70,8 +71,8 @@ def main():
 
     provider_ids.resolve(con, "screenscraper", "quiet", "Something", ["nes"],
                          search_quiet)
-    row = con.execute("SELECT system FROM ss_resolution WHERE norm_key=?",
-                      ("quiet",)).fetchone()
+    row = con.execute("SELECT system FROM ss_resolution "
+                      "WHERE norm_key=? AND platform=?", ("quiet", "nes")).fetchone()
     check("a provider that does not say leaves it NULL", row[0] is None)
     con.commit()
     con.close()
@@ -95,7 +96,14 @@ def main():
     """)
     for nk, title, plat in (("soul reaver", "Soul Reaver", "ps1"),
                             ("sonic", "Sonic", "genesis"),
-                            ("a pc game", "A PC Game", "pc")):
+                            ("a pc game", "A PC Game", "pc"),
+                            # owned on BOTH, and PC has no ScreenScraper system id. The
+                            # old check built the wanted ids from the platform SET, so
+                            # `pc` silently dropped out and the game's perfectly good PC
+                            # record was reported as a Switch mismatch. 12 of 16 live
+                            # violations on 2026-08-26 were exactly this.
+                            ("celeste", "Celeste", "pc"),
+                            ("celeste", "Celeste", "switch")):
         lib.execute("INSERT INTO games(canonical_title,norm_key,platform,entry_key,"
                     "base_key,game_key,n_sources,n_kinds,sources_summary,wanted) "
                     "VALUES(?,?,?,?,?,?,1,0,'steam',0)",
@@ -106,13 +114,18 @@ def main():
 
     md = sqlite3.connect(os.path.join(D, "metadata-cache.sqlite"))
     md.execute("DELETE FROM ss_resolution")
-    # `system` holds ScreenScraper's own numeric system id (135 = PC Windows here)
-    for nk, sid, sysname in (("soul reaver", 313298, "135"),     # ps1 entry, PC record
-                             ("sonic", 5, "1"),                  # genesis record: right
-                             ("a pc game", 999, "58")):          # pc: nothing to fit
-        md.execute("INSERT INTO ss_resolution(norm_key,ss_id,name,matched_by,"
-                   "resolved_at,system) VALUES(?,?,?,'search',0,?)",
-                   (nk, sid, nk.title(), sysname))
+    # ONE ROW PER (game, platform) — the record is judged against the platform it was
+    # matched FOR, not against whichever of the game's platforms sorts first.
+    # `system` holds ScreenScraper's own numeric system id (135 = PC Windows here).
+    for nk, plat, sid, sysname in (
+            ("soul reaver", "ps1", 313298, "135"),   # ps1 row on a PC Windows record
+            ("sonic", "genesis", 5, "1"),            # genesis row, genesis record: right
+            ("a pc game", "pc", 999, "58"),          # pc states no system: nothing to fit
+            ("celeste", "pc", 307016, "135"),        # pc row, PC record: correct
+            ("celeste", "switch", 195244, "225")):   # switch row, switch record: correct
+        md.execute("INSERT INTO ss_resolution(norm_key,platform,ss_id,name,matched_by,"
+                   "resolved_at,system) VALUES(?,?,?,?,'search',0,?)",
+                   (nk, plat, sid, nk.title(), sysname))
     md.commit()
     md.close()
 
@@ -128,6 +141,11 @@ def main():
     check("a correct-system match is not flagged", "sonic" not in out)
     check("a pc entry is not flagged — no ScreenScraper system to disagree with",
           "a pc game" not in out)
+    # THE FALSE POSITIVE THE OLD RULE PRODUCED. Celeste is owned on pc and switch and
+    # holds the right record on each. Judged against the platform SET, the PC record
+    # failed because `pc` contributes no system id and quietly left the wanted set.
+    check("a multi-platform game holding the right record on each is not flagged",
+          "celeste" not in out)
 
     print("\n  %d/%d passed" % (sum(1 for _, c in PASS if c), len(PASS)))
 

@@ -54,9 +54,58 @@ PROVIDERS = {
 # nothing", which is the worst possible failure because it looks like an answer.
 STRING_ID_PROVIDERS = {"mobygames", "arcadedb", "zxinfo"}
 
+# Providers that file one record PER SYSTEM rather than one per GAME. Their identity is
+# `(game, platform)`, so their table is keyed that way and every read must say which
+# platform it is asking about.
+#
+# ScreenScraper keeps a separate record for every system a game shipped on, each with
+# that release's art, year and metadata. Keyed on `norm_key` alone, a game owned on two
+# platforms had ONE row, so whichever record the search happened to return served both
+# and the other platform wore a different release. Measured live 2026-08-26: 61 norm_keys
+# span more than one platform and 57 of them shared a single ScreenScraper record —
+# invariants I10 and I11, and the structural reason they could not be fixed row by row.
+#
+# TheGamesDB belongs here on the same reasoning (one record per title/platform/region,
+# 51% of its hits ambiguous) and is NOT listed yet: `tgdb_resolution` holds 0 rows on
+# this install, so adding it would migrate a table nothing has written to and change a
+# code path nothing exercises. Add it with the run that first populates it.
+#
+# Everything else — IGDB, SteamGridDB, MobyGames, ArcadeDB, ZXInfo — files one record
+# per game. Their platform component is the empty string and nothing about them moves.
+PLATFORM_KEYED = {"screenscraper"}
+
+# The platform component of a row that has not been placed on a platform yet. Carried
+# migration rows use it, and a platform-keyed READ never serves them: a legacy row is
+# the answer to "which record does this game have", which is the question that had no
+# single answer in the first place. See `legacy_rows` and `place_legacy`.
+LEGACY = ""
+
 
 def _is_string_id(provider):
     return provider in STRING_ID_PROVIDERS
+
+
+def is_platform_keyed(provider):
+    """Does this provider file one record per SYSTEM (as opposed to per game)?"""
+    return provider in PLATFORM_KEYED
+
+
+def _plat(provider, platform, required=False):
+    """The platform component of the key.
+
+    Always `''` for a provider that files one record per game — its identity has no
+    platform and inventing one would split its single row. For a per-system provider the
+    platform is part of the identity, so a caller that does not state one is asking a
+    question with no single answer; `required` makes that a refusal rather than a guess.
+    """
+    if not is_platform_keyed(provider):
+        return LEGACY
+    p = (platform or "").strip().lower()
+    if not p and required:
+        raise ValueError(
+            "provider_ids: %s files one record per SYSTEM, so an identity needs the "
+            "platform it is for. Resolve it one platform at a time." % provider)
+    return p
 
 
 def _coerce(provider, provider_id):
@@ -91,13 +140,69 @@ def _spec(provider):
             % (provider, ", ".join(sorted(PROVIDERS))))
 
 
+def _has_platform_pk(con, table):
+    """Is `table` already keyed (norm_key, platform)?"""
+    try:
+        pk = {r[1] for r in con.execute("PRAGMA table_info(%s)" % table) if r[5]}
+    except sqlite3.OperationalError:
+        return False
+    return pk == {"norm_key", "platform"}
+
+
+def _migrate_to_platform_key(con, prov, table, idcol):
+    """Re-key a per-system provider's table from `norm_key` to `(norm_key, platform)`.
+
+    EVERY EXISTING ROW IS KEPT, and kept as LEGACY — platform `''`. It cannot simply be
+    stamped with a platform here, because which platform a row describes is a question
+    about the CATALOG (what the game is owned on) and the recorded system, neither of
+    which this module can see. `place_legacy` does that with a library handle; until it
+    runs, a platform-keyed read finds nothing and the game is re-matched per platform,
+    which is the honest outcome rather than the old arbitrary one.
+
+    sqlite cannot ALTER a primary key, so this is the standard rebuild. Idempotent: it
+    does nothing once the key is already composite.
+    """
+    if _has_platform_pk(con, table):
+        return False
+    have = {r[1] for r in con.execute("PRAGMA table_info(%s)" % table)}
+    if not have:
+        return False                          # table does not exist yet; created below
+    idtype = "TEXT" if _is_string_id(prov) else "INTEGER"
+    tmp = "%s__platkey" % table
+    con.execute("DROP TABLE IF EXISTS %s" % tmp)
+    con.execute(
+        "CREATE TABLE %s(norm_key TEXT NOT NULL, platform TEXT NOT NULL DEFAULT '', "
+        "%s %s, name TEXT, matched_by TEXT, resolved_at INTEGER, year INTEGER, "
+        "system TEXT, PRIMARY KEY(norm_key, platform))" % (tmp, idcol, idtype))
+    carry = [c for c in ("norm_key", idcol, "name", "matched_by", "resolved_at",
+                         "year", "system") if c in have]
+    con.execute("INSERT INTO %s(%s) SELECT %s FROM %s"
+                % (tmp, ",".join(carry), ",".join(carry), table))
+    con.execute("DROP TABLE %s" % table)
+    con.execute("ALTER TABLE %s RENAME TO %s" % (tmp, table))
+    con.commit()
+    return True
+
+
 def ensure_tables(con):
     """Create the identity caches. Safe to call on every open."""
     for prov, (table, idcol) in PROVIDERS.items():
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS %s(norm_key TEXT PRIMARY KEY, %s %s, "
-            "name TEXT, matched_by TEXT, resolved_at INTEGER)"
-            % (table, idcol, "TEXT" if _is_string_id(prov) else "INTEGER"))
+        if is_platform_keyed(prov):
+            # A per-system provider's identity is (game, platform). An existing table
+            # keyed on norm_key alone is re-keyed first; every row it holds is carried
+            # over as LEGACY and placed later by `place_legacy`, which needs the catalog.
+            _migrate_to_platform_key(con, prov, table, idcol)
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS %s(norm_key TEXT NOT NULL, "
+                "platform TEXT NOT NULL DEFAULT '', %s %s, name TEXT, "
+                "matched_by TEXT, resolved_at INTEGER, "
+                "PRIMARY KEY(norm_key, platform))"
+                % (table, idcol, "TEXT" if _is_string_id(prov) else "INTEGER"))
+        else:
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS %s(norm_key TEXT PRIMARY KEY, %s %s, "
+                "name TEXT, matched_by TEXT, resolved_at INTEGER)"
+                % (table, idcol, "TEXT" if _is_string_id(prov) else "INTEGER"))
         # The matched record's YEAR. Without it a wrong-era match is undetectable after
         # the fact: Resident Evil 4 (2023) held ScreenScraper 4750, the 2005 game, and
         # the only way to find others like it was a norm_key heuristic that needed the
@@ -125,15 +230,124 @@ def ensure_tables(con):
     con.commit()
 
 
-def cached(con, provider, norm_key):
+def cached(con, provider, norm_key, platform=None):
     """(id, matched_by, resolved_at) for a recorded row, or None if never looked at.
-    An id of 0 means a recorded MISS — see is_identified()."""
+    An id of 0 means a recorded MISS — see is_identified().
+
+    For a per-system provider `platform` selects the row, and a platform with no row is
+    None — NEVER another platform's answer, which is the whole defect this key fixes. A
+    LEGACY row (platform `''`, carried by the migration) is not served for the same
+    reason: it is the answer to a question that had no single answer.
+    """
     table, idcol = _spec(provider)
-    r = con.execute("SELECT %s, matched_by, resolved_at FROM %s WHERE norm_key=?"
-                    % (idcol, table), (norm_key,)).fetchone()
+    if is_platform_keyed(provider) and _has_platform_pk(con, table):
+        p = _plat(provider, platform, required=True)
+        r = con.execute("SELECT %s, matched_by, resolved_at FROM %s "
+                        "WHERE norm_key=? AND platform=?" % (idcol, table),
+                        (norm_key, p)).fetchone()
+    else:
+        r = con.execute("SELECT %s, matched_by, resolved_at FROM %s WHERE norm_key=?"
+                        % (idcol, table), (norm_key,)).fetchone()
     if not r:
         return None
     return (r[0] or ("" if _is_string_id(provider) else 0), r[1] or "", r[2] or 0)
+
+
+def platforms_for(con, provider, norm_key):
+    """Every platform this game has a PLACED identity row on. [] when it has none.
+
+    A per-game provider has no platform on its single row, so this is [] for it — ask
+    `cached` instead. Legacy rows are excluded: they are carried, not placed.
+    """
+    table, _idcol = _spec(provider)
+    if not (is_platform_keyed(provider) and _has_platform_pk(con, table)):
+        return []
+    return [r[0] for r in con.execute(
+        "SELECT platform FROM %s WHERE norm_key=? AND platform<>''" % table,
+        (norm_key,))]
+
+
+def legacy_rows(con, provider):
+    """[(norm_key, id, name, matched_by, year, system)] for rows the migration carried
+    over but has not placed on a platform yet. The input to `place_legacy`."""
+    table, idcol = _spec(provider)
+    if not (is_platform_keyed(provider) and _has_platform_pk(con, table)):
+        return []
+    return [tuple(r) for r in con.execute(
+        "SELECT norm_key, %s, name, matched_by, year, system FROM %s "
+        "WHERE platform='' ORDER BY norm_key" % (idcol, table))]
+
+
+def place_legacy(con, provider, owned, systeme_id, apply=False):
+    """Put each carried row on the platform it actually describes, or drop it.
+
+    `owned` maps norm_key -> [platform] from the CATALOG, and `systeme_id(platform)`
+    is the provider's own system id for one of our platform labels (None when the
+    provider has no system for it, which is true of PC and must stay true).
+
+    Three rules, in order, and a row that satisfies none is DROPPED:
+
+      1. The row records a SYSTEM and it is the system of one of the platforms this
+         game is owned on. That is the platform the record describes — place it.
+      2. The row records a system that is the system of NONE of them, and every owned
+         platform states a system. Then the record is for hardware this game is not
+         owned on: it is a different release wearing its own art and dates, which is
+         exactly what invariant I11 names. Drop it.
+      3. No usable system evidence and the game is owned on exactly ONE platform. There
+         is only one platform the row can be for — place it there.
+
+    Anything left is a multi-platform game whose single row cannot be attributed, which
+    is the ambiguity this whole key exists to remove. A DROP is an ABSENCE, not a miss:
+    nothing is written down, so the next sweep asks the provider per platform instead of
+    remembering a verdict it never reached. datbird's call, 2026-08-26.
+
+    `apply=False` reports without writing. Returns
+    {'placed': [(nk, platform, why)], 'dropped': [(nk, why)]}.
+    """
+    table, idcol = _spec(provider)
+    out = {"placed": [], "dropped": []}
+    if not (is_platform_keyed(provider) and _has_platform_pk(con, table)):
+        return out
+    for nk, pid, name, matched_by, year, system in legacy_rows(con, provider):
+        plats = [p for p in (owned.get(nk) or []) if p]
+        sysid = None
+        if str(system or "").strip():
+            sysid = (int(system) if str(system).strip().isdigit()
+                     else systeme_id(system))
+        fits = [p for p in plats if sysid and systeme_id(p) == sysid]
+        silent = [p for p in plats if systeme_id(p) is None]
+        if fits:
+            target, why = fits[0], "system %s is %s" % (sysid, fits[0])
+        elif sysid and plats and not silent:
+            target, why = None, ("system %s is none of %s"
+                                 % (sysid, "/".join(sorted(plats))))
+        elif len(plats) == 1:
+            target, why = plats[0], "the only platform it is owned on"
+        elif plats:
+            target, why = None, ("owned on %s, and the row does not say which"
+                                 % "/".join(sorted(plats)))
+        else:
+            target, why = None, "owned on nothing in the catalog"
+        # A row already placed on the target platform was written by a per-platform
+        # search and is the better answer. The legacy row is then simply removed rather
+        # than overwriting it — a carried row must never outrank a placed one.
+        if target and con.execute(
+                "SELECT 1 FROM %s WHERE norm_key=? AND platform=?" % table,
+                (nk, target)).fetchone():
+            target, why = None, "%s already has its own row" % target
+        if target:
+            out["placed"].append((nk, target, why))
+            if apply:
+                con.execute("UPDATE %s SET platform=? WHERE norm_key=? AND platform=''"
+                            % table, (target, nk))
+        else:
+            out["dropped"].append((nk, why))
+            if apply:
+                con.execute("DELETE FROM %s WHERE norm_key=? AND platform=''" % table,
+                            (nk,))
+    if apply:
+        con.commit()
+    return out
 
 
 def is_real_id(provider, provider_id):
@@ -154,11 +368,11 @@ def is_real_id(provider, provider_id):
         return False
 
 
-def is_identified(con, provider, norm_key):
+def is_identified(con, provider, norm_key, platform=None):
     """True only for a REAL id. A recorded miss is not an identity — the whole point of
     the igdb:0 incident is that a falsy id used as a key makes every entry carrying it
     share one identity."""
-    row = cached(con, provider, norm_key)
+    row = cached(con, provider, norm_key, platform=platform)
     if not row:
         return False
     return is_real_id(provider, row[0])
@@ -180,7 +394,7 @@ def holder(con, provider, provider_id, norm_key=None):
 
 
 def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
-           year=None, system=None, commit=True):
+           year=None, system=None, commit=True, platform=None):
     """Write an identity (or a miss, with a falsy provider_id). Idempotent.
 
     `commit=False` for a BULK writer. This committed on every call, and the hash pass
@@ -227,16 +441,32 @@ def record(con, provider, norm_key, provider_id, name=None, matched_by="search",
         yr = int(year) if str(year or "").strip().isdigit() else None
     except (TypeError, ValueError):
         yr = None
-    con.execute(
-        "INSERT INTO %s(norm_key,%s,name,year,system,matched_by,resolved_at) "
-        "VALUES(?,?,?,?,?,?,?) "
-        "ON CONFLICT(norm_key) DO UPDATE SET %s=excluded.%s, name=excluded.name, "
-        "year=excluded.year, system=excluded.system, matched_by=excluded.matched_by, "
-        "resolved_at=excluded.resolved_at"
-        % (table, idcol, idcol, idcol),
-        (norm_key, pid, name, yr, (system or None),
-         matched_by if pid else ("collision" if matched_by == "collision" else "none"),
-         int(time.time())))
+    keyed = is_platform_keyed(provider) and _has_platform_pk(con, table)
+    if keyed:
+        p = _plat(provider, platform, required=True)
+        con.execute(
+            "INSERT INTO %s(norm_key,platform,%s,name,year,system,matched_by,"
+            "resolved_at) VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(norm_key,platform) DO UPDATE SET %s=excluded.%s, "
+            "name=excluded.name, year=excluded.year, system=excluded.system, "
+            "matched_by=excluded.matched_by, resolved_at=excluded.resolved_at"
+            % (table, idcol, idcol, idcol),
+            (norm_key, p, pid, name, yr, (system or None),
+             matched_by if pid else ("collision" if matched_by == "collision"
+                                     else "none"),
+             int(time.time())))
+    else:
+        con.execute(
+            "INSERT INTO %s(norm_key,%s,name,year,system,matched_by,resolved_at) "
+            "VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(norm_key) DO UPDATE SET %s=excluded.%s, name=excluded.name, "
+            "year=excluded.year, system=excluded.system, "
+            "matched_by=excluded.matched_by, resolved_at=excluded.resolved_at"
+            % (table, idcol, idcol, idcol),
+            (norm_key, pid, name, yr, (system or None),
+             matched_by if pid else ("collision" if matched_by == "collision"
+                                     else "none"),
+             int(time.time())))
     if commit:
         con.commit()
     return pid
@@ -334,12 +564,18 @@ def _ix_con():
 
 
 def index_answer(provider, anchors, systems=None):
-    """(id, kind, name, year) from the match index, or None. See index_lookup.
+    """(id, kind, name, year, platform) from the match index, or None. See index_lookup.
 
     The KIND travels with the answer because it decides how the identity is recorded. An
     index key is `exact` only when the source PUBLISHED the pairing; the catalogue merges
     CONCLUDE one with matchgate and used to stamp that `exact` too, which exempted a
     name-derived bind from the collision guard and from `rescore()` forever.
+
+    THE PLATFORM TRAVELS WITH IT FOR THE SAME REASON. For a provider that files one record
+    per system the key's platform is half its identity, and dropping it here recorded the
+    answer with `system=None`. Live, DOOM 3 took one ScreenScraper key on BOTH its PC and
+    Switch rows and neither could be judged afterwards, because nothing had written down
+    which release the key was for. NULL still means UNKNOWN, never "no platform".
     """
     ns = INDEX_NS.get(provider)
     if not ns or not anchors:
@@ -361,10 +597,25 @@ def index_answer(provider, anchors, systems=None):
                 vals = _on_platform(con, ns, vals, systems) or vals
             if len(vals) == 1:
                 return (vals[0], matchindex.key_kind(con, ns, vals[0]),
-                        hit.get("_name"), hit.get("_year"))
+                        hit.get("_name"), hit.get("_year"),
+                        _key_platform(con, ns, vals[0]))
     except Exception:                            # noqa: BLE001
         return None
     return None
+
+
+def _key_platform(con, ns, val):
+    """The platform an index key describes, or None for UNKNOWN.
+
+    None is not "no platform". An index built before the column existed has every row
+    NULL, and reading that as a mismatch would refuse every index answer.
+    """
+    try:
+        r = con.execute("SELECT platform FROM ix.identity_key WHERE ns=? AND val=? "
+                        "LIMIT 1", (ns, str(val))).fetchone()
+        return (r["platform"] or None) if r else None
+    except Exception:                            # noqa: BLE001 — absence is unknown
+        return None
 
 
 def _on_platform(con, ns, vals, systems):
@@ -419,9 +670,24 @@ def resolve(con, provider, norm_key, title, systems, search, force=False, anchor
     id, or 0 for "no match". Never raises on a search failure: a provider being down is
     not a reason to record a miss, so that case leaves the cache untouched and returns 0
     so the caller can carry on.
+
+    ONE PLATFORM AT A TIME for a per-system provider. `systems` is the platform this
+    identity is FOR, and for ScreenScraper it must name exactly one, because its record
+    is per system and "which of these three platforms is this id for" is the question
+    that had no answer before this key existed. Handing it several raises rather than
+    picking one: a guess here is the original bug written back down.
     """
     _table, idcol = _spec(provider)
-    row = cached(con, provider, norm_key)
+    plat = None
+    if is_platform_keyed(provider):
+        _plats = [p for p in (systems or []) if p]
+        if len(_plats) != 1:
+            raise ValueError(
+                "provider_ids: %s files one record per SYSTEM, so resolve it one "
+                "platform at a time, not %d at once (%s)"
+                % (provider, len(_plats), norm_key))
+        plat = _plats[0]
+    row = cached(con, provider, norm_key, platform=plat)
     if row and not force:
         pid, matched_by, at = row
         if is_real_id(provider, pid) or matched_by == "manual":
@@ -442,33 +708,55 @@ def resolve(con, provider, norm_key, title, systems, search, force=False, anchor
     # carried across so rescore() has something to re-judge it against.
     ix = index_answer(provider, anchors, systems=systems)
     if ix and ix[0]:
-        from_ix, kind, ix_name, ix_year = ix
+        from_ix, kind, ix_name, ix_year, ix_plat = ix
         how = "index" if kind == "exact" else "name"
-        return record(con, provider, norm_key, from_ix, ix_name, how,
-                      year=ix_year, system=None)
+        # A KEY FOR ANOTHER SYSTEM IS A DIFFERENT RELEASE. For a per-system provider an
+        # index key that states a platform, and states one this identity is not for, is
+        # refused rather than taken: it is the same discipline `system_fits` applies to a
+        # search candidate. Live, DOOM 3's single ScreenScraper key was handed to its PC
+        # row AND its Switch row. A key that says nothing is UNKNOWN and still answers.
+        if not (is_platform_keyed(provider) and ix_plat
+                and _plat(provider, ix_plat) != plat):
+            return record(con, provider, norm_key, from_ix, ix_name, how,
+                          year=ix_year, system=ix_plat, platform=plat)
 
     try:
         hit = search(title, systems)
     except Exception:                       # noqa: BLE001 — see docstring
         return 0
     if not hit:
-        return record(con, provider, norm_key, 0, None, "none")
+        return record(con, provider, norm_key, 0, None, "none", platform=plat)
     pid = hit.get(idcol) or hit.get("id") or 0
     return record(con, provider, norm_key, pid, hit.get("name"), "search",
-                  year=hit.get("year"), system=hit.get("system"))
+                  year=hit.get("year"), system=hit.get("system"), platform=plat)
 
 
-def unlinked(con, provider, norm_keys):
+def unlinked(con, provider, norm_keys, platforms=None):
     """Of `norm_keys`, those with no recorded identity yet (or a stale miss) — the work
-    list for a sweep. Keeps the caller from re-deriving this rule."""
+    list for a sweep. Keeps the caller from re-deriving this rule.
+
+    For a per-system provider the unit of work is a (game, platform), not a game, so
+    `platforms` maps each norm_key to the platforms it is owned on and the return is a
+    list of `(norm_key, platform)` pairs. Without that map a per-system provider has
+    nothing to enumerate and returns nothing, which is honest: this function cannot
+    invent the platforms a game is owned on.
+    """
     out = []
     now = time.time()
+
+    def _stale(row):
+        return (row is None
+                or (not is_real_id(provider, row[0]) and row[1] != "manual"
+                    and (now - row[2]) >= MISS_TTL))
+
+    if is_platform_keyed(provider):
+        for nk in norm_keys:
+            for p in (platforms or {}).get(nk) or []:
+                if _stale(cached(con, provider, nk, platform=p)):
+                    out.append((nk, p))
+        return out
     for nk in norm_keys:
-        row = cached(con, provider, nk)
-        if row is None:
-            out.append(nk)
-        elif (not is_real_id(provider, row[0]) and row[1] != "manual"
-                and (now - row[2]) >= MISS_TTL):
+        if _stale(cached(con, provider, nk)):
             out.append(nk)
     return out
 
@@ -545,10 +833,17 @@ def rescore(cache_con, lib_con, aliases_for=None, apply=False):
             continue                             # provider never ran on this install
         if not {"matched_by", "name"} <= cols:
             continue                             # table predates the shared columns
+        # A PER-SYSTEM PROVIDER IS RE-JUDGED PER PLATFORM, and cleared per platform. The
+        # refusal below used to `DELETE ... WHERE norm_key=?`, which on a platform-keyed
+        # table would take every platform's identity with it — including the ones today's
+        # gate still accepts. A refusal is about ONE match, so it removes ONE row.
+        keyed = is_platform_keyed(provider) and _has_platform_pk(cache_con, table)
         rows = cache_con.execute(
-            "SELECT norm_key, %s, matched_by, name, year FROM %s "
-            "WHERE COALESCE(%s,0)>0" % (idcol, table, idcol)).fetchall()
-        for nk, pid, how, nm, yr in rows:
+            "SELECT norm_key, %s, matched_by, name, year%s FROM %s "
+            "WHERE COALESCE(%s,0)>0"
+            % (idcol, ", platform, system" if keyed else ", '', ''", table,
+               idcol)).fetchall()
+        for nk, pid, how, nm, yr, plat, sysrow in rows:
             if how not in NAME_DERIVED:
                 continue
             title = titles.get(nk)
@@ -563,12 +858,29 @@ def rescore(cache_con, lib_con, aliases_for=None, apply=False):
                 except Exception:                # noqa: BLE001 — aliases are a bonus
                     pass
             era = matchgate.game_era(lib_con, cache_con, nk)
-            ok, _score = matchgate.score(queries, cand, era, yr)
+            # SAME EXEMPTION AS THE MATCHER, or the scrub deletes what the matcher would
+            # happily record. A per-system provider's record is dated for ITS system, so
+            # when the row's system is the platform it is filed under, a LATER year is a
+            # port date. Live 2026-08-26 this scrub proposed refusing APE OUT, Bayonetta
+            # 2, Overwatch, Fallout Shelter and Titan Quest — every one an identical
+            # title on its own system's record. An EARLIER year is still refused.
+            later_ok = False
+            if keyed and plat and sysrow:
+                import screenscraper as _ss_rs
+                later_ok = (_ss_rs.systeme_id(plat) is not None
+                            and _ss_rs.system_id_fits(plat, sysrow))
+            ok, _score = matchgate.score(queries, cand, era, yr, later_ok=later_ok)
             if ok:
                 continue
-            out["refused"].append((provider, nk, title, cand))
+            out["refused"].append((provider, "%s%s" % (nk, " on " + plat if plat else ""),
+                                   title, cand))
             if apply:
-                cache_con.execute("DELETE FROM %s WHERE norm_key=?" % table, (nk,))
+                if keyed:
+                    cache_con.execute(
+                        "DELETE FROM %s WHERE norm_key=? AND platform=?" % table,
+                        (nk, plat))
+                else:
+                    cache_con.execute("DELETE FROM %s WHERE norm_key=?" % table, (nk,))
                 out["cleared"] += 1
         if apply:
             cache_con.commit()

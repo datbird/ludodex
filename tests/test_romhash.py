@@ -212,14 +212,17 @@ def main():
     check("recorded as matched_by='hash': %r" % (got and got[1]),
           got and got[1] == "hash")
     check("screenscraper id recorded too",
-          (provider_ids.cached(cat, "screenscraper", "game") or [None])[0] == 5150)
+          (provider_ids.cached(cat, "screenscraper", "game",
+                               platform="nes") or [None])[0] == 5150)
 
     print()
     print("12. a slug is never written as a numeric provider's id")
     # 'mobygames' in the index mixes URL slugs with numeric catalogue ids. Nothing may
     # turn one into a recorded identity for a provider that ids by number.
     for prov in ("igdb", "screenscraper", "thegamesdb"):
-        r = provider_ids.cached(cat, prov, "game")
+        r = provider_ids.cached(cat, prov, "game",
+                               platform="nes"
+                               if provider_ids.is_platform_keyed(prov) else None)
         check("%s id is numeric or absent: %r" % (prov, r and r[0]),
               r is None or r[0] is None or isinstance(r[0], int))
 

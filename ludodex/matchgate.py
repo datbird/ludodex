@@ -223,7 +223,7 @@ def safe_aliases(owned, aliases):
     return keep
 
 
-def score(owned, cand_name, year=None, cand_year=None):
+def score(owned, cand_name, year=None, cand_year=None, later_ok=False):
     """Is `cand_name` acceptable for one of the OWNED titles? Returns (ok, score). Split out of `_ss_match` because the acceptance test used to be
     applied to whichever cleaned VARIANT had been searched, not to the title the user
     owns. Variants exist so that "Mega Man X4" can find ScreenScraper's "Megaman X4";
@@ -304,8 +304,25 @@ def score(owned, cand_name, year=None, cand_year=None):
         #
         # Only ever applied when BOTH years are known and numeric: an absent year is not
         # evidence of anything, and must never turn into a refusal.
+        #
+        # `later_ok` — A PORT'S RELEASE DATE IS NOT A DISAGREEMENT. A provider that files
+        # one record per SYSTEM dates each one when THAT system's release shipped, so the
+        # Switch record for a 2019 PC game reads 2021 while being exactly the right
+        # record. Judged symmetrically, that refused ten-odd identical-title matches on
+        # this library — APE OUT, Bayonetta 2, Overwatch, Fallout Shelter, Titan Quest,
+        # all on their own system's record.
+        #
+        # ONE-DIRECTIONAL, and that is the whole safety of it. An EARLIER candidate is
+        # still refused, because the case this check exists for is a modern game taking
+        # its original's record — Resident Evil 4 (2023) on the 2005 GameCube one — and
+        # an original always comes first. A system agreeing does not excuse a record that
+        # PREDATES the game.
+        #
+        # Granted only by a caller that KNOWS the candidate's system is the one being
+        # matched for. Default off, so every other caller is judged exactly as before.
         y1, y2 = _year(year), _year(cand_year)
-        if y1 and y2 and abs(y1 - y2) > YEAR_TOLERANCE:
+        if y1 and y2 and abs(y1 - y2) > YEAR_TOLERANCE \
+                and not (later_ok and y2 > y1):
             continue
         score = qc + nc + (0.4 if y1 and y1 == y2 else 0)
         if covered and score > best[1]:

@@ -117,16 +117,26 @@ def main():
     check("so the estimate is not 'under a minute' for an hour of work",
           estimate.summary(p) != "under a minute")
 
-    # ---- check_invariants: I11 judges against EVERY platform of the game ---------- #
-    # A game owned on Genesis and Windows has two catalog rows and ONE ss_resolution
-    # record. Picking an arbitrary row and comparing against it is a coin flip.
+    # ---- check_invariants: I11 judges the row's OWN platform ---------------------- #
+    # This used to compare a match against the game's whole platform SET, because
+    # ss_resolution held ONE row for a game owned on Genesis and Windows and there was no
+    # platform to judge against. Both halves of that are now gone: the identity is keyed
+    # (norm_key, platform), so the row states which release it is for, and the fit rule
+    # lives in `screenscraper.system_id_fits` beside the one the matcher uses instead of
+    # being written out a second time here. Building the wanted ids from the set was not
+    # merely arbitrary, it was WRONG: `pc` contributes no system id, so it dropped out of
+    # the set rather than making the check abstain, and every PC record held by a pc+
+    # switch game was reported as a mismatch.
     src = open(os.path.join(DIR, "ludodex", "check_invariants.py"),
                encoding="utf-8").read()
     check("I11 no longer takes an arbitrary platform row",
           "SELECT platform, canonical_title FROM games WHERE norm_key=?" not in src)
-    check("it reads every platform the norm_key is owned on",
-          "SELECT DISTINCT platform FROM games WHERE norm_key=?" in src)
-    check("and only flags a match that fits NONE of them", "got not in want" in src)
+    check("it reads the platform off the identity row",
+          "SELECT norm_key, ss_id, system, platform FROM ss_resolution" in src)
+    check("it judges only rows that state a platform", "AND platform<>''" in src)
+    check("and the fit rule is the matcher's, not a second copy",
+          "_ss.system_id_fits(plat, sysname)" in src
+          and "got not in want" not in src)
     check("the module no longer hardcodes /data", '"/data"' not in src)
     check("or /app", '"/app"' not in src)
 

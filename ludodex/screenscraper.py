@@ -138,7 +138,7 @@ def system_label(systemeid):
     return None
 
 
-def system_fits(platform, jeu):
+def system_id_fits(platform, systemeid):
     """False only when BOTH sides state a system and they disagree.
 
     ScreenScraper keeps one record per system, so a record for another system is a
@@ -146,12 +146,31 @@ def system_fits(platform, jeu):
     Virtual Console edition of a 1993 Genesis one — carrying that release's art, dates
     and metadata. Refusing it is the discipline `game_era` already follows: an absent
     statement is not evidence and must never refuse anything, so a PC entry (no system)
-    and a candidate that does not declare its system both pass."""
+    and a candidate that does not declare its system both pass.
+
+    THE ONE DERIVATION OF THIS RULE, and it had two. `check_invariants` I11 wrote it out
+    again over a game's whole platform SET, building the wanted ids from only the
+    platforms that HAVE one — so `pc`, which has none by design, silently dropped out of
+    the set instead of making the check abstain, and every PC record held by a pc+switch
+    game was reported as a wrong-system match. Live 2026-08-26 that was 12 of the 16 I11
+    violations, all false. The rule is per PLATFORM, judged against one system id, and
+    lives here.
+    """
     want = systeme_id(platform)
-    got = jeu_system_id(jeu)
+    try:
+        got = int(systemeid) if str(systemeid or "").strip().isdigit() \
+            else systeme_id(systemeid)
+    except (TypeError, ValueError):
+        got = None
     if not want or not got:
         return True
     return want == got
+
+
+def system_fits(platform, jeu):
+    """False only when BOTH sides state a system and they disagree. See
+    `system_id_fits`, which holds the rule; this reads the system off a candidate."""
+    return system_id_fits(platform, jeu_system_id(jeu))
 
 
 # The auth query params. ScreenScraper bakes these into every media URL it hands

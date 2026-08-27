@@ -1620,6 +1620,44 @@ def _warm_spotlight_bg():
     threading.Thread(target=_warm_spotlight, daemon=True).start()
 
 
+def _place_provider_legacy():
+    """Put every carried per-system identity row on the platform it describes.
+
+    `provider_ids.ensure_tables` re-keys ScreenScraper's table to (norm_key, platform)
+    and carries the old rows over unplaced, because WHICH platform a row is for is a
+    question about the catalog and this is the layer that has one. Runs once at boot and
+    is a no-op forever after: with no legacy rows there is nothing to place.
+    """
+    import provider_ids
+    import screenscraper as _ss
+    mcp = os.path.join(DATA, "metadata-cache.sqlite")
+    if not os.path.exists(mcp) or not os.path.exists(LIBRARY_DB):
+        return
+    con = sqlite3.connect(mcp)
+    try:
+        provider_ids.ensure_tables(con)
+        owned = {}
+        lc = ro(LIBRARY_DB)
+        try:
+            for nk, plat in lc.execute("SELECT DISTINCT norm_key, platform FROM games "
+                                       "WHERE platform IS NOT NULL AND platform!=''"):
+                owned.setdefault(nk, []).append(plat)
+        finally:
+            lc.close()
+        for prov in provider_ids.PLATFORM_KEYED:
+            if not provider_ids.legacy_rows(con, prov):
+                continue
+            rep = provider_ids.place_legacy(con, prov, owned, _ss.systeme_id,
+                                            apply=True)
+            print("startup: %s identity re-keyed per platform — %d placed, %d dropped "
+                  "(dropped rows are an ABSENCE and are re-matched per platform)"
+                  % (prov, len(rep["placed"]), len(rep["dropped"])), file=sys.stderr)
+            for nk, why in rep["dropped"][:20]:
+                print("  dropped %s: %s" % (nk, why), file=sys.stderr)
+    finally:
+        con.close()
+
+
 @app.on_event("startup")
 def _startup_warm_spotlight():
     _warm_spotlight_bg()              # warm on boot so the first dashboard load is snappy
@@ -1629,6 +1667,10 @@ def _startup_warm_spotlight():
             print("startup: reaped %d orphaned scan run(s)" % _reaped, file=sys.stderr)
     except Exception as _e:
         print("startup: scan reap failed: %s" % _e, file=sys.stderr)
+    try:
+        _place_provider_legacy()
+    except Exception as _e:          # noqa: BLE001 — never block boot on a migration
+        print("startup: provider identity placement failed: %s" % _e, file=sys.stderr)
 
 
 def _spotlight_catalog(con):
@@ -1832,11 +1874,26 @@ def _match_worker(force):
                 provider_ids.ensure_tables(_w)
             finally:
                 _w.close()
+            # A per-system provider's work list is (game, platform), so it needs the
+            # platforms each game is owned on. The sweep itself still walks GAMES — a
+            # game with any platform outstanding is work — and the per-platform loop
+            # inside `_one` decides which of its platforms actually get searched.
+            _owned = {}
+            lc2 = ro(LIBRARY_DB)
+            try:
+                for _nk, _p in lc2.execute(
+                        "SELECT DISTINCT norm_key, platform FROM games "
+                        "WHERE platform IS NOT NULL AND platform!=''"):
+                    _owned.setdefault(_nk, []).append(_p)
+            finally:
+                lc2.close()
             mc = ro(_mcp)
             try:
                 todo = set()
                 for prov in provider_ids.PROVIDERS:
-                    todo.update(provider_ids.unlinked(mc, prov, keys))
+                    for item in provider_ids.unlinked(mc, prov, keys,
+                                                      platforms=_owned):
+                        todo.add(item[0] if isinstance(item, tuple) else item)
                 keys = [k for k in keys if k in todo]
             finally:
                 mc.close()
@@ -4525,10 +4582,17 @@ def _ss_match(queries, systems, year=None):
                 if not any(ss.system_fits(p, j) for p in fit_against):
                     continue
                 yr = ss.jeu_year(j)
+                # A RECORD FOR THE SYSTEM WE ASKED ABOUT IS DATED FOR THAT SYSTEM. The
+                # loop above only checks that the candidate's system does not DISAGREE,
+                # which a silent side also satisfies. This asks the stronger question —
+                # does it actually SAY the system, and is that one of ours — because only
+                # then is its year a port date rather than an unexplained disagreement.
+                _same_system = _cand_system_fits(ss, fit_against, j)
                 # Scored against the OWNED titles, never against `q`. `q` may be a
                 # subtitle-stripped variant, and judging by it is how "Half-Life:
                 # Opposing Force" came to be ScreenScraper's Half-Life.
-                acc, score = _ss_candidate_score(queries, ss.jeu_name(j), year, yr)
+                acc, score = _ss_candidate_score(queries, ss.jeu_name(j), year, yr,
+                                                 later_ok=_same_system)
                 if acc and (best is None or score > best[0]):
                     best = (score, j, ss.jeu_name(j), yr)
             if best and best[0] >= 1.7:          # near-exact (qc≈1 + nc≈1) — stop
@@ -4561,11 +4625,33 @@ def _ss_match(queries, systems, year=None):
             "system": str(_cs) if _cs else (systems[0] if systems else None)}
 
 
-def _ss_candidate_score(owned, cand_name, year=None, cand_year=None):
+def _cand_system_fits(ssmod, platforms, jeu):
+    """Does this candidate STATE a system, and is it one of `platforms`?
+
+    Stronger than `system_fits`, deliberately. That one answers "do the two disagree",
+    and a candidate that says nothing satisfies it. This one answers "is this the record
+    for a system we own the game on", which is what makes its release date a PORT DATE
+    and not an unexplained year. Only a yes may relax the era rule.
+
+    The module is passed IN rather than imported here: `screenscraper` is a local import
+    in every caller, and the tests substitute a fake for it. Importing it here would
+    quietly consult the real one instead.
+    """
+    got = ssmod.jeu_system_id(jeu)
+    if not got:
+        return False
+    return any(ssmod.systeme_id(p) == got for p in (platforms or []) if p)
+
+
+def _ss_candidate_score(owned, cand_name, year=None, cand_year=None, later_ok=False):
     """The shared provider acceptance gate — see `matchgate`. Kept as a name here
     because `_ss_match` and its tests read better with it, but the rule itself has one
-    home so ScreenScraper and SteamGridDB cannot drift apart on what counts as a match."""
-    return matchgate.score(owned, cand_name, year, cand_year)
+    home so ScreenScraper and SteamGridDB cannot drift apart on what counts as a match.
+
+    `later_ok` says the candidate is the record for a system we own the game on, so its
+    release date is that port's date. See `matchgate.score`.
+    """
+    return matchgate.score(owned, cand_name, year, cand_year, later_ok=later_ok)
 
 
 def _score_confidence_ai(nks, should_stop=lambda: False, chunk=20):
@@ -6279,8 +6365,17 @@ def _provider_match_state(nk):
         specs["igdb"] = ("igdb_resolution", "igdb_id")
         for prov, (table, idcol) in sorted(specs.items()):
             try:
-                r = mc.execute("SELECT %s FROM %s WHERE norm_key=?" % (idcol, table),
-                               (nk,)).fetchone()
+                # A per-system provider holds one row PER PLATFORM. The review card is
+                # about the game, so a real id on ANY of its platforms is a match and
+                # only a game with no real id anywhere is missed or unattempted. Ordering
+                # by the id descending puts a real id ahead of a recorded miss.
+                if provider_ids.is_platform_keyed(prov):
+                    r = mc.execute("SELECT %s FROM %s WHERE norm_key=? "
+                                   "ORDER BY COALESCE(%s,0) DESC LIMIT 1"
+                                   % (idcol, table, idcol), (nk,)).fetchone()
+                else:
+                    r = mc.execute("SELECT %s FROM %s WHERE norm_key=?"
+                                   % (idcol, table), (nk,)).fetchone()
             except sqlite3.OperationalError:
                 r = None
             # A PROVIDER ID IS NOT ALWAYS A NUMBER. mobygames, arcadedb and zxinfo
@@ -7464,14 +7559,23 @@ def _pull_ss_media(con, nk, systems, queries, now):
         mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
         try:
             provider_ids.ensure_tables(mc)
-            _pid = provider_ids.resolve(mc, "screenscraper", nk,
-                                        (queries[0] if queries else ""), systems,
-                                        lambda t, s: _ss_match([t], s))
+            # ONE PLATFORM AT A TIME — ScreenScraper's record is per system. The media
+            # pull is for ONE entry, so the platform it wants is the first (and normally
+            # only) system it was handed; the loop simply takes the first that answers.
+            _pid, _sysused = 0, None
+            for _sp in (systems or [None]):
+                if not _sp:
+                    continue
+                _pid = provider_ids.resolve(mc, "screenscraper", nk,
+                                            (queries[0] if queries else ""), [_sp],
+                                            lambda t, s: _ss_match([t], s))
+                if _pid:
+                    _sysused = _sp
+                    break
         finally:
             mc.close()
         if _pid:
-            m = {"provider": "screenscraper", "ss_id": _pid,
-                 "system": systems[0] if systems else None}
+            m = {"provider": "screenscraper", "ss_id": _pid, "system": _sysused}
     except Exception as e:                     # noqa: BLE001
         print("ss identity %s: %s" % (nk, str(e)[:110]), file=sys.stderr)
         m = _ss_match(queries, systems, None)
@@ -7965,17 +8069,28 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
                         return hit
                 return None
             if ss_creds and config.provider_allowed("screenscraper", _plat, _srcs):
-                _before = provider_ids.cached(mc, "screenscraper", nk)
-                pid = provider_ids.resolve(
-                    mc, "screenscraper", nk, title, plats,
-                    lambda t, s: _search_with_aliases(
-                        lambda q: _ss_match([q], s, year)),
-                    force=force, anchors=_anchors)
-                searched = searched or _before is None or force
-                if pid:
-                    found["screenscraper"] = pid
-                    _anchors[_ix_ns["screenscraper"]] = pid
-                    out["screenscraper"] += 1
+                # ONE PLATFORM AT A TIME. ScreenScraper files a separate record for every
+                # system, so a game owned on PC and Switch has two identities, not one.
+                # This used to hand `plats` over whole and store whichever record came
+                # back against the game, and the other platform then wore that release's
+                # art, year and metadata — invariants I10 and I11. `provider_ids` now
+                # refuses a multi-platform resolve rather than picking, so the loop is
+                # here, where the platform list actually lives.
+                for _sp in (plats or [None]):
+                    if not _sp or should_stop():
+                        continue
+                    _before = provider_ids.cached(mc, "screenscraper", nk,
+                                                  platform=_sp)
+                    pid = provider_ids.resolve(
+                        mc, "screenscraper", nk, title, [_sp],
+                        lambda t, s: _search_with_aliases(
+                            lambda q: _ss_match([q], s, year)),
+                        force=force, anchors=_anchors)
+                    searched = searched or _before is None or force
+                    if pid:
+                        found["screenscraper"] = pid
+                        _anchors[_ix_ns["screenscraper"]] = pid
+                        out["screenscraper"] += 1
             if sgdb_key and config.provider_allowed("steamgriddb", _plat, _srcs):
                 _before = provider_ids.cached(mc, "steamgriddb", nk)
                 pid = provider_ids.resolve(

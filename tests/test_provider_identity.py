@@ -71,8 +71,9 @@ def main():
     got = provider_ids.resolve(con, "screenscraper", "obscure thing", "Obscure Thing",
                                ["pc"], no_match)
     check("a miss returns 0, not None-as-error", got == 0)
-    check("the miss was recorded", provider_ids.cached(con, "screenscraper",
-                                                       "obscure thing") is not None)
+    check("the miss was recorded",
+          provider_ids.cached(con, "screenscraper", "obscure thing",
+                              platform="pc") is not None)
     provider_ids.resolve(con, "screenscraper", "obscure thing", "Obscure Thing",
                          ["pc"], no_match)
     check("a fresh miss is not re-searched immediately", len(misses) == 1)
@@ -84,13 +85,15 @@ def main():
     check("a STALE miss is retried", len(misses) == 2)
 
     print("3. a manual decision is never overwritten by a search")
-    provider_ids.record(con, "screenscraper", "hand picked", 7, "Chosen", "manual")
+    provider_ids.record(con, "screenscraper", "hand picked", 7, "Chosen", "manual",
+                        platform="pc")
     picked = []
     provider_ids.resolve(con, "screenscraper", "hand picked", "Hand Picked", ["pc"],
                          lambda t, s: picked.append(t) or {"ss_id": 999, "name": "X"})
     check("no search was made", picked == [])
     check("the manual id stands",
-          provider_ids.cached(con, "screenscraper", "hand picked")[0] == 7)
+          provider_ids.cached(con, "screenscraper", "hand picked",
+                              platform="pc")[0] == 7)
 
     print("4. steamgriddb is the same layer, its own table")
     got = provider_ids.resolve(con, "steamgriddb", "system shock classic",
@@ -98,7 +101,8 @@ def main():
                                lambda t, s: {"sgdb_id": 55, "name": "System Shock"})
     check("sgdb id recorded", got == 55)
     check("it did not land in the screenscraper table",
-          provider_ids.cached(con, "screenscraper", "system shock classic")[0] == 4242)
+          provider_ids.cached(con, "screenscraper", "system shock classic",
+                              platform="pc")[0] == 4242)
 
     print("5. an unknown provider is refused rather than silently ignored")
     try:
@@ -119,9 +123,11 @@ def main():
 
     print("7. is_identified distinguishes a real match from a recorded miss")
     check("real match is identified",
-          provider_ids.is_identified(con, "screenscraper", "system shock classic"))
+          provider_ids.is_identified(con, "screenscraper", "system shock classic",
+                                     platform="pc"))
     check("miss is not identified",
-          not provider_ids.is_identified(con, "screenscraper", "obscure thing"))
+          not provider_ids.is_identified(con, "screenscraper", "obscure thing",
+                                         platform="pc"))
 
     print("\n%d/%d passed" % (sum(1 for _, ok in PASS if ok), len(PASS)))
 

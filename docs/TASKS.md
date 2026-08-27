@@ -151,8 +151,9 @@ A four-reviewer audit (media/vision · collections · identity/spend · server/U
   scrub (needs a maintainer decision, it rewrites every commit), grid windowing in the frontend
   (needs a virtualisation dependency), and folding IGDB's exact-name resolver into the shared
   acceptance gate (IGDB's rule is stricter, so folding it in would loosen everything joined to it).
-  Still open as follow-up: port the nine surviving `ludodex/verify_*.py` into `tests/`, since each
-  is the only coverage of a production symbol. Tracked outside the repo (the list names hosts and unfixed holes). Batches in order: data loss, auth/security, paid-AI gating, identity/art, silent failure, dead scripts (`scripts/*.sh` have been broken since the 2026-08-13 move), frontend races, tests/packaging. Each fix lands with a `tests/` check.
+  The follow-up that was open here — porting the nine surviving `ludodex/verify_*.py` into
+  `tests/` — is **DONE** (`7a04474`, "the nine verify scripts become seven tests that actually
+  run"); no `verify_*.py` remains in `ludodex/`. Tracked outside the repo (the list names hosts and unfixed holes). Batches in order: data loss, auth/security, paid-AI gating, identity/art, silent failure, dead scripts (`scripts/*.sh` have been broken since the 2026-08-13 move), frontend races, tests/packaging. Each fix lands with a `tests/` check.
 
 - ~~**Cover / hero loading spinner**~~ **DONE 2026-07-23.** `SpinImg` component (cache-race guarded,
   src-keyed) wired into the library grid covers and the detail hero. `.img-spin` reuses `sync-spin`.
@@ -969,9 +970,101 @@ supplying the card only and never an identity.
 install had no metadata cache, which aborted the run and took every invariant below I10
 with it. The new I12 sits below it, so on a new install it would never have run at all.
 
-**Owed after the deploy:** `docs/images/platforms.png` still shows the same SteamWorld
+**Owed after the deploy — DONE 2026-08-26.** `platforms.png` was retaken against the
+deployed build: SteamWorld Dig 2 as ONE card reading "Pc also owned on Switch", with all
+three copies (gog/pc, nintendo/switch, steam/pc) listed under "In your library". The
+README block is restored, and the prose beside it was **corrected** at the same time — it
+still described the superseded fold ("the Remastered edition ... share a card"), which the
+2026-08-26 rule change reversed and which the live app already contradicted.
+
+The original note read:
+
+> `docs/images/platforms.png` still shows the same SteamWorld
 titles listed once per platform, which is now the defect rather than the feature. Its
 README reference was REMOVED rather than relabelled, because a stale image under a "One
 card per game" heading is worse than no image. Retake it against the deployed build (one
 card showing its platforms and editions), drop it at the same path, and restore the
 `<div align="center">` block in that section.
+
+## Shipped 2026-08-26 — a per-system provider gets a per-platform identity (#47)
+
+The three red invariants — I9, I10 and I11 — closed. Two of them were the code being
+wrong; one of them was the INVARIANT being wrong, and that half is the part worth
+remembering.
+
+### I11 and I10: `ss_resolution` was keyed on `norm_key` alone
+
+ScreenScraper files a separate record for every system a game shipped on, each carrying
+that release's art, year and metadata. One row per `norm_key` cannot hold that: a game
+owned on PC and Switch got whichever record the search happened to return, and the other
+platform wore it. Measured live: **61 norm_keys span more than one platform and 57 of them
+shared a single ScreenScraper record.**
+
+`provider_ids` now names the providers whose records are per-system (`PLATFORM_KEYED`)
+and keys their table `(norm_key, platform)`. Everything else — IGDB, SteamGridDB,
+MobyGames, ArcadeDB, ZXInfo — files one record per GAME, keeps its single row and does not
+move. TheGamesDB belongs in the set on the same reasoning and is deliberately **not** in
+it yet: `tgdb_resolution` holds 0 rows here, so listing it would migrate a table nothing
+has written to.
+
+**The rule that makes it safe:** a per-system provider is resolved ONE PLATFORM AT A TIME.
+`resolve` refuses several platforms rather than picking one, which is the original bug
+written back down. The loop therefore lives in `_match_providers`, where the platform list
+actually is.
+
+**The migration keeps what it can prove and drops the rest.** `ensure_tables` re-keys the
+table and carries every row over unplaced; `place_legacy` then puts each on the platform it
+describes, using the recorded system first and a single-platform game second, and DROPS
+what neither settles. A drop is an ABSENCE, not a miss — nothing is written down, so the
+next pass asks per platform instead of remembering a verdict it never reached
+(datbird's call, 2026-08-26). Live result: **2,362 placed, 67 dropped** — 57 unattributable
+multi-platform rows, 4 on hardware the game is not owned on (the real I11 violations:
+`i am setsuna`, `katana zero`, `nine parchments`, `wolfenstein youngblood`), 4 misses and
+2 games no longer in the catalog.
+
+Carried with it, because they were the same defect in another place:
+
+| | |
+|---|---|
+| `provider_links` | a per-system provider's page link now reaches only the entry it is FOR. The Switch record's page was being attached to the PC entry too. |
+| `romhash` | proposes per (game, provider, **platform**). Keyed without it, a Genesis dump and a Switch copy hashing to two ids read as a conflict and BOTH were discarded. |
+| `rescore` | clears the ONE refused row. `DELETE ... WHERE norm_key=?` on a platform-keyed table would have taken every platform's identity with it, including the ones today's gate still accepts. |
+| I7 | counts (entry, platform) pairs for a per-system provider, because "was this game attempted" has no single answer for a game owned on three platforms. |
+
+### The half where the INVARIANT was wrong
+
+**12 of the 16 I11 violations were false, and I10 was measuring the wrong thing.**
+
+I11 built the wanted system ids from a game's whole platform SET. `pc` contributes no
+ScreenScraper system id by design, so it silently **dropped out of the set** instead of
+making the check abstain — and every PC record held by a pc+switch game was reported as a
+Switch mismatch. `screenscraper.system_fits` had the correct rule (abstain when either
+side is silent) the whole time; I11 had written it out a second time and the copy drifted.
+It is now one function, `system_id_fits`, called by both.
+
+I10 read a per-system record's year as the game's year. ScreenScraper's Switch record for a
+2019 PC game is dated when the **Switch port** shipped, so Ape Out, Among Us, Bayonetta 2,
+Fallout Shelter, Flame in the Flood, Battle Chef Brigade and Overwatch were all reported as
+era disagreements while holding exactly the right record. When the record's system IS the
+platform its row is for, a LATER year is a port date. An EARLIER one still is a violation —
+that is the case this invariant was built for (Resident Evil 4 (2023) wearing the 2005
+GameCube box), and a system agreeing does not excuse a record that predates the game.
+
+Result: **I11 green, I10 from 15 down to 1** — `fortnite` on switch2, holding the 2017
+Save the World founder's pack, which is a genuinely wrong match and is refused by
+`rescore` under today's gate.
+
+### I9: a trademark symbol separates words
+
+`norm()` deleted `™®©` outright, so a title that sets one flush against the next word lost
+the word break with it. `Puyo Puyo(TM)Tetris(R)` normalised to `puyo puyotetris` while the
+Switch copy became `puyo puyo tetris`, and both then claimed IGDB 6866. The symbol is now a
+space. Measured over the live 2,488-entry library that changes **exactly two** norm_keys,
+and both are corrections — the other is `ace combat7 skies unknown`.
+
+### Also closed here
+
+- The nine `ludodex/verify_*.py` follow-up: already done in `7a04474`.
+- The three VR pins (Fallout 4 VR, Arcade Paradise VR, Half-Life Deathmatch: Source):
+  already pinned and live on their own cards.
+- The 57 MB pre-repair snapshot on the host: deleted.

@@ -57,23 +57,30 @@ def main():
 
     # Three games. `arcadia` matched everywhere, `orphan` matched only SGDB (the case
     # build_library could not express at all), `nomatch` matched nothing.
-    provider_ids.record(cc, "screenscraper", "arcadia", 4321, name="Arcadia")
+    provider_ids.record(cc, "screenscraper", "arcadia", 4321, name="Arcadia",
+                        platform="pc")
+    # The SAME game on another platform is a DIFFERENT ScreenScraper record, because
+    # ScreenScraper files one per system. Each links only its own entry.
+    provider_ids.record(cc, "screenscraper", "arcadia", 8765, name="Arcadia",
+                        platform="genesis")
     provider_ids.record(cc, "steamgriddb", "arcadia", 999, name="Arcadia")
     provider_ids.record(cc, "steamgriddb", "orphan", 555, name="Orphan")
-    provider_ids.record(cc, "screenscraper", "nomatch", 0)      # a recorded MISS
+    provider_ids.record(cc, "screenscraper", "nomatch", 0,      # a recorded MISS
+                        platform="pc")
     provider_ids.record(cc, "steamgriddb", "blocked", 777, name="Homebrew Hack")
     cc.commit()
 
     lib = sqlite3.connect(":memory:")
     lib.executescript("""
-    CREATE TABLE games(id INTEGER PRIMARY KEY, norm_key TEXT, canonical_title TEXT);
+    CREATE TABLE games(id INTEGER PRIMARY KEY, norm_key TEXT, canonical_title TEXT,
+                       platform TEXT);
     CREATE TABLE metadata_links(game_id INTEGER, provider TEXT, provider_id TEXT,
                                 slug TEXT, url TEXT);
     """)
     for i, nk in enumerate(("arcadia", "orphan", "nomatch", "blocked"), start=1):
-        lib.execute("INSERT INTO games VALUES(?,?,?)", (i, nk, nk.title()))
-    # two entries for one title (per-platform entries) — both must get the link
-    lib.execute("INSERT INTO games VALUES(9,'arcadia','Arcadia (Genesis)')")
+        lib.execute("INSERT INTO games VALUES(?,?,?,'pc')", (i, nk, nk.title()))
+    # two entries for one title — the SAME game on two platforms
+    lib.execute("INSERT INTO games VALUES(9,'arcadia','Arcadia (Genesis)','genesis')")
     lib.commit()
 
     def links():
@@ -88,13 +95,26 @@ def main():
     check("SGDB identity becomes a link", (1, "steamgriddb", "999") in got)
     check("a game matched by ONLY SGDB is linked (build_library could not do this)",
           (2, "steamgriddb", "555") in got)
-    check("every entry of a title gets the link", (9, "screenscraper", "4321") in got)
+    # A PER-GAME PROVIDER'S LINK SPANS EVERY ENTRY; A PER-SYSTEM PROVIDER'S DOES NOT.
+    # SteamGridDB has one record for the game, so both entries point at it. ScreenScraper
+    # has one per system, so the Genesis entry gets the Genesis page and the PC entry the
+    # PC one. Pointing both at whichever id happened to be stored is the defect the
+    # (norm_key, platform) identity key fixed.
+    check("a per-game provider's link reaches every entry of the title",
+          (9, "steamgriddb", "999") in got)
+    check("the genesis entry gets the GENESIS screenscraper record",
+          (9, "screenscraper", "8765") in got)
+    check("and never the pc one",
+          (9, "screenscraper", "4321") not in got)
+    check("the pc entry keeps the pc record",
+          (1, "screenscraper", "4321") in got
+          and (1, "screenscraper", "8765") not in got)
     check("a recorded MISS never becomes a link",
           not any(g == 3 for g, _, _ in got))
     check("a blocked game is never linked", not any(g == 4 for g, _, _ in got))
     # counts are ROWS, not titles: arcadia has two entries, so it contributes two.
     check("sync reports what it wrote (rows, not titles)",
-          n.get("steamgriddb") == 3 and n.get("screenscraper") == 2)
+          n.get("steamgriddb") == 3 and n.get("screenscraper") == 2)  # one per platform
 
     # idempotent — the rebuild runs this every time
     provider_links.sync(lib, cache, blocked_gids={4})
@@ -193,15 +213,22 @@ def main():
     # left the old link in place: live, `dune awakening` kept ScreenScraper 12706 (Dune:
     # Imperium) after the re-match had correctly decided SS does not have it. A link is
     # a claim about an identity; with no identity there is no claim.
-    provider_ids.record(cc, "screenscraper", "arcadia", 0)     # was 4321, now a miss
+    provider_ids.record(cc, "screenscraper", "arcadia", 0,     # was 4321, now a miss
+                        platform="pc")
     cc.commit()
     provider_links.sync(lib, cache, blocked_gids={4})
     lib.commit()
+    # PER PLATFORM, because the identity is. Only the PC identity became a miss; the
+    # Genesis record is untouched and its entry must keep its link. Removing both would
+    # be the old whole-title behaviour, and it would delete a match nothing retracted.
     check("a link whose identity became a miss is removed",
-          not any(p == "screenscraper" and g in (1, 9) for g, p, _ in links()))
+          not any(p == "screenscraper" and g == 1 for g, p, _ in links()))
+    check("the other platform's link survives, because its identity did",
+          (9, "screenscraper", "8765") in links())
     check("the other provider's link is untouched by that",
           (1, "steamgriddb", "999") in links())
-    provider_ids.record(cc, "screenscraper", "arcadia", 4321, name="Arcadia")
+    provider_ids.record(cc, "screenscraper", "arcadia", 4321, name="Arcadia",
+                        platform="pc")
     cc.commit()
     provider_links.sync(lib, cache, blocked_gids={4})
     lib.commit()

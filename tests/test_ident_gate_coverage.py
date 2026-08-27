@@ -179,14 +179,15 @@ def main():
     pid = provider_ids.resolve(cc, "screenscraper", "deus ex", "Deus Ex", ["pc"],
                                lambda _t, _s: None, anchors={"steam": "6910"})
     check("the index still answers: %r" % pid, str(pid) == "901")
-    how = provider_ids.cached(cc, "screenscraper", "deus ex")[1]
+    how = provider_ids.cached(cc, "screenscraper", "deus ex", platform="pc")[1]
     check("and it is recorded as name-derived, not 'index': %r" % how,
           how in provider_ids.NAME_DERIVED)
     # Which is the whole point: a second game arriving at the same id is now refused.
     provider_ids.record(cc, "screenscraper", "other game", 901, name="Deus Ex",
-                        matched_by="search")
+                        matched_by="search", platform="pc")
     check("a second game cannot take the same id",
-          provider_ids.cached(cc, "screenscraper", "other game")[1] == "collision")
+          provider_ids.cached(cc, "screenscraper", "other game",
+                              platform="pc")[1] == "collision")
     cc.close()
 
     print()

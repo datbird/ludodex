@@ -103,15 +103,30 @@ def sync(lib_con, cache_path, blocked_gids=(), only=None):
     out = {}
     try:
         gids = {}
-        for gid, nk in lib_con.execute("SELECT id, norm_key FROM games"):
+        # THE PLATFORM TRAVELS WITH THE GAME ROW, because a per-system provider's link is
+        # per platform. ScreenScraper's page for the Switch record is a different page
+        # from the PC one, and pointing both entries at whichever id happened to be
+        # stored was the same defect the identity key just fixed.
+        gplat = {}
+        for gid, nk, plat in lib_con.execute(
+                "SELECT id, norm_key, platform FROM games"):
             if want is None or nk in want:
                 gids.setdefault(nk, []).append(gid)
+                gplat[gid] = (plat or "").strip().lower()
 
         for provider in PAGE_URL:
             table, idcol = provider_ids.PROVIDERS[provider]
+            keyed = provider_ids.is_platform_keyed(provider)
             try:
-                rows = cc.execute("SELECT norm_key, %s FROM %s WHERE COALESCE(%s,0)>0"
-                                  % (idcol, table, idcol)).fetchall()
+                if keyed:
+                    rows = cc.execute(
+                        "SELECT norm_key, %s, platform FROM %s "
+                        "WHERE COALESCE(%s,0)>0 AND platform<>''"
+                        % (idcol, table, idcol)).fetchall()
+                else:
+                    rows = [(r[0], r[1], None) for r in cc.execute(
+                        "SELECT norm_key, %s FROM %s WHERE COALESCE(%s,0)>0"
+                        % (idcol, table, idcol))]
             except sqlite3.OperationalError:
                 continue                       # provider never ran on this install
             # AUTHORITATIVE, not incremental. Clearing only the games we are about to
@@ -131,9 +146,13 @@ def sync(lib_con, cache_path, blocked_gids=(), only=None):
                         lib_con.execute("DELETE FROM metadata_links WHERE game_id=? "
                                         "AND provider=?", (_gid, provider))
             n = 0
-            for nk, pid in rows:
+            for nk, pid, rplat in rows:
                 for gid in gids.get(nk, ()):
                     if gid in blocked:
+                        continue
+                    # A per-system row links only the entry it is FOR. Without this the
+                    # Switch record's page would be attached to the PC entry too.
+                    if keyed and rplat and gplat.get(gid) != rplat:
                         continue
                     lib_con.execute("DELETE FROM metadata_links WHERE game_id=? AND "
                                     "provider=?", (gid, provider))

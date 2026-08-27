@@ -52,15 +52,21 @@ of its 33 attributes are still empty.
 
 ### One card per game
 
-*Dark Souls* is one tile, not four. The Remastered edition, the Prepare To Die edition,
-the PC copy and the Switch copy are all the same game, so they share a card that tells
-you which platforms and which editions you actually own. A remake is not the same game
-and keeps its own card: *Resident Evil 2* from 1998 and the one from 2019 stay apart.
+Own *SteamWorld Dig 2* on Steam, on GOG and on Switch and you get one card, not three. It
+tells you which platforms you have it on and lists every copy underneath. The axis that
+folds is the PLATFORM, and only that: a remaster, a remake and a sequel are different
+products and each keeps its own card, so *Dark Souls*, *Dark Souls: Remastered* and
+*Dark Souls II* sit side by side rather than hiding inside one another. What the fold no
+longer merges, the detail page still shows, under Other versions and Series.
 
 Underneath, every platform is still its own record. That is what lets a Switch copy show
 Switch art instead of Steam art, and what lets you publish one platform's files to a
 handheld without dragging the others along. You see the game; the machine still sees
 each copy.
+
+<div align="center">
+<img src="docs/images/platforms.png" alt="One card for SteamWorld Dig 2, showing the platforms it is owned on and each copy" width="820">
+</div>
 
 
 ### Fixes itself in one click

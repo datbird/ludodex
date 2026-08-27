@@ -411,14 +411,20 @@ def enrich_from_hashes(rom_con, cat_con, limit=None, progress=True):
             # exact evidence, which nothing downstream would ever question.
             if len(vals) != 1:
                 continue
-            proposed.setdefault((nk, provider), {}).setdefault(str(vals[0]), plat)
+            # A PER-SYSTEM PROVIDER IS PROPOSED PER PLATFORM. ScreenScraper files one
+            # record per system, so the Genesis dump and the Switch copy of one game
+            # legitimately hash to two different ids — keyed on (nk, provider) alone
+            # that read as a conflict and BOTH were discarded.
+            _pk = plat if provider_ids.is_platform_keyed(provider) else None
+            proposed.setdefault((nk, provider, _pk), {}).setdefault(str(vals[0]), plat)
         if progress and i % 20000 == 0:
             print("romhash: %d/%d examined, %d hash hits" % (i, len(rows), hits),
                   file=sys.stderr)
 
     recorded = conflicts = write_errors = 0
     first_error = None
-    for (nk, provider), byid in sorted(proposed.items()):
+    for (nk, provider, _pk), byid in sorted(
+            proposed.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or "")):
         if len(byid) != 1:
             # Two hashed files under one catalog key point at two different games. That is
             # not a tie to break — it is the title bucket holding more than one game, and
@@ -430,7 +436,8 @@ def enrich_from_hashes(rom_con, cat_con, limit=None, progress=True):
         nm, yr = names.get(nk, (None, None))
         try:
             provider_ids.record(cat_con, provider, nk, pid, name=nm, matched_by="hash",
-                                year=yr, system=plat or None, commit=False)
+                                year=yr, system=plat or None, commit=False,
+                                platform=plat)
             recorded += 1
         except Exception as e:                       # noqa: BLE001 — counted, not hidden
             write_errors += 1
@@ -439,7 +446,7 @@ def enrich_from_hashes(rom_con, cat_con, limit=None, progress=True):
     cat_con.commit()                                 # ONE commit, not one per write
     mi.close()
     out = {"examined": len(rows), "hash_hits": hits, "ids_recorded": recorded,
-           "distinct_games": len({nk for nk, _p in proposed}),
+           "distinct_games": len({nk for nk, _p, _pk in proposed}),
            "conflicts": conflicts, "write_errors": write_errors,
            "at": int(time.time())}
     if first_error:
