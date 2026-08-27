@@ -69,6 +69,12 @@ def ensure_store_type(con):
     which is the point. That is only safe because the server calls this at startup.
 
     Idempotent. The copy runs once because the INSERT is a no-op the second time.
+
+    IT COMMITS, and that is not housekeeping. The CREATE lands on its own implicit
+    commit, but the INSERT is DML in an open transaction, so a caller that opens this
+    and closes it without writing anything else rolls the carried-over rows back. Live
+    2026-08-26: the table appeared on the server, empty, beside 2114 `steam_type` rows,
+    and every one of those verdicts stopped being applied.
     """
     con.execute(STORE_TYPE_DDL % "")
     try:
@@ -79,6 +85,7 @@ def ensure_store_type(con):
         # else is a real fault and must not pass for one.
         if "no such table" not in str(e):
             raise
+    con.commit()
     return con
 
 # Steam GENRES that only ever belong to software, never to a game. A second, independent

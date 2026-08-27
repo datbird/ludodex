@@ -100,6 +100,22 @@ def main():
           "cyberpunk 2077 digital goodies" not in hidden2, hidden2)
 
     # --- 4. a live install carries its rows over, it does not lose them --------------
+    # On DISK and REOPENED, because the first version of this passed in memory while the
+    # server showed an empty table beside 2114 steam_type rows. The CREATE self-commits;
+    # the INSERT does not, so closing without a commit rolled every row back.
+    dbp = os.path.join(os.environ["LUDODEX_DATA"], "carryover.sqlite")
+    w = sqlite3.connect(dbp)
+    w.execute("CREATE TABLE steam_type(norm_key TEXT PRIMARY KEY, type TEXT, updated REAL)")
+    w.execute("INSERT INTO steam_type VALUES('3dmark','application',7)")
+    w.commit()
+    nongame.ensure_store_type(w)
+    w.close()                                   # <- where the rows used to disappear
+    re = sqlite3.connect(dbp)
+    kept = re.execute("SELECT norm_key,source,type FROM store_type").fetchall()
+    re.close()
+    check("the carried-over rows SURVIVE the connection closing",
+          kept == [("3dmark", "steam", "application")], kept)
+
     live = sqlite3.connect(":memory:")
     live.execute("CREATE TABLE steam_type(norm_key TEXT PRIMARY KEY, type TEXT, updated REAL)")
     live.execute("INSERT INTO steam_type VALUES('3dmark','application',7)")
