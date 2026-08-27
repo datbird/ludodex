@@ -1068,3 +1068,32 @@ and both are corrections — the other is `ace combat7 skies unknown`.
 - The three VR pins (Fallout 4 VR, Arcade Paradise VR, Half-Life Deathmatch: Source):
   already pinned and live on their own cards.
 - The 57 MB pre-repair snapshot on the host: deleted.
+
+## Open — I10's last two are a PROVIDER DISAGREEMENT, not a wrong match (2026-08-27)
+
+After the per-platform re-key and the forced re-match, eleven of twelve invariants hold.
+I10 reports two, and both matches are CORRECT:
+
+| game | IGDB says | ScreenScraper says | what they are |
+|---|---:|---:|---|
+| Golf With Your Friends | 2020 | 2016 | the 1.0 release vs the early-access one |
+| Akalabeth: World of Doom | 1998 | 1979 | the DOS re-release vs the Apple II original |
+
+Both ScreenScraper records state system `pc`, match the title exactly, and describe the
+same product. The two providers simply disagree about which release date is "the game's",
+and on Akalabeth ScreenScraper is arguably the more correct of the two.
+
+**The port-year exemption deliberately does NOT cover them.** It is one-directional: a
+LATER candidate is a port date, an EARLIER one is still a violation. That direction is the
+whole safety of the rule, because "the candidate is earlier" is exactly the shape this
+check exists for — Resident Evil 4 (2023) taking the 2005 GameCube record. Nothing in the
+data separates a 1979 original from a 2005 original, so widening it to clear these two
+would re-open the class it was built to catch.
+
+**So this needs adjudication, never arithmetic** — the same conclusion the truncation class
+reached (`Beyond Citadel` <- "The Citadel"). Two games is a review queue, not a red light.
+Either a person marks the pairing `manual`, which every gate and scrub already respects, or
+`game_era` learns to prefer the EARLIEST credible first-release across providers rather than
+IGDB's alone. The second is the real fix and it is its own piece of work: `game_era` is
+consulted by the gate, the scrub and the invariant, so changing what it means changes all
+three at once.
