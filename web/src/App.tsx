@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useCallback, useMemo, memo, Fragment, type
 import { api } from './api'
 import ErrorBoundary from './ErrorBoundary'
 import type {
-  GameRow, GameDetail, Stats, Facets, GamesQuery, AiConfig, AiArea,
+  GameRow, GameDetail, RelatedCard, Stats, Facets, GamesQuery, AiConfig, AiArea,
   AiUsageModel, AiUsageDay, AiUsageSummary, AiPrice, Currency, Caps,
   DedupeSuggestion, Service, ServiceConnect, Achievements as AchData,
   MediaLibrary, MediaAsset, MediaKind, MatchedProvider, ProviderScopeState, BannedMedia, BackupsState, BackupJob,
@@ -7352,6 +7352,74 @@ function showToast(msg: string) {
 // these automatically — but never blocks manual control. Join/Separate delegate to the
 // proven merge/split flows; Manual Match + Associations are handled inline. Every manual
 // change here is durable/pinned (aimeta pin=manual, merges/splits/detach stores).
+// Related games get their own SECTION IN THE BODY, not a strip in the hero.
+//
+// They started in the hero next to the platform chips, which is fine for a two-game
+// series and wrong for a real one: Mega Man put 24 chips across four rows on top of the
+// key art, burying the title and most of the image. A relationship worth showing is not
+// worth showing THERE.
+//
+// Two groups, because they answer different questions. "Other versions" is another way
+// to own THIS game (an edition, a remaster). "Series" is the rest of the franchise. Both
+// are owned games only.
+//
+// A long series collapses to one row with a count, because the point of moving it here
+// was to stop it eating the page. Opening it is one click and the choice sticks while
+// the panel is open.
+function RelatedGames({ versions, series, seriesName, onNavigate }: {
+  versions?: RelatedCard[]; series?: RelatedCard[]
+  seriesName?: string | null; onNavigate?: (k: string) => void
+}) {
+  const [openAll, setOpenAll] = useState<Record<string, boolean>>({})
+  const groups = [
+    { key: 'versions', label: 'Other versions', rows: versions || [],
+      help: 'the same game in another form — an edition, a remaster, a port you own separately' },
+    { key: 'series', label: seriesName ? `${seriesName} series` : 'Series', rows: series || [],
+      help: 'the rest of the franchise, from the games you own' },
+  ].filter((g) => g.rows.length > 0)
+  if (!groups.length) return null
+
+  const CUTOFF = 8
+  return (
+    <section className="rel-section">
+      <h3>🔗 Related games
+        <span className="sec-help">games you own that are connected to this one. They are
+          separate entries on purpose: a remaster is a different game, not a copy of this one.</span>
+      </h3>
+      {groups.map((g) => {
+        const all = openAll[g.key] || g.rows.length <= CUTOFF
+        const shown = all ? g.rows : g.rows.slice(0, CUTOFF)
+        return (
+          <div className="rel-group" key={g.key}>
+            <div className="rel-group-head">
+              <span className="rel-group-label">{g.label}</span>
+              <span className="rel-count">{g.rows.length}</span>
+              <span className="sec-help">{g.help}</span>
+            </div>
+            <div className="rel-chips">
+              {shown.map((r) => (
+                <button key={r.card_key} className="rel-chip" type="button"
+                  onClick={() => onNavigate?.(r.card_key)}
+                  title={r.platforms ? `${r.title} — ${r.platforms}` : r.title}>
+                  <span className="rel-chip-title">{r.title}</span>
+                  {r.platforms && <span className="rel-chip-plat">{r.platforms}</span>}
+                </button>
+              ))}
+              {!all && (
+                <button className="rel-chip rel-more" type="button"
+                  onClick={() => setOpenAll((p) => ({ ...p, [g.key]: true }))}>
+                  Show all {g.rows.length}
+                </button>
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </section>
+  )
+}
+
+
 function ResolveModal({ nk, title, platform, alsoOwnedOn, onClose, onReload, onGone }: {
   nk: string; title: string; platform?: string | null
   alsoOwnedOn?: { entry_key: string; platform: string; title: string; via?: string }[]
@@ -7960,25 +8028,6 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
                   )
                 })()}
 
-                {/* WHAT THIS CARD SHOWS INSTEAD OF MERGING. The fold rule is narrow, so
-                    Remastered is its own card rather than hidden inside Dark Souls. The
-                    relationship still has to be visible, or it is simply lost.
-                    "Other versions" is another way to own THIS game; "Series" is the
-                    rest of the franchise. Owned games only. */}
-                {[
-                  { rows: d.versions || [], label: 'Other versions', cls: 'rel-version' },
-                  { rows: d.series || [], label: d.series_name || 'Series', cls: 'rel-series' },
-                ].map(({ rows, label, cls }) => rows.length > 0 && (
-                  <div className={'also-on ' + cls} key={label}>
-                    <span className="also-on-label">{label}</span>
-                    {rows.map((r) => (
-                      <button key={r.card_key} className="also-on-chip" type="button"
-                        onClick={() => onNavigate?.(r.card_key)}
-                        title={`${r.title}${r.platforms ? ' — ' + r.platforms : ''}`}>
-                        {r.title}</button>
-                    ))}
-                  </div>
-                ))}
               </div>
             </div>
 
@@ -8085,6 +8134,9 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
                   </div>
                   <OwnershipEditor nk={d.norm_key} title={d.title} facts={d.ownership ?? []} onChanged={reloadDetail} />
                 </section>
+
+                <RelatedGames versions={d.versions} series={d.series}
+                  seriesName={d.series_name} onNavigate={onNavigate} />
 
                 {d.collection && d.collection.members.length > 0 && (
                   <section className="coll-section">

@@ -169,6 +169,58 @@ def main():
             st, cd = api("/api/games/" + urllib.request.quote(ek, safe=""))
             check("and its entry key opens a detail page: " + str(ek), st == 200, st)
 
+    # ---------------------------------------------------------------- related games
+    # A card is one PRODUCT, so a remaster is a separate card rather than hidden inside
+    # the original. The relationship is shown instead of merged, and this proves the
+    # data behind that section is real: owned only, one row per card, never this card.
+    # Find a game that HAS a series, rather than hoping the first alphabetical page does.
+    # The facets endpoint lists every series value in the library, and the query language
+    # can filter by one, so this works on any library that has any series at all.
+    found = None
+    st, fac = api("/api/facets")
+    series_vals = ((fac.get("attributes") or {}).get("series") or [])[:5]
+    # Searched by TITLE, not by `query=attr:series:<val>`: the query language splits
+    # tokens on whitespace, so a series whose name contains a space ("Mega Man") filters
+    # to nothing. Games in a series almost always carry its name in the title anyway.
+    for val in series_vals:
+        st, page2 = api("/api/games?limit=10&q=" + urllib.request.quote(val, safe=""))
+        for it in (page2.get("items") or [])[:5]:
+            st, d = api("/api/games/" + urllib.request.quote(nav_key(it), safe=""))
+            if st == 200 and (d.get("series") or d.get("versions")):
+                found = (nav_key(it), d)
+                break
+        if found:
+            break
+    if found:
+        key, d = found
+        rel = (d.get("series") or []) + (d.get("versions") or [])
+        tag = (d.get("card_title") or d.get("title") or "")[:26]
+        check("related games carry a key and a title: " + tag,
+              all(r.get("card_key") and r.get("title") for r in rel), rel[:2])
+        check("a card never lists itself: " + tag,
+              all(r["card_key"] != key for r in rel), key)
+        check("each related card appears once: " + tag,
+              len({r["card_key"] for r in rel}) == len(rel))
+        # every one must be openable, or the chips are decoration
+        st, opened = api("/api/games/" + urllib.request.quote(rel[0]["card_key"], safe=""))
+        check("a related card opens: " + tag, st == 200 and opened.get("title"), st)
+        # OWNED ONLY: everything listed must be in the owned library. PAGE THROUGH IT.
+        # A single limit=1000 read looked like four unowned games on a 2,424-card
+        # library, which is a test asserting its own page size rather than the rule.
+        keys, off = set(), 0
+        while True:
+            st, owned = api("/api/games?limit=1000&offset=%d" % off)
+            batch = owned.get("items") or []
+            keys |= {nav_key(x) for x in batch}
+            off += len(batch)
+            if len(batch) < 1000 or off >= (owned.get("total") or 0):
+                break
+        missing = [r["card_key"] for r in rel if r["card_key"] not in keys]
+        check("related games are all OWNED, never a wishlist: " + tag,
+              not missing, missing[:4])
+    else:
+        print("  ..    no game in the first page has relatives; section unexercised")
+
     # ---------------------------------------------------------------- the canary
     # A REGRESSION TEST NOBODY HAS SEEN FAIL IS WORTH LITTLE. Every check above asserts
     # "not empty", and the failure it guards against was a 200 with an empty body. So

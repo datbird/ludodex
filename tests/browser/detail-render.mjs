@@ -166,6 +166,35 @@ try {
   const title = await page.locator('.hero-title, .hero-sub').first().textContent()
   check('the panel shows a title', !!(title || '').trim(), title)
 
+  // --- related games belong in the BODY, never in the hero --------------------------
+  // They shipped in the hero first. That is fine for a two-game series and wrong for a
+  // real one: Mega Man laid 24 chips across four rows on top of the key art, burying the
+  // title and most of the image. The hero is for the game you opened.
+  check('no related-game chips are inside the hero',
+        (await page.locator('.hero .rel-chip, .hero .rel-section').count()) === 0)
+  const heroH = await page.locator('.hero').first()
+    .evaluate((el) => Math.round(el.getBoundingClientRect().height))
+  check('the hero stays a hero and not a list', heroH > 0 && heroH < 520, heroH)
+
+  const relCount = await page.locator('.rel-section').count()
+  if (relCount) {
+    check('the related section is in the body, not the hero',
+          (await page.locator('.hero .rel-section').count()) === 0)
+    // a long series must arrive COLLAPSED, or moving it out of the hero bought nothing
+    const shown = await page.locator('.rel-section .rel-chip:not(.rel-more)').count()
+    const more = await page.locator('.rel-section .rel-more').count()
+    const label = await page.locator('.rel-section .rel-count').first().textContent()
+    const total = parseInt((label || '0').trim(), 10) || shown
+    check('a long series is collapsed until asked',
+          total <= 8 || (more > 0 && shown <= 8), { total, shown, more })
+    if (more) {
+      await page.locator('.rel-section .rel-more').first().click()
+      await page.waitForTimeout(400)
+      const expanded = await page.locator('.rel-section .rel-chip:not(.rel-more)').count()
+      check('and Show all really shows them all', expanded > shown, { shown, expanded })
+    }
+  }
+
   // --- the network told the truth ---------------------------------------------------
   check('no /api/media request failed', mediaFailures.length === 0, mediaFailures)
   check('no uncaught page errors', consoleErrors.length === 0, consoleErrors)

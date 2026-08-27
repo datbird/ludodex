@@ -4410,3 +4410,28 @@ img.ms-icon { display: block; object-fit: contain; flex: 0 0 auto; }
 
 /* Rebuild acts on the whole Published section, not on the field beside it. */
 .mdb-wide { width: 100%; margin-top: 18px; }
+
+/* ------------------------------------------------------- related games (detail body)
+   These used to sit in the hero beside the platform chips. That is fine for a two-game
+   series and wrong for a real one: Mega Man laid 24 chips across four rows on top of the
+   key art. They live in the body now, and a long list collapses until asked. */
+.rel-section .rel-group { margin: 10px 0 0; }
+.rel-section .rel-group + .rel-group { margin-top: 14px; }
+.rel-group-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.rel-group-label { font-weight: 600; color: var(--fg); font-size: 13px; }
+.rel-count {
+  font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  background: var(--chip-bg, rgba(255,255,255,.07)); color: var(--dim);
+}
+.rel-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.rel-chip {
+  display: inline-flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  padding: 5px 10px; border-radius: 8px; cursor: pointer; text-align: left;
+  border: 1px solid var(--line, rgba(255,255,255,.12));
+  background: var(--chip-bg, rgba(255,255,255,.05)); color: var(--fg);
+}
+.rel-chip:hover { border-color: var(--accent); }
+.rel-chip-title { font-size: 12.5px; line-height: 1.25; }
+/* the platform line is context, not the label: it must never compete with the title */
+.rel-chip-plat { font-size: 10.5px; color: var(--dim); letter-spacing: .02em; }
+.rel-chip.rel-more { justify-content: center; color: var(--accent); font-size: 12.5px; }
