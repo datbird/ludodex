@@ -152,6 +152,47 @@ def overrides_for(norm_key):
     return out
 
 
+def user_override(norm_key, kind):
+    """The value a PERSON chose for this attribute, or None if only a pass wrote one.
+
+    `overrides_for` answers "what is the canonical value", which is the right question
+    for display and for the build merge: there, a value the wand's consensus pass settled
+    on is as good as a hand-typed one.
+
+    It is the wrong question for the acceptance gate. `matchgate.game_era` lets a user
+    widen a game's era downward — that is how Akalabeth's 1979 Apple II release gets
+    stated at all, since IGDB's record starts at 1998 — and an automatic write must never
+    reach that path. An override the consensus pass derived from ScreenScraper is just
+    ScreenScraper's year wearing a different hat, so honouring it would let a provider's
+    year become the evidence that its own year is right. That is the circularity the era
+    rule exists to refuse, and it is how Resident Evil 4 (2023) would license the 2005
+    GameCube record it once wore.
+
+    Same legacy read as `set_override`: rows written before `set_by` existed count as a
+    person's when their origin is 'manual', and as a pass's otherwise.
+
+    READ-ONLY, and it never creates the database. `_con()` runs DDL and a commit on every
+    open, which is the connect-per-row cost `set_overrides` exists to avoid, and the gate
+    asks this once per provider row. Reading an era must also not have a side effect on
+    disk: an absent file is simply an absent answer, not a table to go and create.
+    """
+    if not (norm_key and kind) or not os.path.exists(DB):
+        return None
+    con = sqlite3.connect("file:%s?mode=ro" % DB, uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        r = con.execute("SELECT value, origin, set_by FROM overrides WHERE norm_key=? "
+                        "AND kind=?", (norm_key, kind)).fetchone()
+    except sqlite3.OperationalError:      # no table, or one stripped of these columns
+        return None
+    finally:
+        con.close()
+    if r is None:
+        return None
+    by = r["set_by"] or ("user" if (r["origin"] or "") == "manual" else "auto")
+    return (r["value"] or None) if by == "user" else None
+
+
 def all_overrides():
     """{norm_key: {kind: {value, origin}}} — for the build_library merge."""
     con = _con()

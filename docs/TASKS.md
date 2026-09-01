@@ -1069,7 +1069,58 @@ and both are corrections — the other is `ace combat7 skies unknown`.
   already pinned and live on their own cards.
 - The 57 MB pre-repair snapshot on the host: deleted.
 
-## Open — I10's last two are a PROVIDER DISAGREEMENT, not a wrong match (2026-08-27)
+## Shipped 2026-08-31 — a game's era is the SPAN of its releases (#50)
+
+`game_era` returned one number: the year in IGDB's `first_release_date`. That field names
+ONE release and is not always the earliest one IGDB records. It now returns the SET of
+years the record states, and only a PERSON may widen that set downward.
+
+**The record already carried the answer.** `release_dates.y` has been in `GAME_FIELDS`
+since long before this; nothing ever read it. Golf With Your Friends reads 2020 in
+`first_release_date` while the same record's `release_dates` list its 2016 early access on
+PC, Mac and Linux. So the fix is to read what IGDB already said, not to weaken the rule,
+and it needs no refetch.
+
+**Why a span and not a minimum.** Taking only the earliest year makes every later port look
+wrong: Syberia 2 spans 2004 to 2023 and its 2017 record would be judged against 2004. The
+honest statement is the set, and a candidate is in era when it falls inside its range.
+
+**The safety property, measured.** `first_release_date` falls outside its own
+`release_dates` span in **0 of 2,364 payloads**, so a span can only ever WIDEN what the
+scalar accepted. Replaying all **1,396** judged provider rows: **40 newly pass, 0 newly
+fail** — 1 of the 2 early-side rows and 39 of 46 late-side port rows, whose exemption now
+covers only the 7 genuine leftovers. Live I10 went **2 → 1**.
+
+| | before | after |
+|---|---|---|
+| Golf With Your Friends | era 2020, SS 2016, flagged | era 2016-2022, **accepted** |
+| Akalabeth: World of Doom | era 1998, SS 1979, flagged | era 1998-2014, still flagged |
+
+**What a span cannot fix, and why it must not try.** Akalabeth is a 1979 Apple II game.
+IGDB's record spans 1998 to 2014 and holds no 1979 date at all, so nothing IGDB says will
+clear ScreenScraper's correct 1979 record. The tempting fix — let a provider's own year
+lower the floor — **is circular, and it is exactly what would let Resident Evil 4 (2023)
+validate the 2005 GameCube record it once wore.** A provider's year can never be the
+evidence that its own year is right.
+
+**So the floor is lowered only by a person**, through the `release_year` attribute override
+that already exists (durable, synced, and already protected from automatic overwrite). Two
+rules make that safe, both tested:
+
+- **`set_by='user'` only.** An override the wand's consensus pass wrote is just a
+  provider's guess wearing a different hat, and is refused for the same reason. New helper
+  `overrides.user_override()`.
+- **Widening only.** A stated year above the span is ignored, so adjudicating one game can
+  never start refusing another's correct match.
+
+With `release_year=1979` recorded for Akalabeth, **all 12 invariants hold.**
+
+The ranking bonus deliberately did NOT widen: it was `y1 == y2` and is now exact
+membership in the year set, so scalar callers rank exactly as before. `score()` still takes
+a plain int; a span is an addition, not a replacement. Covered by
+`tests/test_game_era_span.py` (35 checks).
+
+## Resolved — I10's last two were a PROVIDER DISAGREEMENT, not a wrong match (2026-08-27)
 
 After the per-platform re-key and the forced re-match, eleven of twelve invariants hold.
 I10 reports two, and both matches are CORRECT:
@@ -1097,6 +1148,12 @@ Either a person marks the pairing `manual`, which every gate and scrub already r
 IGDB's alone. The second is the real fix and it is its own piece of work: `game_era` is
 consulted by the gate, the scrub and the invariant, so changing what it means changes all
 three at once.
+
+**Both were done on 2026-08-31, and the shape above turned out to be half right — see the
+entry above this one.** "Across providers" is the part that cannot work: reading another
+provider's year to lower the floor is circular. The credible earliest release comes from
+IGDB's OWN `release_dates`, which clears Golf With Your Friends, and from a person for
+Akalabeth, which IGDB genuinely does not know about.
 
 ## Shipped 2026-08-27 — IGDB's series is `collections`, not `franchises` (#48)
 

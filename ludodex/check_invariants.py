@@ -353,13 +353,21 @@ def main():
             own = cat[nk]
             if not (own and yr):
                 continue
-            if int(yr) - own > matchgate.YEAR_TOLERANCE and keyed \
+            # THE ERA IS A SPAN. `first_release_date` names one release and is not always
+            # the earliest one IGDB records, so Golf With Your Friends read 2020 here
+            # while its own release_dates hold the 2016 early access ScreenScraper had
+            # correctly matched. Judged against the whole span, that is not a
+            # disagreement. See matchgate.game_era for why only a PERSON may widen it.
+            lo, hi = own[0], own[-1]
+            if int(yr) - hi > matchgate.YEAR_TOLERANCE and keyed \
                     and _ss10.system_id_fits(row[2], row[3]) and row[2] and row[3]:
                 continue                  # a later release on the system it is filed for
-            if abs(int(yr) - own) > matchgate.YEAR_TOLERANCE:
-                bad.append("%s %s%s — the game is from %d, the match is %s"
+            if not (lo - matchgate.YEAR_TOLERANCE <= int(yr)
+                    <= hi + matchgate.YEAR_TOLERANCE):
+                bad.append("%s %s%s — the game is from %s, the match is %s"
                            % (prov, nk[:38],
-                              (" (%s)" % row[2]) if keyed and row[2] else "", own, yr))
+                              (" (%s)" % row[2]) if keyed and row[2] else "",
+                              lo if lo == hi else "%d-%d" % (lo, hi), yr))
     if _mc:
         _mc.close()
     report("I10 a provider match is the same ERA as the game", bad,

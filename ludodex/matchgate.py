@@ -68,6 +68,29 @@ def _year(v):
     return int(t) if t.isdigit() and len(t) == 4 else None
 
 
+def _era(v):
+    """An era as a sorted tuple of distinct years, from a single year or a span of them.
+
+    `game_era` states a game's era as the SET of years its releases fall in, because one
+    number cannot describe a game that shipped in 2016 and again in 2020. Every caller
+    that predates the span passes a plain int, and an int is simply an era of one year,
+    so both shapes go through here rather than through two paths that can drift.
+
+    The SET is kept rather than reduced to its ends, because the gate asks two different
+    questions of it: whether a candidate falls in RANGE (the acceptance test, which needs
+    the ends and a tolerance) and whether it lands EXACTLY on a release (the ranking
+    bonus, which must not widen — see `score`).
+
+    An empty tuple means no statement, which refuses nothing. See `game_era`.
+    """
+    if v is None:
+        return ()
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return tuple(sorted({y for y in (_year(x) for x in v) if y}))
+    y = _year(v)
+    return (y,) if y else ()
+
+
 def _significant(tokens):
     """The tokens that actually identify a game."""
     return {t for t in tokens if t not in NOISE and not YEAR.match(t)}
@@ -320,11 +343,24 @@ def score(owned, cand_name, year=None, cand_year=None, later_ok=False):
         #
         # Granted only by a caller that KNOWS the candidate's system is the one being
         # matched for. Default off, so every other caller is judged exactly as before.
-        y1, y2 = _year(year), _year(cand_year)
-        if y1 and y2 and abs(y1 - y2) > YEAR_TOLERANCE \
-                and not (later_ok and y2 > y1):
+        #
+        # JUDGED AGAINST THE WHOLE SPAN, not one year of it. `year` may be a single year
+        # or the set `game_era` returns; a game that shipped in 2016 and again in 2020
+        # is in era for both, and for everything between. `later_ok` is measured against
+        # the TOP of the span, since the span already contains every port the metadata
+        # knows about and the exemption only has to cover the ones it does not.
+        ys = _era(year)
+        y2 = _year(cand_year)
+        lo, hi = (ys[0], ys[-1]) if ys else (None, None)
+        in_era = bool(ys and y2) and (lo - YEAR_TOLERANCE) <= y2 <= (hi + YEAR_TOLERANCE)
+        if ys and y2 and not in_era and not (later_ok and y2 > hi):
             continue
-        score = qc + nc + (0.4 if y1 and y1 == y2 else 0)
+        # THE BONUS STAYS EXACT. It used to be `y1 == y2`, and widening it to the whole
+        # tolerance band would change which candidate wins among several — a ranking
+        # change nobody asked for, riding along with an acceptance change. Landing ON a
+        # year IGDB records for the game is the same statement as before, just measured
+        # against every release rather than the one `first_release_date` happens to name.
+        score = qc + nc + (0.4 if y2 and y2 in ys else 0)
         if covered and score > best[1]:
             best = (True, score)
         elif not best[0] and score > best[1]:
@@ -366,7 +402,7 @@ def hardware_ok(ours, theirs):
 
 
 def game_era(lib_con, cache_con, norm_key):
-    """The year THE GAME came out — which is not the year a STORE listed it.
+    """The years THE GAME came out — which are not the year a STORE listed it.
 
     `release_year` names two different facts. For a ROM it is the game's release. For a
     store entry it is when that STOREFRONT listing appeared, so Arcanum reads 2016 (its
@@ -380,19 +416,48 @@ def game_era(lib_con, cache_con, norm_key):
     the same confusion was also about to make the GATE refuse all 123 on the next
     re-match, which is the more expensive half. One fact, one definition, both callers.
 
+    A SPAN, NOT A POINT, and that is the second half of the same lesson. IGDB's
+    `first_release_date` names ONE release and is not always the earliest: Golf With Your
+    Friends reads 2020 there while the SAME record's `release_dates` list its 2016 early
+    access on PC, Mac and Linux. So ScreenScraper's correct 2016 record was reported as an
+    era disagreement, and the gate would have refused it on the next re-match — the same
+    two-sided cost as above, from the same cause. `release_dates.y` had been in
+    `GAME_FIELDS` the whole time; nothing read it. Reading what IGDB already said is the
+    fix; weakening the rule is not.
+
+    Measured on the live library: `first_release_date` falls outside its own
+    `release_dates` span in 0 of 2,364 payloads, so a span can only WIDEN what the single
+    year accepted. Across all 1,396 judged provider rows, 40 newly pass and 0 newly fail.
+
     Order:
-      1. IGDB's `first_release_date` for the identified game — a provider's own statement
-         about the GAME, which is the thing being compared.
-      2. the catalog's release_year, but ONLY for an entry with no store source, where it
+      1. IGDB's `release_dates` for the identified game — every year that record states,
+         which is a provider's own account of the GAME rather than of one of its releases.
+      2. its `first_release_date`, when the record carries no `release_dates` at all
+         (14 payloads live).
+      3. the catalog's release_year, but ONLY for an entry with no store source, where it
          is a release year rather than a listing date.
-      3. None — no statement. An absent year is not evidence and must never refuse
+      4. None — no statement. An absent year is not evidence and must never refuse
          anything (see the disagreement rule above).
 
+    Then, on top of whatever that found, A PERSON MAY WIDEN IT DOWNWARD, through the
+    `release_year` attribute override the UI already offers. Akalabeth: World of Doom is
+    the case: it is a 1979 Apple II game, IGDB's record spans 1998 to 2014 and holds no
+    1979 date anywhere, so nothing IGDB says will ever clear ScreenScraper's correct 1979
+    record. Only a person can state that year.
+
+    ONLY a person, and only ever WIDER. Letting ScreenScraper's own year lower the floor
+    is circular — it is precisely what would let Resident Evil 4 (2023) validate the 2005
+    GameCube record it once wore — so an override the wand's consensus pass wrote is
+    refused by `overrides.user_override` for the same reason, and a stated year that would
+    NARROW the span is ignored, because one adjudication must never start refusing another
+    game's correct match.
+
     It deliberately does NOT weaken the case it was built for: Resident Evil 4 (2023) is
-    a different IGDB record from the 2005 game, so IGDB says 2023, ScreenScraper says
+    a different IGDB record from the 2005 game, its span is 2023 alone, ScreenScraper says
     2005, and the match is still refused.
     """
     import json
+    years = set()
     try:
         row = cache_con.execute(
             "SELECT igdb_id FROM igdb_resolution WHERE norm_key=? AND "
@@ -403,28 +468,60 @@ def game_era(lib_con, cache_con, norm_key):
         try:
             p = cache_con.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=? "
                                   "LIMIT 1", (row[0],)).fetchone()
-            ts = json.loads(p[0]).get("first_release_date") if p else None
-            if ts:
+            d = json.loads(p[0]) if p else {}
+            years = {y for y in (_year(r.get("y"))
+                                 for r in (d.get("release_dates") or [])) if y}
+            # `first_release_date` is the fallback, not a supplement: on the live library
+            # it never lies outside the span, so adding it to a populated set can only be
+            # a no-op or a disagreement with the record's own dates.
+            if not years and d.get("first_release_date"):
                 import datetime
-                return datetime.datetime.fromtimestamp(
-                    int(ts), datetime.timezone.utc).year
+                years = {datetime.datetime.fromtimestamp(
+                    int(d["first_release_date"]), datetime.timezone.utc).year}
         except Exception:                          # noqa: BLE001 — a bad payload is a miss
+            years = set()
+    if not years:
+        try:
+            store = lib_con.execute(
+                "SELECT 1 FROM games g JOIN sources s ON s.game_id=g.id WHERE "
+                "g.norm_key=? AND s.source NOT IN ('emulation','archive') LIMIT 1",
+                (norm_key,)).fetchone()
+            if not store:                          # a listing date is not a release year
+                r = lib_con.execute(
+                    "SELECT ga.value FROM game_attributes ga JOIN games g ON "
+                    "g.id=ga.game_id WHERE g.norm_key=? AND ga.kind='release_year' "
+                    "LIMIT 1", (norm_key,)).fetchone()
+                if r and _year(r[0]):
+                    years = {_year(r[0])}
+        except Exception:                          # noqa: BLE001
             pass
+    stated = _user_era_floor(norm_key)
+    # WIDER ONLY. A floor above the span would refuse records the span accepts today, so
+    # a later stated year is kept only when there is nothing else to widen.
+    if stated and (not years or stated < min(years)):
+        years.add(stated)
+    return tuple(sorted(years)) or None
+
+
+def _user_era_floor(norm_key):
+    """The release year a PERSON stated for this game, or None.
+
+    Read through `overrides.user_override`, which is what refuses an automatic write —
+    see `game_era` for why a pass's value can never lower an era's floor. Isolated here
+    so a missing or unreadable override DB costs the gate nothing: it is an ADDITION to
+    the era, and failing to read it must never turn into a refusal.
+
+    Uncached on purpose. The read is a read-only primary-key lookup on a small table, so
+    the identity scrub's per-row call costs well under a millisecond, and a cache keyed on
+    anything cheaper than the data itself can serve a stale answer to the gate right after
+    a user saves a correction. This project has paid for a stale metadata cache once
+    already (`igdb.fields_sig`); the era is not worth a second one.
+    """
     try:
-        store = lib_con.execute(
-            "SELECT 1 FROM games g JOIN sources s ON s.game_id=g.id WHERE g.norm_key=? "
-            "AND s.source NOT IN ('emulation','archive') LIMIT 1", (norm_key,)).fetchone()
-        if store:
-            return None                            # a listing date is not a release year
-        r = lib_con.execute(
-            "SELECT ga.value FROM game_attributes ga JOIN games g ON g.id=ga.game_id "
-            "WHERE g.norm_key=? AND ga.kind='release_year' LIMIT 1",
-            (norm_key,)).fetchone()
-        if r and str(r[0] or "").isdigit():
-            return int(r[0])
-    except Exception:                              # noqa: BLE001
-        pass
-    return None
+        import overrides
+        return _year(overrides.user_override(norm_key, "release_year"))
+    except Exception:                              # noqa: BLE001 — an absent DB is a miss
+        return None
 
 
 def pick_by_year(cands, year):
