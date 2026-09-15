@@ -4,7 +4,7 @@ The working backlog. Numbers are stable task IDs referenced in commit messages
 (`feat(match-confidence): … (#13)`). Per-task design docs live in
 `docs/superpowers/specs/`; execution plans in `docs/superpowers/plans/`.
 
-Last reviewed: 2026-07-23.
+Last reviewed: 2026-09-15.
 
 ---
 
@@ -147,10 +147,12 @@ A four-reviewer audit (media/vision · collections · identity/spend · server/U
 
 - **2026-08-23 full-repo review: all 50 ranked fixes are done.** 47 fixed, 3 partial with the
   reasoning recorded alongside each. Every fix landed with a regression test written first; the
-  suite went from 94 to 151 files, 0 failures. Three things were deliberately left: a git history
-  scrub (needs a maintainer decision, it rewrites every commit), grid windowing in the frontend
-  (needs a virtualisation dependency), and folding IGDB's exact-name resolver into the shared
-  acceptance gate (IGDB's rule is stricter, so folding it in would loosen everything joined to it).
+  suite went from 94 to 151 files, 0 failures. Three things were deliberately left, and one of
+  them has since been done: the **git history scrub happened** (2026-08-24, all 576 commits, and
+  again 2026-08-27 to strip model attribution), so every hash recorded before those dates is dead.
+  Two remain: grid windowing in the frontend (needs a virtualisation dependency), and folding
+  IGDB's exact-name resolver into the shared acceptance gate (IGDB's rule is stricter, so folding
+  it in would loosen everything joined to it).
   The follow-up that was open here — porting the nine surviving `ludodex/verify_*.py` into
   `tests/` — is **DONE** (`7a04474`, "the nine verify scripts become seven tests that actually
   run"); no `verify_*.py` remains in `ludodex/`. Tracked outside the repo (the list names hosts and unfixed holes). Batches in order: data loss, auth/security, paid-AI gating, identity/art, silent failure, dead scripts (`scripts/*.sh` have been broken since the 2026-08-13 move), frontend races, tests/packaging. Each fix lands with a `tests/` check.
@@ -436,9 +438,11 @@ DO NOT re-file this as a duplicate-entry defect. It was measured and deferred.
 
 ## Doc hygiene
 
-`HANDOFF.md` predates the server build and still describes the AI-forward server as the one
-open task. It needs a rewrite (or retirement in favour of `DESIGN.md` + this file) before it
-misleads anyone picking the project up.
+~~`HANDOFF.md` predates the server build~~ **DONE.** `docs/HANDOFF.md` was rewritten.
+Sections 1 to 5 describe what actually exists. Section 6 is kept as a marked HISTORICAL
+record of the AI-forward server plan, because the reasoning behind several still-live
+decisions is written down nowhere else. It opens by saying so, and it points at
+`README.md`, `DESIGN.md` and this file for the current system.
 
 ## Pipeline unification — one chain, every onramp (2026-08-03)
 
@@ -1114,6 +1118,12 @@ rules make that safe, both tested:
   never start refusing another's correct match.
 
 With `release_year=1979` recorded for Akalabeth, **all 12 invariants hold.**
+
+**RECORDED on the live instance 2026-09-15.** The year was set through the attribute
+override endpoint the UI calls, as a signed-in user, so it is a `set_by='user'` override
+and not a provider's guess. `check_invariants.py` then reported **ALL INVARIANTS HOLD**,
+12 of 12, against the live `/data`. To undo it, clear the `release_year` override on
+`akalabeth world of doom`. The attribute reverts to IGDB's 1998 and the finding returns.
 
 The ranking bonus deliberately did NOT widen: it was `y1 == y2` and is now exact
 membership in the year set, so scalar callers rank exactly as before. `score()` still takes
