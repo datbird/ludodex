@@ -46,9 +46,10 @@ def fixture():
     con.execute("ATTACH DATABASE ':memory:' AS sco")
     con.execute("ATTACH DATABASE ':memory:' AS ov")
     con.executescript("""
-    CREATE TABLE m.media(norm_key TEXT, system TEXT, kind TEXT, chosen INT,
-                         sha1 TEXT, game_key TEXT);
-    CREATE TABLE u.user_media(norm_key TEXT, kind TEXT, sha1 TEXT, created INT);
+    CREATE TABLE m.media(id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, kind TEXT,
+                         chosen INT, sha1 TEXT, ref TEXT, game_key TEXT);
+    CREATE TABLE u.user_media(id INTEGER PRIMARY KEY, norm_key TEXT, kind TEXT, sha1 TEXT,
+                              created INT);
     CREATE TABLE t.user_tags(norm_key TEXT, tag TEXT);
     CREATE TABLE sco.game_scores(norm_key TEXT, universal REAL);
     CREATE TABLE sco.store_type(norm_key TEXT, source TEXT, type TEXT);

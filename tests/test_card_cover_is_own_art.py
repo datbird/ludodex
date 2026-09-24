@@ -52,9 +52,10 @@ def main():
     con.execute("ATTACH DATABASE ':memory:' AS sco")
     con.execute("ATTACH DATABASE ':memory:' AS ov")
     con.executescript("""
-    CREATE TABLE m.media(norm_key TEXT, system TEXT, kind TEXT, chosen INT,
-                         sha1 TEXT, game_key TEXT);
-    CREATE TABLE u.user_media(norm_key TEXT, kind TEXT, sha1 TEXT, created INT);
+    CREATE TABLE m.media(id INTEGER PRIMARY KEY, norm_key TEXT, system TEXT, kind TEXT,
+                         chosen INT, sha1 TEXT, ref TEXT, game_key TEXT);
+    CREATE TABLE u.user_media(id INTEGER PRIMARY KEY, norm_key TEXT, kind TEXT, sha1 TEXT,
+                              created INT);
     CREATE TABLE t.user_tags(norm_key TEXT, tag TEXT);
     CREATE TABLE sco.game_scores(norm_key TEXT, universal REAL);
     CREATE TABLE sco.store_type(norm_key TEXT, source TEXT, type TEXT);
@@ -89,7 +90,10 @@ def main():
     check("the two consoles are one card", len(res["items"]) == 1)
     card = res["items"][0]
     check("the card reports a cover", card["has_cover"] is True)
-    check("the cover is the Game Boy art", card["cover_v"] == "gbcover0001")
+    # cover_v is the token of the asset served (server/app.py _art_v): the Game Boy row
+    gb = con.execute("SELECT id, sha1, ref FROM m.media WHERE system='gameboy'").fetchone()
+    check("the cover is the Game Boy art",
+          card["cover_v"] == srv._art_v(srv._media_art_src(gb)))
     check("the representative is the entry that owns the art",
           card["entry_key"] == "klax@gameboy")
 

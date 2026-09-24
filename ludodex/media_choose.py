@@ -674,14 +674,34 @@ def serve_pick(con, base, platform, game_key, kind):
 
     Returns the media row id, or None.
     """
-    r = con.execute(
-        "SELECT id FROM media WHERE kind=? AND chosen=1 AND ("
-        "(norm_key=? AND COALESCE(system,'')=?) "
-        "OR (COALESCE(system,'')='' AND game_key=?)) "
-        "ORDER BY (norm_key=? AND COALESCE(system,'')=?) DESC, (norm_key=?) DESC, id "
-        "LIMIT 1",
-        (kind, base, platform or "", game_key, base, platform or "", base)).fetchone()
-    return (r[0] if not hasattr(r, "keys") else r["id"]) if r else None
+    r = con.execute("SELECT " + serve_pick_sql(":base", ":plat", ":gk", ":kind"),
+                    {"base": base, "plat": platform or "", "gk": game_key,
+                     "kind": kind}).fetchone()
+    return r[0] if r else None
+
+
+def serve_pick_sql(base, platform, game_key, kind, table="media"):
+    """serve_pick's rule as ONE SQL expression that yields the chosen media id, or NULL.
+
+    The arguments are SQL expressions, not values. serve_pick binds its parameters
+    through them; the library grid passes its own correlated columns (g.norm_key, ...)
+    so the cover version token it hands out is computed by the SAME rule the serve
+    route uses. Two copies of this rule is how the grid and the serve route came to
+    disagree about which picture a game shows (see serve_pick).
+
+    Written as ordered tiers, each its own MIN(id), because SQLite rejects an outer
+    column reference in a correlated subquery's ORDER BY. The tiers ARE that ORDER BY:
+    own-console art, then this title's matching neutral art, then neutral art from
+    another norm_key sharing the identity, and the lowest id within a tier. `platform`
+    must already be COALESCEd to '' by the caller.
+    """
+    tier = ("(SELECT MIN(sp.id) FROM " + table + " sp WHERE sp.kind=" + kind +
+            " AND sp.chosen=1 AND %s)")
+    own = tier % ("sp.norm_key=" + base + " AND COALESCE(sp.system,'')=" + platform)
+    mine = tier % ("sp.norm_key=" + base + " AND COALESCE(sp.system,'')=''"
+                   " AND sp.game_key=" + game_key)
+    shared = tier % ("COALESCE(sp.system,'')='' AND sp.game_key=" + game_key)
+    return "COALESCE(" + own + ", " + mine + ", " + shared + ")"
 
 
 def _repick(con, norm_key, kind):

@@ -1377,40 +1377,21 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     # catalog so the server survives a deploy before the first rebuild)
     eksel = ("g.entry_key AS entry_key, g.platform AS platform, " if has_ek
              else "g.norm_key AS entry_key, NULL AS platform, ")
-    # cover_v: content hash of the cover THIS entry serves — user upload, then the
-    # entry's own console art, then platform-neutral store art. NEVER another console's
-    # art (COALESCE of WHERE-correlated subqueries; SQLite forbids an outer column ref
-    # in a subquery ORDER BY, so system preference is ordered fallbacks, not a sort).
-    _um = ("(SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE um.norm_key=g.norm_key "
-           "AND um.kind='cover' ORDER BY um.created DESC LIMIT 1)")
-    _mc = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.norm_key=g.norm_key "
-           "AND md.chosen=1 AND md.kind='cover'%s LIMIT 1)")
+    # cover_v: the cache token (_art_v) of the cover THIS entry serves, so the grid's
+    # URL changes exactly when the served picture does and can be cached for a year.
+    # The identity comes from _art_src_sql, which is the serve route's own selection
+    # (user upload, then media_choose.serve_pick_sql: own console art, then neutral art
+    # whose identity matches the entry, DESIGN §11.9). NEVER another console's art. An
+    # un-rebuilt catalog (no entry_key or game_key) serves through a legacy branch, so
+    # it gets no token and its covers are revalidated instead of long-cached.
+    _hasgk = "game_key" in _gcols
     if has_ek:
-        _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
-        # Neutral (platform-agnostic store/IGDB) art belongs to a specific resolved game.
-        # It is served to THIS entry only when the media's identity matches the entry's —
-        # media.game_key = g.game_key (DESIGN §11.9). That serves an identified game or a
-        # stray retro-handheld port (both adopt igdb:<id>) while an era-collision entry
-        # (its game_key is title:<nk>, the neutral art's is igdb:<id>) forfeits it — the
-        # identity match replaces the old base_key era-marker test. (g.* outer refs are
-        # legal in a subquery WHERE; only ORDER BY forbids them.)
-        _hasgk = "game_key" in _gcols
-        _gk_gate = (" AND md.game_key=g.game_key" if _hasgk else "")
-        _neutral = " AND COALESCE(md.system,'')=''" + _gk_gate
-        # Neutral art is ALSO reachable by game IDENTITY across norm_keys: a game whose title
-        # parsed into two norm_keys (International Karate "+"/"plus"/gb — same igdb id) shares
-        # its one fetched cover. game_key self-restricts an unresolved title (title:<nk>), so
-        # there is no cross-title bleed. Own-console art stays strictly per-norm_key. Added as
-        # a COALESCE fallback so a game with its own neutral art is byte-for-byte unchanged.
-        _mc_gk = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.game_key=g.game_key "
-                  "AND md.chosen=1 AND md.kind='cover' AND COALESCE(md.system,'')='' LIMIT 1)")
-        _cv = [_um, _mc % _own, _mc % _neutral] + ([_mc_gk] if _hasgk else [])
-        cover_v = "COALESCE(" + ",".join(_cv) + ") AS cover_v, "
+        cover_v = ((_art_src_sql() if _hasgk else "NULL") + " AS cover_src, ")
         # has_cover reflects SERVABLE art (own console or gated neutral), so a card with
         # only another console's art shows the placeholder, not a broken/foreign image.
         has_cov = _has_cover_sql(True, _hasgk) + " AS has_cover, "
     else:
-        cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v, "
+        cover_v = "NULL AS cover_src, "
         has_cov = _has_cover_sql(False, False) + " AS has_cover, "
     # THE REPRESENTATIVE ROW OF A CARD. A card shows one cover, so one entry has to own
     # it, and that choice must be stable across rebuilds or the grid's art churns for no
@@ -1519,7 +1500,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         "matched": bool(r["matched"]),
         "identified": bool(r["identified"]),
         "has_cover": bool(r["has_cover"]),
-        "cover_v": r["cover_v"] or None,
+        "cover_v": _art_v(r["cover_src"]),
         "ludodex_score": round(r["ludodex_score"]) if r["ludodex_score"] is not None else None,
         "tags": _tags(r),
         "attrs": _attrs(r),
@@ -1608,25 +1589,10 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
     has_ek = _has_col(con, "games", "entry_key")
     eksel = ("g.entry_key AS entry_key, g.platform AS platform, " if has_ek
              else "g.norm_key AS entry_key, NULL AS platform, ")
-    _mc = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.norm_key=g.norm_key "
-           "AND md.chosen=1 AND md.kind='cover'%s LIMIT 1)")
-    _um = ("(SELECT substr(um.sha1,1,12) FROM u.user_media um WHERE um.norm_key=g.norm_key "
-           "AND um.kind='cover' ORDER BY um.created DESC LIMIT 1)")
-    # own console art or platform-neutral store art only — never another console's cover.
-    # Neutral art is served only when its identity matches the entry (md.game_key =
-    # g.game_key, DESIGN §11.9): an era-collision entry (game_key title:<nk>) forfeits the
-    # resolved game's igdb:<id> neutral cover, a stray port (adopts igdb:<id>) keeps it.
-    _own = " AND COALESCE(md.system,'')=COALESCE(g.platform,'')"
+    # cover_v: the same token the grid hands out (see _query_games), from the serve
+    # route's own selection; none on an un-rebuilt catalog.
     _hasgk = _has_col(con, "games", "game_key")
-    _neutral = " AND COALESCE(md.system,'')=''" + (" AND md.game_key=g.game_key" if _hasgk else "")
-    # neutral art also reachable by game identity across norm_keys (see _query_games note).
-    _mc_gk = ("(SELECT substr(md.sha1,1,12) FROM m.media md WHERE md.game_key=g.game_key "
-              "AND md.chosen=1 AND md.kind='cover' AND COALESCE(md.system,'')='' LIMIT 1)")
-    if has_ek:
-        _cv = [_um, _mc % _own, _mc % _neutral] + ([_mc_gk] if _hasgk else [])
-        cover_v = "COALESCE(" + ",".join(_cv) + ") AS cover_v "
-    else:
-        cover_v = "COALESCE(" + _um + "," + _mc % "" + ") AS cover_v "
+    cover_v = ((_art_src_sql() if (has_ek and _hasgk) else "NULL") + " AS cover_src ")
     # has_cover comes from _has_cover_sql, not from a sixth hand-written copy of the
     # rule. Spotlight ranks its representative row BY has_cover, so a copy that drifts
     # from the grid's definition puts a placeholder tile at the front of the showcase.
@@ -1666,7 +1632,7 @@ def _spotlight_rows(con, where, args, order="gs.universal DESC", limit=10,
              "card_key": r["grpkey"],
              "platform": r["platform"], "title": r["title"], "score": r["sc_universal"],
              "sources": r["sources"], "matched": bool(r["matched"]),
-             "has_cover": bool(r["has_cover"]), "cover_v": r["cover_v"] or None,
+             "has_cover": bool(r["has_cover"]), "cover_v": _art_v(r["cover_src"]),
              "n_platforms": r["n_platforms"]}
             for r in con.execute(sql, args + [limit])]
 
@@ -9975,8 +9941,10 @@ def game_media(norm_key: str, entry: EntryKey = None):
             "used": False,
             "system": r["system"] if "system" in r.keys() else None,
             "redistributable": (r["kind"], r["provider"], r["ref"]) not in noredist,
-            "url": "/api/media-asset/%d" % r["id"],
-            "thumb": "/api/media-asset/%d?size=thumb" % r["id"] if has_preview else None,
+            # `v` names these exact bytes, so the browser may keep them (_art_v)
+            "url": "/api/media-asset/%d?v=%s" % (r["id"], _art_v(_media_art_src(r))),
+            "thumb": ("/api/media-asset/%d?size=thumb&v=%s"
+                      % (r["id"], _art_v(_media_art_src(r))) if has_preview else None),
             "user": False,
         })
     # Mark the asset the SERVE resolver would actually return, per kind. Same rule as
@@ -10029,8 +9997,11 @@ def game_media(norm_key: str, entry: EntryKey = None):
             "width": r["width"], "height": r["height"],
             "is_image": is_img, "pinned": True, "rank": None, "chosen": False,
             "redistributable": True,
-            "url": "/api/user-media-asset/%d" % r["id"],
-            "thumb": "/api/user-media-asset/%d?size=thumb" % r["id"] if has_preview else None,
+            "url": "/api/user-media-asset/%d?v=%s"
+                   % (r["id"], _art_v("u|%d|%s" % (r["id"], r["sha1"]))),
+            "thumb": ("/api/user-media-asset/%d?size=thumb&v=%s"
+                      % (r["id"], _art_v("u|%d|%s" % (r["id"], r["sha1"])))
+                      if has_preview else None),
             "user": True,
         })
     return {"norm_key": norm_key, "scalar_kinds": list(media.SCALAR_KINDS),
@@ -10206,17 +10177,20 @@ def _ext_from(name, content_type=None):
 
 
 def _umedia_path(norm_key, kind):
-    """Local (path, ext) of the active user upload for a kind (most recent), or None."""
+    """Local (path, ext, art_src) of the active user upload for a kind (most recent),
+    or None. `art_src` is the upload's identity for the cache token (_art_v)."""
     uc = _umedia_con()
     try:
-        r = uc.execute("SELECT sha1, ext FROM user_media WHERE norm_key=? AND kind=? "
-                       "ORDER BY created DESC LIMIT 1", (norm_key, kind)).fetchone()
+        # id breaks a created tie, the same order _UM_ART_SRC uses for the grid token
+        r = uc.execute("SELECT id, sha1, ext FROM user_media WHERE norm_key=? AND kind=? "
+                       "ORDER BY created DESC, id DESC LIMIT 1",
+                       (norm_key, kind)).fetchone()
     finally:
         uc.close()
     if not r:
         return None
     p = os.path.join(REPO, "%s.%s" % (r["sha1"], r["ext"]))
-    return (p, r["ext"]) if os.path.exists(p) else None
+    return (p, r["ext"], "u|%d|%s" % (r["id"], r["sha1"])) if os.path.exists(p) else None
 
 
 def _store_upload(norm_key, kind, data, ext, origin):
@@ -10312,8 +10286,9 @@ def delete_user_media(_ekey: RawKey, norm_key: BaseKey, asset_id: int):
 
 
 @app.get("/api/user-media-asset/{asset_id}")
-def user_media_asset(asset_id: int, size: str = Query(None, pattern="^thumb$")):
-    """Serve a user-uploaded asset by id."""
+def user_media_asset(asset_id: int, size: str = Query(None, pattern="^thumb$"),
+                     v: str = Query(None)):
+    """Serve a user-uploaded asset by id. Long-cached only when `v` is its token."""
     uc = _umedia_con()
     try:
         r = uc.execute("SELECT sha1, ext FROM user_media WHERE id=?",
@@ -10325,7 +10300,8 @@ def user_media_asset(asset_id: int, size: str = Query(None, pattern="^thumb$")):
     p = os.path.join(REPO, "%s.%s" % (r["sha1"], r["ext"]))
     if not os.path.exists(p):
         raise HTTPException(404, "asset bytes missing")
-    return _serve(p, r["ext"], size)
+    return _serve(p, r["ext"], size,
+                  immutable=_v_matches(v, "u|%d|%s" % (asset_id, r["sha1"])))
 
 
 # ------------------------------------------------------------------- server ops
@@ -11132,9 +11108,70 @@ def _render_pdf_thumb(src, dst, px=400):
         doc.close()
 
 
-def _serve(path, ext, size):
+# ------------------------------------------------------------ art cache tokens (`v`)
+# Every art URL the UI builds carries `v`, a short hash of the identity of the EXACT
+# asset the route will serve: a media row's id plus its sha1 (or its ref while it has no
+# sha1 yet), or a user upload's id plus its sha1. The route sends a year-long immutable
+# Cache-Control only when the request's `v` equals the token of what it is serving right
+# now, and `no-cache` otherwise, so a stale URL can never pin an old picture.
+#
+# The version used to be the first 12 characters of the chosen cover's sha1. That could
+# not carry a long cache: the grid skipped a chosen row with no sha1 (an unmaterialized
+# URL ref, the normal state in `ondemand` media mode) while the serve route did not, so a
+# newly chosen cover kept the old `v`. The token now covers the ref too, and the grid
+# computes it through the serve route's own selection (media_choose.serve_pick_sql).
+#
+# The thumbnail box is part of the token: a thumbnail's bytes depend on it, so changing
+# it has to move every URL, or year-old thumbnails would stay at the old size.
+THUMB_PX = 400
+_ART_V_REV = "art1|thumb%d" % THUMB_PX
+_IMMUTABLE = "public, max-age=31536000, immutable"
+
+# The grid's art identity, the same string _umedia_path / the serve route build in
+# Python: "u|<upload id>|<sha1>" or "m|<media id>|<sha1, else ref>".
+_UM_ART_SRC = ("(SELECT 'u|'||um.id||'|'||um.sha1 FROM u.user_media um "
+               "WHERE um.norm_key=g.norm_key AND um.kind=%s "
+               "ORDER BY um.created DESC, um.id DESC LIMIT 1)")
+
+
+def _media_art_src(r):
+    """Identity string of a media row for _art_v (needs id, sha1, ref)."""
+    return "m|%d|%s" % (r["id"], r["sha1"] or r["ref"] or "")
+
+
+def _art_src_sql(kind_sql="'cover'"):
+    """SQL expression (over `g`, with m/u attached) for the identity of the asset
+    /api/media/<entry>/<kind> serves: the newest user upload, else the media row that
+    media_choose.serve_pick_sql selects. Only for a catalog with entry_key and game_key;
+    an older catalog serves through a legacy branch and gets no token (no-cache)."""
+    pick = media_choose.serve_pick_sql("g.norm_key", "COALESCE(g.platform,'')",
+                                       "g.game_key", kind_sql, table="m.media")
+    md = ("(SELECT 'm|'||mv.id||'|'||COALESCE(NULLIF(mv.sha1,''), mv.ref, '') "
+          "FROM m.media mv WHERE mv.id=" + pick + ")")
+    return "COALESCE(" + (_UM_ART_SRC % kind_sql) + ", " + md + ")"
+
+
+def _art_v(src):
+    """The `v` token for an art identity string, or None when there is no asset."""
+    if not src:
+        return None
+    return hashlib.sha1((_ART_V_REV + "|" + src).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _v_matches(v, src):
+    """True when a request's `v` names the asset about to be served. A direct call
+    (a test, a script) leaves `v` as FastAPI's Query default, which is not a string."""
+    return isinstance(v, str) and bool(v) and v == _art_v(src)
+
+
+def _serve(path, ext, size, immutable=False):
     """Return a FileResponse, optionally downscaled to a cached thumbnail. PDFs get
-    a rendered first-page image so manuals preview instead of showing a bare name."""
+    a rendered first-page image so manuals preview instead of showing a bare name.
+
+    `immutable` means the caller checked that the request's `v` names these exact bytes
+    (_v_matches): the response may be cached for a year. Anything else, including a
+    thumbnail that fell back to the full-size file, is `no-cache` (revalidate by ETag)."""
+    cc = _IMMUTABLE if immutable else "no-cache"
     if size == "thumb":
         is_pdf = ext.lower() == "pdf"
         # KEYED ON THE FILE, NOT ITS NAME. The stem is a sha1 only for repo-materialized
@@ -11156,11 +11193,11 @@ def _serve(path, ext, size):
         if not os.path.exists(tpath):
             try:
                 if is_pdf:
-                    _render_pdf_thumb(path, tpath)
+                    _render_pdf_thumb(path, tpath, THUMB_PX)
                 else:
                     from PIL import Image
                     im = Image.open(path)
-                    im.thumbnail((400, 400))
+                    im.thumbnail((THUMB_PX, THUMB_PX))
                     buf = io.BytesIO()
                     fmt = "PNG" if out_ext == "png" else "JPEG"
                     if fmt == "JPEG" and im.mode in ("RGBA", "P", "LA"):
@@ -11169,14 +11206,15 @@ def _serve(path, ext, size):
                     with open(tpath, "wb") as f:
                         f.write(buf.getvalue())
             except Exception:
-                return FileResponse(path)        # fall back to full size
+                # fall back to full size; not the bytes the token names, so no-cache
+                return FileResponse(path, headers={"Cache-Control": "no-cache"})
         path = tpath
-    return FileResponse(path)
+    return FileResponse(path, headers={"Cache-Control": cc})
 
 
 @app.get("/api/media/{norm_key}/{kind}")
 def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thumb$"),
-                entry: EntryKey = None):
+                entry: EntryKey = None, v: str = Query(None)):
     """Resolve + stream the chosen asset for a library entry + kind.
 
     `norm_key` may be an entry id `base@platform` (per-platform library entry) or a
@@ -11190,12 +11228,15 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
 
     A user upload for this kind always wins (most recent), so uploads take effect
     immediately without a pipeline re-run.
+
+    `v` is the art cache token (_art_v). A matching one earns a year-long immutable
+    cache, but only for content-addressed bytes; a missing or stale one gets no-cache.
     """
     # FastAPI fills `entry`; a direct call (a test, a script) resolves here instead.
     base, platform = entry or _entry_key(norm_key)
     up = _umedia_path(base, kind)
     if up:
-        return _serve(up[0], up[1], size)
+        return _serve(up[0], up[1], size, immutable=_v_matches(v, up[2]))
     rcon = ro(INDEX_DB)
     try:
         if platform:
@@ -11250,14 +11291,18 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
         raise HTTPException(404, "no chosen %s for %s" % (kind, norm_key))
 
     ext = (r["ext"] or "jpg").split("?")[0]
+    # the token of the row as PICKED, before any materialization below stamps a sha1
+    # on it: that is the identity the grid handed out for this state
+    fresh = _v_matches(v, _media_art_src(r))
 
     # 1. already materialized in the repo
     if r["sha1"]:
         p = os.path.join(REPO, "%s.%s" % (r["sha1"], ext))
         if os.path.exists(p):
-            return _serve(p, ext, size)
+            return _serve(p, ext, size, immutable=fresh)
 
-    # local file present on THIS host (rare on the VM; common on the producer)
+    # local file present on THIS host (rare on the VM; common on the producer). Its
+    # bytes are not content-addressed, so it is never immutable.
     if r["ref_type"] == "file" and os.path.exists(r["ref"]):
         return _serve(r["ref"], ext, size)
 
@@ -11296,7 +11341,10 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
                 wcon.close()
             p = os.path.join(REPO, "%s.%s" % (sha, ext))
             if os.path.exists(p):
-                return _serve(p, ext, size)
+                # The token named this row by its ref (no sha1 yet), or by a sha1 whose
+                # file had gone: immutable only when these are the bytes it named.
+                return _serve(p, ext, size,
+                              immutable=fresh and (not r["sha1"] or sha == r["sha1"]))
         # The fetch failed. In `ondemand` media mode this is the ONLY materialization
         # there is, so leaving the row chosen meant a dead URL kept the slot forever:
         # a monogram on every subsequent request with good candidates sitting unchosen,
@@ -13464,8 +13512,10 @@ def _thumb_bytes(r, px=256):
 
 
 @app.get("/api/media-asset/{asset_id}")
-def media_asset_by_id(asset_id: int, size: str = Query(None, pattern="^thumb$")):
-    """Serve a specific media row by id (for art-pick candidate previews)."""
+def media_asset_by_id(asset_id: int, size: str = Query(None, pattern="^thumb$"),
+                      v: str = Query(None)):
+    """Serve a specific media row by id (the detail page's art, art-pick previews).
+    Long-cached only when `v` is the row's token and the bytes are content-addressed."""
     rcon = ro(INDEX_DB)
     try:
         r = rcon.execute("SELECT id, ref_type, ref, ext, sha1, provider "
@@ -13474,10 +13524,17 @@ def media_asset_by_id(asset_id: int, size: str = Query(None, pattern="^thumb$"))
         rcon.close()
     if not r:
         raise HTTPException(404, "no such asset")
+    fresh = _v_matches(v, _media_art_src(r))
     p = _asset_local_path(r)
     if not p:
         raise HTTPException(404, "asset not reachable on this host")
-    return _serve(p, (r["ext"] or "jpg").split("?")[0], size)
+    # content-addressed = served from the repo under the sha1 the token named, or
+    # under the sha1 a first fetch just gave a row the token named by its ref
+    stem = os.path.splitext(os.path.basename(p))[0]
+    in_repo = os.path.dirname(os.path.abspath(p)) == os.path.abspath(REPO)
+    addressed = in_repo and (stem == r["sha1"] if r["sha1"] else True)
+    return _serve(p, (r["ext"] or "jpg").split("?")[0], size,
+                  immutable=fresh and addressed)
 
 
 @app.post("/api/ai/art-pick/{norm_key}")

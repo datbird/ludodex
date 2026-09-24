@@ -23,7 +23,7 @@ export interface GameRow {
   matched: boolean         // cross-referenced to a metadata provider (IGDB/ScreenScraper)
   identified: boolean      // a known title: matched OR from a real store/manual source
   has_cover: boolean
-  cover_v?: string | null  // chosen cover's content hash — cache-buster so a re-pinned cover shows live
+  cover_v?: string | null  // token of the exact cover served; changes with it, so the URL is cached for a year
   ludodex_score: number | null
   tags: TagRef[]
   attrs?: Record<string, string>   // attribute kind -> value(s), for the optional attribute columns
@@ -1056,6 +1056,8 @@ export const api = {
   bannedMedia: () => get<{ banned: BannedMedia[] }>('/api/media/banned'),
   unbanMedia: (b: { norm_key: string; kind: string; provider: string; ref: string }) =>
     postJson<{ ok: boolean }>('/api/media/unban', b),
+  // `v` is the server's token for the exact asset served (cover_v). With it the route
+  // answers immutable for a year; without it, no-cache. Never invent one.
   mediaUrl: (nk: string, kind: string, thumb = false, v?: string | null) =>
     `/api/media/${encodeURIComponent(nk)}/${encodeURIComponent(kind)}` +
     (thumb ? '?size=thumb' : '') +

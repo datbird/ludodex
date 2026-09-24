@@ -426,6 +426,19 @@ system ⇔ platform`; the chooser/`_repick` key on **`(base_key, system, kind)`*
 `/api/media/{entry_key}/{kind}` resolver serves that entry's system only, falling back
 to platform-neutral store art (`system IS NULL`) when a console has none.
 
+**Art URLs and browser caching (2026-09-24).** Every art URL the UI builds carries `v`,
+a 12-character hash of the identity of the exact asset the route serves: a media row's
+id plus its sha1 (or its ref while it has no sha1 yet), or a user upload's id plus its
+sha1, plus the thumbnail box size. The grid and Spotlight compute it (`cover_v`) through
+`media_choose.serve_pick_sql`, the same selection the serve route runs, so the two
+cannot disagree; the detail page's `/api/media-asset/{id}` and
+`/api/user-media-asset/{id}` URLs carry the row's own token. A route answers
+`Cache-Control: public, max-age=31536000, immutable` only when the request's `v` equals
+the token of what it is serving and the bytes are content-addressed; a missing or stale
+`v`, a local `file` ref, or a thumbnail that fell back to full size gets `no-cache`. So a
+changed pick, including a new pick that is only an undownloaded URL, changes the URL,
+and a stale URL can never pin an old picture.
+
 ### 11.5 Xbox platform setting
 
 Config **`xbox_platform`** = `xbox` (default) | `pc`, surfaced at **Settings → Library →

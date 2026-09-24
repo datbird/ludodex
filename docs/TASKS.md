@@ -1291,10 +1291,21 @@ only. See `docs/TESTING.md`. Its first runs found these, all fixed:
 Offline suite: 198 passed, 0 failed, 6 skipped. Live UI suite: 437 checks, 0 failed, as
 a normal user; 483 checks, 0 failed, as an admin with writes on, every toggle restored.
 
+### Follow-ups, done the same day
+
+First set aside under "Considered and not done" because the safe version needed a
+root fix. The root fixes:
+
+- **Browser caching of covers and art.** Every art URL now carries `v`, a hash of the
+  identity of the exact asset served (media row id plus sha1, or its ref while it has no
+  sha1; a user upload's id plus sha1), computed for the grid and Spotlight through
+  `media_choose.serve_pick_sql`, the serve route's own selection. The old `v` (a sha1
+  prefix) skipped a chosen row with no sha1, so an undownloaded new pick in `ondemand`
+  mode kept the old `v`. Routes send `immutable` for a year only when `v` matches what
+  they serve, else `no-cache`. See DESIGN §11.4. `tests/test_art_cache_token.py`.
+
 ### Considered and not done
 
-- **Browser caching of covers.** Safe only with a cover version stamp that changes every
-  time the chosen art changes. Without one, a long cache would keep showing replaced art.
 - **Server `DATA` from config.** `config.DATA` is fixed when the module is first imported,
   so reading the server's paths from it would not follow a later change.
 
