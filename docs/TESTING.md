@@ -92,3 +92,53 @@ Two habits, both learned the hard way:
 - **Wait for a state, do not probe for one.** `count()` on a React page that has not
   rendered returns `0`, which reads as "already signed in" and then times out somewhere
   else entirely. That is a flaky test writing itself.
+
+## The whole UI, in a real browser
+
+`tests/browser/ui_full.py` walks every screen a user can reach and checks each against the
+API: sign-in and session, the dashboard numbers and the views each card opens, library
+searches (exact, partial, no-hit, `%`, `_`, `&`, non-ASCII, a very long query, the query
+language), filters, sort, ownership scope, paging, per-page and layout persistence, game
+pages of several kinds (store links, provider chips, media menus, related games, Back,
+Escape), every Settings panel, the job monitor, the header menus, Files and Publish. It
+runs at a desktop and a phone viewport and saves a screenshot of each main screen.
+
+The API is the oracle wherever it can be. A search is compared with the count of titles
+that literally contain the query, taken from the full owned list, so a wildcard leaking
+into SQL `LIKE` shows up as a failure rather than as a plausible number.
+
+```bash
+export LUDODEX_URL=http://<your-instance>:8001
+export LUDODEX_USER=<user>  LUDODEX_PASS_FILE=<file holding the password>
+export BROWSER_CONTAINER=<container with Chromium on CDP and Python Playwright>
+export BROWSER_SSH=<ssh destination that runs docker>     # omit for a local container
+export BROWSER_PYTHON=<python with playwright, in that container>
+
+scripts/run_live_ui.sh                        # read-only
+LUDODEX_UI_WRITES=1 scripts/run_live_ui.sh    # plus reversible settings round trips
+```
+
+The runner never puts the password on a command line: it travels to the container on
+stdin with the script. Screenshots and a `report.json` come back to `SHOTS_OUT` and are
+deleted from the container.
+
+**It is safe to point at a shared browser.** It connects over CDP, works only in a
+context it creates, closes only that context, and never touches existing tabs, cookies
+or the profile.
+
+**Every write the page tries is stopped unless a step asked for it.** A route guard
+aborts any non-GET request except the sign-in, and the exact endpoint (and, for
+`/api/prefs`, the exact keys) that the running step armed. Every aborted request is
+reported: it means a screen fires a write the moment it opens. The suite never presses
+anything that syncs, downloads, deletes, merges, resets, restarts, spends AI money or
+edits users, keys or access rules; it only opens those panels.
+
+**`LUDODEX_UI_WRITES=1` needs an admin login** and round-trips settings that are
+genuinely reversible: media storage mode (and proves no download job starts), hide
+non-games, Xbox platform, file-operation apply mode, spotlight seconds and categories,
+and one game's metadata-provider toggle, plus the theme and reduce-motion switches that
+live in browser storage. Each one is read from the API, changed through the UI, proven
+persisted, put back, and the restore proven. If the UI cannot put it back the suite
+restores it through the API and says so; if that fails too the run fails loudly.
+Deliberately left out: the manifests switch (turning it off deletes manifests) and the
+language filter mode (its "ban" setting deletes art).
