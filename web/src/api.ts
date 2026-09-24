@@ -867,7 +867,11 @@ export interface Troubleshoot {
 }
 export interface JobProgress { done: number; total: number; failed: number }
 export interface Job {
-  id: string; kind: 'sync' | 'romsync' | 'fileops' | 'aimeta' | 'aimeta-apply'; run_id?: number; label: string
+  // the single-flight slots (sync, romsync, publish, media, match, matchindex, backup),
+  // runbooks, scans, and the generic one-shot jobs, whose kind is whatever they started as
+  id: string; kind: 'sync' | 'romsync' | 'publish' | 'media' | 'match' | 'matchindex' | 'backup'
+    | 'fileops' | 'aimeta' | 'aimeta-apply' | 'transfer' | (string & {})
+  run_id?: number; label: string
   status: string; detail: string; error: string | null; progress: JobProgress
   when: number | null; cancelable: boolean; restartable: boolean; deletable: boolean
   findings?: number   // aimeta scan jobs: how many suggestions to review/accept

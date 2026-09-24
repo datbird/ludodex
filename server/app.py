@@ -10,6 +10,7 @@ only live on the producer (the Deck). See HANDOFF.md §6.
 
 Run:  uvicorn server.app:app --host 0.0.0.0 --port 8001
 """
+import contextlib
 import hashlib
 import io
 import json
@@ -1810,11 +1811,125 @@ def _spotlight_seconds():
 
 
 # --------------------------------------------------------------------------- #
+#  Single-flight job slots: "one of these at a time", written once.
+#  Seven jobs (media download, provider match, publish, sync, ROM sync, index
+#  download/rebuild, backup) each hand-wrote the same lock, running check, 409 and
+#  set, and the job feed branched on each by hand, so four of them never reached it.
+# --------------------------------------------------------------------------- #
+_JOB_SLOTS = {}                     # name -> JobSlot, in registration order (= feed order)
+
+
+def _running_flag(j):
+    return bool(j.get("running"))
+
+
+class JobSlot:
+    """One job at a time for one kind of work.
+
+    The state lives in `holder["job"]`, the same dict the status endpoints have always
+    returned, so a slot changes WHO guards the job and nothing about what a caller reads.
+    `running` is the slot's own test (most jobs carry a "running" bool, the index job a
+    "state" string). `feed(job)` returns the slot's job-feed fields; the slot fills in
+    the ones every entry shares."""
+
+    def __init__(self, name, label, busy, holder=None, lock=None, running=_running_flag,
+                 feed=None, on_dismiss=None):
+        self.name, self.label, self.busy = name, label, busy
+        self.holder = holder if holder is not None else {"job": None}
+        self.lock = lock or threading.Lock()
+        self._running, self._feed, self._on_dismiss = running, feed, on_dismiss
+        self.claimed_at = None
+        _JOB_SLOTS[name] = self
+
+    @property
+    def job(self):
+        return self.holder.get("job")
+
+    def is_running(self):
+        j = self.holder.get("job")
+        return bool(j and self._running(j))
+
+    def _check(self, blockers):
+        if self.is_running():
+            raise HTTPException(409, self.busy)
+        for other, msg in blockers:
+            if other.is_running():
+                raise HTTPException(409, msg)
+
+    def _set(self, state):
+        self.holder["job"] = state
+        self.claimed_at = time.time()
+        return state
+
+    @contextlib.contextmanager
+    def claiming(self, blockers=()):
+        """Hold the lock, refuse (409) if this slot or any blocker is running, and hand
+        back a setter. For a claim that has more checks to make under the same lock
+        before it knows its state (sync validates its targets there)."""
+        with self.lock:
+            self._check(blockers)
+            yield self._set
+
+    def claim(self, state, blockers=()):
+        """Lock, running check, 409 with this slot's message, set. UNDER ONE LOCK: a
+        check and a set in separate statements let two requests that arrive together
+        both read "not running" and both start."""
+        with self.claiming(blockers) as put:
+            return put(state)
+
+    def try_claim(self, state):
+        """claim() for a caller with no request to refuse (a scheduler): True if taken."""
+        with self.lock:
+            if self.is_running():
+                return False
+            self._set(state)
+            return True
+
+    def to_feed(self):
+        j = self.holder.get("job")
+        if not j:
+            return None
+        live = self._running(j)
+        out = {"id": self.name, "kind": self.name, "label": self.label,
+               "status": "running" if live else "error" if j.get("error") else "done",
+               "detail": "", "error": j.get("error") or None,
+               "progress": {"done": 0 if live else 1, "total": 0 if live else 1,
+                            "failed": 0},
+               "when": j.get("started") or self.claimed_at,
+               "cancelable": False, "restartable": False, "deletable": not live}
+        if self._feed:
+            out.update(self._feed(j))
+        return out
+
+    def dismiss(self):
+        """Drop a finished job. Never drops one still running: its worker holds the
+        same dict and would go on writing into state nothing can see any more."""
+        if self._on_dismiss:
+            return self._on_dismiss(self)
+        with self.lock:
+            if not self.is_running():
+                self.holder["job"] = None
+        return True
+
+
+def _jobs_progress(done, total, failed=0):
+    return {"done": done or 0, "total": total or 1, "failed": failed}
+
+
+# --------------------------------------------------------------------------- #
 #  Media storage: download chosen (or all) art into the local content-addressed
 #  repo, per the media_mode preference. Complements materialize-on-serve (lazy).
 # --------------------------------------------------------------------------- #
 _MEDIA_JOB = {"job": None}
 _MEDIA_JOB_LOCK = threading.Lock()   # NOT _MEDIA_LOCK: that name belongs to the reconcile queue
+
+
+def _media_feed(j):
+    return {"detail": j.get("step") or ""}
+
+
+_MEDIA_SLOT = JobSlot("media", "Download media", "a media download is already running",
+                      holder=_MEDIA_JOB, lock=_MEDIA_JOB_LOCK, feed=_media_feed)
 
 
 def _media_worker(mode):
@@ -1859,13 +1974,10 @@ def _media_worker(mode):
 def media_materialize(body: dict = Body(default={})):
     """Hydrate the local media repo now. mode defaults to the media_mode pref;
     'all' pulls every candidate, otherwise just the chosen asset per game/kind."""
-    with _MEDIA_JOB_LOCK:
-        cur = _MEDIA_JOB["job"]
-        if cur and cur.get("running"):
-            raise HTTPException(409, "a media download is already running")
+    with _MEDIA_SLOT.claiming() as put:
         mode = (body or {}).get("mode") or config.get("media_mode") or "chosen"
-        _MEDIA_JOB["job"] = {"running": True, "finished": False, "mode": mode,
-                             "step": "Starting…", "ok": None, "downloaded": 0, "dead": 0}
+        put({"running": True, "finished": False, "mode": mode,
+             "step": "Starting…", "ok": None, "downloaded": 0, "dead": 0})
     threading.Thread(target=_media_worker, args=(mode,), daemon=True).start()
     return {"media_job": _MEDIA_JOB["job"]}
 
@@ -1878,6 +1990,15 @@ def media_materialize_status():
 # --- provider identity sweep: match every game against every configured provider ------
 _MATCH_JOB = {"job": None}
 _MATCH_LOCK = threading.Lock()
+
+
+def _match_feed(j):
+    return {"detail": j.get("step") or "",
+            "progress": _jobs_progress(j.get("done"), j.get("total"))}
+
+
+_MATCH_SLOT = JobSlot("match", "Provider match", "a provider match is already running",
+                      holder=_MATCH_JOB, lock=_MATCH_LOCK, feed=_match_feed)
 
 
 def _match_worker(force):
@@ -1969,13 +2090,9 @@ def providers_match(body: dict = Body(default={})):
     media is ever taken from that provider. Free and deterministic: no AI area is
     consulted, so this can never spend. `force` re-searches games already decided.
     """
-    with _MATCH_LOCK:
-        cur = _MATCH_JOB["job"]
-        if cur and cur.get("running"):
-            raise HTTPException(409, "a provider match is already running")
-        _MATCH_JOB["job"] = {"running": True, "finished": False, "step": "Starting…",
-                             "ok": None, "total": 0, "done": 0, "matched": {},
-                             "force": bool((body or {}).get("force"))}
+    _MATCH_SLOT.claim({"running": True, "finished": False, "step": "Starting…",
+                       "ok": None, "total": 0, "done": 0, "matched": {},
+                       "force": bool((body or {}).get("force"))})
     threading.Thread(target=_match_worker,
                      args=(bool((body or {}).get("force")),), daemon=True).start()
     return {"match_job": _MATCH_JOB["job"]}
@@ -2173,7 +2290,7 @@ def media_fetch_provider(norm_key: str, body: dict = Body(default={})):
 @app.delete("/api/providers/match")
 def providers_match_cancel():
     j = _MATCH_JOB["job"]
-    if j and j.get("running"):
+    if _MATCH_SLOT.is_running():
         j["cancel"] = True
     return {"match_job": j}
 
@@ -3045,6 +3162,19 @@ _PUBLISH_JOB = {"job": None}
 _PUBLISH_LOCK = threading.Lock()
 
 
+def _publish_feed(pj):
+    # A publish writes a device's ROM tree for minutes and was in NO job feed at all,
+    # so there was nothing to watch it with and no way to dismiss a finished one.
+    # publish_apply.apply_plan has no stop hook, so a running publish is watched, not
+    # interrupted: the slot's default (not cancelable) is the honest one.
+    return {"detail": pj.get("current") or "",
+            "progress": _jobs_progress(pj.get("done"), pj.get("total"))}
+
+
+_PUBLISH_SLOT = JobSlot("publish", "Publish to device", "a publish is already running",
+                        holder=_PUBLISH_JOB, lock=_PUBLISH_LOCK, feed=_publish_feed)
+
+
 @app.post("/api/devices/{dev_id}/publish/apply")
 def publish_apply_run(dev_id: int, body: dict = Body(...)):
     """Execute a plan. The plan is passed IN rather than recomputed, so what runs is
@@ -3061,10 +3191,7 @@ def publish_apply_run(dev_id: int, body: dict = Body(...)):
     # UNDER THE LOCK. The check and the set were separate statements, so two applies that
     # arrived together both read "not running" and both started — two publishes writing
     # the same device's ROM tree at once.
-    with _PUBLISH_LOCK:
-        if _PUBLISH_JOB["job"] and _PUBLISH_JOB["job"].get("running"):
-            raise HTTPException(409, "a publish is already running")
-        _PUBLISH_JOB["job"] = st
+    _PUBLISH_SLOT.claim(st)
 
     def _run():
         try:
@@ -3908,57 +4035,12 @@ def _start_runbook_job(run_id):
 
 
 def _jobs_list():
-    """Normalize the live sync job + recent runbooks into one job feed."""
+    """Normalize the single-flight job slots + recent runbooks into one job feed."""
     out = []
-    sj = _SYNC.get("job")
-    if sj:
-        prog = sj.get("prog") or {
-            "done": sum(1 for s in sj.get("services", {}).values() if s["state"] == "ok"),
-            "total": len(sj.get("services", {})) or 1}
-        _run = sj.get("running")
-        _pau = sj.get("paused")
-        out.append({
-            "id": "sync", "kind": "sync", "label": "Library sync",
-            "status": ("paused" if _pau else "running" if _run else
-                       "error" if sj.get("error") else "done"),
-            "detail": sj.get("step", ""), "error": sj.get("error"),
-            "progress": {"done": prog["done"], "total": prog["total"] or 1, "failed": 0},
-            "when": None,
-            "cancelable": bool(_run and not _pau),    # ⏸ pause
-            "restartable": bool(_pau),                 # ▶ resume
-            "deletable": True})                        # × stop (running) / dismiss
-    pj = _PUBLISH_JOB.get("job")
-    if pj:
-        # A publish writes a device's ROM tree for minutes and was in NO job feed at all,
-        # so there was nothing to watch it with and no way to dismiss a finished one — the
-        # only trace was /api/publish/job, which nothing but the publish screen polls.
-        _prun = pj.get("running")
-        out.append({
-            "id": "publish", "kind": "publish", "label": "Publish to device",
-            "status": ("running" if _prun else "error" if pj.get("error") else "done"),
-            "detail": pj.get("current") or "", "error": pj.get("error") or None,
-            "progress": {"done": pj.get("done") or 0,
-                         "total": pj.get("total") or 1, "failed": 0},
-            "when": pj.get("started"),
-            # publish_apply.apply_plan has no stop hook, so a running publish is watched,
-            # not interrupted. Saying otherwise would be a button that does nothing.
-            "cancelable": False, "restartable": False,
-            "deletable": not _prun})
-    rj = _ROMSYNC.get("job")
-    if rj:
-        devs = rj.get("devices", {})
-        rprog = rj.get("prog") or {
-            "done": sum(1 for d in devs.values() if d["state"] == "ok"),
-            "total": len(devs) or 1}
-        out.append({
-            "id": "romsync", "kind": "romsync", "label": "ROM sync",
-            "status": ("running" if rj.get("running") else
-                       "error" if rj.get("error") else "done"),
-            "detail": rj.get("step", ""), "error": rj.get("error"),
-            "progress": {"done": rprog["done"], "total": rprog["total"] or 1,
-                         "failed": sum(1 for d in devs.values() if d["state"] == "failed")},
-            "when": None, "cancelable": False, "restartable": False,
-            "deletable": not rj.get("running")})
+    for slot in _JOB_SLOTS.values():
+        entry = slot.to_feed()
+        if entry:
+            out.append(entry)
     for jid, xj in list(_XFER.items()):
         rec = _JOBS.get(jid)
         live = bool(rec and rec["thread"] and rec["thread"].is_alive())
@@ -4191,23 +4273,8 @@ def _stop_and_wait(rec, jid):
 
 def _delete_one_job(jid):
     """Dismiss/stop a single job by id. Returns True if handled, False if unknown."""
-    if jid == "sync":
-        sj = _SYNC.get("job")
-        if sj and sj.get("running"):        # × on a live sync = stop it (kill phase)
-            _sync_stop()
-        else:
-            _SYNC["job"] = None             # dismiss a finished/stopped job
-        return True
-    if jid == "romsync":
-        _ROMSYNC["job"] = None
-        return True
-    if jid == "publish":
-        with _PUBLISH_LOCK:
-            pj = _PUBLISH_JOB.get("job")
-            if pj and pj.get("running"):        # never dismiss work still writing files
-                return True
-            _PUBLISH_JOB["job"] = None
-        return True
+    if jid in _JOB_SLOTS:                       # a live sync stops; other live work stays
+        return _JOB_SLOTS[jid].dismiss()
     if jid.startswith("xfer:"):
         rec = _JOBS.get(jid)
         if rec and rec["thread"] and rec["thread"].is_alive():
@@ -12117,6 +12184,50 @@ _ROMSYNC = {"job": None}          # ROM-location scans (Connections devices)
 _ROMSYNC_LOCK = threading.Lock()
 
 
+def _sync_feed(sj):
+    prog = sj.get("prog") or {
+        "done": sum(1 for s in sj.get("services", {}).values() if s["state"] == "ok"),
+        "total": len(sj.get("services", {})) or 1}
+    _run = sj.get("running")
+    _pau = sj.get("paused")
+    return {
+        "status": ("paused" if _pau else "running" if _run else
+                   "error" if sj.get("error") else "done"),
+        "detail": sj.get("step", ""), "error": sj.get("error"),
+        "progress": {"done": prog["done"], "total": prog["total"] or 1, "failed": 0},
+        "when": None,
+        "cancelable": bool(_run and not _pau),    # pause
+        "restartable": bool(_pau),                 # resume
+        "deletable": True}                         # stop (running) / dismiss
+
+
+def _sync_dismiss(slot):
+    if slot.is_running():               # x on a live sync = stop it (kill phase)
+        _sync_stop()
+    else:
+        slot.holder["job"] = None       # dismiss a finished/stopped job
+    return True
+
+
+def _romsync_feed(rj):
+    devs = rj.get("devices", {})
+    rprog = rj.get("prog") or {
+        "done": sum(1 for d in devs.values() if d["state"] == "ok"),
+        "total": len(devs) or 1}
+    return {
+        "detail": rj.get("step", ""), "error": rj.get("error"),
+        "progress": {"done": rprog["done"], "total": rprog["total"] or 1,
+                     "failed": sum(1 for d in devs.values() if d["state"] == "failed")},
+        "when": None}
+
+
+_SYNC_SLOT = JobSlot("sync", "Library sync", "a sync is already running",
+                     holder=_SYNC, lock=_SYNC_LOCK, feed=_sync_feed,
+                     on_dismiss=_sync_dismiss)
+_ROMSYNC_SLOT = JobSlot("romsync", "ROM sync", "a ROM sync is already running",
+                        holder=_ROMSYNC, lock=_ROMSYNC_LOCK, feed=_romsync_feed)
+
+
 # ---- sync pause / resume / stop: signal the current phase's process GROUP ----
 def _sync_signal(sig):
     """Send `sig` to the running sync subprocess's process group; True if sent."""
@@ -13060,13 +13171,9 @@ def sync_import_mode(body: dict = Body(...)):
 def sync_run(body: dict = Body(default={})):
     """Start a sync of the given source ids, or 'all' = every enabled+ready source.
     Sources that need a browser sign-in (epic/ea) are skipped until connected."""
-    with _SYNC_LOCK:
-        cur = _SYNC["job"]
-        if cur and cur.get("running"):
-            raise HTTPException(409, "a sync is already running")
-        if _ROMSYNC["job"] and _ROMSYNC["job"].get("running"):
-            raise HTTPException(409, "a ROM sync is running — wait for it to finish "
-                                     "(both rebuild the catalog)")
+    with _SYNC_SLOT.claiming(blockers=(
+            (_ROMSYNC_SLOT, "a ROM sync is running — wait for it to finish "
+                            "(both rebuild the catalog)"),)) as put:
         req = (body or {}).get("services") or ["all"]
         if req in ("all", ["all"]):
             targets = [s["id"] for s in _sync_services() if s["enabled"] and s["ready"]]
@@ -13086,7 +13193,7 @@ def sync_run(body: dict = Body(default={})):
                "services": {sid: {"state": "pending", "count": None, "error": None,
                                   "reauth": False}
                             for sid in targets}}
-        _SYNC["job"] = job
+        put(job)
         _SYNC["proc"] = None
     threading.Thread(target=_sync_worker, args=(job, targets, full),
                      daemon=True).start()
@@ -13136,13 +13243,9 @@ def roms_status():
 @app.post("/api/roms/run")
 def roms_run(body: dict = Body(default={})):
     """Rescan the given ROM-location device ids, or 'all' = every enabled one."""
-    with _ROMSYNC_LOCK:
-        cur = _ROMSYNC["job"]
-        if cur and cur.get("running"):
-            raise HTTPException(409, "a ROM sync is already running")
-        if _SYNC["job"] and _SYNC["job"].get("running"):
-            raise HTTPException(409, "a library sync is running — wait for it to finish "
-                                     "(both rebuild the catalog)")
+    with _ROMSYNC_SLOT.claiming(blockers=(
+            (_SYNC_SLOT, "a library sync is running — wait for it to finish "
+                         "(both rebuild the catalog)"),)) as put:
         locs = {loc["id"]: loc for loc in devices.rom_locations()}
         req = (body or {}).get("devices") or ["all"]
         if req in ("all", ["all"]):
@@ -13156,7 +13259,7 @@ def roms_run(body: dict = Body(default={})):
                "devices": {str(i): {"state": "pending", "roms": None, "error": None}
                            for i, _ in targets},
                "prog": {"done": 0, "total": len(targets)}}
-        _ROMSYNC["job"] = job
+        put(job)
     threading.Thread(target=_romsync_worker, args=(job, targets), daemon=True).start()
     return job
 
@@ -13892,6 +13995,21 @@ threading.Thread(target=_backingstore_scheduler, daemon=True).start()
 _INDEX_DL = {"job": None}
 _INDEX_DL_LOCK = threading.Lock()
 
+
+def _index_feed(j):
+    # This job says "state", not "running": running / done / error.
+    rebuild = j.get("mode") == "rebuild"
+    out = {"label": "Rebuild match index" if rebuild else "Download match index",
+           "status": j.get("state") or "done"}
+    if not rebuild and j.get("total"):          # bytes, once the size is known
+        out["progress"] = _jobs_progress(j.get("got"), j["total"])
+    return out
+
+
+_INDEX_SLOT = JobSlot("matchindex", "Match index", "A download is already running",
+                      holder=_INDEX_DL, lock=_INDEX_DL_LOCK,
+                      running=lambda j: j.get("state") == "running", feed=_index_feed)
+
 # How the installed supplement GOT HERE — downloaded, or built on this machine. Stored in
 # config rather than stamped into the file, because the file's own identity_state records
 # who BUILT it, which is a different question: a downloaded index truthfully says it was
@@ -14131,10 +14249,7 @@ def matchindex_download(body: dict = Body(...)):
     dest = matchindex.index_path()
     st = {"state": "running", "got": 0, "total": int((body or {}).get("size") or 0),
           "dest": dest, "error": ""}
-    with _INDEX_DL_LOCK:
-        if _INDEX_DL["job"] and _INDEX_DL["job"].get("state") == "running":
-            raise HTTPException(409, "A download is already running")
-        _INDEX_DL["job"] = st
+    _INDEX_SLOT.claim(st)
 
     def _run():
         part = dest + ".part"
@@ -14215,10 +14330,7 @@ def matchindex_rebuild():
         raise HTTPException(400, "No IGDB mirror on this machine to build from")
     st = {"state": "running", "got": 0, "total": 0, "dest": matchindex.index_path(),
           "error": "", "mode": "rebuild"}
-    with _INDEX_DL_LOCK:
-        if _INDEX_DL["job"] and _INDEX_DL["job"].get("state") == "running":
-            raise HTTPException(409, "A download is already running")
-        _INDEX_DL["job"] = st
+    _INDEX_SLOT.claim(st)
 
     def _run():
         try:
@@ -14236,6 +14348,16 @@ def matchindex_rebuild():
 # Several independent jobs, each with its own contents / destination / timing.
 _BACKUP_JOB = {"job": None}
 _BACKUP_LOCK = threading.Lock()
+
+
+def _backup_feed(j):
+    log = j.get("log") or []
+    return {"label": "Backup: %s" % (j.get("name") or j.get("id")),
+            "detail": log[-1] if log else ""}
+
+
+_BACKUP_SLOT = JobSlot("backup", "Backup", "a backup is already running",
+                       holder=_BACKUP_JOB, lock=_BACKUP_LOCK, feed=_backup_feed)
 
 
 @app.get("/api/backups/jobs")
@@ -14288,11 +14410,7 @@ def backup_job_run(job_id: int):
         raise HTTPException(404, "unknown backup job")
     st = {"running": True, "id": job_id, "name": j["name"], "log": [], "ok": None,
           "started": int(time.time())}
-    with _BACKUP_LOCK:
-        cur = _BACKUP_JOB["job"]
-        if cur and cur.get("running"):
-            raise HTTPException(409, "a backup is already running")
-        _BACKUP_JOB["job"] = st
+    _BACKUP_SLOT.claim(st)
 
     def work():
         try:
@@ -14422,8 +14540,7 @@ def _backup_scheduler():
     while True:
         time.sleep(60)
         try:
-            cur = _BACKUP_JOB["job"]
-            if cur and cur.get("running"):
+            if _BACKUP_SLOT.is_running():
                 continue
             due = backups.due_jobs()
             if not due:
@@ -14431,11 +14548,8 @@ def _backup_scheduler():
             j = due[0]                          # one per tick; the rest catch the next
             st = {"running": True, "id": j["id"], "name": j["name"], "log": [],
                   "ok": None, "started": int(time.time()), "scheduled": True}
-            with _BACKUP_LOCK:                  # a manual run may have claimed it since
-                cur = _BACKUP_JOB["job"]
-                if cur and cur.get("running"):
-                    continue
-                _BACKUP_JOB["job"] = st
+            if not _BACKUP_SLOT.try_claim(st):  # a manual run may have claimed it since
+                continue
             try:
                 st.update(ok=True, result=backups.run_job(j["id"],
                                                           log=lambda m: st["log"].append(m)))
