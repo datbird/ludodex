@@ -32,10 +32,10 @@ import zipfile
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
-# Same derivation every other module uses: DIR is this package, DATA is the repo root
-# above it, where the databases live. Deriving DATA from DIR instead would silently
-# relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+# Same resolution every other module uses (paths.py): LUDODEX_DATA, else the repo root
+# above this package, where the databases live.
+import paths                                     # noqa: E402  the one LUDODEX_DATA reader
+DATA = paths.DATA
 # The one list of what counts as a ROM. romtags owns it; restating it here is how a
 # format gets added in one place and silently ignored in the other.
 import romtags                                   # noqa: E402

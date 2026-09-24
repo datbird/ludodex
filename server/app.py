@@ -38,8 +38,9 @@ from starlette.concurrency import run_in_threadpool
 
 DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo root
 PKG = os.path.join(DIR, "ludodex")                                  # the modules
-DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, PKG)
+import paths          # noqa: E402  the one LUDODEX_DATA reader (paths.py)
+DATA = paths.DATA     # LUDODEX_DATA, else the repo root (DIR)
 import config          # noqa: E402  pipeline config store (config.sqlite)
 import media           # noqa: E402  pipeline vocab/priority (pure data)
 import media_choose    # noqa: E402  reuse _materialize_row (non-destructive)

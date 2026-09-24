@@ -143,8 +143,10 @@ def main():
     # It derived its output dir from the PACKAGE directory, so without LUDODEX_DATA it
     # wrote epic_games.tsv into ludodex/ while build_library looks in the repo root.
     s = src("epic_owned.py")
+    # paths.py is the one resolver (LUDODEX_DATA, else the repo root above the package);
+    # test_one_data_reader.py proves what it resolves to.
     check("epic resolves its output dir the way every sibling does",
-          "os.path.dirname(DIR)" in s)
+          "OWN = paths.DATA" in s)
 
     print("\nRESULT: %d checks, all passed" % len(PASS))
 

@@ -22,10 +22,10 @@ import os
 import sqlite3
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+# DATA is the REPO ROOT above this package unless LUDODEX_DATA names another
+# directory. paths.py is the one place that resolves it, so every module agrees.
+import paths                                     # noqa: E402  the one LUDODEX_DATA reader
+DATA = paths.DATA
 
 # ---------------------------------------------------------------- measured rates
 # SECONDS OF WORK per game, before concurrency. Divide by the worker count to get wall

@@ -13,6 +13,15 @@ python3 ludodex/config.py set steam_id 7656119…   # set one
 python3 ludodex/config.py get steam_id            # read one
 ```
 
+## Data directory
+
+Every database, `config.sqlite` included, lives in the data directory: `LUDODEX_DATA`
+when it is set and non-empty, else the repository root (the container sets
+`LUDODEX_DATA=/data`). `ludodex/paths.py` is the only code that reads the variable, and
+`tests/test_one_data_reader.py` fails if a second reader appears. It is read once, when
+the first ludodex module is imported, so set it before starting the process; nothing
+re-reads it later.
+
 ## Keys
 
 | key | what it is |

@@ -1303,10 +1303,15 @@ root fix. The root fixes:
   prefix) skipped a chosen row with no sha1, so an undownloaded new pick in `ondemand`
   mode kept the old `v`. Routes send `immutable` for a year only when `v` matches what
   they serve, else `no-cache`. See DESIGN §11.4. `tests/test_art_cache_token.py`.
-
-### Considered and not done
-
-- **Server `DATA` from config.** `config.DATA` is fixed when the module is first imported,
-  so reading the server's paths from it would not follow a later change.
+- **One source of truth for the data directory.** `ludodex/paths.py` is now the only code
+  that reads `LUDODEX_DATA`; `config.DATA`, `server/app.py`, `server/ai.py` and every
+  pipeline module take it from there (the twenty-odd modules that computed it themselves,
+  `epic_owned`'s `OWN` and `provider_ids`' call-time read included). The import-order
+  worry was checked rather than patched over: every process that sets `LUDODEX_DATA`
+  (the container, the test runner, `test_support.isolate()`, the tests that set it in
+  `main()`) sets it before its first ludodex import, and the one test that repoints mid-run
+  (`test_collection_apply_guard`) already reassigns `srv.DATA`. An empty `LUDODEX_DATA`
+  now falls back to the repo root instead of meaning the current directory.
+  `tests/test_one_data_reader.py` fails on a second reader.
 
 Nothing from this session is left open.

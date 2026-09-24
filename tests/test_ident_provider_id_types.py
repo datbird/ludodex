@@ -133,9 +133,10 @@ def main():
     check("it does not fall back to the package directory",
           'os.path.dirname(os.path.abspath(__file__))\n' not in
           src[src.index("def _main("):])
-    check("it falls back to the repo root above the package",
-          "os.path.dirname(os.path.dirname(os.path.abspath(__file__)))"
-          in src[src.index("def _main("):])
+    # paths.py is the one resolver (LUDODEX_DATA, else the repo root above the package);
+    # test_one_data_reader.py proves what it resolves to.
+    check("it takes the data dir from paths.py like every other module",
+          "data = paths.DATA" in src[src.index("def _main("):])
 
     print()
     print("7. STRING_ID_PROVIDERS has ONE home")

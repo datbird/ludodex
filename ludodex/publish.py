@@ -33,8 +33,9 @@ import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
+import paths                                     # noqa: E402  the one LUDODEX_DATA reader
+DATA = paths.DATA                # LUDODEX_DATA, else the repo root
 
 DB = os.path.join(DATA, "connections.sqlite")      # lives with the device data
 LIBRARY_DB = os.path.join(DATA, "game-library.sqlite")

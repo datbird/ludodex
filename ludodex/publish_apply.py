@@ -29,8 +29,9 @@ import tempfile
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
+import paths                                     # noqa: E402  the one LUDODEX_DATA reader
+DATA = paths.DATA                # LUDODEX_DATA, else the repo root
 import devices              # noqa: E402
 import publish_plan         # noqa: E402
 

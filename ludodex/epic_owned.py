@@ -11,11 +11,12 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config                                             # noqa: E402
 
-# DIR is this package; the default output dir is the REPO ROOT above it — the same
-# resolution every sibling store script uses, and the only place build_library looks.
-# Deriving it from DIR wrote epic_games.tsv into ludodex/ whenever LUDODEX_DATA was
-# unset, where nothing reads it: an Epic library that pulled fine and never appeared.
-OWN = os.environ.get("LUDODEX_DATA") or os.path.dirname(DIR)
+# The output dir is the data dir, resolved in paths.py like every sibling store script
+# (LUDODEX_DATA, else the REPO ROOT above this package), the only place build_library
+# looks. Deriving it from DIR wrote epic_games.tsv into ludodex/ whenever LUDODEX_DATA
+# was unset, where nothing reads it: an Epic library that pulled fine and never appeared.
+import paths                                     # noqa: E402  the one LUDODEX_DATA reader
+OWN = paths.DATA
 leg = shutil.which("legendary") or os.path.expanduser("~/.local/bin/legendary")
 try:
     out = subprocess.run([leg, "list", "--json"], capture_output=True, text=True,

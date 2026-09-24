@@ -36,8 +36,8 @@ import zipfile
 
 import config
 
-DATA = os.environ.get("LUDODEX_DATA",
-                      os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths                          # the one LUDODEX_DATA reader
+DATA = paths.DATA                     # LUDODEX_DATA, else the repo root
 DB = os.path.join(DATA, "backups.sqlite")
 STAGE = os.path.join(DATA, "tmp", "backup-stage")
 

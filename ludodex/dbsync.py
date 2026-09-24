@@ -20,8 +20,8 @@ import time
 import config
 import remote_db as _s                # http + PocketBase helpers + CACHE_DB
 
-DATA = os.environ.get("LUDODEX_DATA",
-                      os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths                          # the one LUDODEX_DATA reader
+DATA = paths.DATA                     # LUDODEX_DATA, else the repo root
 
 # name: sync id (also the remote collection suffix). db/table: where it lives locally.
 # key: the natural primary-key columns (portable across machines — never an autoincrement

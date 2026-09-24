@@ -29,8 +29,9 @@ import time
 
 DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo root
 PKG = os.path.join(DIR, "ludodex")                                  # the modules
-DATA = os.environ.get("LUDODEX_DATA", DIR)
 sys.path.insert(0, PKG)
+import paths          # noqa: E402  the one LUDODEX_DATA reader (paths.py)
+DATA = paths.DATA     # LUDODEX_DATA, else the repo root (DIR)
 import config  # noqa: E402
 
 # --- token usage tracking + monthly limits (per provider / per model) --------

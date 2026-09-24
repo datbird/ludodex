@@ -18,10 +18,12 @@ import sqlite3
 import sys
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# Resolved the way every other module resolves it — DIR is this package, the repo root is
-# above it. Hardcoding /data and /app made this the one check that could not be run on a
-# checkout, which is exactly where an invariant regression is cheapest to catch.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+# Resolved where every other module resolves it (paths.py): LUDODEX_DATA, else the repo
+# root above this package. Hardcoding /data and /app made this the one check that could
+# not be run on a checkout, which is exactly where an invariant regression is cheapest
+# to catch.
+import paths                                     # noqa: E402  the one LUDODEX_DATA reader
+DATA = paths.DATA
 LIB = os.path.join(DATA, "game-library.sqlite")
 IDX = os.path.join(DATA, "media-index.sqlite")
 sys.path.insert(0, DIR)

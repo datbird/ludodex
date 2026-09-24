@@ -28,7 +28,9 @@ docker run -d --name ludodex -p 8001:8001 \
 - **All durable state lives in `/data`** (mount a named volume or host dir there):
   the config, device connections, tokens, the catalog, and caches. These are
   small and critical (not regenerable) — this is the volume to back up. Nothing
-  durable is written into the image, so upgrades are just a re-pull.
+  durable is written into the image, so upgrades are just a re-pull. The image sets
+  `LUDODEX_DATA=/data`; outside a container the data dir defaults to the checkout's
+  root (see [CONFIG.md](CONFIG.md#data-directory)).
 - **Media (downloaded art) defaults to `/data/media`.** It's bulk and
   regenerable (re-fetchable from providers), so you can keep it on separate,
   larger storage: just **mount a volume at `/media`** and ludodex uses it

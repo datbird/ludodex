@@ -906,12 +906,11 @@ def _main(argv):
     if "--scrub" not in argv:
         print(_main.__doc__.strip())
         return 2
-    # The package dir is NOT the data dir. Every sibling module says so in as many words:
-    # __file__ is this package, DATA is the REPO ROOT above it, which is where the
-    # databases live. Falling back to the package dir pointed the scrub at a directory
-    # holding no game-library.sqlite at all.
-    data = (os.environ.get("LUDODEX_DATA")
-            or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # The package dir is NOT the data dir: DATA is LUDODEX_DATA, else the REPO ROOT above
+    # this package, which is where the databases live (paths.py). Falling back to the
+    # package dir pointed the scrub at a directory holding no game-library.sqlite at all.
+    import paths
+    data = paths.DATA
     lib = sqlite3.connect("file:%s?mode=ro" % os.path.join(data, "game-library.sqlite"),
                           uri=True)
     apply_it = "--apply" in argv
