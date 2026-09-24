@@ -1619,6 +1619,7 @@ const SECTIONS = [
   { id: 'metadata', name: 'AI Metadata', icon: '🔎' },
   { id: 'account', name: 'Account & Users', icon: '👤' },
 ]
+const ADMIN_SECTIONS = new Set(['account', 'backup'])
 const SUBSECTIONS: Record<string, { id: string; name: string }[]> = {
   ai: [{ id: 'usage', name: 'AI Usage' }, { id: 'keys', name: 'API Keys' },
        { id: 'budgets', name: 'Budgets & limits' }, { id: 'report', name: 'Usage report' }],
@@ -1677,14 +1678,18 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
   const [q, setQ] = useState('')   // settings search
   const [cfg, setCfg] = useState<AiConfig | null>(null)
 
-  const reload = () => api.aiConfig().then(setCfg).catch(() => {})
+  const [cfgErr, setCfgErr] = useState('')
+  const reload = () => api.aiConfig().then((c) => { setCfg(c); setCfgErr('') })
+    .catch((e) => setCfgErr((e as Error).message))
   useEffect(() => { reload() }, [])
   useScrollLock()
 
-  // "Account & Users" is admin-only. Sorted alphabetically by name so the list —
-  // and any future section — stays in order without manual bookkeeping.
+  // "Account & Users" and "Backup" are admin-only: every panel in them reads an API the
+  // server refuses a non-admin (/api/backups, /api/backingstore). Shown to a user, they
+  // sat on "Loading..." forever. Sorted alphabetically by name so the list and any
+  // future section stay in order without manual bookkeeping.
   const sections = SECTIONS
-    .filter((s) => s.id !== 'account' || user?.role === 'admin')
+    .filter((s) => !ADMIN_SECTIONS.has(s.id) || user?.role === 'admin')
     .sort((a, b) => a.name.localeCompare(b.name))
   const subs = SUBSECTIONS[section] ?? []
 
@@ -1753,7 +1758,8 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
               : section === 'account'
               ? (sub === 'access' ? <CfAccessPanel />
                 : <><UsersPanel currentUser={user} /><PublicHealthSwitch /></>)
-              : !cfg ? <div className="loading">Loading…</div>
+              : !cfg ? (cfgErr ? <div className="connect-msg err">{cfgErr}</div>
+                        : <div className="loading">Loading…</div>)
               : sub === 'usage' ? <AiUsage cfg={cfg} onChange={reload} />
               : sub === 'keys' ? <ApiKeys cfg={cfg} onChange={reload} />
               : sub === 'budgets' ? <AiBudgets />
@@ -1886,13 +1892,17 @@ function BackingStore() {
   const hydrate = (d: BSCfg) => {
     setCfg(d); setBackend(d.backend); setVals({ ...d.values }); setAuto(d.auto_minutes || 0)
   }
-  useEffect(() => { api.backingConfig().then(hydrate).catch(() => {}) }, [])
+  const [loadErr, setLoadErr] = useState('')
+  useEffect(() => {
+    api.backingConfig().then(hydrate).catch((e) => setLoadErr((e as Error).message))
+  }, [])
   // The sync poll ran for up to 120s with no alive flag, so closing Settings left it
   // calling setMsg/setBusy on a dead component. Own the handle and clear it on unmount.
   const pollRef = useRef<number | null>(null)
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
-  if (!cfg) return <div className="loading">Loading…</div>
+  if (!cfg) return loadErr ? <div className="connect-msg err">{loadErr}</div>
+    : <div className="loading">Loading…</div>
   const secret = (k: string) => k in cfg.secret_set
   const fields = backend ? (cfg.fields[backend] || []) : []
 
@@ -2712,7 +2722,9 @@ function SnapshotBackups() {
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
 
-  const load = useCallback(() => { api.backups().then(setSt).catch(() => {}) }, [])
+  const load = useCallback(() => {
+    api.backups().then(setSt).catch((e) => setMsg((e as Error).message))
+  }, [])
   useEffect(() => { load() }, [load])
   // poll only while a run is in flight
   useEffect(() => {
@@ -3132,7 +3144,9 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
   // return changes the hook count between renders (React error #310, white-screens the app).
   const [langResult, setLangResult] = useState<MediaLangResult | null>(null)
   const { err, run } = useMutation()
-  const load = () => api.prefs().then(setPrefs).catch(() => {})
+  const [loadErr, setLoadErr] = useState('')
+  const load = () => api.prefs().then((p) => { setPrefs(p); setLoadErr('') })
+    .catch((e) => setLoadErr((e as Error).message))
   useEffect(() => { load() }, [])
   const running = prefs?.media_job?.running
   useEffect(() => {
@@ -3141,7 +3155,8 @@ function LibraryPrefs({ onChanged }: { onChanged: () => void }) {
     return () => clearInterval(t)
   }, [running])
 
-  if (!prefs) return <div className="loading">Loading…</div>
+  if (!prefs) return loadErr ? <div className="connect-msg err">{loadErr}</div>
+    : <div className="loading">Loading…</div>
   const job = prefs.media_job
 
   // ONE optimistic setter. Each of these used to splat the RENDER-TIME `prefs` closure,
@@ -12097,7 +12112,8 @@ function RunbookModal({ runId, onClose }: { runId: number; onClose: () => void }
   const [err, setErr] = useState('')
   const wrapRef = useClickOutside<HTMLDivElement>(true, onClose)
 
-  const load = useCallback(() => api.getRunbook(runId).then(setRb).catch(() => {}), [runId])
+  const load = useCallback(() => api.getRunbook(runId).then(setRb)
+    .catch((e) => setErr((e as Error).message)), [runId])
   useEffect(() => { load() }, [load])
   const status = rb?.run.status
   const live = !!rb?.running || status === 'running'
@@ -12117,7 +12133,8 @@ function RunbookModal({ runId, onClose }: { runId: number; onClose: () => void }
 
   if (!rb) return (
     <div className="overlay overlay-2" onClick={onClose}>
-      <div className="fo-runbook" ref={wrapRef} onClick={(e) => e.stopPropagation()}><div className="loading">Loading…</div></div>
+      <div className="fo-runbook" ref={wrapRef} onClick={(e) => e.stopPropagation()}>
+        {err ? <div className="connect-msg err">{err}</div> : <div className="loading">Loading…</div>}</div>
     </div>
   )
   const c = rb.counts

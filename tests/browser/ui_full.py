@@ -1176,9 +1176,10 @@ def area_settings(page, api, user, full=True):
     open_settings(page)
     names = [t.strip() for t in page.locator(".settings-nav .nav-item").all_inner_texts()]
     names = [re.sub(r"^\W+\s*", "", n).strip() for n in names]
-    want = {"AI settings", "Connections", "Database", "Library", "Dashboard", "AI Metadata"}
+    want = {"AI settings", "Connections", "Library", "Dashboard", "AI Metadata"}
     if user["role"] == "admin":
-        want.add("Account & Users")
+        # admin-only: every panel in these reads an API the server refuses a user
+        want |= {"Account & Users", "Database"}
     check(A, "the nav lists every section this role gets", set(names) == want,
           {"shown": names, "want": sorted(want)})
     check(A, "and in alphabetical order", names == sorted(names, key=str.lower), names)
