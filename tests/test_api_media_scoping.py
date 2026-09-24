@@ -91,7 +91,8 @@ def main():
 
     # ---- #28, set_pins -------------------------------------------------------- #
     seed()
-    app.set_pins("doom@genesis", {"kind": "cover", "ids": [2]})
+    # FastAPI resolves the key before the handler runs; a direct call passes both halves.
+    app.set_pins("doom@genesis", app._base_key("doom@genesis"), {"kind": "cover", "ids": [2]})
     ch = chosen_map()
     check("the pinned asset is chosen", ch[2] == 1)
     check("the one it replaced in its own bucket is cleared", ch[1] == 0)

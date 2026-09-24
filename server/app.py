@@ -28,7 +28,9 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request
+from typing import Annotated
+
+from fastapi import Body, Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
@@ -136,6 +138,47 @@ app = FastAPI(title="ludodex", version="0.1.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
+
+# --------------------------------------------------------------------------- #
+#  Game keys in the URL. A route never splits a key itself: it declares the key
+#  through one of these, and FastAPI resolves it before the handler runs. Three
+#  shapes reach a route (`<norm_key>@<platform>`, a bare norm_key, and a CARD key
+#  `igdb:2155` / `title:<nk>`), and only _split_entry_key understands all three.
+#  Routes that split inline each missed the card shape on 2026-08-26 and queried
+#  for a game named "igdb:2155", an empty 200 with no error anywhere.
+#
+#  FastAPI binds a dependency's parameter to the path parameter of the same name,
+#  so each helper is named for the path parameter it reads, and the URL shape is
+#  unchanged. See test_routes_resolve_their_keys, which fails a route that takes a
+#  key any other way.
+# --------------------------------------------------------------------------- #
+def _base_key(norm_key: str) -> str:
+    """The base title norm_key for `{norm_key}`, whatever shape the UI sent."""
+    return _split_entry_key(norm_key)[0]
+
+
+def _entry_key(norm_key: str) -> tuple:
+    """(base norm_key, platform or None) for `{norm_key}`."""
+    return _split_entry_key(norm_key)
+
+
+def _base_nk(nk: str) -> str:
+    """_base_key for the routes whose path parameter is spelled `{nk}`."""
+    return _split_entry_key(nk)[0]
+
+
+def _base_coll_key(coll_key: str) -> str:
+    """_base_key for the collection routes, whose path parameter is `{coll_key}`."""
+    return _split_entry_key(coll_key)[0]
+
+
+BaseKey = Annotated[str, Depends(_base_key)]
+EntryKey = Annotated[tuple, Depends(_entry_key)]
+BaseNk = Annotated[str, Depends(_base_nk)]
+CollBaseKey = Annotated[str, Depends(_base_coll_key)]
+# The key exactly as the URL gave it, for a route that must echo the entry it was
+# addressed by (a filtered media list is per entry, not per title).
+RawKey = Annotated[str, Path(alias="norm_key")]
 
 # --------------------------------------------------------------------------- #
 #  Authentication: local accounts + session cookie. The whole /api surface is
@@ -2074,14 +2117,13 @@ PER_GAME_FETCH_PROVIDERS = ("igdb", "screenscraper", "steamgriddb", "steam")
 
 
 @app.get("/api/media/matched-providers/{norm_key}")
-def media_matched_providers(norm_key: str):
+def media_matched_providers(base: BaseKey):
     """Providers this game is MATCHED to, for the "Fetch from…" menu (spec §2.5).
 
     A provider with no match is returned with matched:false rather than omitted —
     "absent is not the same as unmatched, and hiding it makes a missing match look like
     a missing feature".
     """
-    base, _plat = _split_entry_key(norm_key)
     links, kinds = {}, {}
     lc = ro(LIBRARY_DB)
     try:
@@ -2121,7 +2163,7 @@ def media_matched_providers(norm_key: str):
 
 
 @app.post("/api/media/fetch/{norm_key}")
-def media_fetch_provider(norm_key: str, body: dict = Body(default={})):
+def media_fetch_provider(base: BaseKey, body: dict = Body(default={})):
     """Deterministic "Fetch from <provider>" (spec §2.5) — the wand's free sibling.
 
     Pulls everything a MATCHED provider holds for this game. No AI area is consulted, so
@@ -2133,7 +2175,6 @@ def media_fetch_provider(norm_key: str, body: dict = Body(default={})):
     friction with no risk behind it. What the response reports is whether the CHOSEN
     asset would change, because that is what the library actually displays.
     """
-    base, _plat = _split_entry_key(norm_key)
     provider = (body or {}).get("provider") or None
     kinds = [k for k in ((body or {}).get("kinds") or []) if k] or None
     if provider and provider not in PER_GAME_FETCH_PROVIDERS + ("web",):
@@ -3109,18 +3150,17 @@ def collections_list():
 
 
 @app.get("/api/collections/{coll_key:path}")
-def collection_get(coll_key: str):
-    c = compilations.get_collection(DATA, _split_entry_key(coll_key)[0])
+def collection_get(coll_key: CollBaseKey):
+    c = compilations.get_collection(DATA, coll_key)
     if not c:
         raise HTTPException(404, "not a collection")
     return c
 
 
 @app.post("/api/collections/{coll_key:path}")
-def collection_set(coll_key: str, body: dict = Body(...)):
+def collection_set(base: CollBaseKey, body: dict = Body(...)):
     """Mark an entry as a compilation and (re)set its members. Body:
     {name, members:[{title, platform?, year?}]}. Manual curation path."""
-    base = _split_entry_key(coll_key)[0]
     name = ((body or {}).get("name") or "").strip()
     members = (body or {}).get("members") or []
     if not name:
@@ -3133,10 +3173,10 @@ def collection_set(coll_key: str, body: dict = Body(...)):
 
 
 @app.delete("/api/collections/{coll_key:path}")
-def collection_delete(coll_key: str):
+def collection_delete(coll_key: CollBaseKey):
     # origin='manual': this endpoint IS the user saying so, and the removal has to
     # outlive the next scan — otherwise auto-detection re-nominates the same bundle.
-    compilations.clear_collection(DATA, _split_entry_key(coll_key)[0],
+    compilations.clear_collection(DATA, coll_key,
                                   reason="removed in the library",
                                   origin="manual")
     # deleting must also remove the members it materialized — otherwise phantom
@@ -9340,10 +9380,9 @@ def _game_title(norm_key):
 
 
 @app.post("/api/games/{norm_key}/framing")
-def set_framing(norm_key: str, body: dict = Body(...)):
+def set_framing(norm_key: BaseKey, body: dict = Body(...)):
     """Position + zoom for one image kind inside its viewport (e.g. the hero
     'background' or a 'cover'). Applied at render time, keyed by norm_key."""
-    norm_key = _split_entry_key(norm_key)[0]
     body = body or {}
     kind = (body.get("kind") or "").strip()
     if not kind:
@@ -9356,19 +9395,19 @@ def set_framing(norm_key: str, body: dict = Body(...)):
 
 
 @app.delete("/api/games/{norm_key}/framing")
-def clear_framing(norm_key: str, kind: str):
-    framing.clear(DATA, _split_entry_key(norm_key)[0], kind)
+def clear_framing(norm_key: BaseKey, kind: str):
+    framing.clear(DATA, norm_key, kind)
     return {"ok": True}
 
 
 @app.post("/api/games/{norm_key}/hero")
-def set_hero_pref(norm_key: str, body: dict = Body(...)):
+def set_hero_pref(norm_key: BaseKey, body: dict = Body(...)):
     """Override what drives the detail hero for one game: 'marquee' (force the
     scrolling media dance), a media kind to force as the static background, or
     'auto'/'' to clear (default hero→background→header→marquee logic). Keyed by
     norm_key, applied at render time."""
     source = ((body or {}).get("source") or "").strip()
-    saved = framing.set_hero(DATA, _split_entry_key(norm_key)[0], source)
+    saved = framing.set_hero(DATA, norm_key, source)
     return {"hero_pref": saved}
 
 
@@ -9546,12 +9585,8 @@ def _game_tags(con, gid, norm_key):
 
 
 @app.get("/api/games/{norm_key}/tags")
-def get_game_tags(norm_key: str):
+def get_game_tags(norm_key: BaseKey):
     """All tags for a game (imported + user), each with its origin(s)."""
-    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
-    # norm_key; a fix if a CARD key ever arrives here, which is how the media
-    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
-    norm_key = _split_entry_key(norm_key)[0]
     con = lib()
     try:
         row = con.execute("SELECT id FROM games WHERE norm_key=?", (norm_key,)).fetchone()
@@ -9562,7 +9597,7 @@ def get_game_tags(norm_key: str):
 
 
 @app.post("/api/games/{norm_key}/tags")
-def add_game_tag(norm_key: str, body: dict = Body(...)):
+def add_game_tag(norm_key: BaseKey, body: dict = Body(...)):
     """Add a user (ludodex-origin) tag. Durable — survives catalog rebuilds."""
     tag = (body or {}).get("tag", "").strip()
     if not tag:
@@ -9578,12 +9613,8 @@ def add_game_tag(norm_key: str, body: dict = Body(...)):
 
 
 @app.delete("/api/games/{norm_key}/tags/{tag}")
-def remove_game_tag(norm_key: str, tag: str):
+def remove_game_tag(norm_key: BaseKey, tag: str):
     """Remove a user tag (imported-origin tags can't be removed here)."""
-    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
-    # norm_key; a fix if a CARD key ever arrives here, which is how the media
-    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
-    norm_key = _split_entry_key(norm_key)[0]
     tc = _tags_con()
     tc.execute("DELETE FROM user_tags WHERE norm_key=? AND tag=?", (norm_key, tag))
     tc.commit()
@@ -9592,13 +9623,9 @@ def remove_game_tag(norm_key: str, tag: str):
 
 
 @app.get("/api/games/{norm_key}/achievements")
-def game_achievements(norm_key: str):
+def game_achievements(norm_key: BaseKey):
     """RetroAchievements for a game: full set + which the user earned.
     Populated by ra_fetch.py; empty/unmatched if never pulled."""
-    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
-    # norm_key; a fix if a CARD key ever arrives here, which is how the media
-    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
-    norm_key = _split_entry_key(norm_key)[0]
     if not os.path.exists(RA_DB):
         return {"matched": False, "num_ach": 0, "num_earned": 0, "achievements": []}
     con = ro(RA_DB)
@@ -9717,12 +9744,14 @@ def media_kinds():
 
 
 @app.get("/api/games/{norm_key}/media")
-def game_media(norm_key: str):
+def game_media(norm_key: str, entry: EntryKey = None):
     """Every media asset THIS entry has, grouped by kind, annotated with pin state.
     Filtered to the entry's own console + platform-neutral art (never another
     console's), so the detail hero/candidates match the platform. `pinned`/`rank`
     come from the durable (title-level) pin store."""
-    base, platform = _split_entry_key(norm_key)
+    # FastAPI fills `entry`. The media routes also return game_media(_ekey) directly,
+    # and a direct call resolves here, through the same dependency.
+    base, platform = entry or _entry_key(norm_key)
     _cols = ("id, kind, provider, ref, ref_type, ext, width, height, chosen, sha1, system")
     con = lib()
     try:
@@ -9842,12 +9871,10 @@ def game_media(norm_key: str):
 
 
 @app.post("/api/games/{norm_key}/pins")
-def set_pins(norm_key: str, body: dict = Body(...)):
+def set_pins(_ekey: RawKey, norm_key: BaseKey, body: dict = Body(...)):
     """Set the pinned assets (and their order) for one kind of a game. Send the
     full ordered list of asset ids you want pinned — this replaces the prior set.
     Scalar kinds keep at most 1; other kinds keep up to MULTI_CAP, in order."""
-    _ekey = norm_key                              # keep entry id for the filtered return
-    norm_key = _split_entry_key(norm_key)[0]      # media/pins are keyed by base title
     kind = body.get("kind")
     ids = body.get("ids") or []
     if not kind:
@@ -9908,11 +9935,9 @@ def _asset_identity(norm_key, aid):
 
 
 @app.post("/api/games/{norm_key}/media/{aid}/ban")
-def ban_media(norm_key: str, aid: int):
+def ban_media(_ekey: RawKey, norm_key: BaseKey, aid: int):
     """Ban a provider asset: delete it from the index AND remember never to
     re-download it (media_fetch skips banned refs). Unban later in Settings."""
-    _ekey = norm_key
-    norm_key = _split_entry_key(norm_key)[0]
     ident = _asset_identity(norm_key, aid)
     if not ident:
         raise HTTPException(404, "no such asset")
@@ -9938,11 +9963,10 @@ def ban_media(norm_key: str, aid: int):
 
 
 @app.post("/api/games/{norm_key}/media/{aid}/redist")
-def set_media_redist(norm_key: str, aid: int, body: dict = Body(default={})):
+def set_media_redist(_ekey: RawKey, norm_key: BaseKey, aid: int,
+                     body: dict = Body(default={})):
     """Toggle whether a provider asset is redistributable (copied to other machines
     when games are sent to them). Default is redistributable; this stores the 'no'."""
-    _ekey = norm_key
-    norm_key = _split_entry_key(norm_key)[0]
     ident = _asset_identity(norm_key, aid)
     if not ident:
         raise HTTPException(404, "no such asset")
@@ -10080,10 +10104,9 @@ async def upload_media(norm_key: str, kind: str, request: Request,
 
 
 @app.post("/api/games/{norm_key}/media/{kind}/url")
-def add_media_from_url(norm_key: str, kind: str, body: dict = Body(...)):
+def add_media_from_url(_ekey: RawKey, norm_key: BaseKey, kind: str,
+                       body: dict = Body(...)):
     """Download media from a direct URL and store it as a user upload."""
-    _ekey = norm_key
-    norm_key = _split_entry_key(norm_key)[0]
     url = (body or {}).get("url", "").strip()
     if not url or not re.match(r"^https?://", url, re.I):
         raise HTTPException(400, "a valid http(s) URL is required")
@@ -10109,10 +10132,8 @@ def add_media_from_url(norm_key: str, kind: str, body: dict = Body(...)):
 
 
 @app.delete("/api/games/{norm_key}/media/user/{asset_id}")
-def delete_user_media(norm_key: str, asset_id: int):
+def delete_user_media(_ekey: RawKey, norm_key: BaseKey, asset_id: int):
     """Remove a user-uploaded asset (leaves shared repo bytes; they're content-addressed)."""
-    _ekey = norm_key
-    norm_key = _split_entry_key(norm_key)[0]
     uc = _umedia_con()
     try:
         uc.execute("DELETE FROM user_media WHERE id=? AND norm_key=?",
@@ -10982,7 +11003,8 @@ def _serve(path, ext, size):
 
 
 @app.get("/api/media/{norm_key}/{kind}")
-def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thumb$")):
+def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thumb$"),
+                entry: EntryKey = None):
     """Resolve + stream the chosen asset for a library entry + kind.
 
     `norm_key` may be an entry id `base@platform` (per-platform library entry) or a
@@ -10997,7 +11019,8 @@ def media_asset(norm_key: str, kind: str, size: str = Query(None, pattern="^thum
     A user upload for this kind always wins (most recent), so uploads take effect
     immediately without a pipeline re-run.
     """
-    base, platform = _split_entry_key(norm_key)
+    # FastAPI fills `entry`; a direct call (a test, a script) resolves here instead.
+    base, platform = entry or _entry_key(norm_key)
     up = _umedia_path(base, kind)
     if up:
         return _serve(up[0], up[1], size)
@@ -13320,9 +13343,8 @@ def media_asset_by_id(asset_id: int, size: str = Query(None, pattern="^thumb$"))
 
 
 @app.post("/api/ai/art-pick/{norm_key}")
-def art_pick(norm_key: str, kind: str = Query("cover")):
+def art_pick(norm_key: BaseKey, kind: str = Query("cover")):
     """AI picks the best candidate asset for (norm_key, kind) among providers."""
-    norm_key = _split_entry_key(norm_key)[0]
     if not ai.area_available("art"):
         raise HTTPException(503, "art-pick not configured (set a provider + API key)")
     lcon = ro(LIBRARY_DB)
@@ -13596,13 +13618,9 @@ def games_merge(nk: str, body: dict = Body(...)):
 
 
 @app.get("/api/games/{nk}/sources")
-def game_sources(nk: str):
+def game_sources(nk: BaseNk):
     """Per-source rows of a game, for the 'Peel apart' picker (which source belongs
     to the OTHER same-named game)."""
-    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
-    # norm_key; a fix if a CARD key ever arrives here, which is how the media
-    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
-    nk = _split_entry_key(nk)[0]
     con = lib()
     try:
         g = con.execute("SELECT id, canonical_title FROM games WHERE norm_key=?",
@@ -13619,15 +13637,11 @@ def game_sources(nk: str):
 
 
 @app.post("/api/games/{nk}/split")
-def games_split(nk: str, body: dict = Body(...)):
+def games_split(nk: BaseNk, body: dict = Body(...)):
     """Peel selected source rows off a merged entry into a NEW, separately-identified
     game (the inverse of merge). Body: {"rows":[{"source","source_id"}],
     "title":"Uno (2006)"}. The peeled rows get their own norm_key on every rebuild;
     identify the new entry (title/IGDB) afterward like any game."""
-    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
-    # norm_key; a fix if a CARD key ever arrives here, which is how the media
-    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
-    nk = _split_entry_key(nk)[0]
     body = body or {}
     rows = body.get("rows") or []
     title = (body.get("title") or "").strip()
@@ -13682,14 +13696,10 @@ def games_split(nk: str, body: dict = Body(...)):
 
 
 @app.post("/api/games/{nk}/split-suggest")
-def games_split_suggest(nk: str):
+def games_split_suggest(nk: BaseNk):
     """Agentic 'peel apart': ask the model whether this entry is really 2+ different
     same-named games and how its source rows split. Returns the suggested grouping
     (row indices are 1-based into the returned `sources`) for the user to confirm."""
-    # Resolve whatever key shape the UI sent. A no-op for an entry key or a bare
-    # norm_key; a fix if a CARD key ever arrives here, which is how the media
-    # panel broke on 2026-08-26. See test_routes_resolve_their_keys.
-    nk = _split_entry_key(nk)[0]
     if not ai.area_available("split"):
         raise HTTPException(503, "split assist not configured (set a provider + API key)")
     con = lib()
