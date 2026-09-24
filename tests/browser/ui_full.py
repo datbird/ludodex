@@ -533,8 +533,11 @@ def area_dashboard(page, api):
     want = [s.get("identified", s["games"]), s["media"]["games_with_art"], s["cross_source"], srcs]
     check(A, "the four headline numbers are /api/stats", nums == want, {"shown": nums, "want": want})
     lib_total = api.get("/api/games?limit=1")["total"]
-    check(A, "the Games number equals the library's default (Owned) total",
-          want[0] == lib_total, {"dashboard": want[0], "library_owned_total": lib_total})
+    # The dashboard counts games; the grid also lists add-ons whose base game is not
+    # owned, and /api/stats reports how many of those it left out.
+    check(A, "the Games number equals the library's default (Owned) total, less add-ons",
+          want[0] == lib_total - s.get("addons", 0),
+          {"dashboard": want[0], "library_owned_total": lib_total, "addons": s.get("addons")})
     hdr = page.locator("header .stats").inner_text() if page.locator("header .stats").count() else ""
     check(A, "the header line carries the same identified count",
           "{:,}".format(want[0]) in hdr, hdr)

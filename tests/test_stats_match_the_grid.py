@@ -12,6 +12,9 @@ there. This seeds a catalog with a tool, an add-on and a wishlist tool beside re
 games, and asserts each stats number equals the total of the view it links to, with
 the setting on and with it off.
 
+One deliberate difference: the dashboard counts GAMES, so an add-on whose base game is
+not owned (listed in the grid, since there is nowhere to file it) is still not counted.
+
 Offline: an isolated data dir and the empty catalog the server seeds on first run.
 """
 import os
@@ -47,12 +50,15 @@ GAMES = [
     ("wallpaper engine", 0, None, True, True),           # a tool, undecided covers too
     ("fps monitor", 1, None, True, False),               # a WISHED tool
     ("hexen", 1, None, False, False),                    # a wished game
+    ("quake ii ground zero", 0, None, False, False),     # an add-on, base NOT owned
 ]
+ORPHAN_ADDON = "quake ii ground zero"
 
 
 def seed():
     lc = sqlite3.connect(app.LIBRARY_DB)
     lc.execute("ALTER TABLE games ADD COLUMN parent_key TEXT")
+    lc.execute("ALTER TABLE games ADD COLUMN content_kind TEXT")
     for i, (nk, wanted, parent, _ng, _und) in enumerate(GAMES, 1):
         lc.execute("INSERT INTO games(id,canonical_title,norm_key,platform,entry_key,"
                    "base_key,game_key,n_sources,n_kinds,sources_summary,wanted,has_steam,"
@@ -66,6 +72,8 @@ def seed():
         if wanted:
             lc.execute("INSERT INTO wanted(game_id,store,store_id,title_raw) "
                        "VALUES(?,'steam',?,?)", (i, str(i), nk))
+    lc.execute("UPDATE games SET content_kind='expansion' WHERE norm_key IN (?,?)",
+               (ORPHAN_ADDON, "quake mission pack"))
     lc.commit()
     lc.close()
     sc = app._scores_con()
@@ -101,16 +109,19 @@ def compare(hide):
     config.set_("hide_non_games", "1" if hide else "0")
     st = app.stats()
     owned = view_total()
-    check("Games (identified) == the default library view",
-          st["identified"] == owned, (st["identified"], owned))
+    check("the grid still lists the add-on whose base is not owned",
+          view_total(q="ground zero") == 1)
+    check("Games (identified) == the default library view, less that add-on",
+          st["identified"] == owned - 1, (st["identified"], owned))
+    check("and stats says how many add-ons it left out", st["addons"] == 1, st["addons"])
     wanted = view_total(status="wanted")
     check("Wanted == the Wanted view", st["wanted"] == wanted, (st["wanted"], wanted))
     und = view_total(include=["cover_undecided"])
     check("Cover undecided == its view", st["cover_undecided"] == und,
           (st["cover_undecided"], und))
     steam = view_total(include=["steam"])
-    check("by_source steam == the Steam filter", st["by_source"]["steam"] == steam,
-          (st["by_source"]["steam"], steam))
+    check("by_source steam == the Steam filter, less that add-on",
+          st["by_source"]["steam"] == steam - 1, (st["by_source"]["steam"], steam))
     return st
 
 

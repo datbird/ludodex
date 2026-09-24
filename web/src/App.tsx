@@ -1751,7 +1751,8 @@ function Settings({ onClose, onPrefsChanged, user, initialSection }: {
               : section === 'metadata'
               ? (sub === 'scan' ? <MetadataScan /> : <MetadataReview />)
               : section === 'account'
-              ? (sub === 'access' ? <CfAccessPanel /> : <UsersPanel currentUser={user} />)
+              ? (sub === 'access' ? <CfAccessPanel />
+                : <><UsersPanel currentUser={user} /><PublicHealthSwitch /></>)
               : !cfg ? <div className="loading">Loading…</div>
               : sub === 'usage' ? <AiUsage cfg={cfg} onChange={reload} />
               : sub === 'keys' ? <ApiKeys cfg={cfg} onChange={reload} />
@@ -2934,6 +2935,36 @@ function SnapshotBackups() {
       {msg && <div className="dim bs-msg">{msg}</div>}
       <RestoreFromArchive jobs={st?.jobs || []} />
     </section>
+  )
+}
+
+// Admin switch: may a signed-out caller read /api/health's details? Liveness
+// ({"ok": true}) is always public so health checks and uptime monitors keep working.
+function PublicHealthSwitch() {
+  const [on, setOn] = useState<boolean | null>(null)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    api.publicHealth().then((d) => setOn(d.enabled)).catch((e) => setErr((e as Error).message))
+  }, [])
+  const flip = async (v: boolean) => {
+    const r = await attempt(() => api.setPublicHealth(v), setErr)
+    if (r.ok) setOn(r.value.enabled)
+  }
+  return (
+    <div className="public-health">
+      <h3>Health endpoint</h3>
+      <p className="dim">Without sign-in, <code>/api/health</code> only answers that the server is
+        up. Turn this on to also show its details (data paths and the AI setup) to anyone who can
+        reach the server, for example a monitoring tool that cannot sign in.</p>
+      {err && <div className="connect-msg err">{err}</div>}
+      {on !== null && (
+        <label className="switch">
+          <input type="checkbox" checked={on} onChange={(e) => flip(e.target.checked)} />
+          <span className="track"><span className="knob" /></span>
+          <span className="switch-text">{on ? 'Details public' : 'Details need sign-in'}</span>
+        </label>
+      )}
+    </div>
   )
 }
 

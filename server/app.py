@@ -409,6 +409,20 @@ def _cf_state():
     return {**_cf_cfg(), "mappings": auth.list_email_maps(), "users": auth.list_users()}
 
 
+@app.get("/api/auth/public-health")
+def public_health_get(request: Request):
+    """Whether /api/health shows its details to signed-out callers (admin only)."""
+    _require_admin(request)
+    return {"enabled": config.get_bool("public_health_details", False)}
+
+
+@app.post("/api/auth/public-health")
+def public_health_set(request: Request, body: dict = Body(...)):
+    _require_admin(request)
+    config.set_("public_health_details", "1" if (body or {}).get("enabled") else "0")
+    return public_health_get(request)
+
+
 @app.get("/api/auth/cf-access")
 def cf_access_get(request: Request):
     _require_admin(request)
@@ -675,7 +689,7 @@ def _non_game_hidden_sql():
     return nongame.hidden_sql()
 
 
-def _view_hidden_where(con, status="owned"):
+def _view_hidden_where(con, status="owned", games_only=False):
     """(where[], args) for the entries the library grid keeps out of a `status` view:
     add-ons filed under an owned base game, and non-games while `hide_non_games` is on.
 
@@ -685,10 +699,16 @@ def _view_hidden_where(con, status="owned"):
     rule from here, so the numbers and the lists cannot drift apart again.
 
     'all' keeps add-ons (that is what 'all' means); 'utilities' keeps non-games, because
-    it is the one view that exists to show them (it applies the inverse itself)."""
+    it is the one view that exists to show them (it applies the inverse itself).
+
+    `games_only` is the dashboard's rule on top: it counts games, so it also leaves out
+    an add-on whose base game is NOT owned (content_kind set, no parent to file it
+    under). The grid still lists those, so they stay findable; they just are not games."""
     where, args = [], []
     if status != "all" and _has_col(con, "games", "parent_key"):
         where.append("g.parent_key IS NULL")
+    if games_only and _has_col(con, "games", "content_kind"):
+        where.append("g.content_kind IS NULL")
     if status != "utilities" and config.get_bool("hide_non_games", True):
         _ex, _exargs = _non_game_hidden_sql()
         where.append("NOT (" + _ex + ")")
@@ -851,9 +871,10 @@ def stats():
         wcol = _has_col(con, "games", "wanted")     # wishlist-only games: exclude from owned stats
         # The entries the grid itself hides (add-ons under an owned base, non-games while
         # hide_non_games is on) are left out of every number here, from the SAME rule
-        # _query_games applies, or each card reads higher than the view it opens.
+        # _query_games applies, or each card reads higher than the view it opens. The
+        # dashboard also never counts an add-on (DLC, expansion) as a game.
         # Everything below is `... WHERE <owned> AND <vis>`; `vis` carries its own args.
-        _vw, vargs = _view_hidden_where(con)
+        _vw, vargs = _view_hidden_where(con, games_only=True)
         vis = " AND ".join(_vw) if _vw else "1"
         gw = " WHERE " + ("g.wanted=0 AND " if wcol else "") + vis
         and_w = (" AND g.wanted=0" if wcol else "") + " AND " + vis
@@ -867,7 +888,7 @@ def stats():
         g = con.execute("SELECT %s FROM games g%s" % (_ct, gw), vargs).fetchone()[0]
         ident = con.execute("SELECT " + _ct + " FROM games g" + gw + " AND "
                             + IDENTIFIED_SQL, vargs).fetchone()[0]
-        _wvw, _wva = _view_hidden_where(con, "wanted")
+        _wvw, _wva = _view_hidden_where(con, "wanted", games_only=True)
         wanted_ct = con.execute(
             "SELECT " + _ct + " FROM games g WHERE " + " AND ".join(["g.wanted=1"] + _wvw),
             _wva).fetchone()[0] if wcol else 0
@@ -926,8 +947,19 @@ def stats():
         for row in con.execute("SELECT kind, COUNT(DISTINCT norm_key) c "
                                "FROM m.media WHERE chosen=1 GROUP BY kind"):
             coverage[row["kind"]] = row["c"]
+        # The add-ons the grid lists but no number above counts: DLC and expansions
+        # whose base game is not owned. Reported so a card can say why it reads lower
+        # than the library view it opens.
+        addons = 0
+        if _has_col(con, "games", "content_kind"):
+            _gv, _gva = _view_hidden_where(con)
+            addons = con.execute(
+                "SELECT " + _ct + " FROM games g WHERE g.content_kind IS NOT NULL AND "
+                + IDENTIFIED_SQL + (" AND g.wanted=0" if wcol else "")
+                + "".join(" AND " + w for w in _gv), _gva).fetchone()[0]
         return {
             "games": g,
+            "addons": addons,                  # listed in the grid, not counted as games
             "identified": ident,               # real, known titles (in the library)
             "unidentified": g - ident,         # bare ROMs awaiting identification
             "wanted": wanted_ct,
@@ -13283,7 +13315,15 @@ def roms_run(body: dict = Body(default={})):
 
 
 @app.get("/api/health")
-def health():
+def health(request: Request):
+    """Liveness for anyone, details for a signed-in user.
+
+    Signed out, this answers only {"ok": true}, so a container health check or an
+    uptime monitor still works without an account. The rest (data paths, the AI setup
+    with every prompt and a masked key) used to be served to anyone who could reach the
+    port. An admin can publish the details again with `public_health_details`."""
+    if not (config.get_bool("public_health_details", False) or _current_user(request)):
+        return {"ok": True}
     return {"ok": True, "library": os.path.exists(LIBRARY_DB),
             "media_index": os.path.exists(INDEX_DB), "repo": REPO,
             "ai": ai.status()}

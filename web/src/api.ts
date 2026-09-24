@@ -945,6 +945,9 @@ export const api = {
     postJson<{ ok: boolean }>('/api/auth/users/' + id + '/password', { password }),
   setUserRole: (id: number, role: string) =>
     postJson<{ ok: boolean }>('/api/auth/users/' + id + '/role', { role }),
+  publicHealth: () => get<{ enabled: boolean }>('/api/auth/public-health'),
+  setPublicHealth: (enabled: boolean) =>
+    postJson<{ enabled: boolean }>('/api/auth/public-health', { enabled }),
   cfAccess: () => get<CfAccessState>('/api/auth/cf-access'),
   cfAccessSet: (patch: Partial<{ enabled: boolean; team_domain: string; aud: string }>) =>
     postJson<CfAccessState>('/api/auth/cf-access', patch),
