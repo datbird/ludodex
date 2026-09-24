@@ -339,7 +339,7 @@ def shown_titles(page):
 
 
 def wait_count(page, total):
-    want = "{:,} results".format(total)
+    want = "{:,} result{}".format(total, "" if total == 1 else "s")
     page.wait_for_function(
         "(t) => ((document.querySelector('.results-bar .count') || {}).textContent || '')"
         ".startsWith(t)", arg=want, timeout=20000)

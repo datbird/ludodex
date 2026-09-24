@@ -38,7 +38,7 @@ def check(label, cond):
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Where a bare `foo.py` in prose is allowed to live.
-PKG_DIRS = ("ludodex", "server", "scripts", "tests", "web/scripts", "")
+PKG_DIRS = ("ludodex", "server", "scripts", "tests", "tests/browser", "web/scripts", "")
 
 # Pages that are DELIBERATELY historical: dated plans and specs, kept as a record of
 # what was decided and why. They name files that were proposed, renamed or deleted, and

@@ -109,7 +109,10 @@ export interface GameDetail {
   attributes: Record<string, string[]>
   tags: TagRef[]
   scores: Scores
-  metadata_links: { provider: string; provider_id: string; slug: string; url: string }[]
+  // `disabled`: the user turned this provider off for the game. The link stays so its
+  // chip (and the control that turns it back on) stays; its attributes/media do not.
+  metadata_links: { provider: string; provider_id: string; slug: string; url: string | null
+                    disabled?: boolean }[]
   provider_links?: { provider: string; url: string }[]   // favicon shortcuts (metadata + steam store)
   media_kinds: string[]
   ai_meta?: AiFinding | null
@@ -1125,12 +1128,12 @@ export const api = {
   // Read-only folder browser (Files › Browse): immediate dirs (with child counts)
   // + files (with sizes) of a path on a device. Lazy, one level per expand.
   browseEntries: (id: number, path: string) =>
-    postJson<{
+    get<{
       ok: boolean; path: string
       dirs: { name: string; nfiles: number }[]
       files: { name: string; size: number }[]
       error?: string
-    }>('/api/devices/browse-entries', { device_id: id, path }),
+    }>('/api/devices/browse-entries?' + new URLSearchParams({ device_id: String(id), path })),
   syncDevice: (id: number) =>
     mutate<{ device: string; results: { manager: string; kind: string; ok: boolean; roms?: number; media?: string; error?: string }[] }>('/api/devices/' + id + '/sync', 'POST'),
   backupArchives: (jobId: number) =>

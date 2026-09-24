@@ -3757,10 +3757,19 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     border-right: 0;
-    border-bottom: 1px solid var(--border);
-    padding: 8px 52px 8px 10px; /* right pad clears the close button */
+    border-bottom: 0;
+    /* The close button sits at this row's right end. Padding could not clear it: in a
+       scroll container, right padding only adds room after the LAST item, so any item
+       scrolled under the button was still covered by it. So the row stops short of the
+       button instead, and a shadow of the row's own colour fills the gap behind it. */
+    padding: 8px 10px;
+    margin-right: var(--settings-close-gutter);
+    box-shadow: var(--settings-close-gutter) 0 0 var(--bg);
     gap: 6px;
   }
+  .settings-window { --settings-close-gutter: 52px; }   /* 32px button at right:12px */
+  /* the divider moves here, so it still spans the full width under the button */
+  .settings-main { border-top: 1px solid var(--border); }
   /* close sits over the top nav row here — give it a chip backing so it reads */
   .settings-window > .close {
     background: var(--panel);
@@ -3848,7 +3857,8 @@ button.chg-art .chg-art-kind { cursor: zoom-in; }
   .detail-actions { gap: 8px; }
   .job-overlay, .fo-runbook, .cmd-inspect, .dedupe-panel { border-radius: 0;
     min-height: 100vh; min-height: 100dvh; padding: 20px 16px 32px; }
-  .settings-window { height: 100vh; height: 100dvh; border-radius: 0; }
+  .settings-window { height: 100vh; height: 100dvh; border-radius: 0;
+    --settings-close-gutter: 62px; }   /* the 44px phone close at right:10px, plus a gap */
 
   /* dropdowns → bottom-anchored sheets that never overflow the viewport */
   .filter-menu, .sync-menu {

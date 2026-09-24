@@ -1431,7 +1431,7 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
 
       {aiNote && <div className="ai-note">{aiNote}</div>}
       <div className="results-bar">
-        <div className="count">{total.toLocaleString()} results
+        <div className="count">{total.toLocaleString()} result{total === 1 ? '' : 's'}
           {!showUnidentified && hidden > 0 && (
             <button className="hidden-hint" onClick={() => setShowUnidentified(true)}
               title="Show the unidentified ROMs that also match your search">
@@ -7895,7 +7895,9 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
   }
   // a game is "identified" once it's a known title (a provider match or a real
   // store/manual source); a bare ROM (emulation/archive only, no match) is not.
-  const identified = (d?.metadata_links?.length ?? 0) > 0 ||
+  // A provider the user DISABLED is still listed (its chip is the way back), but it no
+  // longer identifies anything.
+  const identified = (d?.metadata_links ?? []).some((l) => !l.disabled) ||
     (d?.sources ?? []).some((s) => !NON_ID_SRC.has(s.source))
   // Hero source: default picks the best wide art (hero → background → header). A
   // per-game override can force the scrolling "dance" ('marquee') or a specific media
@@ -8209,10 +8211,14 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
                   const disabled = new Set(d.disabled_identity ?? [])
                   const conf = d.identity_confidence ?? {}
                   const metaChips = d.metadata_links.filter((l) => META_PROVIDERS.has(l.provider))
+                  // One chip per distinct STORE ENTRY, not per store: BioShock owned as
+                  // Steam 7670 and Steam 409710 is two purchases with two store pages.
+                  // Keyed by store + id, so the same entry seen on two platforms (one
+                  // appid on pc and linux) still collapses to one chip.
                   const storeChips = Array.from(new Map(
                     d.sources
                       .filter((sc) => !NON_ID_SOURCES.has(sc.source) && sc.source_id)
-                      .map((sc) => [sc.source, {
+                      .map((sc) => [sc.source + '\u0000' + sc.source_id, {
                         provider: sc.source, id: sc.source_id,
                         // the server builds the store page (provider_links.store_url);
                         // a store whose id maps to no stable URL gets an unlinked chip

@@ -675,6 +675,27 @@ def _non_game_hidden_sql():
     return nongame.hidden_sql()
 
 
+def _view_hidden_where(con, status="owned"):
+    """(where[], args) for the entries the library grid keeps out of a `status` view:
+    add-ons filed under an owned base game, and non-games while `hide_non_games` is on.
+
+    ONE place, because /api/stats used to skip it. The dashboard counted the tools and
+    add-ons the grid hides, so "Games", "Wanted" and "Cover undecided" each read a few
+    higher than the list the card opened. _query_games and /api/stats both take the
+    rule from here, so the numbers and the lists cannot drift apart again.
+
+    'all' keeps add-ons (that is what 'all' means); 'utilities' keeps non-games, because
+    it is the one view that exists to show them (it applies the inverse itself)."""
+    where, args = [], []
+    if status != "all" and _has_col(con, "games", "parent_key"):
+        where.append("g.parent_key IS NULL")
+    if status != "utilities" and config.get_bool("hide_non_games", True):
+        _ex, _exargs = _non_game_hidden_sql()
+        where.append("NOT (" + _ex + ")")
+        args += _exargs
+    return where, args
+
+
 # Storefront labels are Sources, not Systems — PC-store games get platform=source,
 # so exclude these (and the generic psn/xbox fallbacks) from the Systems facet.
 # Real consoles (ps4/ps5/xbox one/…/windows) are kept.
@@ -828,8 +849,14 @@ def stats():
     con = lib()
     try:
         wcol = _has_col(con, "games", "wanted")     # wishlist-only games: exclude from owned stats
-        gw = " WHERE g.wanted=0" if wcol else ""
-        and_w = " AND g.wanted=0" if wcol else ""
+        # The entries the grid itself hides (add-ons under an owned base, non-games while
+        # hide_non_games is on) are left out of every number here, from the SAME rule
+        # _query_games applies, or each card reads higher than the view it opens.
+        # Everything below is `... WHERE <owned> AND <vis>`; `vis` carries its own args.
+        _vw, vargs = _view_hidden_where(con)
+        vis = " AND ".join(_vw) if _vw else "1"
+        gw = " WHERE " + ("g.wanted=0 AND " if wcol else "") + vis
+        and_w = (" AND g.wanted=0" if wcol else "") + " AND " + vis
         # COUNT CARDS, NOT ENTRIES (2026-08-25 design). Every number on this card links
         # to a filtered library view, so counting entries here while the grid shows
         # cards makes the dashboard disagree with the page it opens. `_ct` is the one
@@ -837,34 +864,39 @@ def stats():
         _has_ck = _has_col(con, "games", "card_key")
         _ct = ("COUNT(DISTINCT COALESCE(g.card_key, g.entry_key))"
                if _has_ck else "COUNT(*)")
-        g = con.execute("SELECT %s FROM games g%s" % (_ct, gw)).fetchone()[0]
-        ident = con.execute("SELECT " + _ct + " FROM games g" +
-                            (gw + " AND " if gw else " WHERE ") + IDENTIFIED_SQL).fetchone()[0]
-        wanted_ct = con.execute("SELECT " + _ct + " FROM games g WHERE g.wanted=1").fetchone()[0] if wcol else 0
+        g = con.execute("SELECT %s FROM games g%s" % (_ct, gw), vargs).fetchone()[0]
+        ident = con.execute("SELECT " + _ct + " FROM games g" + gw + " AND "
+                            + IDENTIFIED_SQL, vargs).fetchone()[0]
+        _wvw, _wva = _view_hidden_where(con, "wanted")
+        wanted_ct = con.execute(
+            "SELECT " + _ct + " FROM games g WHERE " + " AND ".join(["g.wanted=1"] + _wvw),
+            _wva).fetchone()[0] if wcol else 0
         # cross-source = owned on >1 source (n_sources), matching the facet/sort
         # definitions. NOT n_kinds (media-kind count) — that reads 0 library-wide.
-        cross = con.execute("SELECT " + _ct + " FROM games g WHERE g.n_sources>1" + and_w).fetchone()[0]
+        cross = con.execute("SELECT " + _ct + " FROM games g WHERE g.n_sources>1" + and_w,
+                            vargs).fetchone()[0]
         unmatched = con.execute(
             "SELECT " + _ct + " FROM games g WHERE NOT EXISTS("
-            "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)" + and_w).fetchone()[0]
+            "SELECT 1 FROM metadata_links ml WHERE ml.game_id=g.id)" + and_w,
+            vargs).fetchone()[0]
         # The exact negation of FLAG_SQL["has_media"], because the card links straight to
         # that filter. It used to look at m.media only, so a game whose only art is a USER
         # UPLOAD was counted as having no media here and then vanished from the list the
         # number opened — the dashboard and the filter disagreed by construction.
         no_media = con.execute(
             "SELECT " + _ct + " FROM games g WHERE NOT " + FLAG_SQL["has_media"]
-            + and_w).fetchone()[0]
+            + and_w, vargs).fetchone()[0]
         # matched-but-low-confidence identity (task #13) — its own review facet
         _thr = int(config.get("match_confidence_threshold") or 60)
         low_conf = con.execute(
             "SELECT " + _ct + " FROM games g WHERE EXISTS(SELECT 1 FROM game_attributes ga "
             "WHERE ga.game_id=g.id AND ga.kind='match_confidence' "
-            "AND CAST(ga.value AS INT) < ?)" + and_w, (_thr,)).fetchone()[0]
+            "AND CAST(ga.value AS INT) < ?)" + and_w, [_thr] + vargs).fetchone()[0]
         # covers the deterministic rules could not settle — every candidate flagged,
         # so the term ranked nothing and the winner came from a tiebreak
         cover_undecided = con.execute(
             "SELECT " + _ct + " FROM games g WHERE " + FLAG_SQL["cover_undecided"]
-            + and_w).fetchone()[0]
+            + and_w, vargs).fetchone()[0]
         # OWNED counts, like every other number on this card. Without the wanted=0
         # filter a wishlist-only title counted as owned on its store, so the per-source
         # totals could exceed `games` and disagreed with the source filter they link to.
@@ -875,11 +907,11 @@ def stats():
                 ("COUNT(CASE WHEN g.has_%s=1 THEN 1 END)" % s)
                 for s in COLUMN_SOURCES]
         by_source = dict(zip(COLUMN_SOURCES, con.execute(
-            "SELECT " + ", ".join(_cts) + " FROM games g" + gw).fetchone()))
+            "SELECT " + ", ".join(_cts) + " FROM games g" + gw, vargs).fetchone()))
         # dynamic sources (ea/playnite/etc.) live only in the sources table
         for row in con.execute("SELECT s.source, COUNT(DISTINCT s.game_id) c FROM sources s "
-                               "JOIN games g ON g.id=s.game_id" +
-                               (" WHERE g.wanted=0" if wcol else "") + " GROUP BY s.source"):
+                               "JOIN games g ON g.id=s.game_id" + gw + " GROUP BY s.source",
+                               vargs):
             by_source.setdefault(row["source"], row["c"])
         coverage = {}
         # "with art" = identified, non-wanted games that have a chosen COVER — a
@@ -890,7 +922,7 @@ def stats():
         total_with = con.execute(
             "SELECT " + _ct + " FROM games g WHERE " + IDENTIFIED_SQL + and_w +
             " AND " + _has_cover_sql(_has_col(con, "games", "entry_key"),
-                                     _has_col(con, "games", "game_key"))).fetchone()[0]
+                                     _has_col(con, "games", "game_key")), vargs).fetchone()[0]
         for row in con.execute("SELECT kind, COUNT(DISTINCT norm_key) c "
                                "FROM m.media WHERE chosen=1 GROUP BY kind"):
             coverage[row["kind"]] = row["c"]
@@ -1047,6 +1079,20 @@ _QL_ATTR = {  # field alias -> game_attributes.kind
 }
 
 
+def _like_contains(val):
+    """A user's text -> a LIKE pattern that matches it literally, anywhere in the value.
+
+    Pair it with `LIKE ? ESCAPE '\\'` (see LIKE_ESC). Without the escape, `%` and `_`
+    typed into the search box were SQL wildcards: searching `%` matched every title and
+    `_` matched any one character, so the result count was a plausible number that had
+    nothing to do with the text. One helper, used by every LIKE a user's text reaches."""
+    val = str(val).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return "%" + val + "%"
+
+
+LIKE_ESC = " LIKE ? ESCAPE '\\'"   # the operator every _like_contains pattern goes with
+
+
 def _ql_num(field_sql, raw):
     """'>1990' / '<=75' / '1995' -> (sql_fragment, int_arg), or None."""
     m = re.match(r"^(>=|<=|>|<|=)?\s*(-?\d+)$", (raw or "").strip())
@@ -1073,16 +1119,16 @@ def _parse_query(qstr):
             continue
         clause, cargs = None, []
         if field in ("title", "name"):
-            clause, cargs = "g.canonical_title LIKE ?", ["%%%s%%" % val]
+            clause, cargs = "g.canonical_title" + LIKE_ESC, [_like_contains(val)]
         elif field in ("platform", "system"):
             clause, cargs = ("EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
-                             "AND s.platform LIKE ?)"), ["%%%s%%" % val]
+                             "AND s.platform" + LIKE_ESC + ")"), [_like_contains(val)]
         elif field in ("source", "store"):
             clause, cargs = ("EXISTS(SELECT 1 FROM sources s WHERE s.game_id=g.id "
-                             "AND s.source LIKE ?)"), ["%%%s%%" % val]
+                             "AND s.source" + LIKE_ESC + ")"), [_like_contains(val)]
         elif field == "tag":
             clause, cargs = ("EXISTS(SELECT 1 FROM game_tags gt WHERE gt.game_id=g.id "
-                             "AND gt.tag LIKE ?)"), ["%%%s%%" % val]
+                             "AND gt.tag" + LIKE_ESC + ")"), [_like_contains(val)]
         elif field == "year":
             num = _ql_num("CAST(ga.value AS INT)", val)
             if num:
@@ -1110,10 +1156,11 @@ def _parse_query(qstr):
                     clause, cargs = _at % num[0], [num[1]]
         elif field in _QL_ATTR:
             clause, cargs = ("EXISTS(SELECT 1 FROM game_attributes ga WHERE "
-                             "ga.game_id=g.id AND ga.kind=? AND ga.value LIKE ?)"), \
-                            [_QL_ATTR[field], "%%%s%%" % val]
+                             "ga.game_id=g.id AND ga.kind=? AND ga.value" + LIKE_ESC + ")"), \
+                            [_QL_ATTR[field], _like_contains(val)]
         else:                                   # unknown field: match the raw token in title
-            clause, cargs = "g.canonical_title LIKE ?", ["%%%s:%s%%" % (field, val)]
+            clause, cargs = ("g.canonical_title" + LIKE_ESC,
+                             [_like_contains("%s:%s" % (field, val))])
         if clause:
             where.append("NOT (%s)" % clause if neg else clause)
             args.extend(cargs)
@@ -1189,9 +1236,11 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     # Only `parent_key IS NOT NULL` hides anything. An add-on whose base game is NOT
     # owned has a NULL parent by construction and stays right here, because hiding
     # something you own under something you do not is strictly worse. 'all' shows
-    # everything, which is what 'all' means.
-    if status != "all" and _has_col(con, "games", "parent_key"):
-        where.append("g.parent_key IS NULL")
+    # everything, which is what 'all' means. Non-games leave every view but 'utilities'
+    # the same way; both rules live in _view_hidden_where, which /api/stats shares.
+    _vw, _va = _view_hidden_where(con, status)   # add-ons + non-games (see there)
+    where += _vw
+    args += _va
     if status == "wanted":
         where.append("g.wanted=1" if has_w else "0")
     elif status == "utilities":
@@ -1211,8 +1260,8 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         where.extend(qw)
         args.extend(qa)
     elif q:
-        where.append("g.canonical_title LIKE ?")
-        args.append("%%%s%%" % q)
+        where.append("g.canonical_title" + LIKE_ESC)
+        args.append(_like_contains(q))
     def _fexpr(tok):
         """Filter token -> (sql, args). Bare tokens hit FLAG_SQL; 'source:<x>'
         and 'system:<x>' match the sources table dynamically."""
@@ -1278,12 +1327,6 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         where.append("g.norm_key IN (SELECT norm_key FROM m.media "
                      "WHERE chosen=1 AND kind=?)")
         args.append(has_kind)
-    # ...except in the 'utilities' view, which exists precisely to show them. Applying
-    # both would AND "is a non-game" with "is not a non-game" and always return nothing.
-    if status != "utilities" and config.get_bool("hide_non_games", True):
-        _ex, _exargs = _non_game_hidden_sql()
-        where.append("NOT (" + _ex + ")")
-        args += _exargs
     clause = (" WHERE " + " AND ".join(where)) if where else ""
 
     _cnt = ("COUNT(DISTINCT %s)" % ckey) if has_ck else "COUNT(*)"
@@ -2344,6 +2387,9 @@ def get_prefs():
         "hide_non_games": config.get_bool("hide_non_games", True),
         "spotlight_seconds": _spotlight_seconds(),
         "spotlight_disabled": sorted(_spotlight_disabled()),
+        # read by /api/spotlight (_spotlight_rows); the Settings switch saves it here
+        "spotlight_include_collections": config.get_bool(
+            "spotlight_include_collections", False),
         "media_mode": config.get("media_mode") or "chosen",
         "screenshot_limit": int(config.get("screenshot_limit") or 0),
         "media_language": config.get("media_language") or "",
@@ -2432,6 +2478,12 @@ def set_prefs(body: dict = Body(...)):
             ids = [ids]
         clean = sorted({str(x).strip() for x in ids if str(x).strip()})
         config.set_("spotlight_disabled", ",".join(clean))
+    # Spotlight has read this key since compilations were kept out of it, but nothing
+    # ever WROTE it: the Settings switch posted it, this handler dropped it, and the
+    # switch came back off on the next open.
+    if "spotlight_include_collections" in body:
+        config.set_("spotlight_include_collections",
+                    "1" if body["spotlight_include_collections"] else "0")
     return get_prefs()
 
 
@@ -2914,13 +2966,16 @@ def browse_device(body: dict = Body(default={})):
     return devices.browse_dirs(dev_id, (body or {}).get("path") or "/")
 
 
-@app.post("/api/devices/browse-entries")
-def browse_entries_ep(body: dict = Body(default={})):
+@app.get("/api/devices/browse-entries")
+def browse_entries_ep(device_id: str = "", path: str = "/"):
     """Immediate dirs (with child counts) + files (with sizes) of a path on a
-    device — powers the read-only Files › Browse tree. Lazy, one level per expand."""
-    raw = (body or {}).get("device_id")
-    dev_id = int(raw) if str(raw).isdigit() else 0
-    return devices.browse_entries(dev_id, (body or {}).get("path") or "/")
+    device: powers the read-only Files › Browse tree. Lazy, one level per expand.
+
+    A GET, because it only reads: it was a POST, so every open of the Files tab looked
+    like a write to anything watching for one. Still admin-only (`_ADMIN_ONLY` matches
+    the path whatever the method)."""
+    dev_id = int(device_id) if str(device_id).isdigit() else 0
+    return devices.browse_entries(dev_id, path or "/")
 
 
 # --- Device wishlist: "I want these games on that device" (intent only) ------ #
@@ -9236,6 +9291,13 @@ def game_detail(norm_key: str):
         links = [dict(r) for r in con.execute(
             "SELECT provider, provider_id, slug, url FROM metadata_links "
             "WHERE game_id=?", (gid,))]
+        # DERIVED wins over stored, for the identity chips as well as the favicon strip
+        # below. Only provider_links used to derive, so the IGDB chip on a game page had
+        # `url: null` (IGDB links are stored without one) and rendered unlinked while
+        # the favicon for the same match pointed at the right page.
+        for l in links:
+            l["url"] = _provider_page_url(l["provider"], l.get("provider_id"),
+                                          l.get("slug")) or l.get("url")
         # Provider links to surface as favicon shortcuts by the media tabs: every
         # metadata link that has a page URL (IGDB, ScreenScraper…) PLUS store-page
         # links derivable from an owned source (Steam appid → store page). Epic/GOG/
@@ -9243,11 +9305,11 @@ def game_detail(norm_key: str):
         # skipped rather than guessed into a dead link.
         provider_links, _pl_seen = [], set()
         for l in links:
-            # DERIVED wins over stored. The apply path minted igdb.com/games/<numeric id>
-            # for 42 rows, which is not IGDB's canonical URL form — it is slug-based. A
-            # stored URL is only a fallback for the case the cache can't cover.
-            url = _provider_page_url(l["provider"], l.get("provider_id"),
-                                     l.get("slug")) or l.get("url")
+            # `url` is already the derived one (above). The apply path minted
+            # igdb.com/games/<numeric id> for 42 rows, which is not IGDB's canonical URL
+            # form: it is slug-based. A stored URL is only a fallback for the case the
+            # cache can't cover.
+            url = l["url"]
             if url and l["provider"] not in _pl_seen:
                 provider_links.append({"provider": l["provider"], "url": url})
                 _pl_seen.add(l["provider"])
@@ -9262,13 +9324,18 @@ def game_detail(norm_key: str):
                 provider_links.append({"provider": src, "url": url})
                 _pl_seen.add(src)
         # Disabled-provider cascade (tiered ingest, identity badges): when the user
-        # turns a metadata provider off for this game, drop its links/confidence AND
+        # turns a metadata provider off for this game, drop its shortcut/confidence AND
         # its attribute contributions, falling back to the next provider's RETAINED
         # value (from the alternates surface built above). Store-ownership facts are
         # never disable-able, so this only ever affects metadata providers.
+        #
+        # The metadata link itself STAYS, marked `disabled`. Its chip carries the only
+        # control that turns the provider back on, so dropping the link here made
+        # disabling a one-way door: the chip vanished and with it the way back.
         disabled = identity_disable.disabled_for(base)
+        for l in links:
+            l["disabled"] = l["provider"] in disabled
         if disabled:
-            links = [l for l in links if l["provider"] not in disabled]
             provider_links = [l for l in provider_links if l["provider"] not in disabled]
             for _p in list(identity_confidence):
                 if _p in disabled:

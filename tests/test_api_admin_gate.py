@@ -49,7 +49,7 @@ OPERATOR = [
     ("POST", "/api/fs/mkdir"),
     ("POST", "/api/fs/stat"),
     ("POST", "/api/devices/browse"),
-    ("POST", "/api/devices/browse-entries"),
+    ("GET", "/api/devices/browse-entries"),
     ("POST", "/api/games/identify-folder"),
     ("POST", "/api/fileops/plan"),
     ("POST", "/api/fileops/runbook/3/execute"),
