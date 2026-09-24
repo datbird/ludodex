@@ -267,20 +267,22 @@ def enabled(provider):
     return config.get_bool(key, True)
 
 
+# The providers whose "configured" is a real check (config.ready); see configured().
+_NEEDS_CREDS = ("igdb", "screenscraper", "thegamesdb")
+
+
 def configured(provider):
     """Does it have what it needs to run at all? A provider that is switched on but has
     no credentials is a third state, and 'enabled' alone would misreport it as ready."""
+    # Only these need credentials of their own to answer attribute queries. For Steam
+    # and the stores, config.ready answers "can it sync ownership", which is not this
+    # question, so everything else reads as configured, as it always has.
+    if provider not in _NEEDS_CREDS:
+        return True
     try:
-        if provider == "igdb":
-            return all(config.igdb_creds())
-        if provider == "screenscraper":
-            return bool(config.screenscraper_creds().get("devid"))
-        if provider == "thegamesdb":
-            import thegamesdb
-            return bool(thegamesdb.api_key())
+        return config.ready(provider)
     except Exception:                                   # noqa: BLE001
         return False
-    return True
 
 
 def matrix(kinds=None):

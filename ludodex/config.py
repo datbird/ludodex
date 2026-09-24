@@ -34,6 +34,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 # DIR is this package; DATA is the REPO ROOT above it, which is where local
@@ -1203,27 +1204,88 @@ def commercial_safe_only():
     return get_bool("commercial_safe_only", False)
 
 
+# --------------------------------------------------------------------------- #
+#  readiness: the ONE answer to "is this provider configured and ready?"
+# --------------------------------------------------------------------------- #
+# The CLI status column, the server's sync menu + Services page, and the provider
+# capability matrix all ask this. Each check is cheap (the UI polls it every few
+# seconds) and never raises on a missing or unreadable file.
+def _json_file(path):
+    """A small JSON credential file as a dict, or {} if it is absent or unreadable."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except Exception:                                   # noqa: BLE001
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _ea_ready():
+    """A valid, unexpired browser-minted EA token (.ea/token.json). A remid alone
+    does NOT count: Akamai often blocks the silent refresh it depends on."""
+    t = _json_file(os.path.join(DATA, ".ea", "token.json"))
+    return bool(t.get("access_token")) and t.get("expires_at", 0) > time.time()
+
+
+def _epic_ready():
+    """legendary has a cached Epic login (user.json with a display name)."""
+    return bool(_json_file(os.path.expanduser("~/.config/legendary/user.json"))
+                .get("displayName"))
+
+
+def _token_cached(sub):
+    """A store login has been cached (DATA/.<sub>/tokens.json)."""
+    return os.path.exists(os.path.join(DATA, "." + sub, "tokens.json"))
+
+
+def _nintendo_ready():
+    """A Nintendo portal cookie has been saved (.nintendo/cookies.json).
+
+    A cookie on disk is not proof it still WORKS: there is no refresh token, so the
+    session expires and the next sync is where that shows. `--whoami` is the live check.
+    """
+    return os.path.exists(os.path.join(DATA, ".nintendo", "cookies.json"))
+
+
+def _thegamesdb_ready():
+    import thegamesdb                   # lazy: thegamesdb imports this module
+    return bool(thegamesdb.api_key())
+
+
+# id -> check. ScreenScraper needs only the software devid+devpassword (shipped
+# embedded, so normally always ready); the user's ssid is optional and only raises
+# the request tier. screenscraper_creds() is {} exactly when the devid pair is
+# missing, so "any creds" and "has a devid" are the same question.
+READY = {
+    "steam":         lambda: bool(steam_key() and get("steam_id")),
+    "itch":          lambda: bool(itch_key()),
+    "igdb":          lambda: all(igdb_creds()),
+    "steamgriddb":   lambda: bool(steamgriddb_key()),
+    "screenscraper": lambda: bool(screenscraper_creds().get("devid")),
+    "thegamesdb":    _thegamesdb_ready,
+    "ea":            _ea_ready,
+    "epic":          _epic_ready,
+    "gog":           lambda: _token_cached("gog"),
+    "psn":           lambda: _token_cached("psn"),
+    "xbox":          lambda: _token_cached("xbox"),
+    "nintendo":      _nintendo_ready,
+    "esde":          lambda: bool(media_mounts_list(only_enabled=True, provider="esde")),
+}
+
+
+def ready(pid):
+    """(bool) Is provider/source `pid` configured and able to run right now?
+    False for an id with no registered check."""
+    check = READY.get(pid)
+    return bool(check and check())
+
+
 def _has_cred(it):
     """Best-effort 'is this integration configured?' for the status column."""
-    if it["id"] == "steam":
-        return bool(steam_key() and get("steam_id"))
-    if it["id"] == "itch":
-        return bool(itch_key())
-    if it["id"] == "igdb":
-        return all(igdb_creds())
-    if it["id"] == "steamgriddb":
-        return bool(steamgriddb_key())
-    if it["id"] == "screenscraper":
-        return bool(screenscraper_creds())
-    if it["id"] == "ea":
-        return os.path.exists(os.path.join(DATA, ".ea", "token.json")) or \
-            bool(get("ea_remid"))
-    if it["id"] == "epic":
-        return os.path.exists(os.path.expanduser("~/.config/legendary/user.json"))
-    if it["id"] == "gog":
-        return os.path.exists(os.path.join(DATA, ".gog", "tokens.json"))
-    if it["id"] == "esde":
-        return bool(media_mounts_list(only_enabled=True, provider="esde"))
+    if it["id"] in READY:
+        return ready(it["id"])
     for k in it.get("config_keys", []):
         if get(k):
             return True

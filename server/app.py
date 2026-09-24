@@ -11707,24 +11707,8 @@ def _svc_state(s):
     if s["role"] in ("source", "both"):
         out["enabled"] = config.source_enabled(s["id"])
     if s.get("connect"):
-        checker = {"ea": _ea_connected, "epic": _epic_connected,
-                   "psn": _psn_connected, "xbox": _xbox_connected,
-                   "nintendo": _nintendo_connected}.get(s["id"])
-        out["connect"] = dict(s["connect"], connected=bool(checker and checker()))
+        out["connect"] = dict(s["connect"], connected=config.ready(s["id"]))
     return out
-
-
-def _ea_connected():
-    """(bool) True if a valid cached EA browser token exists."""
-    tokf = os.path.join(DATA, ".ea", "token.json")
-    if not os.path.exists(tokf):
-        return False
-    try:
-        with open(tokf) as f:               # polled every few seconds by the UI
-            t = json.load(f)
-        return bool(t.get("access_token")) and t.get("expires_at", 0) > time.time()
-    except Exception:
-        return False
 
 
 @app.get("/api/services")
@@ -11807,18 +11791,6 @@ def ea_connect(body: dict = Body(...)):
                          "fresh token, and paste it. (%s)" % str(e)[:100]}
 
 
-def _epic_connected():
-    """(bool) True if legendary has a cached Epic login (user.json w/ a name)."""
-    uf = os.path.expanduser("~/.config/legendary/user.json")
-    if not os.path.exists(uf):
-        return False
-    try:
-        with open(uf) as f:                 # polled every few seconds by the UI
-            return bool(json.load(f).get("displayName"))
-    except Exception:
-        return False
-
-
 @app.post("/api/services/epic/code")
 def epic_connect(body: dict = Body(...)):
     """Accept whatever the user copies from Epic's redirect page — the full JSON,
@@ -11833,7 +11805,7 @@ def epic_connect(body: dict = Body(...)):
                            capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"ok": False, "account": None, "error": "Couldn't reach Epic: %s" % e}
-    if r.returncode != 0 or not _epic_connected():
+    if r.returncode != 0 or not config.ready("epic"):
         return {"ok": False, "account": None,
                 "error": "That code didn't work — codes are single-use, so open "
                          "Get Epic code again for a fresh one and paste it."}
@@ -11843,11 +11815,6 @@ def epic_connect(body: dict = Body(...)):
     except Exception:
         name = None
     return {"ok": True, "account": name}
-
-
-def _token_cached(sub):
-    """(bool) True if a store login has been cached (DATA/.<sub>/tokens.json)."""
-    return os.path.exists(os.path.join(DATA, "." + sub, "tokens.json"))
 
 
 def _paste_connect(script, flag, secret, timeout, service, connected, bad,
@@ -11869,11 +11836,6 @@ def _paste_connect(script, flag, secret, timeout, service, connected, bad,
     return {"ok": True, "account": None}
 
 
-def _gog_connected():
-    """(bool) True if a GOG OAuth login has been cached (.gog/tokens.json)."""
-    return _token_cached("gog")
-
-
 @app.post("/api/services/gog/code")
 def gog_connect(body: dict = Body(...)):
     """Accept whatever the user copies from GOG's login-success page — the full
@@ -11884,18 +11846,9 @@ def gog_connect(body: dict = Body(...)):
         raise HTTPException(400, "no login code found in what you pasted")
     return _paste_connect(
         "gog_owned.py", "--code", secret=code, timeout=60, service="GOG",
-        connected=_gog_connected, detail=False,
+        connected=lambda: config.ready("gog"), detail=False,
         bad="That code didn't work — codes are single-use, so open "
             "Get GOG code again for a fresh one and paste it.")
-
-
-def _nintendo_connected():
-    """(bool) True if a Nintendo portal cookie has been saved (.nintendo/cookies.json).
-
-    A cookie on disk is not proof it still WORKS — there is no refresh token, so the
-    session expires and the next sync is where that shows. `--whoami` is the live check.
-    """
-    return os.path.exists(os.path.join(DATA, ".nintendo", "cookies.json"))
 
 
 @app.post("/api/services/nintendo/cookie")
@@ -11917,11 +11870,6 @@ def nintendo_connect(body: dict = Body(...)):
     return {"connected": True}
 
 
-def _psn_connected():
-    """(bool) True if a PSN login has been cached (.psn/tokens.json)."""
-    return _token_cached("psn")
-
-
 @app.post("/api/services/psn/npsso")
 def psn_connect(body: dict = Body(...)):
     """Accept the PSN npsso — the bare 64-char token, the {"npsso":"…"} JSON, or
@@ -11933,14 +11881,9 @@ def psn_connect(body: dict = Body(...)):
     # an npsso is a session credential: stdin, never argv
     return _paste_connect(
         "psn_owned.py", "--npsso", secret=npsso, timeout=60, service="PSN",
-        connected=_psn_connected,
+        connected=lambda: config.ready("psn"),
         bad="That npsso didn't work — it expires quickly, so grab a "
             "fresh one from the ssocookie page and paste it.")
-
-
-def _xbox_connected():
-    """(bool) True if an Xbox/Microsoft login has been cached (.xbox/tokens.json)."""
-    return _token_cached("xbox")
 
 
 @app.post("/api/services/xbox/code")
@@ -11953,7 +11896,7 @@ def xbox_connect(body: dict = Body(...)):
         raise HTTPException(400, "no auth code found in what you pasted")
     return _paste_connect(
         "xbox_owned.py", "--code", secret=code, timeout=90, service="Xbox",
-        connected=_xbox_connected,
+        connected=lambda: config.ready("xbox"),
         bad="That code didn't work — codes are single-use, so open Get "
             "Xbox code again for a fresh one and paste it.")
 
@@ -12038,27 +11981,6 @@ MEDIA_SYNC_PROVIDER = {"steam": "steam"}
 _SVC_NAME = {s["id"]: s["name"] for s in SERVICES}
 
 
-def _sync_ready(sid):
-    """(bool) True if this source can pull ownership right now (creds/login present)."""
-    if sid == "steam":
-        return bool(config.steam_key() and config.get("steam_id"))
-    if sid == "itch":
-        return bool(config.itch_key())
-    if sid == "gog":
-        return _gog_connected()
-    if sid == "epic":
-        return _epic_connected()
-    if sid == "ea":
-        return _ea_connected()
-    if sid == "psn":
-        return _psn_connected()
-    if sid == "xbox":
-        return _xbox_connected()
-    if sid == "nintendo":
-        return _nintendo_connected()
-    return False
-
-
 def _tsv_count(out):
     """Games recorded in a fetcher's output TSV (None if it doesn't exist yet)."""
     p = os.path.join(DATA, out)
@@ -12096,7 +12018,7 @@ def _sync_services():
         if sid not in SYNC_SPECS:
             continue
         _, tsv, _ = SYNC_SPECS[sid]
-        ready = _sync_ready(sid)
+        ready = config.ready(sid)
         conn = s.get("connect")
         out.append({
             "id": sid, "name": s["name"],
@@ -13072,7 +12994,7 @@ def sync_run(body: dict = Body(default={})):
             targets = [s["id"] for s in _sync_services() if s["enabled"] and s["ready"]]
         else:
             targets = [sid for sid in req if sid in SYNC_SPECS
-                       and config.source_enabled(sid) and _sync_ready(sid)]
+                       and config.source_enabled(sid) and config.ready(sid)]
         if not targets:
             raise HTTPException(400, "nothing ready to sync")
         # full=True re-checks EVERY game for upstream changes (re-resolve + refetch
