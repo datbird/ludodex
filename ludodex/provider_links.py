@@ -46,6 +46,25 @@ PAGE_URL = {
     "zxinfo": "https://zxinfo.dk/details/%s",
 }
 
+# store -> how an owned source row's id becomes that store's page. Only stores whose id
+# maps to a stable public URL are here: GOG product ids and Epic/Xbox/PSN catalogue ids
+# do not, so they get no link rather than a guessed one that 404s. Steam ids by appid;
+# itch already stores the game's page URL as its id, so it passes through.
+_STORE_URL = {
+    "steam": lambda v: "https://store.steampowered.com/app/%s" % v if v.isdigit() else None,
+    "itch": lambda v: v if re.match(r"https?://", v) else None,
+}
+
+
+def store_url(source, source_id):
+    """The store's public page for an owned source row, or None if it has none.
+
+    The one place a store link is built: the detail page's store chips, its favicon
+    shortcuts and the matched-providers report all read it from here."""
+    f = _STORE_URL.get(source or "")
+    v = str(source_id or "")
+    return (f(v) or None) if (f and v) else None
+
 
 # Which providers id by string is decided in ONE place — the layer that stores the id.
 # A second copy here went stale the moment a provider joined or left the set, and this

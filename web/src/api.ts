@@ -103,7 +103,8 @@ export interface GameDetail {
   content_kind?: 'dlc' | 'expansion' | null
   extends?: { entry_key: string; norm_key: string; platform: string; title: string } | null
   title: string
-  sources: { source: string; platform: string; source_id: string; title_raw: string; detail: string; os: string[] | null; state?: 'have' | 'want'; collection?: string | null; via_collection?: string }[]
+  sources: { source: string; platform: string; source_id: string; title_raw: string; detail: string; os: string[] | null; state?: 'have' | 'want'; collection?: string | null; via_collection?: string
+             url?: string | null }[]   // store page, from provider_links.store_url
   rom_files?: { path: string; filename: string; system: string }[]   // on-disk ROM path(s)
   attributes: Record<string, string[]>
   tags: TagRef[]
