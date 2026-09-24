@@ -16,7 +16,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 
-KEY = (os.environ.get("ITCH_API_KEY", "").strip() or config.itch_key())
+KEY = config.itch_key()   # ITCH_API_KEY env, else config
 if not KEY:
     sys.exit("no itch.io API key — run ./scripts/setup.sh, or set it with "
              "config.py set itch_api_key <key> (get one at "

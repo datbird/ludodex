@@ -101,18 +101,6 @@ def remove(from_key):
     con.close()
 
 
-def list_merges():
-    if not os.path.exists(DB):
-        return []
-    con = _con()
-    out = [{"from_key": r[0], "to_key": r[1], "from_title": r[2],
-            "to_title": r[3], "created": r[4]}
-           for r in con.execute("SELECT from_key,to_key,from_title,to_title,created "
-                                "FROM merges ORDER BY created DESC")]
-    con.close()
-    return out
-
-
 def rekey_user_data(from_key, to_key):
     """Move every per-game row from `from_key` onto `to_key` across the durable
     per-game stores, so the merged game keeps both entries' media/tags/scores/

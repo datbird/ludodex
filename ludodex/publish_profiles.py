@@ -274,10 +274,6 @@ def entry_exts(profile):
     return (profile.get("discs") or {}).get("entry_exts") or DISC_ENTRY_EXTS
 
 
-def playlist_ext(profile):
-    return (profile.get("discs") or {}).get("playlist")
-
-
 def convert_plan(profile, system, ext):
     """(target_ext, tool) for one source file. tool ∈ {copy, chd, rvz, unzip}.
 

@@ -20,6 +20,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 # databases have always lived. Deriving DATA from DIR after the move would
 # silently relocate an existing checkout's data.
 DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+CACHE_DB = os.path.join(DATA, "metadata-cache.sqlite")
 sys.path.insert(0, DIR)
 import config
 import titlenorm                # shared dedupe normalizer (honors config prefs)
@@ -522,10 +523,9 @@ def _igdb_ids():
     Kept separate from _igdb_years so the identity map is a plain resolution read,
     no payload parse."""
     ids = {}
-    _cache = os.path.join(DATA, "metadata-cache.sqlite")
-    if not os.path.exists(_cache):
+    if not os.path.exists(CACHE_DB):
         return ids
-    _c = sqlite3.connect(_cache)
+    _c = sqlite3.connect(CACHE_DB)
     try:
         for _nk, _iid in _c.execute(
                 "SELECT norm_key, igdb_id FROM igdb_resolution WHERE igdb_id>0"):
@@ -540,10 +540,9 @@ def _igdb_ids():
 def _igdb_years():
     """base norm_key -> earliest IGDB release year (for the era check)."""
     ry = {}
-    _cache = os.path.join(DATA, "metadata-cache.sqlite")
-    if not os.path.exists(_cache):
+    if not os.path.exists(CACHE_DB):
         return ry
-    _c = sqlite3.connect(_cache)
+    _c = sqlite3.connect(CACHE_DB)
     try:
         rows = _c.execute("SELECT r.norm_key, m.payload_json FROM igdb_resolution r "
                           "JOIN igdb_meta m ON m.igdb_id=r.igdb_id WHERE r.igdb_id>0")
@@ -616,10 +615,9 @@ def _igdb_bundle_ids():
     a query we already make. Ids absent from the cache (fetched before `game_type` was
     requested) are simply not flagged — forward-only, per the design decision."""
     out = set()
-    _cache = os.path.join(DATA, "metadata-cache.sqlite")
-    if not os.path.exists(_cache):
+    if not os.path.exists(CACHE_DB):
         return out
-    _c = sqlite3.connect(_cache)
+    _c = sqlite3.connect(CACHE_DB)
     try:
         # only RESOLVED ids can ever be refused — restrict the payload parse to them
         # instead of json-decoding the whole igdb_meta table every build
@@ -739,10 +737,9 @@ def _entry_igdb_ids():
     the ROM entries carry their own id here — overriding both the title-level resolution
     (which the store entry keeps) and the era-collision forfeit."""
     out = {}
-    _cache = os.path.join(DATA, "metadata-cache.sqlite")
-    if not os.path.exists(_cache):
+    if not os.path.exists(CACHE_DB):
         return out
-    _c = sqlite3.connect(_cache)
+    _c = sqlite3.connect(CACHE_DB)
     try:
         for _nk, _p, _iid in _c.execute(
                 "SELECT norm_key, platform, igdb_id FROM entry_resolution WHERE igdb_id>0"):
@@ -758,10 +755,9 @@ def _entry_detached_set():
     """{(norm_key, platform)} explicitly detached from the title's game — a homebrew/demake
     sharing the name (the Atari 2600 "Doom") that must NOT inherit the title's identity."""
     out = set()
-    _cache = os.path.join(DATA, "metadata-cache.sqlite")
-    if not os.path.exists(_cache):
+    if not os.path.exists(CACHE_DB):
         return out
-    _c = sqlite3.connect(_cache)
+    _c = sqlite3.connect(CACHE_DB)
     try:
         for _nk, _p in _c.execute("SELECT norm_key, platform FROM entry_resolution "
                                   "WHERE matched_by='detached'"):
@@ -883,9 +879,8 @@ for _ek in list(games):
 # whose norm_key matches the canonical game, so its region's art + identity survive.
 _igdb_name_norm = {}
 if any(len(v) > 1 for v in _id_groups.values()):
-    _mcache = os.path.join(DATA, "metadata-cache.sqlite")
-    if os.path.exists(_mcache):
-        _mc = sqlite3.connect(_mcache)
+    if os.path.exists(CACHE_DB):
+        _mc = sqlite3.connect(CACHE_DB)
         try:
             for _iid, _payload in _mc.execute("SELECT igdb_id, payload_json FROM igdb_meta"):
                 try:
@@ -1120,19 +1115,7 @@ _wrote = 0
 for (base, plat), g in games.items():
     canonical = g["store_title"] or g["title"]
     srcs = g["sources"]
-    kinds = {}
-    for s in srcs:
-        kinds.setdefault(s[0], set())
-        if s[0] in ("emulation", "archive"):    # grouped sources keep their platforms
-            kinds[s[0]].add(s[1])
-    parts = []
-    for grp in ("emulation", "archive"):
-        if grp in kinds:
-            parts.append(grp + ":" + ",".join(sorted(kinds[grp])))
-    # any other provider (steam/gog/epic/itch/ea/ubisoft/battlenet/xbox/…), dynamic
-    for st in sorted(k for k in kinds if k not in ("emulation", "archive")):
-        parts.append(st)
-    summary = "; ".join(parts)
+    summary, kinds = catalog_patch.sources_summary((s[0], s[1]) for s in srcs)
     # a game is owned if ANY source is 'have'; a pure want-only game (e.g. only a
     # manual "want the ROM" fact) is wanted=1 so it lands in the Wanted view.
     owned = any(s[5] == "have" for s in srcs)
@@ -1484,7 +1467,6 @@ if os.path.exists(STEAM_META_DB):
             for kind, val in sattrs.items():
                 _accum(gid, kind, val, "steam")
 
-CACHE_DB = os.path.join(DATA, "metadata-cache.sqlite")
 n_link = n_attr = 0
 if config.metadata_enabled("igdb") and os.path.exists(CACHE_DB):
     mc = sqlite3.connect(CACHE_DB)
@@ -1761,6 +1743,11 @@ CREATE INDEX IF NOT EXISTS ix_gattr_kv ON game_attributes(kind, value);
 CREATE INDEX IF NOT EXISTS ix_pattr_game ON provider_attrs(game_id);
 CREATE INDEX IF NOT EXISTS ix_mlink_game ON metadata_links(game_id);
 CREATE INDEX IF NOT EXISTS ix_gtag_game ON game_tags(game_id);
+-- The card grouping key as the server spells it. The expression must match the read
+-- paths' COALESCE(card_key, entry_key) text or SQLite will not use it.
+CREATE INDEX IF NOT EXISTS ix_card ON games(COALESCE(card_key, entry_key));
+CREATE INDEX IF NOT EXISTS ix_base ON games(base_key);
+CREATE INDEX IF NOT EXISTS ix_parent ON games(parent_key);
 """)
 con.commit()
 
@@ -1775,21 +1762,25 @@ con.commit()
 # edition marker stripped only when the stripped form IS the root's name. That turns
 # "DARK SOULS: REMASTERED" into "DARK SOULS" and leaves "Mega Man 2" alone.
 _card_rows = {}
-for _ck, _ct in cur.execute(
-        "SELECT card_key, canonical_title FROM games "
+_card_ids = {}                  # card_key -> [id,...], so the write below goes by rowid
+for _id, _ck, _ct in cur.execute(
+        "SELECT id, card_key, canonical_title FROM games "
         "WHERE card_key IS NOT NULL AND card_key!='' "
         "ORDER BY card_key, COALESCE(platform,''), id").fetchall():
     _card_rows.setdefault(_ck, []).append(_ct)
+    _card_ids.setdefault(_ck, []).append(_id)
 # Ask the mirror only about the roots this catalog actually has. The whole name table is
 # 71 MB resident and a rebuild needs a few thousand of them.
 _root_ids = {int(k[5:]) for k in _card_rows if k.startswith("igdb:") and k[5:].isdigit()}
 _names = igdb_mirror.names(_root_ids)
 _titled = 0
+_card_writes = []
 for _ck, _titles in _card_rows.items():
     _t = cardkey.card_title(_ck, _titles, _names)
     if _t and _t != _titles[0]:
         _titled += 1
-    cur.execute("UPDATE games SET card_title=? WHERE card_key=?", (_t or _titles[0], _ck))
+    _card_writes.extend((_t or _titles[0], _id) for _id in _card_ids[_ck])
+cur.executemany("UPDATE games SET card_title=? WHERE id=?", _card_writes)
 con.commit()
 print("# card titles: %d card(s), %d shortened to the game's name"
       % (len(_card_rows), _titled), file=sys.stderr)

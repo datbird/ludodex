@@ -528,11 +528,6 @@ export interface PublishJob {
   } | null
 }
 
-export interface PublishStatus {
-  intent_rows: number; included: number; excluded: number; devices: number
-  catalog: boolean; legacy_device_wants?: number
-}
-
 export interface MatchIndexState {
   path: string
   default_path: string
@@ -638,14 +633,6 @@ export interface Device {
   id: number; name: string; transport: string; host: string; port: number
   username: string; auth: string; key_path: string; share: string
   enabled: number; has_password: boolean; managers: LibraryManager[]
-}
-export interface EmuLocation {
-  name: string
-  path: string
-  role: 'roms' | 'media' | 'both'
-  kinds: string[]        // media kinds to index (empty = all); only for media/both
-  enabled: boolean
-  status: string         // 'mounted' | 'present' | 'MISSING' | 'unset'
 }
 export interface ServiceConnect {
   url: string
@@ -849,11 +836,6 @@ export interface FilePlanSummary {
 }
 export interface FilePlanMove { op: string; src: string; dst: string }
 export interface FilePlan { summary: FilePlanSummary; warnings: string[]; sample: FilePlanMove[] }
-export interface FileCommandResult {
-  explanation: string; profile: FileProfile; scope: string; system?: string
-  summary: FilePlanSummary; warnings: string[]; sample: FilePlanMove[]
-}
-export interface FileInferResult { profile: FileProfile; detected: FileDetect }
 export interface SourceModel {
   system_at?: string; groups?: string[]
   media?: { present: boolean; where?: string; naming?: string }; summary?: string
@@ -899,17 +881,31 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
 }
 
 // Send a mutation, surfacing the server's {detail} message on failure.
-async function mutate<T>(path: string, method: string, body?: unknown): Promise<T> {
+async function mutate<T>(path: string, method: string, body?: unknown,
+                         signal?: AbortSignal): Promise<T> {
   const r = await fetch(path, {
     method,
     headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   })
   const data = await r.json().catch(() => ({}))
-  if (!r.ok) throw new Error((data as { detail?: string }).detail || `${r.status} ${path}`)
+  if (!r.ok) {
+    // FastAPI's own 422 carries `detail` as a list of objects, not a string, and
+    // new Error() of that reads "[object Object]".
+    const detail = (data as { detail?: unknown }).detail
+    throw new Error(typeof detail === 'string' && detail ? detail
+      : detail ? `${r.status} ${JSON.stringify(detail).slice(0, 200)}` : `${r.status} ${path}`)
+  }
   return data as T
 }
-const postJson = <T>(path: string, body: unknown) => mutate<T>(path, 'POST', body)
+const postJson = <T>(path: string, body: unknown, signal?: AbortSignal) =>
+  mutate<T>(path, 'POST', body, signal)
+
+// The media-kind vocabulary is fixed for the life of the server, and the game detail
+// asks for it on every open. One request per page load; a failed one is not kept, so
+// the next caller retries.
+let mediaKindsCache: Promise<{ kinds: MediaKind[] }> | null = null
 
 export type AuthUser = { id?: number; username: string; role: string }
 export type AuthStatus = { needs_setup: boolean; authenticated: boolean; user: AuthUser | null }
@@ -989,90 +985,43 @@ export const api = {
   gameSources: (nk: string) =>
     get<{ norm_key: string; title: string; sources: SourceRow[] }>(
       '/api/games/' + encodeURIComponent(nk) + '/sources'),
-  splitSuggest: async (nk: string) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/split-suggest',
-      { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)
-    return r.json() as Promise<SplitSuggestion>
-  },
-  splitGame: async (nk: string, rows: { source: string; source_id: string }[],
-                    title: string) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/split', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ rows, title }),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 180)}`)
-    return r.json() as Promise<{ split: boolean; to_key: string; title: string; peeled: number }>
-  },
+  splitSuggest: (nk: string) =>
+    mutate<SplitSuggestion>('/api/games/' + encodeURIComponent(nk) + '/split-suggest', 'POST'),
+  splitGame: (nk: string, rows: { source: string; source_id: string }[],
+              title: string) =>
+    postJson<{ split: boolean; to_key: string; title: string; peeled: number }>('/api/games/' + encodeURIComponent(nk) + '/split', { rows, title }),
   achievements: (nk: string, signal?: AbortSignal) =>
     get<Achievements>('/api/games/' + encodeURIComponent(nk) + '/achievements', signal),
-  gameTags: (nk: string) =>
-    get<GameTags>('/api/games/' + encodeURIComponent(nk) + '/tags'),
-  addTag: async (nk: string, tag: string) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/tags', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ tag }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<GameTags>
-  },
-  removeTag: async (nk: string, tag: string) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/tags/' +
-      encodeURIComponent(tag), { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status} tag`)
-    return r.json() as Promise<GameTags>
-  },
-  setOwnership: async (nk: string, form: string, platform: string, state: string, note = '', title?: string) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/ownership', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ form, platform, state, note, title }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ ownership: OwnershipFact[] }>
-  },
-  clearOwnership: async (nk: string, form: string, platform: string, state: string) => {
+  addTag: (nk: string, tag: string) =>
+    postJson<GameTags>('/api/games/' + encodeURIComponent(nk) + '/tags', { tag }),
+  removeTag: (nk: string, tag: string) =>
+    mutate<GameTags>('/api/games/' + encodeURIComponent(nk) + '/tags/' + encodeURIComponent(tag), 'DELETE'),
+  setOwnership: (nk: string, form: string, platform: string, state: string, note = '', title?: string) =>
+    postJson<{ ownership: OwnershipFact[] }>('/api/games/' + encodeURIComponent(nk) + '/ownership', { form, platform, state, note, title }),
+  clearOwnership: (nk: string, form: string, platform: string, state: string) => {
     const q = new URLSearchParams({ form, platform, state }).toString()
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/ownership?' + q,
-      { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status} ownership`)
-    return r.json() as Promise<{ ownership: OwnershipFact[] }>
+    return mutate<{ ownership: OwnershipFact[] }>('/api/games/' + encodeURIComponent(nk) + '/ownership?' + q, 'DELETE')
   },
-  gameReleases: async (nk: string) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/releases')
-    if (!r.ok) throw new Error(`${r.status} releases`)
-    return r.json() as Promise<{ resolved: boolean; igdb_id?: number; name?: string;
-      releases: GameRelease[]; source?: string | null; error?: string }>
-  },
-  knownSystems: async () => {
-    const r = await fetch('/api/systems')
-    if (!r.ok) throw new Error(`${r.status} systems`)
-    return r.json() as Promise<{ systems: SystemEntry[]; error?: string }>
-  },
-  setFraming: async (nk: string, kind: string, f: Frame) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/framing', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ kind, ...f }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ kind: string; framing: Frame }>
-  },
-  clearFraming: async (nk: string, kind: string) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/framing?kind=' +
-      encodeURIComponent(kind), { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status} framing`)
-    return r.json()
-  },
-  setHeroPref: async (nk: string, source: string) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/hero', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ source }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ hero_pref: string | null }>
-  },
+  gameReleases: (nk: string) =>
+    get<{ resolved: boolean; igdb_id?: number; name?: string;
+      releases: GameRelease[]; source?: string | null; error?: string }>('/api/games/' + encodeURIComponent(nk) + '/releases'),
+  knownSystems: () =>
+    get<{ systems: SystemEntry[]; error?: string }>('/api/systems'),
+  setFraming: (nk: string, kind: string, f: Frame) =>
+    postJson<{ kind: string; framing: Frame }>('/api/games/' + encodeURIComponent(nk) + '/framing', { kind, ...f }),
+  clearFraming: (nk: string, kind: string) =>
+    mutate<unknown>('/api/games/' + encodeURIComponent(nk) + '/framing?kind=' + encodeURIComponent(kind), 'DELETE'),
+  setHeroPref: (nk: string, source: string) =>
+    postJson<{ hero_pref: string | null }>('/api/games/' + encodeURIComponent(nk) + '/hero', { source }),
   mediaLibrary: (nk: string) =>
     get<MediaLibrary>('/api/games/' + encodeURIComponent(nk) + '/media'),
-  mediaKinds: () => get<{ kinds: MediaKind[] }>('/api/media-kinds'),
+  mediaKinds: () => {
+    if (!mediaKindsCache) {
+      mediaKindsCache = get<{ kinds: MediaKind[] }>('/api/media-kinds')
+      mediaKindsCache.catch(() => { mediaKindsCache = null })
+    }
+    return mediaKindsCache
+  },
   uploadMedia: async (nk: string, kind: string, file: File) => {
     const r = await fetch(`/api/games/${encodeURIComponent(nk)}/media/` +
       `${encodeURIComponent(kind)}/upload?filename=${encodeURIComponent(file.name)}`, {
@@ -1082,114 +1031,47 @@ export const api = {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
     return r.json() as Promise<MediaLibrary>
   },
-  addMediaFromUrl: async (nk: string, kind: string, url: string) => {
-    const r = await fetch(`/api/games/${encodeURIComponent(nk)}/media/` +
-      `${encodeURIComponent(kind)}/url`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ url }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<MediaLibrary>
-  },
-  deleteUserMedia: async (nk: string, id: number) => {
-    const r = await fetch(`/api/games/${encodeURIComponent(nk)}/media/user/${id}`,
-      { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status} delete`)
-    return r.json() as Promise<MediaLibrary>
-  },
-  setPins: async (nk: string, kind: string, ids: number[]) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/pins', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ kind, ids }),
-    })
-    if (!r.ok) throw new Error(`${r.status} pins`)
-    return r.json() as Promise<MediaLibrary>
-  },
-  banMedia: async (nk: string, id: number) => {
-    const r = await fetch(`/api/games/${encodeURIComponent(nk)}/media/${id}/ban`, { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status} ban`)
-    return r.json() as Promise<MediaLibrary>
-  },
-  setMediaRedist: async (nk: string, id: number, redistributable: boolean) => {
-    const r = await fetch(`/api/games/${encodeURIComponent(nk)}/media/${id}/redist`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ redistributable }),
-    })
-    if (!r.ok) throw new Error(`${r.status} redist`)
-    return r.json() as Promise<MediaLibrary>
-  },
+  addMediaFromUrl: (nk: string, kind: string, url: string) =>
+    postJson<MediaLibrary>(`/api/games/${encodeURIComponent(nk)}/media/` +
+      `${encodeURIComponent(kind)}/url`, { url }),
+  deleteUserMedia: (nk: string, id: number) =>
+    mutate<MediaLibrary>(`/api/games/${encodeURIComponent(nk)}/media/user/${id}`, 'DELETE'),
+  setPins: (nk: string, kind: string, ids: number[]) =>
+    postJson<MediaLibrary>('/api/games/' + encodeURIComponent(nk) + '/pins', { kind, ids }),
+  banMedia: (nk: string, id: number) =>
+    mutate<MediaLibrary>(`/api/games/${encodeURIComponent(nk)}/media/${id}/ban`, 'POST'),
+  setMediaRedist: (nk: string, id: number, redistributable: boolean) =>
+    postJson<MediaLibrary>(`/api/games/${encodeURIComponent(nk)}/media/${id}/redist`, { redistributable }),
   bannedMedia: () => get<{ banned: BannedMedia[] }>('/api/media/banned'),
-  unbanMedia: async (b: { norm_key: string; kind: string; provider: string; ref: string }) => {
-    const r = await fetch('/api/media/unban', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(b),
-    })
-    if (!r.ok) throw new Error(`${r.status} unban`)
-    return r.json() as Promise<{ ok: boolean }>
-  },
+  unbanMedia: (b: { norm_key: string; kind: string; provider: string; ref: string }) =>
+    postJson<{ ok: boolean }>('/api/media/unban', b),
   mediaUrl: (nk: string, kind: string, thumb = false, v?: string | null) =>
     `/api/media/${encodeURIComponent(nk)}/${encodeURIComponent(kind)}` +
     (thumb ? '?size=thumb' : '') +
     (v ? (thumb ? '&' : '?') + 'v=' + encodeURIComponent(v) : ''),
-  assetUrl: (id: number, thumb = false) =>
-    `/api/media-asset/${id}` + (thumb ? '?size=thumb' : ''),
-  artPick: async (nk: string, kind = 'cover') => {
-    const r = await fetch(`/api/ai/art-pick/${encodeURIComponent(nk)}?kind=${kind}`,
-      { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<ArtPick>
-  },
+  artPick: (nk: string, kind = 'cover') =>
+    mutate<ArtPick>(`/api/ai/art-pick/${encodeURIComponent(nk)}?kind=${kind}`, 'POST'),
   // Providers this game is MATCHED to — drives the "Fetch from…" menu. A provider
   // with no match comes back matched:false rather than missing, because absent and
   // unmatched are different things and hiding one makes it look like the other.
-  providerScope: async () => {
-    const r = await fetch('/api/providers/scope')
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<ProviderScopeState>
-  },
-  setProviderScope: async (body: {
+  providerScope: () =>
+    get<ProviderScopeState>('/api/providers/scope'),
+  setProviderScope: (body: {
     provider: string; enabled?: boolean
     off_sources?: string[]; off_platforms?: string[]
-  }) => {
-    const r = await fetch('/api/providers/scope', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<ProviderScopeState>
-  },
-  matchedProviders: async (nk: string) => {
-    const r = await fetch(`/api/media/matched-providers/${encodeURIComponent(nk)}`)
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{ providers: MatchedProvider[] }>
-  },
+  }) =>
+    postJson<ProviderScopeState>('/api/providers/scope', body),
+  matchedProviders: (nk: string) =>
+    get<{ providers: MatchedProvider[] }>(`/api/media/matched-providers/${encodeURIComponent(nk)}`),
   // Deterministic pull from one matched provider. Free by definition — no AI area is
   // consulted — and additive, so candidates land immediately; only a change to the
   // CHOSEN asset is worth reporting back.
-  mediaFetch: async (nk: string, provider: string, kinds?: string[]) => {
-    const r = await fetch(`/api/media/fetch/${encodeURIComponent(nk)}`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ provider, kinds: kinds ?? null }),
-    })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{ added: number; chosen_changed: string[]; provider: string }>
-  },
-  artApply: async (id: number, norm_key: string, kind: string) => {
-    const r = await fetch('/api/ai/art-apply', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id, norm_key, kind }),
-    })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json()
-  },
-  dedupe: async (limit = 15) => {
-    const r = await fetch('/api/ai/dedupe', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ limit }),
-    })
-    if (!r.ok) throw new Error(`${r.status} /api/ai/dedupe`)
-    return r.json() as Promise<{ suggestions: DedupeSuggestion[] }>
-  },
+  mediaFetch: (nk: string, provider: string, kinds?: string[]) =>
+    postJson<{ added: number; chosen_changed: string[]; provider: string }>(`/api/media/fetch/${encodeURIComponent(nk)}`, { provider, kinds: kinds ?? null }),
+  artApply: (id: number, norm_key: string, kind: string) =>
+    postJson<unknown>('/api/ai/art-apply', { id, norm_key, kind }),
+  dedupe: (limit = 15) =>
+    postJson<{ suggestions: DedupeSuggestion[] }>('/api/ai/dedupe', { limit }),
   // Dashboard spotlight (themed top-N; 'random' rotates through themes)
   spotlight: (kind = 'random', exclude?: string) =>
     get<Spotlight>('/api/spotlight?kind=' + encodeURIComponent(kind)
@@ -1198,121 +1080,54 @@ export const api = {
   spotlightThemes: () =>
     get<{ themes: SpotlightTheme[] }>('/api/spotlight/themes'),
   prefs: () => get<Prefs>('/api/prefs'),
-  setPrefs: async (p: Partial<Prefs>) => {
-    const r = await fetch('/api/prefs', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(p),
-    })
-    if (!r.ok) throw new Error(`${r.status} prefs`)
-    return r.json() as Promise<Prefs>
-  },
+  setPrefs: (p: Partial<Prefs>) =>
+    postJson<Prefs>('/api/prefs', p),
   mediaLanguageFilter: (mode?: MediaLangMode) =>
     postJson<MediaLangResult>('/api/media/language-filter', mode ? { mode } : {}),
   mediaMaterialize: (mode?: MediaMode) =>
     postJson<{ media_job: MediaJob }>('/api/media/materialize', mode ? { mode } : {}),
-  mediaMaterializeStatus: () => get<{ media_job: MediaJob }>('/api/media/materialize'),
   // Add a game manually: identify by name (IGDB) or recognize from images (AI)
   identify: (name: string) =>
     get<{ query: string; candidates: IdentifyCandidate[]; provider: string | null }>(
       '/api/identify?name=' + encodeURIComponent(name)),
-  addGame: async (g: { title: string; source: string; platform: string; detail?: string }) => {
-    const r = await fetch('/api/games/add', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(g),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ ok: boolean; norm_key: string; new_game: boolean }>
-  },
-  identifyImage: async (images: string[]) => {
-    const r = await fetch('/api/games/identify-image', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ images }),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)
-    return r.json() as Promise<{ games: RecognizedGame[]; count: number }>
-  },
-  identifyFolder: async (path: string, limit?: number) => {
-    const r = await fetch('/api/games/identify-folder', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path, limit }),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)
-    return r.json() as Promise<{ games: RecognizedGame[]; count: number; scanned: number; total_found: number; batch_errors: number }>
-  },
+  addGame: (g: { title: string; source: string; platform: string; detail?: string }) =>
+    postJson<{ ok: boolean; norm_key: string; new_game: boolean }>('/api/games/add', g),
+  identifyImage: (images: string[]) =>
+    postJson<{ games: RecognizedGame[]; count: number }>('/api/games/identify-image', { images }),
+  identifyFolder: (path: string, limit?: number) =>
+    postJson<{ games: RecognizedGame[]; count: number; scanned: number; total_found: number; batch_errors: number }>('/api/games/identify-folder', { path, limit }),
   // Connections › Devices (machines hosting library managers, pulled over SSH)
   devices: () => get<{ devices: Device[]; lm_kinds: Record<string, [string, boolean, boolean]> }>('/api/devices'),
-  setDevice: async (d: Partial<Device> & { password?: string }) => {
-    const r = await fetch('/api/devices', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(d) })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ devices: Device[] }>
-  },
-  removeDevice: async (id: number) => {
-    const r = await fetch('/api/devices/' + id, { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status} device`); return r.json() as Promise<{ devices: Device[] }>
-  },
-  testDevice: async (id: number) => {
-    const r = await fetch('/api/devices/' + id + '/test', { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status} test`); return r.json() as Promise<{ ok: boolean; detail: string }>
-  },
+  setDevice: (d: Partial<Device> & { password?: string }) =>
+    postJson<{ devices: Device[] }>('/api/devices', d),
+  removeDevice: (id: number) =>
+    mutate<{ devices: Device[] }>('/api/devices/' + id, 'DELETE'),
+  testDevice: (id: number) =>
+    mutate<{ ok: boolean; detail: string }>('/api/devices/' + id + '/test', 'POST'),
   // Device wishlist: "I want these games on that device" (emulation only for now).
   wantsSummary: () => get<{ counts: Record<string, number> }>('/api/wants'),
   deviceWants: (id: number) => get<{ wants: GameRow[]; total: number }>('/api/devices/' + id + '/wants'),
-  addWants: async (id: number, norm_keys: string[]) => {
-    const r = await fetch('/api/devices/' + id + '/wants', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ norm_keys }),
-    })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{ added: number; skipped: number }>
-  },
-  removeWant: async (id: number, norm_key: string) => {
-    const r = await fetch('/api/devices/' + id + '/wants/' + encodeURIComponent(norm_key), { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{ ok: boolean }>
-  },
+  addWants: (id: number, norm_keys: string[]) =>
+    postJson<{ added: number; skipped: number }>('/api/devices/' + id + '/wants', { norm_keys }),
+  removeWant: (id: number, norm_key: string) =>
+    mutate<{ ok: boolean }>('/api/devices/' + id + '/wants/' + encodeURIComponent(norm_key), 'DELETE'),
   // Collections / compilations (DESIGN §13)
-  setCollection: async (collKey: string, name: string, members: { title: string; platform?: string; year?: number | null }[]) => {
-    const r = await fetch('/api/collections/' + encodeURIComponent(collKey), {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name, members }),
-    })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{ coll_key: string; name: string; members: number }>
-  },
-  deleteCollection: async (collKey: string) => {
-    const r = await fetch('/api/collections/' + encodeURIComponent(collKey), { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{ ok: boolean }>
-  },
+  deleteCollection: (collKey: string) =>
+    mutate<{ ok: boolean }>('/api/collections/' + encodeURIComponent(collKey), 'DELETE'),
   // Directory autocomplete for ROM/media paths. id 0 = local ludodex host/container.
-  browseDevice: async (id: number, path: string) => {
-    const r = await fetch('/api/devices/browse', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ device_id: id, path }),
-    })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{ ok: boolean; path: string; dirs: string[]; error?: string }>
-  },
+  browseDevice: (id: number, path: string) =>
+    postJson<{ ok: boolean; path: string; dirs: string[]; error?: string }>('/api/devices/browse', { device_id: id, path }),
   // Read-only folder browser (Files › Browse): immediate dirs (with child counts)
   // + files (with sizes) of a path on a device. Lazy, one level per expand.
-  browseEntries: async (id: number, path: string) => {
-    const r = await fetch('/api/devices/browse-entries', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ device_id: id, path }),
-    })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{
+  browseEntries: (id: number, path: string) =>
+    postJson<{
       ok: boolean; path: string
       dirs: { name: string; nfiles: number }[]
       files: { name: string; size: number }[]
       error?: string
-    }>
-  },
-  syncDevice: async (id: number) => {
-    const r = await fetch('/api/devices/' + id + '/sync', { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`)
-    return r.json() as Promise<{ device: string; results: { manager: string; kind: string; ok: boolean; roms?: number; media?: string; error?: string }[] }>
-  },
+    }>('/api/devices/browse-entries', { device_id: id, path }),
+  syncDevice: (id: number) =>
+    mutate<{ device: string; results: { manager: string; kind: string; ok: boolean; roms?: number; media?: string; error?: string }[] }>('/api/devices/' + id + '/sync', 'POST'),
   backupArchives: (jobId: number) =>
     get<{ archives: string[]; encrypted: boolean; dest: string; dest_kind: string }>(
       `/api/backups/archives?job_id=${jobId}`),
@@ -1328,21 +1143,11 @@ export const api = {
   attrCapabilities: () => get<AttrCapabilities>('/api/attributes/capabilities'),
   tgdbLimit: (refresh = false) =>
     get<TgdbLimit>(`/api/services/thegamesdb/limit${refresh ? '?refresh=true' : ''}`),
-  publishStatus: () => get<PublishStatus>('/api/publish/status'),
   publishEffective: (dev: number) =>
     get<PublishEffective>(`/api/devices/${dev}/publish/effective`),
   publishIntent: (dev: number, state = 'include') =>
     get<{ entries: PublishEntry[]; state: string }>(
       `/api/devices/${dev}/publish?state=${state}`),
-  publishMark: (dev: number, b: { entry_keys?: string[]; norm_keys?: string[]; state?: string }) =>
-    postJson<{ written: number }>(`/api/devices/${dev}/publish`, b),
-  publishUnmark: (dev: number, entryKey: string) =>
-    mutate<{ cleared: number }>(
-      `/api/devices/${dev}/publish/${encodeURIComponent(entryKey)}`, 'DELETE'),
-  publishUnmarkMany: (dev: number, b: { entry_keys?: string[]; norm_keys?: string[]; all?: boolean }) =>
-    postJson<{ cleared: number | string }>(`/api/devices/${dev}/publish/clear`, b),
-  publishRules: (dev: number) =>
-    get<{ rules: PublishRule[] }>(`/api/devices/${dev}/publish/rules`),
   publishRuleSave: (dev: number, b: Partial<PublishRule>) =>
     postJson<{ id: number; rules: PublishRule[] }>(`/api/devices/${dev}/publish/rules`, b),
   publishRuleDelete: (dev: number, id: number) =>
@@ -1353,8 +1158,6 @@ export const api = {
     postJson<{ ok: boolean }>(`/api/devices/${dev}/publish/apply`,
       { plan, allow_blocked }),
   publishJob: () => get<{ job: PublishJob | null }>('/api/publish/job'),
-  publishLedger: (dev: number) =>
-    get<{ placed: Record<string, unknown> }>(`/api/devices/${dev}/publish/ledger`),
 
   matchIndex: () => get<MatchIndexState>('/api/matchindex'),
   setMatchIndex: (b: { prefer?: string; path?: string; release_url?: string; release_token?: string }) =>
@@ -1377,52 +1180,14 @@ export const api = {
     postJson<{ ok: boolean; id: number }>('/api/backups/jobs', j),
   deleteBackupJob: (id: number) => mutate<{ ok: boolean }>(`/api/backups/jobs/${id}`, 'DELETE'),
   runBackupJob: (id: number) => postJson<{ ok: boolean }>(`/api/backups/jobs/${id}/run`, {}),
-  importBackup: (path: string, passphrase?: string) =>
-    postJson<{ ok: boolean; id: string; databases: number }>('/api/backups/import',
-      { path, passphrase }),
-  setManager: async (m: Partial<LibraryManager>) => {
-    const r = await fetch('/api/devices/managers', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(m) })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ devices: Device[] }>
-  },
+  setManager: (m: Partial<LibraryManager>) =>
+    postJson<{ devices: Device[] }>('/api/devices/managers', m),
   // What an import tier would cost on this source, and whether a budget cap is set
   importEstimate: (mode: ImportMode, mgr?: number) =>
     get<ImportEstimate>(`/api/devices/import-estimate?mode=${mode}` +
       (mgr ? `&mgr=${mgr}` : '')),
-  ingestHints: (limit = 200) =>
-    get<{ count: number; hints: Record<string, unknown>[] }>(`/api/ingest-hints?limit=${limit}`),
-  clearIngestHints: async (system?: string) => {
-    const r = await fetch('/api/ingest-hints' + (system ? `?system=${encodeURIComponent(system)}` : ''),
-      { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status} hints`); return r.json() as Promise<{ cleared: number }>
-  },
-  removeManager: async (id: number) => {
-    const r = await fetch('/api/devices/managers/' + id, { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status} manager`); return r.json() as Promise<{ devices: Device[] }>
-  },
-  // Emulation storage locations (ROMs / media / both)
-  emuLocations: () => get<{ locations: EmuLocation[] }>('/api/archives'),
-  setEmuLocation: async (a: { name: string; path: string; role?: string; kinds?: string[]; enabled?: boolean }) => {
-    const r = await fetch('/api/archives', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(a),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 120)}`)
-    return r.json() as Promise<{ locations: EmuLocation[] }>
-  },
-  removeEmuLocation: async (name: string) => {
-    const r = await fetch('/api/archives/' + encodeURIComponent(name), { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status} location`)
-    return r.json() as Promise<{ locations: EmuLocation[] }>
-  },
-  setEmuLocationEnabled: async (name: string, enabled: boolean) => {
-    const r = await fetch('/api/archives/' + encodeURIComponent(name) + '/enabled', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    })
-    if (!r.ok) throw new Error(`${r.status} location`)
-    return r.json() as Promise<{ locations: EmuLocation[] }>
-  },
+  removeManager: (id: number) =>
+    mutate<{ devices: Device[] }>('/api/devices/managers/' + id, 'DELETE'),
   // AI token usage + monthly limits
   aiUsage: () => get<AiUsageSummary>('/api/ai/usage'),
   aiUsageSeries: (provider: string, model: string) =>
@@ -1435,131 +1200,54 @@ export const api = {
     get<{ ok: boolean; provider?: string; model?: string; priced?: boolean;
       budget_usd?: number; reason?: string }>(
       `/api/ai/pricing-check?area=${encodeURIComponent(area)}`),
-  aiPriceSuggest: async (provider?: string, model?: string) => {
-    const r = await fetch('/api/ai/price/suggest', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ provider, model }),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ provider: string; model: string; resolved: string | null;
-      basis: 'exact' | 'feed' | 'alias' | 'ai' | 'family' | 'unknown'; price: number[] | null; like?: string }>
-  },
-  setAiLimit: async (scope: 'global' | 'provider' | 'model', key: string, caps: Partial<Caps>) => {
-    const r = await fetch('/api/ai/limit', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ scope, key, caps }),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ caps: AiCap[]; usage: AiUsageSummary }>
-  },
+  aiPriceSuggest: (provider?: string, model?: string) =>
+    postJson<{ provider: string; model: string; resolved: string | null;
+      basis: 'exact' | 'feed' | 'alias' | 'ai' | 'family' | 'unknown'; price: number[] | null; like?: string }>('/api/ai/price/suggest', { provider, model }),
+  setAiLimit: (scope: 'global' | 'provider' | 'model', key: string, caps: Partial<Caps>) =>
+    postJson<{ caps: AiCap[]; usage: AiUsageSummary }>('/api/ai/limit', { scope, key, caps }),
   aiPrices: () => get<{ prices: AiPrice[]; currency: Currency; openrouter: boolean;
     schedule: { daily: boolean; time: string }; last_update: string | null }>('/api/ai/prices'),
-  setPricesOpenRouter: async (openrouter: boolean) => {
-    const r = await fetch('/api/ai/prices/source', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ openrouter }),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ openrouter: boolean }>
-  },
-  setPriceSchedule: async (daily: boolean, time?: string) => {
-    const r = await fetch('/api/ai/prices/schedule', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ daily, time }),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ schedule: { daily: boolean; time: string } }>
-  },
-  setAiPrice: async (provider: string, model: string, in_usd: number, out_usd: number, cached_usd?: number | null) => {
-    const r = await fetch('/api/ai/price', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ provider, model, in_usd, out_usd, cached_usd }),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ prices: AiPrice[] }>
-  },
-  refreshAiPrices: async () => {
-    const r = await fetch('/api/ai/prices/refresh', { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ updated: number; checked: number; prices: AiPrice[] }>
-  },
-  resolveAiPrices: async (use_ai: boolean, note?: string) => {
-    const r = await fetch('/api/ai/prices/resolve', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ use_ai, note: note || '' }),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ prices: AiPrice[]; fetched: number; ai_resolved: number;
-      targeted: number; still_missing: number; fetch_error: string | null; ai_error: string | null }>
-  },
-  setCurrency: async (code: string, fx?: number) => {
-    const r = await fetch('/api/ai/currency', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code, fx }),
-    })
-    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 140)}`)
-    return r.json() as Promise<{ currency: Currency }>
-  },
+  setPricesOpenRouter: (openrouter: boolean) =>
+    postJson<{ openrouter: boolean }>('/api/ai/prices/source', { openrouter }),
+  setPriceSchedule: (daily: boolean, time?: string) =>
+    postJson<{ schedule: { daily: boolean; time: string } }>('/api/ai/prices/schedule', { daily, time }),
+  setAiPrice: (provider: string, model: string, in_usd: number, out_usd: number, cached_usd?: number | null) =>
+    postJson<{ prices: AiPrice[] }>('/api/ai/price', { provider, model, in_usd, out_usd, cached_usd }),
+  refreshAiPrices: () =>
+    mutate<{ updated: number; checked: number; prices: AiPrice[] }>('/api/ai/prices/refresh', 'POST'),
+  resolveAiPrices: (use_ai: boolean, note?: string) =>
+    postJson<{ prices: AiPrice[]; fetched: number; ai_resolved: number;
+      targeted: number; still_missing: number; fetch_error: string | null; ai_error: string | null }>('/api/ai/prices/resolve', { use_ai, note: note || '' }),
+  setCurrency: (code: string, fx?: number) =>
+    postJson<{ currency: Currency }>('/api/ai/currency', { code, fx }),
   // AI provider config (phase 3 — BYOAI; keys are write-only, never returned)
   aiConfig: () => get<AiConfig>('/api/ai/config'),
   aiModels: (provider: string, refresh = false, vision = false) =>
     get<{ provider: string; models: string[] }>(
       `/api/ai/models/${encodeURIComponent(provider)}?refresh=${refresh}&vision=${vision}`),
-  setAiConfig: async (body: AiConfigUpdate) => {
-    const r = await fetch('/api/ai/config', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error(`${r.status} /api/ai/config`)
-    return r.json() as Promise<AiConfig>
-  },
+  setAiConfig: (body: AiConfigUpdate) =>
+    postJson<AiConfig>('/api/ai/config', body),
   // Service credentials (Sources + Providers; secrets returned masked)
   servicesConfig: () => get<{ services: Service[] }>('/api/services'),
-  connectService: async (postPath: string, value: string) => {
-    const r = await fetch(postPath, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ value }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ ok: boolean; account: string | null; error?: string }>
-  },
+  connectService: (postPath: string, value: string) =>
+    postJson<{ ok: boolean; account: string | null; error?: string }>(postPath, { value }),
   // Dynamic sign-in URL (Nintendo PKCE): the button asks the server to mint the
   // authorize URL (and stash the matching verifier) right before opening it.
-  authorizeStart: async (startPath: string) => {
-    const r = await fetch(startPath, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{ ok: boolean; url?: string; error?: string }>
-  },
+  authorizeStart: (startPath: string) =>
+    postJson<{ ok: boolean; url?: string; error?: string }>(startPath, {}),
   // Device-code flow (Xbox): start returns the short user code + link; poll is
   // called on a timer until Microsoft reports the sign-in finished.
-  deviceStart: async (startPath: string) => {
-    const r = await fetch(startPath, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
-    })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{
+  deviceStart: (startPath: string) =>
+    postJson<{
       ok: boolean; user_code: string; verification_uri: string
       interval: number; expires_in: number; error?: string
-    }>
-  },
-  devicePoll: async (pollPath: string) => {
-    const r = await fetch(pollPath, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
-    })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{
+    }>(startPath, {}),
+  devicePoll: (pollPath: string) =>
+    postJson<{
       status: 'pending' | 'connected' | 'expired' | 'declined'; account: string | null
-    }>
-  },
-  setSourceEnabled: async (id: string, enabled: boolean) => {
-    const r = await fetch(`/api/services/${encodeURIComponent(id)}/enabled`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    })
-    if (!r.ok) throw new Error(`${r.status} enabled`)
-    return r.json() as Promise<{ id: string; enabled: boolean }>
-  },
+    }>(pollPath, {}),
+  setSourceEnabled: (id: string, enabled: boolean) =>
+    postJson<{ id: string; enabled: boolean }>(`/api/services/${encodeURIComponent(id)}/enabled`, { enabled }),
   // Ownership sync (pull owned games per store, then rebuild the catalog)
   syncStatus: () => get<{ services: SyncService[]; job: SyncJob | null; has_cap?: boolean }>('/api/sync/status'),
   bulkAttrKinds: () => get<{ kinds: string[] }>('/api/attributes/bulk'),
@@ -1571,261 +1259,95 @@ export const api = {
       '/api/ops/reset', { scope, ...(confirm ? { confirm } : {}) }),
   setImportMode: (id: string, mode: ImportMode) =>
     postJson<{ ok: boolean }>('/api/sync/import-mode', { id, mode }),
-  syncRun: async (services: string[], media: string[] = [], full = false) => {
-    const r = await fetch('/api/sync/run', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ services, media, full }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<SyncJob>
-  },
+  syncRun: (services: string[], media: string[] = [], full = false) =>
+    postJson<SyncJob>('/api/sync/run', { services, media, full }),
   // Index EmulationStation/RetroArch art living inside a device's ROM tree, in
   // place (no move) — so existing local covers show up. Local devices only.
-  scanLocalArt: async (deviceId: number) => {
-    const r = await fetch('/api/media/scan-local', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ device_id: deviceId }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ started: boolean; roots: string[] }>
-  },
+  scanLocalArt: (deviceId: number) =>
+    postJson<{ started: boolean; roots: string[] }>('/api/media/scan-local', { device_id: deviceId }),
   // ROM-repo sync: rescan Connections devices' ROM locations, then rebuild.
   romsStatus: () => get<{ locations: RomLocation[]; job: RomJob | null }>('/api/roms/status'),
-  romsRun: async (devices: number[] | 'all') => {
-    const r = await fetch('/api/roms/run', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ devices: devices === 'all' ? 'all' : devices }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<RomJob>
-  },
-  setServices: async (values: Record<string, string>) => {
-    const r = await fetch('/api/services', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ values }),
-    })
-    if (!r.ok) throw new Error(`${r.status} /api/services`)
-    return r.json() as Promise<{ services: Service[] }>
-  },
+  romsRun: (devices: number[] | 'all') =>
+    postJson<RomJob>('/api/roms/run', { devices: devices === 'all' ? 'all' : devices }),
+  setServices: (values: Record<string, string>) =>
+    postJson<{ services: Service[] }>('/api/services', { values }),
   // Server operations (restart, DB health/repair)
   opsStatus: () => get<OpsStatus>('/api/ops/status'),
-  opsRestart: async () => {
-    const r = await fetch('/api/ops/restart', { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status} restart`)
-    return r.json() as Promise<{ restarting: boolean }>
-  },
-  dbCheck: async (db = 'all') => {
-    const r = await fetch('/api/ops/db-check', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ db }),
-    })
-    if (!r.ok) throw new Error(`${r.status} db-check`)
-    return r.json() as Promise<{ results: OpsDatabase[] }>
-  },
-  dbFix: async (db: string, action: 'optimize' | 'recover') => {
-    const r = await fetch('/api/ops/db-fix', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ db, action }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json()
-  },
+  opsRestart: () =>
+    mutate<{ restarting: boolean }>('/api/ops/restart', 'POST'),
+  dbCheck: (db = 'all') =>
+    postJson<{ results: OpsDatabase[] }>('/api/ops/db-check', { db }),
+  dbFix: (db: string, action: 'optimize' | 'recover') =>
+    postJson<{ ok: boolean; reclaimed?: number; backup?: string }>('/api/ops/db-fix', { db, action }),
   // whole-fleet maintenance
-  opsOptimize: async () => {
-    const r = await fetch('/api/ops/optimize', { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{ ok: boolean; optimized: number; reclaimed: number; errors: string[] }>
-  },
-  opsBackup: async () => {
-    const r = await fetch('/api/ops/backup', { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status}`)
-    return r.json() as Promise<{ ok: boolean; id: string; count: number; size: number }>
-  },
+  opsOptimize: () =>
+    mutate<{ ok: boolean; optimized: number; reclaimed: number; errors: string[] }>('/api/ops/optimize', 'POST'),
+  opsBackup: () =>
+    mutate<{ ok: boolean; id: string; count: number; size: number }>('/api/ops/backup', 'POST'),
   opsBackups: () => get<{ backups: { id: string; count: number; size: number }[] }>('/api/ops/backups'),
   // two-way backing-store sync (durable stores <-> PocketBase/etc.)
   backingStatus: () => get<{ running: boolean; last: BackingResult | null; backend: string; configured: boolean }>('/api/backingstore/status'),
-  backingRun: async (dry = false) => {
-    const r = await fetch('/api/backingstore/run', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ dry_run: dry }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ started: boolean; backend: string; running?: boolean }>
-  },
+  backingRun: (dry = false) =>
+    postJson<{ started: boolean; backend: string; running?: boolean }>('/api/backingstore/run', { dry_run: dry }),
   backingConfig: () => get<{ backend: string; values: Record<string, string>; secret_set: Record<string, boolean>; fields: Record<string, string[]>; auto_minutes: number }>('/api/backingstore/config'),
   backingConfigSet: (patch: { backend?: string; auto_minutes?: number; values?: Record<string, string> }) =>
     postJson<{ backend: string; values: Record<string, string>; secret_set: Record<string, boolean>; fields: Record<string, string[]>; auto_minutes: number }>('/api/backingstore/config', patch),
   backingTest: (backend?: string) =>
     postJson<{ ok: boolean; backend: string; detail?: string; error?: string }>('/api/backingstore/test', backend ? { backend } : {}),
-  opsRestore: async (id: string) => {
-    const r = await fetch('/api/ops/restore', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ ok: boolean; restored: number; safety_backup: string; restart_required: boolean }>
-  },
+  opsRestore: (id: string) =>
+    postJson<{ ok: boolean; restored: number; safety_backup: string; restart_required: boolean }>('/api/ops/restore', { id }),
   // AI natural-language search (phase 3)
-  aiSearch: async (q: string) => {
-    const r = await fetch('/api/search', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ q }),
-    })
-    if (!r.ok) throw new Error(`${r.status} /api/search`)
-    return r.json() as Promise<{ query: GamesQuery; explanation: string; result: GamesPage }>
-  },
+  aiSearch: (q: string) =>
+    postJson<{ query: GamesQuery; explanation: string; result: GamesPage }>('/api/search', { q }),
   // ---- File-operations engine: profiles, plans, runbooks ----
   fileVariables: () => get<{ variables: FileVariable[] }>('/api/fileops/variables'),
   fileProfiles: () => get<{ profiles: FileProfile[] }>('/api/fileops/profiles'),
-  saveFileProfile: async (p: FileProfile) => {
-    const r = await fetch('/api/fileops/profiles', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(p),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ id: string; profiles: FileProfile[] }>
-  },
-  deleteFileProfile: async (pid: string) => {
-    const r = await fetch('/api/fileops/profiles/' + encodeURIComponent(pid), { method: 'DELETE' })
-    if (!r.ok) throw new Error(`${r.status} profile`)
-    return r.json() as Promise<{ profiles: FileProfile[] }>
-  },
-  fileDetect: async (body: { device_id: number; root: string; scope: string; system?: string }, signal?: AbortSignal) => {
-    const r = await fetch('/api/fileops/detect', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal,
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<FileDetect>
-  },
-  filePlan: async (body: { device_id: number; root: string; profile: string | FileProfile; scope: string; system?: string }, signal?: AbortSignal) => {
-    const r = await fetch('/api/fileops/plan', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal,
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<FilePlan>
-  },
+  saveFileProfile: (p: FileProfile) =>
+    postJson<{ id: string; profiles: FileProfile[] }>('/api/fileops/profiles', p),
+  deleteFileProfile: (pid: string) =>
+    mutate<{ profiles: FileProfile[] }>('/api/fileops/profiles/' + encodeURIComponent(pid), 'DELETE'),
+  fileDetect: (body: { device_id: number; root: string; scope: string; system?: string }, signal?: AbortSignal) =>
+    postJson<FileDetect>('/api/fileops/detect', body, signal),
+  filePlan: (body: { device_id: number; root: string; profile: string | FileProfile; scope: string; system?: string }, signal?: AbortSignal) =>
+    postJson<FilePlan>('/api/fileops/plan', body, signal),
   mediaLayouts: () => get<{ layouts: { id: string; name: string; desc: string }[] }>('/api/fileops/media-layouts'),
-  planExtract: async (body: { device_id: number; root: string; dest?: string; scope: string; system?: string; layout?: string; op?: 'move' | 'copy' }, signal?: AbortSignal) => {
-    const r = await fetch('/api/fileops/plan-extract', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal,
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<FilePlan>
-  },
-  modelSource: async (body: { device_id: number; root: string; scope: string; system?: string }) => {
-    const r = await fetch('/api/fileops/model-source', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<SourceModelResult>
-  },
-  fileInfer: async (body: { device_id: number; root: string; scope: string; system?: string }) => {
-    const r = await fetch('/api/fileops/infer', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<FileInferResult>
-  },
-  fileCommand: async (body: { device_id: number; root: string; text: string; scope: string; system?: string }) => {
-    const r = await fetch('/api/fileops/command', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<FileCommandResult>
-  },
-  createRunbook: async (body: { device_id: number; root: string; profile?: string | FileProfile; operation?: string; dest?: string; scope: string; system?: string; note?: string; layout?: string; op?: 'move' | 'copy' }) => {
-    const r = await fetch('/api/fileops/runbook', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<CreateRunbookResult>
-  },
+  planExtract: (body: { device_id: number; root: string; dest?: string; scope: string; system?: string; layout?: string; op?: 'move' | 'copy' }, signal?: AbortSignal) =>
+    postJson<FilePlan>('/api/fileops/plan-extract', body, signal),
+  modelSource: (body: { device_id: number; root: string; scope: string; system?: string }) =>
+    postJson<SourceModelResult>('/api/fileops/model-source', body),
+  createRunbook: (body: { device_id: number; root: string; profile?: string | FileProfile; operation?: string; dest?: string; scope: string; system?: string; note?: string; layout?: string; op?: 'move' | 'copy' }) =>
+    postJson<CreateRunbookResult>('/api/fileops/runbook', body),
   getRunbook: (id: number) => get<Runbook>('/api/fileops/runbook/' + id),
-  executeRunbook: async (id: number) => {
-    const r = await fetch('/api/fileops/runbook/' + id + '/execute', { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status} execute`)
-    return r.json() as Promise<{ started: boolean; run_id: number }>
-  },
-  undoRunbook: async (id: number) => {
-    const r = await fetch('/api/fileops/runbook/' + id + '/undo', { method: 'POST' })
-    if (!r.ok) throw new Error(`${r.status} undo`)
-    return r.json() as Promise<{ started: boolean; run_id: number }>
-  },
+  executeRunbook: (id: number) =>
+    mutate<{ started: boolean; run_id: number }>('/api/fileops/runbook/' + id + '/execute', 'POST'),
+  undoRunbook: (id: number) =>
+    mutate<{ started: boolean; run_id: number }>('/api/fileops/runbook/' + id + '/undo', 'POST'),
   // ---- Commander: build a reversible runbook from raw same-device drops ----
-  createRunbookOps: async (body: { device_id: number; root: string; ops: { op: string; src?: string; dst?: string }[]; label?: string; note?: string }) => {
-    const r = await fetch('/api/fileops/runbook-ops', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ run_id: number; runbook: Runbook }>
-  },
+  createRunbookOps: (body: { device_id: number; root: string; ops: { op: string; src?: string; dst?: string }[]; label?: string; note?: string }) =>
+    postJson<{ run_id: number; runbook: Runbook }>('/api/fileops/runbook-ops', body),
   // ---- Commander: cross-device transfer (backgrounded rsync job) ----
-  fsTransfer: async (body: { src_device: number; dst_device: number; src_dir: string; dst_dir: string; items: string[]; mode: 'copy' | 'move' }) => {
-    const r = await fetch('/api/fs/transfer', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ started: boolean; jid: string }>
-  },
-  fsMkdir: async (device_id: number, path: string) => {
-    const r = await fetch('/api/fs/mkdir', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_id, path }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ ok: boolean }>
-  },
-  fsDelete: async (device_id: number, paths: string[]) => {
-    const r = await fetch('/api/fs/delete', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_id, paths }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ ok: boolean; removed: number }>
-  },
-  fsStat: async (device_id: number, path: string) => {
-    const r = await fetch('/api/fs/stat', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_id, path }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<FsStat>
-  },
+  fsTransfer: (body: { src_device: number; dst_device: number; src_dir: string; dst_dir: string; items: string[]; mode: 'copy' | 'move' }) =>
+    postJson<{ started: boolean; jid: string }>('/api/fs/transfer', body),
+  fsMkdir: (device_id: number, path: string) =>
+    postJson<{ ok: boolean }>('/api/fs/mkdir', { device_id, path }),
+  fsDelete: (device_id: number, paths: string[]) =>
+    postJson<{ ok: boolean; removed: number }>('/api/fs/delete', { device_id, paths }),
+  fsStat: (device_id: number, path: string) =>
+    postJson<FsStat>('/api/fs/stat', { device_id, path }),
   troubleshootRunbook: (id: number) => get<Troubleshoot>('/api/fileops/runbook/' + id + '/troubleshoot'),
   fileHistory: () => get<{ runs: RunHistoryRow[] }>('/api/fileops/history'),
-  manifestWrite: async (body: { device_id: number; root: string; operation?: string; profile?: string; scope?: string; system?: string; dest?: string }) => {
-    const r = await fetch('/api/fileops/manifest', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ started: boolean; jid: string }>
-  },
-  manifestDelete: async (device_id: number, root: string) => {
-    const r = await fetch('/api/fileops/manifest/delete', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_id, root }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ ok: boolean }>
-  },
+  manifestWrite: (body: { device_id: number; root: string; operation?: string; profile?: string; scope?: string; system?: string; dest?: string }) =>
+    postJson<{ started: boolean; jid: string }>('/api/fileops/manifest', body),
   // ---- Unified job monitor (library sync + file-op runbooks) ----
   jobs: () => get<{ jobs: Job[] }>('/api/jobs'),
-  pauseJob: async (id: string) => {
-    const r = await fetch('/api/jobs/' + id + '/pause', { method: 'POST' })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json()
-  },
-  restartJob: async (id: string) => {
-    const r = await fetch('/api/jobs/' + id + '/restart', { method: 'POST' })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json()
-  },
-  deleteJob: async (id: string) => {
-    const r = await fetch('/api/jobs/' + id, { method: 'DELETE' })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json()
-  },
-  clearJobs: async () => {
-    const r = await fetch('/api/jobs/clear', { method: 'POST' })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ cleared: number }>
-  },
+  pauseJob: (id: string) =>
+    mutate<unknown>('/api/jobs/' + id + '/pause', 'POST'),
+  restartJob: (id: string) =>
+    mutate<unknown>('/api/jobs/' + id + '/restart', 'POST'),
+  deleteJob: (id: string) =>
+    mutate<unknown>('/api/jobs/' + id, 'DELETE'),
+  clearJobs: () =>
+    mutate<{ cleared: number }>('/api/jobs/clear', 'POST'),
   // ---- AI metadata audit & supplement ----
   aimetaTargets: () => get<AiScanTargets>('/api/aimeta/targets'),
   aimetaScans: () => get<{ scans: AiScanRun[] }>('/api/aimeta/scans'),
@@ -1838,125 +1360,43 @@ export const api = {
     return get<{ findings: AiFinding[]; counts: AiFindingCounts }>(
       '/api/aimeta/findings' + (q ? '?' + q : ''))
   },
-  aimetaScan: async (
+  aimetaScan: (
     body: ({ target: string; limit?: number } | { norm_keys: string[]; label?: string }) & ScanOpts,
-  ) => {
-    const r = await fetch('/api/aimeta/scan', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ run_id: number; target: string; count: number; web: boolean; match_provider: boolean }>
-  },
-  aimetaRefine: async (
+  ) =>
+    postJson<{ run_id: number; target: string; count: number; web: boolean; match_provider: boolean }>('/api/aimeta/scan', body),
+  aimetaRefine: (
     body: { norm_key: string; hint?: string; refs?: string[]; model?: string; web?: boolean; run_id?: number },
-  ) => {
-    const r = await fetch('/api/aimeta/refine', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ kind: string | null; finding: AiFinding | null; used_web: boolean; used_refs: string[]; model: string; context: FindingContext | null }>
-  },
-  // Hunt media for an already-identified game on demand (IGDB + SteamGridDB, + optional
-  // AI open-web discovery when web:true). The trigger the wand lacks for matched games.
-  aimetaRefreshMedia: async (body: { norm_key?: string; entry_key?: string; web?: boolean }) => {
-    const r = await fetch('/api/aimeta/refresh-media', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ ok: boolean; norm_key: string; has_cover: boolean; chosen: Record<string, number>; web_added: number }>
-  },
+  ) =>
+    postJson<{ kind: string | null; finding: AiFinding | null; used_web: boolean; used_refs: string[]; model: string; context: FindingContext | null }>('/api/aimeta/refine', body),
   // Full authoritative catalog re-derivation (background). Wand applies reconcile only
   // the touched games now, so this is the on-demand button for a global rebuild.
-  rebuildCatalog: async () => {
-    const r = await fetch('/api/catalog/rebuild', { method: 'POST' })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ started: boolean; running?: boolean }>
-  },
-  // On-demand AI art pick for one game — the wand's "pick nicest art" button. The ONLY
-  // place the paid vision pick runs by default (routine apply/rebuild never calls it).
-  aimetaPickArt: async (body: { norm_key?: string; entry_key?: string }) => {
-    const r = await fetch('/api/aimeta/pick-art', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ ok: boolean; norm_key: string }>
-  },
+  rebuildCatalog: () =>
+    mutate<{ started: boolean; running?: boolean }>('/api/catalog/rebuild', 'POST'),
   // Manually pin an entry's identity to a specific IGDB game (the human override for
   // odd-ball cases). `igdb` = an IGDB game link, slug, or numeric id. `platform` present
   // → per-entry pin (just that platform); absent → whole title.
-  aimetaPin: async (body: { norm_key: string; igdb?: string; platform?: string | null; detach?: boolean }) => {
-    const r = await fetch('/api/aimeta/pin', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ ok: boolean; norm_key: string; platform: string | null; detached: boolean; igdb_id: number | null; title: string | null; url: string | null }>
-  },
-  aimetaFindingAction: async (id: number, action: 'accept' | 'reject' | 'reset') => {
-    const r = await fetch('/api/aimeta/finding/' + id + '/' + action, { method: 'POST' })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ findings: AiFinding[]; counts: AiFindingCounts }>
-  },
-  aimetaAcceptAll: async (minConfidence?: number) => {
-    const r = await fetch('/api/aimeta/accept-all', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ min_confidence: minConfidence || 0 }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ accepted: number; counts: AiFindingCounts }>
-  },
-  aimetaAccept: async (selections: AiApplySelection[]) => {
-    const r = await fetch('/api/aimeta/accept', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ selections }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ accepted: number; pending: number }>
-  },
-  aimetaApply: async (selections?: AiApplySelection[], media?: ScopeValue) => {
+  aimetaPin: (body: { norm_key: string; igdb?: string; platform?: string | null; detach?: boolean }) =>
+    postJson<{ ok: boolean; norm_key: string; platform: string | null; detached: boolean; igdb_id: number | null; title: string | null; url: string | null }>('/api/aimeta/pin', body),
+  aimetaFindingAction: (id: number, action: 'accept' | 'reject' | 'reset') =>
+    mutate<{ findings: AiFinding[]; counts: AiFindingCounts }>('/api/aimeta/finding/' + id + '/' + action, 'POST'),
+  aimetaAcceptAll: (minConfidence?: number) =>
+    postJson<{ accepted: number; counts: AiFindingCounts }>('/api/aimeta/accept-all', { min_confidence: minConfidence || 0 }),
+  aimetaAccept: (selections: AiApplySelection[]) =>
+    postJson<{ accepted: number; pending: number }>('/api/aimeta/accept', { selections }),
+  aimetaApply: (selections?: AiApplySelection[], media?: ScopeValue) => {
     const body: { selections?: AiApplySelection[]; media?: ScopeValue } = {}
     if (selections) body.selections = selections
     if (media !== undefined) body.media = media
-    const r = await fetch('/api/aimeta/apply', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ started: boolean; selected: number | null; coalesced?: boolean }>
+    return postJson<{ started: boolean; selected: number | null; coalesced?: boolean }>('/api/aimeta/apply', body)
   },
-  aimetaMediaDiff: async (items: { norm_key: string; after_cover: string | null; igdb_id?: number | null; title?: string }[]) => {
-    const r = await fetch('/api/aimeta/media-diff', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ items }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ items: MediaDiff[]; sgdb: boolean }>
-  },
-  setAttributeOverride: async (nk: string, kind: string, value: string, origin: string) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/attribute', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ kind, value, origin }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ override: { value: string; origin: string } }>
-  },
-  clearAttributeOverride: async (nk: string, kind: string) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/attribute/' + encodeURIComponent(kind), { method: 'DELETE' })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ cleared: boolean }>
-  },
-  setIdentityDisabled: async (nk: string, provider: string, disabled: boolean) => {
-    const r = await fetch('/api/games/' + encodeURIComponent(nk) + '/identity/' + encodeURIComponent(provider), {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ disabled }),
-    })
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`)
-    return r.json() as Promise<{ disabled_identity: string[] }>
-  },
+  aimetaMediaDiff: (items: { norm_key: string; after_cover: string | null; igdb_id?: number | null; title?: string }[]) =>
+    postJson<{ items: MediaDiff[]; sgdb: boolean }>('/api/aimeta/media-diff', { items }),
+  setAttributeOverride: (nk: string, kind: string, value: string, origin: string) =>
+    postJson<{ override: { value: string; origin: string } }>('/api/games/' + encodeURIComponent(nk) + '/attribute', { kind, value, origin }),
+  clearAttributeOverride: (nk: string, kind: string) =>
+    mutate<{ cleared: boolean }>('/api/games/' + encodeURIComponent(nk) + '/attribute/' + encodeURIComponent(kind), 'DELETE'),
+  setIdentityDisabled: (nk: string, provider: string, disabled: boolean) =>
+    postJson<{ disabled_identity: string[] }>('/api/games/' + encodeURIComponent(nk) + '/identity/' + encodeURIComponent(provider), { disabled }),
 }
 
 export type IngestEstimate = {

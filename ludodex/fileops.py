@@ -31,22 +31,18 @@ import os
 import posixpath
 import shlex
 import sqlite3
-import subprocess
 import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 
 MANIFEST_NAME = ".ludodex.json"   # per-folder sidecar; invisible to every operation
 import config          # noqa: E402
 import devices         # noqa: E402  transport (_device/_ssh/_run/_wrap_pw/...)
 import romtags         # noqa: E402  parse_name()
-import titlenorm       # noqa: E402  norm()
+import schema_once     # noqa: E402  DDL once per process
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 
 DB = os.path.join(DATA, "file-profiles.sqlite")
 
@@ -266,6 +262,11 @@ BUILTIN_BY_ID = {p["id"]: p for p in BUILTIN_PROFILES}
 def _con():
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
+    schema_once.ensure(con, DB, _schema)
+    return con
+
+
+def _schema(con):
     con.execute("""CREATE TABLE IF NOT EXISTS profiles(
         id INTEGER PRIMARY KEY, name TEXT, description TEXT, target TEXT,
         m3u INTEGER DEFAULT 0, prune_empty INTEGER DEFAULT 1,
@@ -287,7 +288,9 @@ def _con():
         cols = {r[1] for r in con.execute("PRAGMA table_info(%s)" % tbl)}
         if col not in cols:
             con.execute("ALTER TABLE %s ADD COLUMN %s %s" % (tbl, col, decl))
-    return con
+    # history() counts each run's ops by status, three subqueries per run.
+    con.execute("CREATE INDEX IF NOT EXISTS ix_run_ops_run_status "
+                "ON run_ops(run_id, status)")
 
 
 def _profile_row(r):
@@ -1274,14 +1277,6 @@ def run_target(run_id):
     r = con.execute("SELECT device_id, root FROM runs WHERE id=?", (run_id,)).fetchone()
     con.close()
     return ((r["device_id"] or 0), r["root"]) if r else (0, None)
-
-
-def manifest_status(device_id, root):
-    """What ludodex knows about this folder from its manifest, if any.
-    Returns {present, fresh, manifest} — manifest is the raw dict (or None)."""
-    fs = _Fs(device_id)
-    m, fresh = _manifest_state(fs, root)
-    return {"present": bool(m), "fresh": fresh, "manifest": m}
 
 
 def manifest_write(device_id, root, profile=None, scope="multi_system",

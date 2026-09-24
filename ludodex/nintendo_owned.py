@@ -48,8 +48,8 @@ import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 import config                                             # noqa: E402
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 
 NIN_DIR = os.path.join(DATA, ".nintendo")
 COOKIEFILE = os.path.join(NIN_DIR, "cookies.json")

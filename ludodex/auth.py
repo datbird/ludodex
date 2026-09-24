@@ -1,8 +1,8 @@
 """ludodex app authentication — local username/password accounts + sessions.
 
-Self-contained (stdlib only): passwords are scrypt-hashed with a per-user random
-salt; session tokens are random and stored *hashed* (a DB leak grants no logins).
-All state lives in auth.sqlite on the data volume. No external secret store.
+Self-contained (stdlib plus the sibling schema_once): passwords are scrypt-hashed
+with a per-user random salt; session tokens are random and stored *hashed* (a DB
+leak grants no logins). All state lives in auth.sqlite on the data volume. No external secret store.
 
 The first account created on a fresh install is the admin (there are no users
 until then — that's what drives the first-run "create admin" screen).
@@ -12,6 +12,7 @@ import sqlite3
 import hashlib
 import hmac
 import secrets
+import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,12 +22,21 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 DB = os.path.join(DATA, "auth.sqlite")
 
+sys.path.insert(0, DIR)
+import schema_once                               # noqa: E402  DDL once per process
+
 SESSION_TTL = 30 * 24 * 3600          # 30 days
 MIN_PASSWORD = 8
 
 
 def _con():
     con = sqlite3.connect(DB)
+    schema_once.ensure(con, DB, _schema)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _schema(con):
     con.execute("""CREATE TABLE IF NOT EXISTS users(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE COLLATE NOCASE,
@@ -37,8 +47,6 @@ def _con():
         created REAL, expires REAL)""")
     con.execute("""CREATE TABLE IF NOT EXISTS email_map(
         email TEXT PRIMARY KEY COLLATE NOCASE, user_id INTEGER, created REAL)""")
-    con.row_factory = sqlite3.Row
-    return con
 
 
 _con().close()   # ensure the file + schema exist at import

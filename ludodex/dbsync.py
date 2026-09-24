@@ -348,10 +348,10 @@ class _SqlBackend:
         try:
             cur = con.cursor()
             up = self._upsert_sql(self._table(store))
-            for key, row in upserts.items():
-                data = json.dumps({c: _cell(row.get(c)) for c in cols},
-                                  sort_keys=True, ensure_ascii=False)
-                cur.execute(up, (key, data))
+            rows = [(key, json.dumps({c: _cell(row.get(c)) for c in cols},
+                                     sort_keys=True, ensure_ascii=False))
+                    for key, row in upserts.items()]
+            cur.executemany(up, rows)
             for key in deletes:
                 cur.execute("DELETE FROM %s WHERE k=%%s" % self._table(store), (key,))
             con.commit()

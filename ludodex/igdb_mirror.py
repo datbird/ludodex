@@ -33,14 +33,11 @@ import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 import config          # noqa: E402
 import igdb           # noqa: E402
 from titlenorm import norm   # noqa: E402
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 
 DB = os.path.join(DATA, "igdb-catalog.sqlite")
 PAGE = 500                      # IGDB's per-request maximum

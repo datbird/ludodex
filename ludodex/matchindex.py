@@ -50,14 +50,11 @@ import sys
 import time
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 import config                    # noqa: E402
 import matchgate                 # noqa: E402
 from titlenorm import norm       # noqa: E402
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 
 
 class _Con(sqlite3.Connection):
@@ -86,7 +83,6 @@ TGDB_ID_BASE = 300_000_000
 MOBY_ID_BASE = 400_000_000
 # A TheGamesDB game neither mirror knows. Its own range, above MobyGames.
 TGDB_CAT_ID_BASE = 500_000_000
-YEAR_SLACK = 1                   # a year that disagrees by more than this is a refusal
 
 # Which ROM hashes earn their place. CRC32 is what No-Intro, TOSEC and every frontend
 # key on, and what ludodex already computes for a file; sha1 covers the DATs that

@@ -180,6 +180,20 @@ function useClickOutside<T extends HTMLElement>(active: boolean, onClose: () => 
   return ref
 }
 
+// Close a menu on Escape while it is open. For the menus that dismiss through the
+// shared .hero-cfg-backdrop instead of useClickOutside, so they are not in the
+// escLayers registry (useEscClosesOverlays stands down while that backdrop is up).
+function useEscClose(open: boolean, close: () => void) {
+  const cb = useRef(close)
+  cb.current = close
+  useEffect(() => {
+    if (!open) return
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') cb.current() }
+    window.addEventListener('keydown', esc)
+    return () => window.removeEventListener('keydown', esc)
+  }, [open])
+}
+
 // A small colored dot for a provider origin — used on attribute values + source
 // rows so provider attribution is visible and consistent everywhere.
 function ProvDot({ origin }: { origin: string }) {
@@ -540,7 +554,8 @@ const GameCard = memo(function GameCard({ g, selectMode, picked, onPick }: {
 const NON_ID_SOURCES = new Set(['emulation', 'archive', 'physical', 'rom', 'digital', 'manual'])
 
 // Metadata-PROVIDER identities (editable/disable-able badges), as opposed to
-// store-ownership badges which are immutable facts.
+// store-ownership badges which are immutable facts. Must match provider_ids.PROVIDERS,
+// which the server's disable route accepts.
 const META_PROVIDERS = new Set(['igdb', 'screenscraper', 'steamgriddb', 'thegamesdb',
   'arcadedb', 'zxinfo', 'mobygames'])
 
@@ -839,8 +854,13 @@ function LudodexApp({ user, onLogout }: { user: AuthUser | null; onLogout: () =>
     // Poll gently so a pending-apply (accepted-not-applied) count surfaces on its own,
     // rather than only after the user happens to open/close a game — pairs with the
     // JobMonitor's own poll, which now also scoops up orphaned pending reviews.
-    const t = setInterval(refreshStats, 20000)
-    return () => clearInterval(t)
+    // A hidden tab skips the tick, and catches up once when it is shown again.
+    const t = setInterval(() => {
+      if (document.visibilityState !== 'hidden') refreshStats()
+    }, 20000)
+    const onVis = () => { if (document.visibilityState === 'visible') refreshStats() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis) }
   }, [refreshStats])
 
   // One definition of "the current view". The bulk tools used to be handed a
@@ -8291,12 +8311,7 @@ function MediaWand({ nk, kinds, label, onDone }: {
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState('')
-  useEffect(() => {
-    if (!open) return
-    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
-    window.addEventListener('keydown', esc)
-    return () => window.removeEventListener('keydown', esc)
-  }, [open])
+  useEscClose(open, () => setOpen(false))
 
   // (1) judge what we already hold. Paid, and only ever from this click — scope is
   // exactly one game and exactly the kinds in scope, never the catalog.
@@ -8326,11 +8341,18 @@ function MediaWand({ nk, kinds, label, onDone }: {
       let added = 0
       const failed: string[] = []
       const changed = new Set<string>()
-      // 'thegamesdb' used to be in this list and the server rejects it with a 400
-      // (it takes igdb, screenscraper, steamgriddb, steam, web) — one guaranteed
-      // failure per run, hidden by the catch. Ask only for what the server accepts.
-      const provs = ['igdb', 'screenscraper', 'steamgriddb', 'steam',
-                     ...(alsoWeb ? ['web'] : [])]
+      // The provider list comes from the server (the same list the Fetch-from menu
+      // shows). It used to be hardcoded here and drifted: 'thegamesdb' stayed in it
+      // after the server stopped accepting it, one guaranteed 400 per run hidden by
+      // the catch below.
+      let listed: string[]
+      try {
+        listed = (await api.matchedProviders(nk)).providers.map((p) => p.provider)
+      } catch (e) {
+        onDone(`Couldn't list providers: ${(e as Error)?.message || 'the request failed'}`)
+        return
+      }
+      const provs = [...listed, ...(alsoWeb ? ['web'] : [])]
       for (const p of provs) {
         try {
           const r = await api.mediaFetch(nk, p, kinds ?? undefined)
@@ -8416,10 +8438,8 @@ function MediaFetchMenu({ nk, kinds, label, onDone }: {
   useEffect(() => {
     if (!open) return
     api.matchedProviders(nk).then((r) => setProvs(r.providers)).catch(() => setProvs([]))
-    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
-    window.addEventListener('keydown', esc)
-    return () => window.removeEventListener('keydown', esc)
   }, [open, nk])
+  useEscClose(open, () => setOpen(false))
 
   const pull = async (p: string) => {
     setBusy(p)
@@ -8616,12 +8636,7 @@ function HeroConfig({ assets, heroPref, onPick, onClose }: {
 // chevron is part of the artwork, so the control reads as a menu without extra chrome.
 function ProviderLinksMenu({ links }: { links: { provider: string; url: string }[] }) {
   const [open, setOpen] = useState(false)
-  useEffect(() => {
-    if (!open) return
-    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
-    window.addEventListener('keydown', esc)
-    return () => window.removeEventListener('keydown', esc)
-  }, [open])
+  useEscClose(open, () => setOpen(false))
   const n = links.length
   return (
     <span className="prov-links">
@@ -12212,7 +12227,14 @@ function JobMonitor({ onOpen, pendingApply = 0, onApplied, onApplyRunning }: {
   const [open, setOpen] = useState(false)
   const [review, setReview] = useState<{ runId: number; title: string } | null>(null)
   const load = useCallback(() => api.jobs().then((j) => setJobs(j.jobs)).catch(() => {}), [])
-  useEffect(() => { load(); const t = setInterval(load, 2500); return () => clearInterval(t) }, [load])
+  useEffect(() => {
+    load()
+    // A hidden tab skips the tick, and catches up once when it is shown again.
+    const t = setInterval(() => { if (document.visibilityState !== 'hidden') load() }, 2500)
+    const onVis = () => { if (document.visibilityState === 'visible') load() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis) }
+  }, [load])
   // An apply runs as a background "Apply AI metadata + rebuild" job. While that job is
   // live the accepted-not-applied changes ARE being applied, so the pending bar is
   // redundant with the running job — hide it and let the job (+ its badge) represent the

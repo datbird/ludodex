@@ -47,12 +47,6 @@ def load_detached(con):
         "SELECT norm_key, platform FROM entry_resolution WHERE matched_by='detached'")}
 
 
-def clear_entry(con, norm_key, platform):
-    ensure(con)
-    con.execute("DELETE FROM entry_resolution WHERE norm_key=? AND platform=?",
-                (norm_key, platform))
-
-
 def load(con):
     """{(norm_key, platform): igdb_id} for every entry override — for build_library."""
     ensure(con)

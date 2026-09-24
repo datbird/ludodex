@@ -39,12 +39,9 @@ import urllib.parse
 import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 import config
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 
 XBOX_DIR = os.path.join(DATA, ".xbox")
 TOKFILE = os.path.join(XBOX_DIR, "tokens.json")
@@ -54,10 +51,6 @@ os.makedirs(XBOX_DIR, exist_ok=True)
 MS_CLIENT = "000000004c12ae6f"
 MS_SCOPE = "Xboxlive.signin Xboxlive.offline_access"
 MS_REDIRECT = "https://login.live.com/oauth20_desktop.srf"
-AUTHORIZE = ("https://login.live.com/oauth20_authorize.srf?client_id=%s"
-             "&response_type=code&approval_prompt=auto"
-             "&scope=%s&redirect_uri=%s"
-             % (MS_CLIENT, urllib.parse.quote(MS_SCOPE), urllib.parse.quote(MS_REDIRECT)))
 MS_TOKEN = "https://login.live.com/oauth20_token.srf"
 # Device-code flow endpoint — the reliable alternative to the address-bar code:
 # Microsoft hands back a short user_code the person types at microsoft.com/link,

@@ -79,18 +79,6 @@ def no_redist_for(nk):
     return s
 
 
-def no_redist_set():
-    """{(norm_key, kind, provider, ref)} flagged not-redistributable, library-wide
-    — the filter a copy-to-device pass applies so banned-from-sharing art stays put."""
-    if not os.path.exists(DB):
-        return set()
-    con = _con()
-    s = {(r[0], r[1], r[2], r[3]) for r in con.execute(
-        "SELECT norm_key, kind, provider, ref FROM media_flags WHERE no_redist=1")}
-    con.close()
-    return s
-
-
 def list_banned():
     """Banned assets (most recent first) for the Settings 'unban' list."""
     if not os.path.exists(DB):

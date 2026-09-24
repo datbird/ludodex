@@ -64,7 +64,7 @@ import config                      # noqa: E402
 import provider_rate               # noqa: E402 — shared pacing/timeout rules
 
 API = "https://api.thegamesdb.net"
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 STATE_DB = os.path.join(DATA, "thegamesdb-state.sqlite")
 
 # The server pages at 20 rows whatever we ask for (verified live 2026-08-16 with a

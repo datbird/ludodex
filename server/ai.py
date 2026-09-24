@@ -608,8 +608,7 @@ def resolve_prices_ai(targets, note=None, provider=None, model=None):
     Returns [{provider, model, input, output, cached, note}] for what it priced."""
     if not targets:
         return []
-    provider, key, model = _resolve(provider or provider_for_area("prices"),
-                                    model or model_for_area("prices"))
+    provider, key, model = _resolve_area("prices", provider, model)
     system = area_prompt("prices")
     if note and str(note).strip():
         system += ("\n\nThe user is specifically having this issue — make sure your "
@@ -1920,16 +1919,6 @@ def _repair_json(s):
     return tail + "".join(reversed(stack))
 
 
-def require_ready(provider=None, model=None):
-    """Public form of _resolve for a caller that only needs "is this usable".
-
-    Callers outside this module were reaching into _resolve to ask exactly that, which
-    also handed them the API KEY they had no use for. Returns (provider, model); raises
-    the same way _resolve does when nothing is configured."""
-    prov, _key, mdl = _resolve(provider, model)
-    return prov, mdl
-
-
 def _resolve(provider, model=None):
     """Validate provider + key, return (provider, key, model). Raises if unusable."""
     provider = provider or active_provider()
@@ -1939,6 +1928,16 @@ def _resolve(provider, model=None):
     if not key:
         raise RuntimeError("provider %r has no API key" % provider)
     return provider, key, (model or model_for(provider))
+
+
+def _resolve_area(area, provider=None, model=None):
+    """_resolve for one task area: the caller's provider/model, else the area's own."""
+    return _resolve(provider or provider_for_area(area), model or model_for_area(area))
+
+
+def _results(obj):
+    """The row list of a model reply: a bare list, or the `results` of an object."""
+    return obj if isinstance(obj, list) else (obj or {}).get("results", [])
 
 
 def find_media_pages(title, systems=None, year=None, provider=None, model=None):
@@ -2297,8 +2296,7 @@ def identify_games(images, provider=None, model=None):
     cartridges/discs, screenshots, store pages, or a shelf/photo with many games.
     `images`=[(mime,bytes)]. Returns a list of
     {"title": str, "platform": str, "source": str, "confidence": float}."""
-    provider, key, model = _resolve(provider or provider_for_area("identify"),
-                                    model or model_for_area("identify"))
+    provider, key, model = _resolve_area("identify", provider, model)
     system = area_prompt("identify")
     text = _complete_vision(provider, key, model, system,
                             "Identify every game you can see.", images)
@@ -2325,8 +2323,7 @@ def adjudicate_attributes(title, conflicts, provider=None, model=None):
     """Two providers disagree on some fields — pick the better source per field.
     `conflicts` = {kind: {"igdb": value, "screenscraper": value}}. Returns
     {kind: "igdb"|"screenscraper"} naming the winning provider for each field."""
-    provider, key, model = _resolve(provider or provider_for_area("metadata"),
-                                    model or model_for_area("metadata"))
+    provider, key, model = _resolve_area("metadata", provider, model)
     system = (
         "You reconcile video-game metadata for the game \"%s\". For each field you "
         "are given two providers' values (IGDB and ScreenScraper). Choose the ONE "
@@ -2348,8 +2345,7 @@ def detect_contamination(items, provider=None, model=None):
     or a DIFFERENT game that merely shares the title (the Atari-2600 "Dune" vs the 1992 Cryo
     "Dune"). `items` = [{n, title, platform, igdb_name, igdb_year, igdb_platforms:[..],
     summary}]. Returns [{n, contaminated: bool, confidence: 0..1, reason}]. Raises on error."""
-    provider, key, model = _resolve(provider or provider_for_area("metadata"),
-                                    model or model_for_area("metadata"))
+    provider, key, model = _resolve_area("metadata", provider, model)
     listing = "\n".join(
         '%d. ROM "%s" on %s  ->  bound to IGDB "%s" (%s; IGDB platforms: %s). Summary: %s'
         % (it["n"], it["title"], it["platform"], it.get("igdb_name", ""),
@@ -2370,7 +2366,7 @@ def detect_contamination(items, provider=None, model=None):
         '{"n": <num>, "contaminated": true|false, "confidence": 0..1, "reason": "<short>"}.')
     text = _complete_text(provider, key, model, system, "Items:\n" + listing)
     obj = _json(text)
-    rows = obj if isinstance(obj, list) else (obj or {}).get("results", [])
+    rows = _results(obj)
     return rows if isinstance(rows, list) else []
 
 
@@ -2383,8 +2379,7 @@ def detect_collections(items, provider=None, model=None):
     This is the systematic counterpart to the `collection` block in the per-game metadata
     prompt: that one only runs for games the scan flagged for an attribute/match gap, so a
     fully-enriched compilation was never asked about."""
-    provider, key, model = _resolve(provider or provider_for_area("metadata"),
-                                    model or model_for_area("metadata"))
+    provider, key, model = _resolve_area("metadata", provider, model)
 
     def _line(it):
         s = '%d. "%s"%s%s' % (it["n"], it["title"],
@@ -2434,7 +2429,7 @@ def detect_collections(items, provider=None, model=None):
         '"reason": "<short>"}.')
     text = _complete_text(provider, key, model, system, "Entries:\n" + listing)
     obj = _json(text)
-    rows = obj if isinstance(obj, list) else (obj or {}).get("results", [])
+    rows = _results(obj)
     return rows if isinstance(rows, list) else []
 
 
@@ -2445,8 +2440,7 @@ def adjudicate_entry(items, provider=None, model=None):
     the list (detach). `items` = [{n, title, platform, filename?, year?, primary_id,
     candidates:[{id, name, year, platforms:[..]}]}]. Returns [{n, same_as_group: bool,
     correct_igdb_id: int|null, detach: bool, confidence: 0..1, reason}]. Raises on error."""
-    provider, key, model = _resolve(provider or provider_for_area("metadata"),
-                                    model or model_for_area("metadata"))
+    provider, key, model = _resolve_area("metadata", provider, model)
 
     def _cands(it):
         return "; ".join(
@@ -2479,7 +2473,7 @@ def adjudicate_entry(items, provider=None, model=None):
         'null>, "detach": true|false, "confidence": 0..1, "reason": "<short>"}.')
     text = _complete_text(provider, key, model, system, "Items:\n" + listing)
     obj = _json(text)
-    rows = obj if isinstance(obj, list) else (obj or {}).get("results", [])
+    rows = _results(obj)
     return rows if isinstance(rows, list) else []
 
 
@@ -2488,8 +2482,7 @@ def rate_match_confidence(items, provider=None, model=None):
     [{n, title, matched_name, platform, year?}] where `title` is the library/ROM title and
     `matched_name` is the IGDB game it's currently matched to. Returns [{n, confidence: 0..100,
     reason}] — how likely the entry really IS that game. Raises on error."""
-    provider, key, model = _resolve(provider or provider_for_area("metadata"),
-                                    model or model_for_area("metadata"))
+    provider, key, model = _resolve_area("metadata", provider, model)
     listing = "\n".join(
         '%d. Library entry "%s" on console "%s"%s is currently matched to IGDB game "%s".'
         % (it["n"], it["title"], it.get("platform", "?"),
@@ -2508,7 +2501,7 @@ def rate_match_confidence(items, provider=None, model=None):
         '{"n": <num>, "confidence": 0-100, "reason": "<short>"}.')
     text = _complete_text(provider, key, model, system, "Items:\n" + listing)
     obj = _json(text)
-    rows = obj if isinstance(obj, list) else (obj or {}).get("results", [])
+    rows = _results(obj)
     return rows if isinstance(rows, list) else []
 
 
@@ -2532,8 +2525,7 @@ def same_image(a, b, provider=None, model=None):
     """Vision adjudication of ONE gray-zone near-duplicate pair (Heavy media de-dup).
     `a`,`b` = (mime, bytes). Returns {"same": bool, "confidence": float}. The caller does
     the cheap perceptual/sha pre-filter and only sends AI the genuinely ambiguous pairs."""
-    provider, key, model = _resolve(provider or provider_for_area("dedupe_media"),
-                                    model or model_for_area("dedupe_media"))
+    provider, key, model = _resolve_area("dedupe_media", provider, model)
     system = area_prompt("dedupe_media")
     text = _complete_vision(provider, key, model, system,
                             "Pair 1 — Image 1 is A, Image 2 is B. Same image?", [a, b])
@@ -2551,8 +2543,7 @@ def same_image(a, b, provider=None, model=None):
 def categorize_media(image, kinds, provider=None, model=None):
     """Classify one ambiguous image into the right asset kind (Heavy). `image`=(mime,bytes),
     `kinds`=allowed kind names. Returns {"kind": str|None, "confidence": float}."""
-    provider, key, model = _resolve(provider or provider_for_area("categorize"),
-                                    model or model_for_area("categorize"))
+    provider, key, model = _resolve_area("categorize", provider, model)
     system = area_prompt("categorize", kinds=", ".join(kinds))
     text = _complete_vision(provider, key, model, system, "Classify this image.", [image])
     obj = _json(text) or {}
@@ -2573,8 +2564,7 @@ def consensus_attributes(title, per_attr, provider=None, model=None):
     for the kinds the model chose to adjudicate (it may omit ones it can't improve)."""
     if not per_attr:
         return {}
-    provider, key, model = _resolve(provider or provider_for_area("consensus"),
-                                    model or model_for_area("consensus"))
+    provider, key, model = _resolve_area("consensus", provider, model)
     system = area_prompt("consensus", title=title)
     lines = []
     for kind, pv in per_attr.items():
@@ -2718,8 +2708,7 @@ def _clean_profile(obj):
 def infer_file_profile(sample_text, systems_text, variables_text, current,
                        provider=None, model=None):
     """Crawl-sample → a proposed file-organization profile (dict). Raises on error."""
-    provider, key, model = _resolve(provider or provider_for_area("fileprofile"),
-                                    model or model_for_area("fileprofile"))
+    provider, key, model = _resolve_area("fileprofile", provider, model)
     system = area_prompt("fileprofile", variables=variables_text,
                          systems=systems_text, current=current)
     text = _complete_text(provider, key, model, system,
@@ -2731,8 +2720,7 @@ def file_command(command, profiles_text, systems_text, variables_text, current,
                  provider=None, model=None):
     """Natural-language request → a plan intent dict: either {profile_id,...} or an
     ad-hoc {target, m3u, rename, prune_empty}, plus scope/system/explanation."""
-    provider, key, model = _resolve(provider or provider_for_area("filecmd"),
-                                    model or model_for_area("filecmd"))
+    provider, key, model = _resolve_area("filecmd", provider, model)
     system = area_prompt("filecmd", profiles=profiles_text, variables=variables_text,
                          systems=systems_text, current=current)
     obj = _json(_complete_text(provider, key, model, system, command))
@@ -2745,8 +2733,7 @@ def model_source_layout(sample_text, systems_text, current, provider=None, model
     """Describe the CURRENT on-disk layout (system/group folders, intermixed media)
     — for the Before panel. Returns a small dict {system_at, groups, media, summary}.
     Reuses the fileprofile area's provider/model config with the filesource prompt."""
-    provider, key, model = _resolve(provider or provider_for_area("filesource"),
-                                    model or model_for_area("filesource"))
+    provider, key, model = _resolve_area("filesource", provider, model)
     system = area_prompt("filesource", systems=systems_text, current=current)
     obj = _json(_complete_text(provider, key, model, system,
                                "Current file paths (sample):\n" + sample_text))

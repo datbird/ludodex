@@ -39,10 +39,7 @@ from titlenorm import norm
 
 # Use the local repo copies (config.library_db points at the Deck producer path).
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 RA_DB = os.path.join(DATA, "ra.sqlite")
 LIB_DB = os.path.join(DATA, "game-library.sqlite")
 

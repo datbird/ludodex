@@ -32,6 +32,7 @@ MEDIA_INDEX = os.path.join(DATA, "media-index.sqlite")
 sys.path.insert(0, DIR)
 import compilations                              # noqa: E402  durable collection store
 import nongame                                   # noqa: E402  shared "not a game" rule
+import schema_once                               # noqa: E402  DDL once per process
 
 # Factual attributes the model can reasonably supply; scores/subjective kinds are
 # deliberately excluded. Holes in these drive the "missing" list + "missing" target.
@@ -205,6 +206,11 @@ def _rom_file_context(links, max_files=6, max_sibs=12):
 def _con():
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
+    schema_once.ensure(con, DB, _schema)
+    return con
+
+
+def _schema(con):
     con.execute("""CREATE TABLE IF NOT EXISTS findings(
         id INTEGER PRIMARY KEY, run_id INTEGER, norm_key TEXT, title TEXT,
         kind TEXT, status TEXT DEFAULT 'proposed', payload_json TEXT,
@@ -243,7 +249,6 @@ def _con():
             con.execute("ALTER TABLE scan_runs ADD COLUMN %s %s" % (col, decl))
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_nk ON findings(norm_key)")
     con.execute("CREATE INDEX IF NOT EXISTS ix_find_status ON findings(status)")
-    return con
 
 
 def _lib():
@@ -684,28 +689,6 @@ def accepted_ids():
         "SELECT id FROM findings WHERE status='accepted'")]
     con.close()
     return ids
-
-
-def runs_want_scores(ids=None):
-    """True if any of these findings (all pending 'accepted' if ids is None) belong to
-    a scan run flagged pull_scores — i.e. a Heavy wand run whose apply should refresh
-    the multi-source scores, not just the IGDB cache recompute every apply does."""
-    con = _con()
-    try:
-        if ids:
-            ph = ",".join("?" * len(ids))
-            q = ("SELECT 1 FROM findings f JOIN scan_runs r ON r.id=f.run_id "
-                 "WHERE r.pull_scores=1 AND f.id IN (%s) LIMIT 1" % ph)
-            row = con.execute(q, [int(i) for i in ids]).fetchone()
-        else:
-            row = con.execute(
-                "SELECT 1 FROM findings f JOIN scan_runs r ON r.id=f.run_id "
-                "WHERE r.pull_scores=1 AND f.status='accepted' LIMIT 1").fetchone()
-        return bool(row)
-    except sqlite3.OperationalError:
-        return False
-    finally:
-        con.close()
 
 
 def mark_applied(ids=None):

@@ -36,7 +36,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config                       # noqa: E402
 
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 CACHE_DIR = os.path.join(DATA, "libretro-dats")
 RAW = "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/%s/%s"
 TREE = ("https://api.github.com/repos/libretro/libretro-database/git/trees/"

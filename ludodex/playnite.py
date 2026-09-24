@@ -55,7 +55,6 @@ PLUGIN_GUIDS = {
     "402674cd-4af6-4886-b6ec-0e695bfa0688": "amazon",
     "00000000-0000-0000-0000-000000000000": "playnite",   # manual / emulated
 }
-SOURCE_GUIDS = {v: k for k, v in PLUGIN_GUIDS.items()}
 
 # Multi-valued attribute kinds (Playnite reference collections) -> stored as
 # distinct (kind, value) rows aggregated per game; round-trip as JSON arrays.
@@ -68,13 +67,3 @@ SCALAR_KINDS = ["release_date", "release_year", "playtime", "play_count",
                 "community_score", "favorite", "hidden", "version",
                 "description", "notes", "install_dir", "is_installed",
                 "install_size", "added", "last_activity"]
-
-
-# Playnite's three art slots <-> canonical media kind. (Playnite has no separate
-# logo/screenshot slots; 'icon' is sourced per the playnite_icon_source config.)
-MEDIA_SLOTS = {"cover": "CoverImage", "background": "BackgroundImage",
-               "icon": "Icon"}
-
-
-def source_for_guid(guid):
-    return PLUGIN_GUIDS.get((guid or "").strip().lower(), "playnite")

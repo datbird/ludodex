@@ -135,11 +135,6 @@ def lb_kind(folder):
                   file=sys.stderr)
     return k
 
-# Video / manual roots (sibling of Images/), matched by sanitized Title too.
-VIDEO_DIR = "Videos"
-MANUAL_DIR = "Manuals"
-
-
 # --- platform name map: our label <-> LaunchBox display name ---------------- #
 # LaunchBox uses full canonical names (and the file is named for the platform).
 TO_LB_PLATFORM = {

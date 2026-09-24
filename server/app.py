@@ -56,6 +56,7 @@ import compilations    # noqa: E402  durable collections/compilations store (own
 import igdb_enrich      # noqa: E402  IGDB cache resolvers (cross-platform releases + systems)
 import console_eras     # noqa: E402  emulation platform era windows (year-plausibility gate)
 import entry_res        # noqa: E402  per-entry IGDB resolution overrides (same-title split)
+import catalog_patch    # noqa: E402  surgical catalog patches + shared entry-row rules
 import unfold           # noqa: E402  per-entry "keep this on its own card" pins
 import medialang        # noqa: E402  per-asset media language classification + filter
 import framing         # noqa: E402  per-game/per-kind image framing (position + zoom)
@@ -438,13 +439,30 @@ def ro(path):
     return con
 
 
+def _meta_cache():
+    """Path of the metadata cache. A function, not a constant: tests repoint DATA."""
+    return os.path.join(DATA, "metadata-cache.sqlite")
+
+
+def _has_col(con, table, col):
+    return col in _table_cols(con, table)
+
+
+def _table_cols(con, table):
+    """The column names of `table`, or an empty set when it cannot be read."""
+    try:
+        return {r[1] for r in con.execute("PRAGMA table_info(%s)" % table)}
+    except sqlite3.Error:
+        return set()
+
+
 def _tags_con():
     """Durable user-tag store (origin 'ludodex'); survives catalog rebuilds, like
     pins/os. One row per (game, tag)."""
     con = sqlite3.connect(TAGS_DB)
     con.execute("""CREATE TABLE IF NOT EXISTS user_tags(
         norm_key TEXT, tag TEXT, created REAL, PRIMARY KEY(norm_key, tag))""")
-    if "created" not in {r[1] for r in con.execute("PRAGMA table_info(user_tags)")}:
+    if not _has_col(con, "user_tags", "created"):
         con.execute("ALTER TABLE user_tags ADD COLUMN created REAL")   # backing-store heal
     con.row_factory = sqlite3.Row
     return con
@@ -626,7 +644,7 @@ def _manual_con():
     con.execute("""CREATE TABLE IF NOT EXISTS manual_games(
         norm_key TEXT, title TEXT, source TEXT, platform TEXT,
         detail TEXT, added REAL, PRIMARY KEY(norm_key, source, platform))""")
-    have = {r[1] for r in con.execute("PRAGMA table_info(manual_games)")}  # backing-store heal
+    have = _table_cols(con, "manual_games")  # backing-store heal
     for col, decl in (("title", "TEXT"), ("detail", "TEXT"), ("added", "REAL")):
         if col not in have:
             con.execute("ALTER TABLE manual_games ADD COLUMN %s %s" % (col, decl))
@@ -679,7 +697,10 @@ def _ensure_catalog():
     CREATE INDEX ix_gattr_kv ON game_attributes(kind, value);
     CREATE INDEX ix_mlink_game ON metadata_links(game_id);
     CREATE INDEX ix_gtag_game ON game_tags(game_id);
+    CREATE INDEX ix_base ON games(base_key);
     """)
+    # ix_card and ix_parent are build_library's too, but this seed has no card_key or
+    # parent_key column (the read paths probe for them), so they wait for a real build.
     con.close()
 
 
@@ -769,8 +790,9 @@ def stats():
         # to a filtered library view, so counting entries here while the grid shows
         # cards makes the dashboard disagree with the page it opens. `_ct` is the one
         # definition; on an un-rebuilt catalog it is still COUNT(*).
+        _has_ck = _has_col(con, "games", "card_key")
         _ct = ("COUNT(DISTINCT COALESCE(g.card_key, g.entry_key))"
-               if _has_col(con, "games", "card_key") else "COUNT(*)")
+               if _has_ck else "COUNT(*)")
         g = con.execute("SELECT %s FROM games g%s" % (_ct, gw)).fetchone()[0]
         ident = con.execute("SELECT " + _ct + " FROM games g" +
                             (gw + " AND " if gw else " WHERE ") + IDENTIFIED_SQL).fetchone()[0]
@@ -802,10 +824,14 @@ def stats():
         # OWNED counts, like every other number on this card. Without the wanted=0
         # filter a wishlist-only title counted as owned on its store, so the per-source
         # totals could exceed `games` and disagreed with the source filter they link to.
-        by_source = {}
-        for s in COLUMN_SOURCES:
-            by_source[s] = con.execute(
-                "SELECT " + _ct + " FROM games g WHERE g.has_%s=1%s" % (s, and_w)).fetchone()[0]
+        # One pass for every column source: the same count per source, taken with a
+        # CASE so a row only counts toward the sources it has (NULL is never counted).
+        _cts = [("COUNT(DISTINCT CASE WHEN g.has_%s=1 "
+                 "THEN COALESCE(g.card_key, g.entry_key) END)" % s) if _has_ck else
+                ("COUNT(CASE WHEN g.has_%s=1 THEN 1 END)" % s)
+                for s in COLUMN_SOURCES]
+        by_source = dict(zip(COLUMN_SOURCES, con.execute(
+            "SELECT " + ", ".join(_cts) + " FROM games g" + gw).fetchone()))
         # dynamic sources (ea/playnite/etc.) live only in the sources table
         for row in con.execute("SELECT s.source, COUNT(DISTINCT s.game_id) c FROM sources s "
                                "JOIN games g ON g.id=s.game_id" +
@@ -950,13 +976,6 @@ def _order_by(sort, extra=None):
             parts.append("%s %s" % (expr, d))
     parts.append("g.canonical_title COLLATE NOCASE ASC")
     return " ORDER BY " + ", ".join(parts)
-
-
-def _has_col(con, table, col):
-    try:
-        return any(r[1] == col for r in con.execute("PRAGMA table_info(%s)" % table))
-    except sqlite3.Error:
-        return False
 
 
 # A game is "identified" once it's a real, known title: a provider match (IGDB /
@@ -1108,14 +1127,15 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     SOMEWHERE, or the only way to see a thing you own is to turn the setting off
     globally. It is the one status that shows them, and the only one that shows them."""
     where, args = [], []
-    has_w = _has_col(con, "games", "wanted")
-    has_ek = _has_col(con, "games", "entry_key")   # per-platform entries (DESIGN §11)
+    _gcols = _table_cols(con, "games")   # read once: this used to PRAGMA per column
+    has_w = "wanted" in _gcols
+    has_ek = "entry_key" in _gcols     # per-platform entries (DESIGN §11)
     # ONE CARD PER GAME (2026-08-25-single-game-entry-design.md). card_key groups the
     # per-platform entry rows by the GAME they are, folding ports, editions and
     # remasters. The rows below it are untouched: they still carry ownership, art and
     # everything publish addresses. Absent on an un-rebuilt catalog, and then every
     # branch here falls back to exactly what it served yesterday.
-    has_ck = _has_col(con, "games", "card_key")
+    has_ck = "card_key" in _gcols
     ckey = "COALESCE(g.card_key, g.entry_key)" if has_ck else None
     # ADD-ONS leave the grid. A DLC or expansion filed under an owned base game is
     # content for a game, not a game you own, so it must not inflate the library or its
@@ -1153,7 +1173,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         """Filter token -> (sql, args). Bare tokens hit FLAG_SQL; 'source:<x>'
         and 'system:<x>' match the sources table dynamically."""
         if tok == "has_cover":               # display rule, not the naive one
-            return _has_cover_sql(has_ek, _has_col(con, "games", "game_key")), []
+            return _has_cover_sql(has_ek, ("game_key" in _gcols)), []
         if tok in FLAG_SQL:
             return FLAG_SQL[tok], []
         if tok == "low_confidence":              # task #13 — threshold is a live config value
@@ -1255,7 +1275,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         # (its game_key is title:<nk>, the neutral art's is igdb:<id>) forfeits it — the
         # identity match replaces the old base_key era-marker test. (g.* outer refs are
         # legal in a subquery WHERE; only ORDER BY forbids them.)
-        _hasgk = _has_col(con, "games", "game_key")
+        _hasgk = "game_key" in _gcols
         _gk_gate = (" AND md.game_key=g.game_key" if _hasgk else "")
         _neutral = " AND COALESCE(md.system,'')=''" + _gk_gate
         # Neutral art is ALSO reachable by game IDENTITY across norm_keys: a game whose title
@@ -1286,7 +1306,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     if has_ck:
         rep_order = ("%s DESC, (g.has_emulation=0) DESC, g.n_sources DESC, "
                      "COALESCE(g.platform,'') ASC, g.id ASC"
-                     % _has_cover_sql(has_ek, _has_col(con, "games", "game_key")))
+                     % _has_cover_sql(has_ek, ("game_key" in _gcols)))
         rep = (" AND g.id IN (SELECT id FROM (SELECT g.id AS id, ROW_NUMBER() OVER ("
                "PARTITION BY " + ckey + " ORDER BY " + rep_order + ") rn "
                "FROM games g" + clause + ") WHERE rn=1)")
@@ -1311,7 +1331,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
     # The card's name, falling back to this entry's own title on an un-rebuilt catalog.
     # A card that collapses three editions must not wear one edition's name.
     _title = ("COALESCE(g.card_title, g.canonical_title) AS canonical_title, "
-              if _has_col(con, "games", "card_title") else "g.canonical_title, ")
+              if ("card_title" in _gcols) else "g.canonical_title, ")
     base = (
         "SELECT g.norm_key, " + eksel + cksel + _title + nsrc + nkind +
         "g.sources_summary, g.has_emulation AS is_emulation, " + wsel + plats +
@@ -1329,7 +1349,7 @@ def _query_games(con, q=None, source=None, platform=None, has_kind=None,
         _order_by(sort, {"ludodex_score": (score, "DESC"),
                          # sort on the DISPLAY rule, same as the filter and the grid
                          "has_cover": (_has_cover_sql(
-                             has_ek, _has_col(con, "games", "game_key")), "DESC")})
+                             has_ek, ("game_key" in _gcols)), "DESC")})
         + " LIMIT ? OFFSET ?")
     # imported-origin tags live in the catalog's game_tags (absent in an older DB)
     imp = ("(SELECT group_concat(gt.origin||':'||gt.tag, char(31)) FROM game_tags gt "
@@ -1632,7 +1652,7 @@ def _place_provider_legacy():
     """
     import provider_ids
     import screenscraper as _ss
-    mcp = os.path.join(DATA, "metadata-cache.sqlite")
+    mcp = _meta_cache()
     if not os.path.exists(mcp) or not os.path.exists(LIBRARY_DB):
         return
     con = sqlite3.connect(mcp)
@@ -1794,7 +1814,7 @@ def _spotlight_seconds():
 #  repo, per the media_mode preference. Complements materialize-on-serve (lazy).
 # --------------------------------------------------------------------------- #
 _MEDIA_JOB = {"job": None}
-_MEDIA_LOCK = threading.Lock()
+_MEDIA_JOB_LOCK = threading.Lock()   # NOT _MEDIA_LOCK: that name belongs to the reconcile queue
 
 
 def _media_worker(mode):
@@ -1839,7 +1859,7 @@ def _media_worker(mode):
 def media_materialize(body: dict = Body(default={})):
     """Hydrate the local media repo now. mode defaults to the media_mode pref;
     'all' pulls every candidate, otherwise just the chosen asset per game/kind."""
-    with _MEDIA_LOCK:
+    with _MEDIA_JOB_LOCK:
         cur = _MEDIA_JOB["job"]
         if cur and cur.get("running"):
             raise HTTPException(409, "a media download is already running")
@@ -1874,7 +1894,7 @@ def _match_worker(force):
         if not force:
             # Only the games that have no recorded identity yet (or a stale miss) — the
             # rule for "still to do" lives in one place, not in this loop.
-            _mcp = os.path.join(DATA, "metadata-cache.sqlite")
+            _mcp = _meta_cache()
             # ensure_tables CREATES the file. The read-only handle was opened FIRST, so
             # on a fresh install the very first non-forced provider match died with
             # "unable to open database file" — and the write connection it was handed
@@ -2047,6 +2067,12 @@ def providers_scope_set(body: dict = Body(...)):
     return providers_scope()
 
 
+# The providers a per-game "Fetch from..." can pull from, in menu order. The matched-
+# providers report lists exactly these, and the fetch endpoint accepts exactly these
+# (plus the web search, which has no match to report).
+PER_GAME_FETCH_PROVIDERS = ("igdb", "screenscraper", "steamgriddb", "steam")
+
+
 @app.get("/api/media/matched-providers/{norm_key}")
 def media_matched_providers(norm_key: str):
     """Providers this game is MATCHED to, for the "Fetch from…" menu (spec §2.5).
@@ -2056,7 +2082,6 @@ def media_matched_providers(norm_key: str):
     a missing feature".
     """
     base, _plat = _split_entry_key(norm_key)
-    known = ["igdb", "screenscraper", "steamgriddb", "steam"]
     links, kinds = {}, {}
     lc = ro(LIBRARY_DB)
     try:
@@ -2092,7 +2117,7 @@ def media_matched_providers(norm_key: str):
         "id": links.get(p, {}).get("id"),
         "url": links.get(p, {}).get("url"),
         "holds": kinds.get(p, {}),
-    } for p in known]}
+    } for p in PER_GAME_FETCH_PROVIDERS]}
 
 
 @app.post("/api/media/fetch/{norm_key}")
@@ -2111,8 +2136,7 @@ def media_fetch_provider(norm_key: str, body: dict = Body(default={})):
     base, _plat = _split_entry_key(norm_key)
     provider = (body or {}).get("provider") or None
     kinds = [k for k in ((body or {}).get("kinds") or []) if k] or None
-    if provider and provider not in ("igdb", "screenscraper", "steamgriddb", "steam",
-                                     "web"):
+    if provider and provider not in PER_GAME_FETCH_PROVIDERS + ("web",):
         raise HTTPException(400, "unknown provider %r" % provider)
     con = media_choose.con_index()
     try:
@@ -2464,14 +2488,9 @@ def _refresh_game_row(con, gid, new_source):
     """Recompute n_sources/n_kinds/summary (+ set has_<source>) after adding a row."""
     srcs = con.execute("SELECT source, platform FROM sources WHERE game_id=?",
                        (gid,)).fetchall()
-    kinds = {}
-    for s, p in srcs:
-        kinds.setdefault(s, set()).add(p)
-    parts = [grp + ":" + ",".join(sorted(kinds[grp]))
-             for grp in ("emulation", "archive") if grp in kinds]
-    parts += sorted(k for k in kinds if k not in ("emulation", "archive"))
+    summary, kinds = catalog_patch.sources_summary(srcs)
     sets = "sources_summary=?, n_sources=?, n_kinds=?"
-    args = ["; ".join(parts), len(srcs), len(kinds)]
+    args = [summary, len(srcs), len(kinds)]
     if new_source in COLUMN_SOURCES:
         sets += ", has_%s=1" % new_source
     con.execute("UPDATE games SET %s WHERE id=?" % sets, args + [gid])
@@ -4380,13 +4399,25 @@ def _emulation_consoles(nk):
         con.close()
 
 
+def _igdb_record(con, iid, default=None):
+    """The cached IGDB payload for one id from a metadata-cache connection, parsed.
+    `default` when there is no row, an empty payload, or JSON that will not parse."""
+    r = con.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?", (iid,)).fetchone()
+    if not r or not r[0]:
+        return default
+    try:
+        return json.loads(r[0])
+    except Exception:
+        return default
+
+
 def _igdb_year_from_meta(mc, iid):
     """Release year of a cached IGDB record (from first_release_date), or None."""
-    r = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?", (iid,)).fetchone()
-    if not r or not r[0]:
+    rec = _igdb_record(mc, iid)
+    if not isinstance(rec, dict):
         return None
     try:
-        d = json.loads(r[0]).get("first_release_date")
+        d = rec.get("first_release_date")
         return time.gmtime(int(d)).tm_year if d else None
     except (ValueError, OverflowError, OSError, TypeError):
         return None
@@ -4439,7 +4470,7 @@ def _store_locked_igdb(nk, proposed_id):
     norm_key stay era-separated (their own console art), never adopting the store id."""
     if not proposed_id:
         return False
-    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    cache = _meta_cache()
     if not os.path.exists(cache):
         return False
     try:
@@ -4677,7 +4708,7 @@ def _score_confidence_ai(nks, should_stop=lambda: False, chunk=20):
         hi = int(config.get("match_ai_band_hi") or 70)
     except (TypeError, ValueError):
         lo, hi = 40, 70
-    mcpath = os.path.join(DATA, "metadata-cache.sqlite")
+    mcpath = _meta_cache()
     band = []                                   # entries whose base confidence is gray-zone
     try:
         lib, mc = ro(LIBRARY_DB), ro(mcpath)
@@ -4697,12 +4728,7 @@ def _score_confidence_ai(nks, should_stop=lambda: False, chunk=20):
                 except (IndexError, ValueError):
                     continue
                 if iid not in recs:
-                    row = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?",
-                                     (iid,)).fetchone()
-                    try:
-                        recs[iid] = json.loads(row[0]) if row and row[0] else {}
-                    except Exception:
-                        recs[iid] = {}
+                    recs[iid] = _igdb_record(mc, iid, {})
                 rec = recs[iid]
                 base, _ = matchconf.match_confidence(mb.get(nk), nk, rec, plat)
                 if lo <= base <= hi:
@@ -5142,7 +5168,7 @@ def _igdb_declared_collections(nks):
     import bundlemap
     recorded = []
     try:
-        mcp = os.path.join(DATA, "metadata-cache.sqlite")
+        mcp = _meta_cache()
         if not os.path.exists(mcp):
             return recorded
         mc = ro(mcp)
@@ -5370,8 +5396,8 @@ def _member_identity(nk, plat, ai_rescue=False):
         lc.close()
     if not r or not (r["canonical_title"] or "").strip():
         return 0
-    gid, title = r["id"], r["canonical_title"].strip()
-    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    title = r["canonical_title"].strip()
+    cache = _meta_cache()
     mc = sqlite3.connect(cache)
     try:
         mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY "
@@ -5541,18 +5567,17 @@ def _contamination_suspects(nks):
         lc.close()
     if not rows:
         return out
-    mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+    mc = ro(_meta_cache())
     try:
         for nk, platform, gk, title in rows:
             try:
                 iid = int(gk.split(":")[1])
             except (ValueError, IndexError):
                 continue
-            r = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?",
-                           (iid,)).fetchone()
-            if not r or not r[0]:
+            # one unparseable payload skips its entry instead of ending the whole pass
+            g = _igdb_record(mc, iid)
+            if not isinstance(g, dict):
                 continue
-            g = json.loads(r[0])
             if not platmap.contamination_suspect(platform, g.get("platforms")):
                 continue
             yr = None
@@ -5575,7 +5600,7 @@ def _detach_entry(nk, platform, now):
     Also drops the ScreenScraper match and its media for this title. SS art is stored
     system-tagged and is NOT gated on game_key, so without this a ROM detached from a wrong
     match keeps displaying the wrong game's box art — the detach looks like it did nothing."""
-    mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    mc = sqlite3.connect(_meta_cache())
     try:
         entry_res.ensure(mc)
         entry_res.set_detach(mc, nk, platform)
@@ -5704,7 +5729,7 @@ def resolve_per_entry_identity(nks, should_stop=lambda: False, threshold=None, a
         groups.setdefault(nk, []).append({"platform": plat, "title": title})
     if not groups:
         return result
-    mcp = os.path.join(DATA, "metadata-cache.sqlite")
+    mcp = _meta_cache()
     mc_ro = ro(mcp)
     try:
         detached_set = entry_res.load_detached(mc_ro)
@@ -5719,10 +5744,8 @@ def resolve_per_entry_identity(nks, should_stop=lambda: False, threshold=None, a
             primary_id = pr[0] if pr and pr[0] else None
             if not primary_id:
                 continue
-            pm = mc_ro.execute(
-                "SELECT payload_json FROM igdb_meta WHERE igdb_id=?", (primary_id,)).fetchone()
             try:
-                pname = json.loads(pm[0]).get("name") if pm and pm[0] else None
+                pname = (_igdb_record(mc_ro, primary_id) or {}).get("name")
             except Exception:
                 pname = None
             if not pname:
@@ -6017,7 +6040,6 @@ def _fetch_ref_text(url, max_bytes=500_000, max_chars=6000):
     """Fetch one user-provided reference URL → readable text (best-effort). HTML is
     stripped to text; empty string on any failure. Used to ground a wand re-run in the
     exact sources the user found, instead of the model's own blind web search."""
-    import re as _re
     import html as _html
     try:
         with _safe_urlopen(
@@ -6027,11 +6049,11 @@ def _fetch_ref_text(url, max_bytes=500_000, max_chars=6000):
             data = resp.read(max_bytes)
         text = data.decode("utf-8", "replace")
         if "html" in ctype.lower() or "<html" in text[:2000].lower():
-            text = _re.sub(r"(?is)<(script|style|nav|footer|header|aside)[^>]*>.*?</\1>",
+            text = re.sub(r"(?is)<(script|style|nav|footer|header|aside)[^>]*>.*?</\1>",
                            " ", text)
-            text = _re.sub(r"(?is)<[^>]+>", " ", text)
+            text = re.sub(r"(?is)<[^>]+>", " ", text)
             text = _html.unescape(text)
-        return _re.sub(r"\s+", " ", text).strip()[:max_chars]
+        return re.sub(r"\s+", " ", text).strip()[:max_chars]
     except Exception as e:
         print("ref fetch %s: %s" % (url, str(e)[:120]), file=sys.stderr)
         return ""
@@ -6040,9 +6062,8 @@ def _fetch_ref_text(url, max_bytes=500_000, max_chars=6000):
 def _fetch_refs(refs):
     """Normalize the request's `refs` (list or newline/comma string) → [{url,text}] for the
     valid, fetchable http(s) links (cap 5)."""
-    import re as _re
     if isinstance(refs, str):
-        refs = _re.split(r"[\s,]+", refs)
+        refs = re.split(r"[\s,]+", refs)
     out = []
     for u in (refs or [])[:8]:
         u = (u or "").strip()
@@ -6059,9 +6080,8 @@ def _fetch_refs(refs):
 def _resolve_igdb_ref(raw):
     """A user-provided IGDB reference — a game URL (…/games/<id-or-slug>), a bare slug, or
     a numeric id — resolved to the numeric IGDB id (or None). The manual-pin escape hatch."""
-    import re as _re
     raw = (raw or "").strip()
-    m = _re.search(r"igdb\.com/games/([^/?#]+)", raw, _re.I)
+    m = re.search(r"igdb\.com/games/([^/?#]+)", raw, re.I)
     token = (m.group(1) if m else raw).strip().strip("/")
     if token.isdigit():
         return int(token)
@@ -6086,14 +6106,13 @@ def _map_igdb_attrs(iid):
         return {}
     try:
         from igdb import map_record as _igdb_map
-        mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+        mc = ro(_meta_cache())
         try:
-            r = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?",
-                           (iid,)).fetchone()
+            rec = _igdb_record(mc, iid)
         finally:
             mc.close()
-        if r and r["payload_json"]:
-            return _igdb_map(json.loads(r["payload_json"])) or {}
+        if rec is not None:
+            return _igdb_map(rec) or {}
     except Exception:
         pass
     return {}
@@ -6188,9 +6207,7 @@ def _apply_identity(nk, iid, plat=None, name=None, detach=False):
                         "VALUES(?,?,?,?,?)", (gid, "igdb", str(iid), None,
                         "https://www.igdb.com/games/%d" % iid))
             if name:
-                con.execute("UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
-                            "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
-                            "('emulation','archive'))", (name, gid, gid))
+                catalog_patch.rename_if_rom_only(con, gid, name)
             _fill_provider_attrs(con, gid, (igdb_attrs, "igdb"), (ss_attrs, "screenscraper"))
         con.commit()
     finally:
@@ -6302,7 +6319,7 @@ def aimeta_pin(body: dict = Body(default={})):
             plat = next((p for p in _plats if p == _np or p == plat), plat)
     now = int(time.time())
     name = None
-    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    cache = _meta_cache()
     mc = sqlite3.connect(cache)
     try:
         mc.execute("CREATE TABLE IF NOT EXISTS igdb_resolution(norm_key TEXT PRIMARY KEY, "
@@ -6395,15 +6412,7 @@ def aimeta_pick_art(body: dict = Body(default={})):
     if not ai.area_available("art"):
         raise HTTPException(400, "AI art picking isn't configured (set an AI provider "
                                  "for the 'art' area in Settings › AI).")
-    title = nk
-    lc = ro(LIBRARY_DB)
-    try:
-        r = lc.execute("SELECT canonical_title FROM games WHERE norm_key=? LIMIT 1",
-                       (nk,)).fetchone()
-        if r and r["canonical_title"]:
-            title = r["canonical_title"]
-    finally:
-        lc.close()
+    title = _game_title(nk) or nk
     kinds = body.get("kinds") or None
     if kinds:
         kinds = tuple(k for k in kinds if k in media.SCALAR_KINDS)
@@ -6476,7 +6485,7 @@ def _provider_match_state(nk):
     # and one a reviewer should not read as work outstanding.
     out = {"matched": [], "missed": [], "unattempted": [], "ineligible": []}
     try:
-        mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+        mc = ro(_meta_cache())
     except Exception:                              # noqa: BLE001
         return out
     try:
@@ -6579,7 +6588,7 @@ def _manual_edits(nk):
     it). {"identity": bool (a manual identity pin), "attrs": [kinds manually overridden]}."""
     identity = False
     try:
-        mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+        mc = ro(_meta_cache())
         try:
             if mc.execute("SELECT 1 FROM igdb_resolution WHERE norm_key=? AND "
                           "matched_by='manual'", (nk,)).fetchone():
@@ -6617,7 +6626,7 @@ def _identity_provenance(nk):
     that must never sit on a commercial IGDB identity (drives the mismatch warning)."""
     prov = None
     try:
-        mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+        mc = ro(_meta_cache())
         try:
             r = mc.execute("SELECT matched_by FROM igdb_resolution WHERE norm_key=?",
                            (nk,)).fetchone()
@@ -6732,17 +6741,14 @@ def aimeta_accept_all(body: dict = Body(default={})):
     # crash; deciding every row first is what stops any later failure splitting the batch.
     ids = [f["id"] for f in aimeta.findings_list(status="proposed", limit=5000)
            if float(f["confidence"] or 0) >= minc]
-    n = 0
-    for fid in ids:
-        aimeta.set_status(fid, "accepted")
-        n += 1
+    n = aimeta.set_status_many(ids, "accepted")     # one transaction for the batch
     return {"accepted": n, "counts": aimeta.findings_counts()}
 
 
 def _igdb_attrs_for(nk):
     """Raw {kind: value} an accepted IGDB match supplies for a game."""
     import igdb
-    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    cache = _meta_cache()
     if not os.path.exists(cache):
         return {}
     c = sqlite3.connect(cache)
@@ -6800,25 +6806,39 @@ def _art_adjudicated(nk, scope="all"):
     every kind). A game marked 'all' is covered for any request; one marked 'cover'
     still qualifies for a later 'all' pass — Heavy must get to judge the kinds Light
     never looked at."""
+    return nk in _art_adjudicated_set([nk], scope)
+
+
+def _art_adjudicated_set(keys, scope="all"):
+    """The subset of `keys` already adjudicated at `scope` (see _art_adjudicated), read
+    with ONE connection. A pass over thousands of keys used to open the index per key."""
+    keys = list(keys)
+    done = set()
     try:
         c = ro(INDEX_DB)
         try:
-            try:
-                row = c.execute("SELECT scope FROM art_adjudicated WHERE norm_key=?",
-                                (nk,)).fetchone()
-            except sqlite3.OperationalError:
-                # pre-scope marker table: every existing mark came from an all-kinds
-                # caller, so treat it as 'all'
-                return c.execute("SELECT 1 FROM art_adjudicated WHERE norm_key=?",
-                                 (nk,)).fetchone() is not None
-            if not row:
-                return False
-            marked = row[0] or "all"
-            return marked == "all" or marked == scope
+            for i in range(0, len(keys), 900):     # SQLITE_MAX_VARIABLE_NUMBER
+                part = keys[i:i + 900]
+                ph = ",".join("?" * len(part))
+                try:
+                    rows = c.execute("SELECT norm_key, scope FROM art_adjudicated "
+                                     "WHERE norm_key IN (%s)" % ph, part).fetchall()
+                except sqlite3.OperationalError:
+                    # pre-scope marker table: every existing mark came from an all-kinds
+                    # caller, so treat it as 'all'
+                    rows = [(r[0], "all") for r in c.execute(
+                        "SELECT norm_key FROM art_adjudicated WHERE norm_key IN (%s)"
+                        % ph, part)]
+                for k, marked in rows:
+                    marked = marked or "all"
+                    if marked == "all" or marked == scope:
+                        done.add(k)
         finally:
             c.close()
-    except Exception:
-        return False
+    except Exception as e:                     # noqa: BLE001
+        # keep what was already read: an empty answer here re-buys every paid verdict
+        print("art_adjudicated read: %s" % str(e)[:120], file=sys.stderr)
+    return done
 
 
 def _mark_art_adjudicated(nk, now, scope="all"):
@@ -6831,8 +6851,7 @@ def _mark_art_adjudicated(nk, now, scope="all"):
         try:
             c.execute("CREATE TABLE IF NOT EXISTS art_adjudicated("
                       "norm_key TEXT PRIMARY KEY, at INTEGER)")
-            cols = {r[1] for r in c.execute("PRAGMA table_info(art_adjudicated)")}
-            if "scope" not in cols:
+            if not _has_col(c, "art_adjudicated", "scope"):
                 c.execute("ALTER TABLE art_adjudicated ADD COLUMN scope TEXT")
             prev = c.execute("SELECT scope FROM art_adjudicated WHERE norm_key=?",
                              (nk,)).fetchone()
@@ -7071,7 +7090,8 @@ def _ai_art_pass(keys, heavy=False, should_stop=lambda: False, progress=None):
     n = [0]
     stop = threading.Event()
     lock = threading.Lock()
-    todo = [k for k in keys if not _art_adjudicated(k, scope)]
+    _done = _art_adjudicated_set(keys, scope)
+    todo = [k for k in keys if k not in _done]
 
     def _one(k):
         if stop.is_set() or should_stop():
@@ -7118,7 +7138,7 @@ def _aimeta_apply(should_stop, only_ids=None):
     start so a coalesced drain never marks findings accepted mid-run but not processed
     here."""
     import igdb
-    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    cache = _meta_cache()
     now = int(time.time())
     if only_ids is None:                       # capture the set this pass applies
         only_ids = aimeta.accepted_ids()
@@ -7304,7 +7324,7 @@ def _apply_surgical_meta(touched):
     surgical_detached = set()
     if touched:
         try:
-            _mcd = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+            _mcd = ro(_meta_cache())
             try:
                 surgical_detached = {e for e in entry_res.load_detached(_mcd)
                                      if e[0] in touched}
@@ -7323,18 +7343,13 @@ def _apply_surgical_meta(touched):
     manual_pins = set()                  # title-level hand pins
     manual_entry_pins = set()            # (nk, platform) hand pins
     if touched:
-        mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+        mc = ro(_meta_cache())
         try:
             for pm in pms.values():
-                r = mc.execute("SELECT payload_json FROM igdb_meta WHERE igdb_id=?",
-                               (pm["igdb_id"],)).fetchone()
-                if r and r["payload_json"]:
-                    try:
-                        _rec = json.loads(r["payload_json"])
-                        igdb_records[pm["igdb_id"]] = _rec
-                        igdb_names[pm["norm_key"]] = (_rec.get("name") or "").strip()
-                    except ValueError:
-                        pass
+                _rec = _igdb_record(mc, pm["igdb_id"])
+                if isinstance(_rec, dict):
+                    igdb_records[pm["igdb_id"]] = _rec
+                    igdb_names[pm["norm_key"]] = (_rec.get("name") or "").strip()
             qs = ",".join("?" * len(touched))
             tt = tuple(touched)
             try:
@@ -7490,10 +7505,7 @@ def _apply_surgical_meta(touched):
                 # rename to the matched title — only ROM/archive-only entries (store
                 # titles are already clean; build_library guards the same way)
                 if name and apply_igdb:
-                    con.execute(
-                        "UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
-                        "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
-                        "('emulation','archive'))", (name, gid, gid))
+                    catalog_patch.rename_if_rom_only(con, gid, name)
                 # provider links (replace this provider's link for the entry)
                 if apply_igdb:
                     con.execute("DELETE FROM metadata_links WHERE game_id=? AND "
@@ -7575,7 +7587,6 @@ def _fetch_media_web(con, nk, title, now):
     it's trusted. Private-use catalog art (self-hosted, single user). Returns count added."""
     import media_fetch as _mf
     import media_web
-    import urllib.request
     ctx = aimeta.game_context(nk) or {}
     systems, year = ctx.get("systems"), ctx.get("year")
     gkey = None
@@ -7675,7 +7686,7 @@ def _pull_ss_media(con, nk, systems, queries, now):
     m = None
     try:
         import provider_ids
-        mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+        mc = sqlite3.connect(_meta_cache())
         try:
             provider_ids.ensure_tables(mc)
             # ONE PLATFORM AT A TIME — ScreenScraper's record is per system. The media
@@ -7853,7 +7864,6 @@ def _enrich_media(keys, con=None, web=False, provider=None, kinds=None,
            "web_added": 0}
     if not keys:
         return out
-    import media_fetch as _mf
 
     # 1. identity for every provider
     matched_here = False
@@ -7910,14 +7920,19 @@ def _enrich_media(keys, con=None, web=False, provider=None, kinds=None,
                     % ",".join("?" * len(_part)), _part)})
         finally:
             lcon.close()
+        done = _art_adjudicated_set(keys)
         for nk in keys:
             if should_stop():
                 break
-            if _art_adjudicated(nk):
+            # The set was read before the loop, and each verdict below is a paid call that
+            # can take seconds. Ask again right before spending, so a key another pass
+            # marked meanwhile is not bought twice.
+            if nk in done or _art_adjudicated(nk):
                 continue
             try:
                 _ai_adjudicate_game(nk, titles.get(nk, nk))
                 _mark_art_adjudicated(nk, now)
+                done.add(nk)
                 out["adjudicated"] += 1
             except Exception as e:             # noqa: BLE001
                 print("enrich ai %s: %s" % (nk, str(e)[:120]), file=sys.stderr)
@@ -7944,7 +7959,7 @@ def _title_aliases(nk, title, platforms, allow_ai=False):
     missed. `allow_ai` is off by default — this is the paid path, and it only ever runs
     where a tier has opted in.
     """
-    cache = os.path.join(DATA, "metadata-cache.sqlite")
+    cache = _meta_cache()
     con = sqlite3.connect(cache)
     try:
         con.execute("PRAGMA busy_timeout=15000")
@@ -8079,7 +8094,7 @@ def _match_providers(keys, should_stop=lambda: False, force=False,
     ss_creds = config.screenscraper_creds()
     if not (sgdb_key or ss_creds):
         return out
-    mc = sqlite3.connect(os.path.join(DATA, "metadata-cache.sqlite"))
+    mc = sqlite3.connect(_meta_cache())
     # ONE library handle for the whole batch. Each key used to open TWO read-only
     # connections of its own, in a loop the sweep drives with batches of five keys on up
     # to six ScreenScraper threads — sixty sqlite opens per wave, all against one file
@@ -8371,7 +8386,6 @@ def _wand_fill_media(nks, want_web, should_stop):
     nks = list(nks)
     if not nks:
         return
-    import media_fetch as _mf
     con = media_choose.con_index()
     try:
         con.execute("PRAGMA busy_timeout=30000")
@@ -8823,7 +8837,7 @@ def _igdb_slug(iid):
     URL can be built from — sits unused in every cached `igdb_meta` payload."""
     if not _IGDB_SLUGS:
         try:
-            mc = ro(os.path.join(DATA, "metadata-cache.sqlite"))
+            mc = ro(_meta_cache())
             try:
                 for iid_, payload in mc.execute(
                         "SELECT igdb_id, payload_json FROM igdb_meta"):
@@ -9006,7 +9020,7 @@ def game_detail(norm_key: str):
         # every copy on the CARD, not just the entry that was opened
         sources = _card_sources(
             con, (g["card_key"] if "card_key" in _keys and g["card_key"] else None), gid)
-        osmap = _os_map()
+        osmap = _os_map([(s["source"], str(s["source_id"])) for s in sources])
         for s in sources:
             oss = osmap.get((s["source"], str(s["source_id"])))
             if oss:
@@ -9015,15 +9029,17 @@ def game_detail(norm_key: str):
                 s["os"] = ["windows"]  # Epic Games Store is Windows-only (no Linux client)
             else:
                 s["os"] = None
+        _via_names = {}                  # one collection read per compilation, not per copy
         for s in sources:
             # A MATERIALIZED member's real source row carries via_collection — §13.2's
             # Collection column must show the compilation's name on it, exactly like
             # the synthetic read-time credit rows it replaced.
             _via = s.get("via_collection")
             if _via:
-                _cc = compilations.get_collection(DATA, _via)
-                s["collection"] = ((_cc or {}).get("name") or s.get("detail")
-                                   or _via)
+                if _via not in _via_names:
+                    _via_names[_via] = (compilations.get_collection(DATA, _via)
+                                        or {}).get("name")
+                s["collection"] = _via_names[_via] or s.get("detail") or _via
             else:
                 s.setdefault("collection", None)  # ordinary rows aren't credited
         # Collection credit (DESIGN §13): this game is owned via any COMPILATION the
@@ -9032,8 +9048,7 @@ def game_detail(norm_key: str):
         try:
             _bk_col = "g2.base_key" if "base_key" in _keys else "g2.norm_key"
             # catalogs built before via_collection existed have no such column
-            _has_via_col = any(r[1] == "via_collection"
-                               for r in con.execute("PRAGMA table_info(sources)"))
+            _has_via_col = _has_col(con, "sources", "via_collection")
             _seen_plat = {platform} | {a["platform"] for a in also}
             # Members that build_library MATERIALIZED already carry a real source row
             # stamped with via_collection, so re-emitting a synthetic credit here would
@@ -9315,7 +9330,7 @@ def _apply_ownership_live(norm_key: str, title: str):
 
 
 def _game_title(norm_key):
-    con = lib()
+    con = ro(LIBRARY_DB)            # a games-only read: none of lib()'s five ATTACHes
     try:
         r = con.execute("SELECT canonical_title FROM games WHERE norm_key=?",
                         (norm_key,)).fetchone()
@@ -9392,8 +9407,10 @@ def set_identity_disabled(norm_key: str, provider: str, body: dict = Body(...)):
     """Turn a metadata provider (igdb/screenscraper/…) off or on for this game. When
     off, its attributes + media drop out of use and the game falls back to the next
     provider's retained value (the read-time cascade in game_detail). Store-ownership
-    providers aren't disable-able — only metadata identities."""
-    if provider not in ("igdb", "screenscraper", "steamgriddb"):
+    providers aren't disable-able, only metadata identities: the provider_ids registry,
+    the same set the UI draws a toggle for (META_PROVIDERS in App.tsx)."""
+    import provider_ids
+    if provider not in provider_ids.PROVIDERS:
         raise HTTPException(400, "not a disable-able metadata provider")
     identity_disable.set_disabled(norm_key, provider, bool(body.get("disabled", True)))
     return {"disabled_identity": sorted(identity_disable.disabled_for(norm_key))}
@@ -9475,16 +9492,14 @@ def bulk_set_attribute(body: dict = Body(...)):
     keys = list(dict.fromkeys(keys))          # de-dupe, keep order
     if not keys:
         raise HTTPException(400, "no games in scope")
-    n = 0
-    for nk in keys:
-        try:
-            if clear:
-                overrides.clear_override(nk, kind)
-            else:
-                overrides.set_override(nk, kind, value, origin="manual")
-            n += 1
-        except ValueError:
-            pass
+    # One connection and one commit for the whole batch. The count stays what the
+    # per-key loop reported: a clear counted every key (an empty one included), a set
+    # only the keys it could write, which set_overrides returns.
+    if clear:
+        overrides.clear_overrides(keys, kind)
+        n = len(keys)
+    else:
+        n = overrides.set_overrides([(nk, kind, value) for nk in keys], origin="manual")
     return {"ok": True, "kind": kind, "count": n, "cleared": clear}
 
 
@@ -9649,24 +9664,29 @@ def _pins():
     con.execute("""CREATE TABLE IF NOT EXISTS pins(
         norm_key TEXT, kind TEXT, provider TEXT, ref TEXT, rank INTEGER,
         PRIMARY KEY(norm_key, kind, provider, ref))""")
-    if "rank" not in {r[1] for r in con.execute("PRAGMA table_info(pins)")}:
+    if not _has_col(con, "pins", "rank"):
         con.execute("ALTER TABLE pins ADD COLUMN rank INTEGER")   # backing-store heal
         con.commit()
     con.row_factory = sqlite3.Row
     return con
 
 
-def _os_map():
-    """(source, source_id) -> {windows, mac, linux} bools, from the durable OS store.
+def _os_map(pairs):
+    """(source, source_id) -> {windows, mac, linux} bools, from the durable OS store,
+    for just the `pairs` asked about (a detail page needs a handful, not the table).
     Populated by os_fetch.py; empty until then, so OS shows as “—”."""
     if not os.path.exists(OS_DB):
         return {}
     con = ro(OS_DB)
     try:
-        return {(r["source"], r["source_id"]):
-                {"windows": r["windows"], "mac": r["mac"], "linux": r["linux"]}
-                for r in con.execute("SELECT source, source_id, windows, mac, linux "
-                                     "FROM os_support")}
+        out = {}
+        for pair in set(pairs):
+            # IS, not =, so a NULL matches a NULL exactly as the old whole-table dict did
+            r = con.execute("SELECT windows, mac, linux FROM os_support "
+                            "WHERE source IS ? AND source_id IS ?", pair).fetchone()
+            if r:
+                out[pair] = {"windows": r["windows"], "mac": r["mac"], "linux": r["linux"]}
+        return out
     except sqlite3.OperationalError:
         return {}
     finally:
@@ -10010,7 +10030,6 @@ def _umedia_path(norm_key, kind):
 
 def _store_upload(norm_key, kind, data, ext, origin):
     """Write bytes into the content-addressed REPO and index them as a user upload."""
-    _ekey = norm_key
     norm_key = _split_entry_key(norm_key)[0]
     if kind not in media.KINDS:
         raise HTTPException(400, "unknown media kind %r" % kind)
@@ -10649,6 +10668,17 @@ def _card_related(con, card_key, graph=None):
             " GROUP BY COALESCE(g.card_key, g.entry_key) ORDER BY title", args)
         return [dict(r) for r in rows if r["card_key"] != card_key]
 
+    _igdb = []
+
+    def _igdb_cards():
+        """Every owned card keyed by an IGDB id. Read once: versions and remakes both
+        walk it, and it is a scan of the whole catalog."""
+        if not _igdb:
+            _igdb.append([k for (k,) in con.execute(
+                "SELECT DISTINCT COALESCE(card_key, entry_key) FROM games "
+                "WHERE COALESCE(card_key, entry_key) LIKE 'igdb:%'")])
+        return _igdb[0]
+
     # ---------------------------------------------------------------- other versions
     # Walk the OWNED cards, not the graph. The mirror holds 371,978 rows and scanning it
     # per request to find a handful of relatives is absurd; the library holds a few
@@ -10664,9 +10694,7 @@ def _card_related(con, card_key, graph=None):
             root = None
         if root:
             kin = []
-            for (k,) in con.execute(
-                    "SELECT DISTINCT COALESCE(card_key, entry_key) FROM games "
-                    "WHERE COALESCE(card_key, entry_key) LIKE 'igdb:%'"):
+            for k in _igdb_cards():
                 try:
                     if _version_root(int(k[5:]), graph) == root:
                         kin.append(k)
@@ -10693,9 +10721,7 @@ def _card_related(con, card_key, graph=None):
             _me = None
         if _me is not None:
             _owned_ids, _by_id = [], {}
-            for (k,) in con.execute(
-                    "SELECT DISTINCT COALESCE(card_key, entry_key) FROM games "
-                    "WHERE COALESCE(card_key, entry_key) LIKE 'igdb:%'"):
+            for k in _igdb_cards():
                 try:
                     _i = int(k[5:])
                 except ValueError:
@@ -10738,13 +10764,21 @@ def _card_related(con, card_key, graph=None):
         rows = _cards(
             "EXISTS(SELECT 1 FROM game_attributes ga WHERE ga.game_id=g.id "
             "AND ga.kind='series' AND ga.value=?)", [own])
-        # drop the crossovers, keeping any whose own title names this series
+        # drop the crossovers, keeping any whose own title names this series. One
+        # grouped count over the candidates, not one COUNT per related card.
+        _n_series = {}
+        _cand = [r["card_key"] for r in rows]
+        for _i in range(0, len(_cand), 900):        # SQLITE_MAX_VARIABLE_NUMBER
+            _part = _cand[_i:_i + 900]
+            _n_series.update((_r[0], _r[1]) for _r in con.execute(
+                "SELECT COALESCE(g.card_key, g.entry_key), COUNT(*) FROM games g "
+                "JOIN game_attributes ga ON ga.game_id=g.id "
+                "WHERE COALESCE(g.card_key, g.entry_key) IN (%s) AND ga.kind='series' "
+                "GROUP BY COALESCE(g.card_key, g.entry_key)"
+                % ",".join("?" * len(_part)), _part))
         keep = []
         for r in rows:
-            n = con.execute(
-                "SELECT COUNT(*) FROM games g JOIN game_attributes ga ON ga.game_id=g.id "
-                "WHERE COALESCE(g.card_key, g.entry_key)=? AND ga.kind='series'",
-                (r["card_key"],)).fetchone()[0]
+            n = _n_series.get(r["card_key"], 0)
             if n <= SERIES_MAX or _title_names(r.get("title") or "", own):
                 keep.append(r)
         out["series"] = keep
@@ -11686,9 +11720,8 @@ def _ea_connected():
     if not os.path.exists(tokf):
         return False
     try:
-        import json as _json
         with open(tokf) as f:               # polled every few seconds by the UI
-            t = _json.load(f)
+            t = json.load(f)
         return bool(t.get("access_token")) and t.get("expires_at", 0) > time.time()
     except Exception:
         return False
@@ -11715,13 +11748,12 @@ def _extract_token(raw, keys):
     the whole JSON blob ({"access_token": "..."}), a `key=value` / `key: value`
     pair (as copied from devtools), or the bare value on its own. `keys` lists the
     field names to look for, in priority order."""
-    import json as _json
     raw = (raw or "").strip()
     if not raw:
         return ""
     # 1. Full JSON object
     try:
-        obj = _json.loads(raw)
+        obj = json.loads(raw)
         if isinstance(obj, dict):
             for k in keys:
                 if obj.get(k):
@@ -11781,9 +11813,8 @@ def _epic_connected():
     if not os.path.exists(uf):
         return False
     try:
-        import json as _json
         with open(uf) as f:                 # polled every few seconds by the UI
-            return bool(_json.load(f).get("displayName"))
+            return bool(json.load(f).get("displayName"))
     except Exception:
         return False
 
@@ -11793,7 +11824,6 @@ def epic_connect(body: dict = Body(...)):
     """Accept whatever the user copies from Epic's redirect page — the full JSON,
     an `authorizationCode=…` pair, or the bare code — and hand it to legendary,
     which exchanges it for a refresh token that auto-renews from then on."""
-    import subprocess
     code = _extract_token((body or {}).get("value", ""),
                           ["authorizationCode", "code"])
     if not code:
@@ -11808,17 +11838,40 @@ def epic_connect(body: dict = Body(...)):
                 "error": "That code didn't work — codes are single-use, so open "
                          "Get Epic code again for a fresh one and paste it."}
     try:
-        import json as _json
         with open(os.path.expanduser("~/.config/legendary/user.json")) as f:
-            name = _json.load(f).get("displayName")
+            name = json.load(f).get("displayName")
     except Exception:
         name = None
     return {"ok": True, "account": name}
 
 
+def _token_cached(sub):
+    """(bool) True if a store login has been cached (DATA/.<sub>/tokens.json)."""
+    return os.path.exists(os.path.join(DATA, "." + sub, "tokens.json"))
+
+
+def _paste_connect(script, flag, secret, timeout, service, connected, bad,
+                   detail=True):
+    """The shared tail of a paste-a-credential connect: hand `secret` to `script` over
+    stdin (never argv, see _SECRET_SHIM), then prove the login landed with `connected`.
+    `bad` is the refusal shown to the user; `detail` appends the child's last stderr
+    line to it, which GOG's flow never did."""
+    try:
+        r = _run_secret(script, [flag], secret, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "account": None,
+                "error": "Couldn't reach %s: %s" % (service, e)}
+    if r.returncode != 0 or not connected():
+        if detail:
+            last = (r.stderr or "").strip().splitlines()[-1:] or [""]
+            bad = "%s (%s)" % (bad, last[0])
+        return {"ok": False, "account": None, "error": bad}
+    return {"ok": True, "account": None}
+
+
 def _gog_connected():
     """(bool) True if a GOG OAuth login has been cached (.gog/tokens.json)."""
-    return os.path.exists(os.path.join(DATA, ".gog", "tokens.json"))
+    return _token_cached("gog")
 
 
 @app.post("/api/services/gog/code")
@@ -11829,16 +11882,11 @@ def gog_connect(body: dict = Body(...)):
     code = _extract_token((body or {}).get("value", ""), ["code"])
     if not code:
         raise HTTPException(400, "no login code found in what you pasted")
-    try:
-        # the code goes over stdin, not argv — see _SECRET_SHIM
-        r = _run_secret("gog_owned.py", ["--code"], code, timeout=60)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return {"ok": False, "account": None, "error": "Couldn't reach GOG: %s" % e}
-    if r.returncode != 0 or not _gog_connected():
-        return {"ok": False, "account": None,
-                "error": "That code didn't work — codes are single-use, so open "
-                         "Get GOG code again for a fresh one and paste it."}
-    return {"ok": True, "account": None}
+    return _paste_connect(
+        "gog_owned.py", "--code", secret=code, timeout=60, service="GOG",
+        connected=_gog_connected, detail=False,
+        bad="That code didn't work — codes are single-use, so open "
+            "Get GOG code again for a fresh one and paste it.")
 
 
 def _nintendo_connected():
@@ -11871,7 +11919,7 @@ def nintendo_connect(body: dict = Body(...)):
 
 def _psn_connected():
     """(bool) True if a PSN login has been cached (.psn/tokens.json)."""
-    return os.path.exists(os.path.join(DATA, ".psn", "tokens.json"))
+    return _token_cached("psn")
 
 
 @app.post("/api/services/psn/npsso")
@@ -11882,23 +11930,17 @@ def psn_connect(body: dict = Body(...)):
     npsso = _extract_token((body or {}).get("value", ""), ["npsso"])
     if not npsso:
         raise HTTPException(400, "no npsso token found in what you pasted")
-    try:
-        # an npsso is a session credential — stdin, never argv (see _SECRET_SHIM)
-        r = _run_secret("psn_owned.py", ["--npsso"], npsso, timeout=60)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return {"ok": False, "account": None, "error": "Couldn't reach PSN: %s" % e}
-    if r.returncode != 0 or not _psn_connected():
-        detail = (r.stderr or "").strip().splitlines()[-1:] or [""]
-        return {"ok": False, "account": None,
-                "error": "That npsso didn't work — it expires quickly, so grab a "
-                         "fresh one from the ssocookie page and paste it. (%s)"
-                         % detail[0]}
-    return {"ok": True, "account": None}
+    # an npsso is a session credential: stdin, never argv
+    return _paste_connect(
+        "psn_owned.py", "--npsso", secret=npsso, timeout=60, service="PSN",
+        connected=_psn_connected,
+        bad="That npsso didn't work — it expires quickly, so grab a "
+            "fresh one from the ssocookie page and paste it.")
 
 
 def _xbox_connected():
     """(bool) True if an Xbox/Microsoft login has been cached (.xbox/tokens.json)."""
-    return os.path.exists(os.path.join(DATA, ".xbox", "tokens.json"))
+    return _token_cached("xbox")
 
 
 @app.post("/api/services/xbox/code")
@@ -11909,18 +11951,11 @@ def xbox_connect(body: dict = Body(...)):
     code = _extract_token((body or {}).get("value", ""), ["code"])
     if not code:
         raise HTTPException(400, "no auth code found in what you pasted")
-    try:
-        # stdin, not argv (see _SECRET_SHIM)
-        r = _run_secret("xbox_owned.py", ["--code"], code, timeout=90)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return {"ok": False, "account": None, "error": "Couldn't reach Xbox: %s" % e}
-    if r.returncode != 0 or not _xbox_connected():
-        detail = (r.stderr or "").strip().splitlines()[-1:] or [""]
-        return {"ok": False, "account": None,
-                "error": "That code didn't work — codes are single-use, so open Get "
-                         "Xbox code again for a fresh one and paste it. (%s)"
-                         % detail[0]}
-    return {"ok": True, "account": None}
+    return _paste_connect(
+        "xbox_owned.py", "--code", secret=code, timeout=90, service="Xbox",
+        connected=_xbox_connected,
+        bad="That code didn't work — codes are single-use, so open Get "
+            "Xbox code again for a fresh one and paste it.")
 
 
 # Device-code flow — the reliable Xbox connect: no address-bar code to race. We
@@ -11934,7 +11969,7 @@ def xbox_device_start():
     """Begin the Xbox device-code flow. Returns the short code + microsoft.com/link
     URL for the UI to display; the device_code stays here and is consumed by /poll."""
     try:
-        r = subprocess.run([sys.executable, os.path.join(PKG, "xbox_owned.py"),
+        r = subprocess.run([sys.executable, _script_path("xbox_owned.py"),
                             "--device-start"],
                            capture_output=True, text=True, timeout=30, cwd=DIR)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -13855,6 +13890,7 @@ threading.Thread(target=_backingstore_scheduler, daemon=True).start()
 # A file, not a service: optional, read-only, replaced wholesale. Everything here is
 # about telling the user what they have and letting them point at a different copy.
 _INDEX_DL = {"job": None}
+_INDEX_DL_LOCK = threading.Lock()
 
 # How the installed supplement GOT HERE — downloaded, or built on this machine. Stored in
 # config rather than stamped into the file, because the file's own identity_state records
@@ -14089,15 +14125,16 @@ def matchindex_download(body: dict = Body(...)):
     only swaps it in once complete — a half-written index that ludodex would happily
     attach and quietly miss every lookup against is worse than no index."""
     import matchindex
-    if _INDEX_DL["job"] and _INDEX_DL["job"].get("state") == "running":
-        raise HTTPException(409, "A download is already running")
     url = (body or {}).get("url")
     if not url:
         raise HTTPException(400, "No url")
     dest = matchindex.index_path()
     st = {"state": "running", "got": 0, "total": int((body or {}).get("size") or 0),
           "dest": dest, "error": ""}
-    _INDEX_DL["job"] = st
+    with _INDEX_DL_LOCK:
+        if _INDEX_DL["job"] and _INDEX_DL["job"].get("state") == "running":
+            raise HTTPException(409, "A download is already running")
+        _INDEX_DL["job"] = st
 
     def _run():
         part = dest + ".part"
@@ -14176,11 +14213,12 @@ def matchindex_rebuild():
     import matchindex
     if not os.path.exists(matchindex.IGDB_DB):
         raise HTTPException(400, "No IGDB mirror on this machine to build from")
-    if _INDEX_DL["job"] and _INDEX_DL["job"].get("state") == "running":
-        raise HTTPException(409, "A download is already running")
     st = {"state": "running", "got": 0, "total": 0, "dest": matchindex.index_path(),
           "error": "", "mode": "rebuild"}
-    _INDEX_DL["job"] = st
+    with _INDEX_DL_LOCK:
+        if _INDEX_DL["job"] and _INDEX_DL["job"].get("state") == "running":
+            raise HTTPException(409, "A download is already running")
+        _INDEX_DL["job"] = st
 
     def _run():
         try:
@@ -14197,6 +14235,7 @@ def matchindex_rebuild():
 # Point-in-time archives (backups.py), as opposed to the live two-way mirror above.
 # Several independent jobs, each with its own contents / destination / timing.
 _BACKUP_JOB = {"job": None}
+_BACKUP_LOCK = threading.Lock()
 
 
 @app.get("/api/backups/jobs")
@@ -14244,15 +14283,16 @@ def backup_job_delete(job_id: int):
 def backup_job_run(job_id: int):
     """Run one job in the background (single-flight across all jobs — they contend for the
     same databases and destination bandwidth)."""
-    cur = _BACKUP_JOB["job"]
-    if cur and cur.get("running"):
-        raise HTTPException(409, "a backup is already running")
     j = backups.get_job(job_id)
     if not j:
         raise HTTPException(404, "unknown backup job")
     st = {"running": True, "id": job_id, "name": j["name"], "log": [], "ok": None,
           "started": int(time.time())}
-    _BACKUP_JOB["job"] = st
+    with _BACKUP_LOCK:
+        cur = _BACKUP_JOB["job"]
+        if cur and cur.get("running"):
+            raise HTTPException(409, "a backup is already running")
+        _BACKUP_JOB["job"] = st
 
     def work():
         try:
@@ -14391,7 +14431,11 @@ def _backup_scheduler():
             j = due[0]                          # one per tick; the rest catch the next
             st = {"running": True, "id": j["id"], "name": j["name"], "log": [],
                   "ok": None, "started": int(time.time()), "scheduled": True}
-            _BACKUP_JOB["job"] = st
+            with _BACKUP_LOCK:                  # a manual run may have claimed it since
+                cur = _BACKUP_JOB["job"]
+                if cur and cur.get("running"):
+                    continue
+                _BACKUP_JOB["job"] = st
             try:
                 st.update(ok=True, result=backups.run_job(j["id"],
                                                           log=lambda m: st["log"].append(m)))

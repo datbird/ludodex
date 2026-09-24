@@ -80,13 +80,20 @@ def main():
           [f for f in os.listdir(os.path.dirname(p)) if f != "tokens.json"] == [])
 
     # ---- every store script that caches a credential uses it -------------------- #
-    for name in ("gog_owned.py", "gog_wishlist.py", "psn_owned.py", "xbox_owned.py",
+    for name in ("gog_owned.py", "psn_owned.py", "xbox_owned.py",
                  "ea_owned.py", "nintendo_owned.py"):
         s = src(name)
         check("%s writes its credential through the shared helper" % name,
               "write_private_json" in s)
         check("%s no longer json.dumps straight into an open() " % name,
               'json.dump(tok, open(' not in s)
+    # gog_wishlist shares gog_owned's token file, so it must not refresh or write it on
+    # its own: GOG rotates the refresh token, and two writers is how a login gets lost.
+    s = src("gog_wishlist.py")
+    check("gog_wishlist takes its token from gog_owned's one refresh path",
+          "gog_owned.cached_access_token()" in s)
+    check("gog_wishlist writes no credential of its own",
+          "write_private_json" not in s and 'json.dump(tok, open(' not in s)
 
     # ---- and the ones that can be imported actually produce 0600 ---------------- #
     import psn_owned                                           # noqa: E402

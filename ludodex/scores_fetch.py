@@ -28,14 +28,11 @@ import urllib.request
 import urllib.parse
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 import config          # noqa: E402
 import nongame         # noqa: E402
 import scoring         # noqa: E402
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 
 SCORES_DB = os.path.join(DATA, "scores.sqlite")
 CTX = ssl.create_default_context()

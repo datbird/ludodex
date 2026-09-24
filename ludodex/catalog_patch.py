@@ -68,6 +68,36 @@ def _game_key(nk, platform, title_ids, entry_ids, blocked=False):
     return "igdb:%d" % title_ids[nk]
 
 
+def sources_summary(pairs):
+    """(summary, kinds) for an entry's sources, given as (source, platform) pairs.
+
+    `summary` is the sources_summary column: the grouped kinds (emulation, archive) with
+    their platforms, then every other source kind, sorted. `kinds` is the set of source
+    kinds (n_kinds and the has_* flags read it). One rule for build_library, this module
+    and the server's live row refresh. A blank platform is left out of a group's list,
+    so a rebuilt row and a patched row carry the same string."""
+    kinds = {}
+    for src, plat in pairs:
+        kinds.setdefault(src, set())
+        if src in ("emulation", "archive"):    # grouped sources keep their platforms
+            kinds[src].add(plat)
+    parts = []
+    for grp in ("emulation", "archive"):
+        if grp in kinds:
+            parts.append(grp + ":" + ",".join(sorted(x for x in kinds[grp] if x)))
+    # any other provider (steam/gog/epic/itch/ea/ubisoft/battlenet/xbox/...), dynamic
+    parts += sorted(k for k in kinds if k not in ("emulation", "archive"))
+    return "; ".join(parts), set(kinds)
+
+
+def rename_if_rom_only(con, gid, name):
+    """Adopt `name` as entry `gid`'s title, but only when every source it has is a ROM
+    or an archive: a store title is already clean, and a ROM's is just its filename."""
+    con.execute("UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
+                "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
+                "('emulation','archive'))", (name, gid, gid))
+
+
 def _recompute_denorm(con, gid, nk, platform, title_ids, entry_ids):
     """Recompute a game row's derived columns from its CURRENT sources (after a move),
     mirroring build_library's per-entry write: n_sources/n_kinds/sources_summary/has_*/
@@ -78,18 +108,7 @@ def _recompute_denorm(con, gid, nk, platform, title_ids, entry_ids):
         "FROM sources WHERE game_id=?", (gid,)).fetchall()
     if not srcs:
         return False
-    kinds = {}
-    for s in srcs:
-        kinds.setdefault(s[0], set())
-        if s[0] in ("emulation", "archive"):
-            kinds[s[0]].add(s[1])
-    parts = []
-    for grp in ("emulation", "archive"):
-        if grp in kinds:
-            parts.append(grp + ":" + ",".join(sorted(x for x in kinds[grp] if x)))
-    for st in sorted(k for k in kinds if k not in ("emulation", "archive")):
-        parts.append(st)
-    summary = "; ".join(parts)
+    summary, kinds = sources_summary((s[0], s[1]) for s in srcs)
     owned = any(s[5] == "have" for s in srcs)
     blocked = bool(con.execute(
         "SELECT 1 FROM game_attributes WHERE game_id=? AND kind='release_type' "
@@ -171,9 +190,7 @@ def merge(con, from_key, to_key, to_title, data_dir):
             _delete_entry(con, from_gid)
             touched.add(to_gid)
         else:                                   # re-key the from_key row onto to_key
-            con.execute("UPDATE games SET canonical_title=? WHERE id=? AND NOT EXISTS("
-                        "SELECT 1 FROM sources WHERE game_id=? AND source NOT IN "
-                        "('emulation','archive'))", (to_title, from_gid, from_gid))
+            rename_if_rom_only(con, from_gid, to_title)
             to_by_plat[plat] = from_gid
             touched.add(from_gid)
     for gid in touched:

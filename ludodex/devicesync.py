@@ -12,14 +12,12 @@ files on the target device, laid out the way ES-DE expects:
                                               filename, so media paths aren't stored)
 
 Transport, job/progress and the ROM index all come from devices.py + build_romdb;
-this module owns the layout math, the ROM resolver, the gamelist writer and the
-per-system format-conversion rules.
+this module owns the layout math, the ROM resolver and the per-system
+format-conversion rules.
 """
 import os
-import re
 import sqlite3
 import sys
-import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import publish_profiles     # noqa: E402  target layouts, as data
@@ -33,38 +31,6 @@ DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 # --------------------------------------------------------------------------- #
 #  Catalog platform  ->  ES-DE system folder name
 # --------------------------------------------------------------------------- #
-# media.ESDE_SYSTEM_ALIAS maps ES-DE folder -> our platform; this is the reverse,
-# choosing the canonical ES-DE folder for each of our platforms. Platforms whose
-# label already IS a valid ES-DE folder (snes, nes, psx, n64, gba, nds, ps2, ps3,
-# psp, psvita, dreamcast, saturn, wii, wiiu, switch…) fall through unchanged.
-CATALOG_TO_ESDE = {
-    "sega genesis": "genesis",
-    "sega ms": "mastersystem",
-    "sega cd": "segacd",
-    "sega 32x": "sega32x",
-    "sega saturn": "saturn",
-    "gameboy": "gb",
-    "gameboy color": "gbc",
-    "gamecube": "gc",
-    "jaguar": "atarijaguar",
-    "jaguar cd": "atarijaguarcd",
-    "lynx": "atarilynx",
-    "atari st": "atarist",
-    "atari 2600": "atari2600",
-    "atari 5200": "atari5200",
-    "atari 7800": "atari7800",
-    "3ds": "n3ds",
-    "nintendo switch": "switch",
-    "zx spectrum": "zxspectrum",
-    "turbo gfx": "tg16",
-    "tubo duo": "tg16",
-    "neogeopocketcolor": "ngpc",
-    "neogeo": "neogeo",
-    "mame": "arcade",
-    "arcade (mame)": "arcade",
-}
-
-
 def esde_system(platform, profile=None):
     """Our catalog platform label -> the target's system folder name.
 
@@ -75,24 +41,6 @@ def esde_system(platform, profile=None):
 
 
 # --------------------------------------------------------------------------- #
-#  Chosen-kind  ->  ES-DE downloaded_media subfolder (reverse of media.ESDE_TYPE_KIND)
-# --------------------------------------------------------------------------- #
-KIND_TO_ESDE_FOLDER = {
-    "cover": "covers",
-    "background": "fanart",
-    "logo": "marquees",
-    "screenshot": "screenshots",
-    "title_screen": "titlescreens",
-    "box_3d": "3dboxes",
-    "box_back": "backcovers",
-    "physical_media": "physicalmedia",
-    "mix": "miximages",
-    "video": "videos",
-    "manual": "manuals",
-}
-
-
-# --------------------------------------------------------------------------- #
 #  Per-system format-conversion rules
 # --------------------------------------------------------------------------- #
 # fmt: what the emulator wants; tool: how to get there (runs on the target device,
@@ -100,7 +48,6 @@ KIND_TO_ESDE_FOLDER = {
 # Multi-disc titles additionally get an .m3u playlist (pure text, no tool needed).
 _CD_SYSTEMS = {"psx", "ps2", "saturn", "segacd", "pcenginecd", "pcfx", "3do",
                "neogeocd", "amigacd32", "megacd", "tg-cd", "turbografxcd"}
-_DISC_SRC_EXTS = {"cue", "bin", "iso", "img", "gdi", "toc", "ccd", "mdf", "nrg"}
 
 
 def convert_plan(esde_sys, ext, profile=None):
@@ -151,90 +98,6 @@ def resolve_roms(mgr_id, system, game_name, con=None):
     finally:
         if own:
             con.close()
-
-
-# --------------------------------------------------------------------------- #
-#  ES-DE gamelist.xml — read-modify-write (never clobber foreign entries)
-# --------------------------------------------------------------------------- #
-# ES-DE resolves MEDIA by filename convention, so gamelist holds only text metadata.
-_GL_FIELDS = ("name", "sortname", "desc", "rating", "releasedate",
-              "developer", "publisher", "genre", "players")
-
-
-def _fmt_releasedate(val):
-    """A year or ISO date -> ES-DE's YYYYMMDDT000000 stamp (year-only -> Jan 1)."""
-    s = str(val or "").strip()
-    m = re.search(r"(\d{4})(?:-(\d{2})-(\d{2}))?", s)
-    if not m:
-        return None
-    y, mo, d = m.group(1), m.group(2) or "01", m.group(3) or "01"
-    return "%s%s%sT000000" % (y, mo, d)
-
-
-def gamelist_upsert(xml_text, entries):
-    """Upsert `entries` into an ES-DE gamelist.xml document (string in, string out).
-    Each entry: {path, name, desc, rating(0-1), release_year|release_date, developer,
-    publisher, genre, players, favorite}. Games are keyed by <path> ('./<file>'):
-    an existing entry is updated in place; foreign entries are left untouched."""
-    try:
-        root = ET.fromstring(xml_text) if xml_text and xml_text.strip() else ET.Element("gameList")
-    except ET.ParseError:
-        root = ET.Element("gameList")
-    if root.tag != "gameList":
-        root = ET.Element("gameList")
-    by_path = {(g.findtext("path") or "").strip(): g for g in root.findall("game")}
-
-    for e in entries:
-        path = e.get("path")
-        if not path:
-            continue
-        g = by_path.get(path)
-        if g is None:
-            g = ET.SubElement(root, "game")
-            ET.SubElement(g, "path").text = path
-            by_path[path] = g
-
-        def setf(tag, value):
-            if value in (None, ""):
-                return
-            el = g.find(tag)
-            if el is None:
-                el = ET.SubElement(g, tag)
-            el.text = str(value)
-
-        setf("name", e.get("name"))
-        setf("desc", e.get("desc"))
-        if e.get("rating") not in (None, ""):
-            try:
-                setf("rating", "%.2f" % max(0.0, min(1.0, float(e["rating"]))))
-            except (TypeError, ValueError):
-                pass
-        rd = _fmt_releasedate(e.get("release_date") or e.get("release_year"))
-        setf("releasedate", rd)
-        setf("developer", e.get("developer"))
-        setf("publisher", e.get("publisher"))
-        setf("genre", e.get("genre"))
-        setf("players", e.get("players"))
-        if e.get("favorite"):
-            setf("favorite", "true")
-
-    _indent(root)
-    return "<?xml version=\"1.0\"?>\n" + ET.tostring(root, encoding="unicode")
-
-
-def _indent(elem, level=0):
-    """Pretty-print ElementTree in place (stdlib ET has no indent pre-3.9-safe)."""
-    pad = "\n" + "  " * level
-    if len(elem):
-        if not (elem.text or "").strip():
-            elem.text = pad + "  "
-        for i, child in enumerate(elem):
-            _indent(child, level + 1)
-            tail_pad = pad + ("  " if i < len(elem) - 1 else "")
-            if not (child.tail or "").strip():
-                child.tail = tail_pad
-    if level and not (elem.tail or "").strip():
-        elem.tail = pad
 
 
 # --------------------------------------------------------------------------- #

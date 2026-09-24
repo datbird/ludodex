@@ -243,8 +243,6 @@ PIPELINE_WIRED = {
     "igdb", "screenscraper", "steam", "steamspy", "ai", "ai_web",
     "rom", "xbox", "ludodex",
 }
-NOT_WIRED_NOTE = ("no enrichment step consults it yet, so switching it on will not "
-                  "fill this")
 
 
 def providers_for(kind):

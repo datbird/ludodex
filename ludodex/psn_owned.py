@@ -35,12 +35,9 @@ import urllib.parse
 import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 import config
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 
 PSN_DIR = os.path.join(DATA, ".psn")
 TOKFILE = os.path.join(PSN_DIR, "tokens.json")

@@ -23,10 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 KEY = config.steam_key()                # env STEAM_API_KEY > config steam_api_key
 who = sys.argv[1] if len(sys.argv) > 1 else config.get("steam_id")
 CTX = ssl.create_default_context()

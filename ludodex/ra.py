@@ -81,10 +81,6 @@ def _call(endpoint, **params):
         return json.load(r)
 
 
-def get_console_ids():
-    return _call("GetConsoleIDs")
-
-
 def get_game_list(console_id, only_achievements=True):
     """All games for a console: [{ID, Title, ...}]. f=1 limits to games that
     actually have achievements (keeps the match set relevant + smaller)."""

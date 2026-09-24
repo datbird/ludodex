@@ -1198,12 +1198,6 @@ COMMERCIAL = {
 }
 
 
-def commercial_ok(provider):
-    """True if this provider's data is cleared for commercial use without a
-    separate license. Unknown providers default to True (treated as own-data)."""
-    return COMMERCIAL.get(provider, (True, ""))[0]
-
-
 def commercial_safe_only():
     """When set, the engine should run only commercially-cleared providers."""
     return get_bool("commercial_safe_only", False)

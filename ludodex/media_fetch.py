@@ -28,14 +28,11 @@ import urllib.request
 import urllib.parse
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
 sys.path.insert(0, DIR)
 import config
 import matchgate
 import medialang
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 
 INDEX = os.path.join(DATA, "media-index.sqlite")
 META_CACHE = os.path.join(DATA, "metadata-cache.sqlite")
@@ -1323,7 +1320,12 @@ def main(argv):
         # scoped reconcile skips it for the same reason), and IGDB refs come from the
         # API's own image manifest, so dead ones are rare.
         prov = argv[argv.index("--sync-art") + 1]
-        if prov == "igdb" and config.media_enabled("igdb"):
+        if prov != "igdb":
+            # Only IGDB has a non-destructive incremental pass. Any other name used to
+            # print a count and exit 0, which read as a sync that had run.
+            con.close()
+            sys.exit("media_fetch: --sync-art supports igdb only, not %r" % prov)
+        if config.media_enabled("igdb"):
             fetch_igdb(con, now)
         tot = con.execute("SELECT COUNT(*) FROM media WHERE provider=?",
                           (prov,)).fetchone()[0]

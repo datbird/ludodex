@@ -36,7 +36,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config                       # noqa: E402
 
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 CACHE = os.path.join(DATA, "wikidata-ids.csv")
 ENDPOINT = "https://query.wikidata.org/sparql"
 

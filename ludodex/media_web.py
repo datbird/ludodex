@@ -17,7 +17,6 @@ import urllib.request
 
 _UA = {"User-Agent": "ludodex media finder (https://github.com/datbird/ludodex)"}
 WP_API = "https://en.wikipedia.org/w/api.php"
-GCSE = "https://www.googleapis.com/customsearch/v1"
 
 
 def _get_json(url, timeout=15):

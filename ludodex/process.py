@@ -30,13 +30,9 @@ import config
 import platmap
 import titlenorm
 from romtags import parse_name
-from titlenorm import norm
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-# DIR is this package; DATA is the REPO ROOT above it, which is where local
-# databases have always lived. Deriving DATA from DIR after the move would
-# silently relocate an existing checkout's data.
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 DB = os.path.join(DATA, "crawl-index.sqlite")
 
 

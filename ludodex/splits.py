@@ -79,26 +79,3 @@ def remove(source, source_id):
                 (source, str(source_id)))
     con.commit()
     con.close()
-
-
-def remove_key(to_key):
-    """Un-peel every row that was peeled onto to_key (undo a whole split)."""
-    if not os.path.exists(DB):
-        return
-    con = _con()
-    con.execute("DELETE FROM peels WHERE to_key=?", (to_key,))
-    con.commit()
-    con.close()
-
-
-def list_peels():
-    if not os.path.exists(DB):
-        return []
-    con = _con()
-    out = [{"source": r[0], "source_id": r[1], "to_key": r[2],
-            "to_title": r[3], "from_key": r[4], "created": r[5]}
-           for r in con.execute(
-               "SELECT source, source_id, to_key, to_title, from_key, created "
-               "FROM peels ORDER BY created DESC")]
-    con.close()
-    return out

@@ -26,7 +26,6 @@ in one shared limiter. See the note in arcadedb.py.
 import json
 import os
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request

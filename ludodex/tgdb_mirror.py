@@ -32,10 +32,9 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config                       # noqa: E402
 import thegamesdb as tgdb           # noqa: E402
-import tgdb_normalize as tn         # noqa: E402
 from titlenorm import norm          # noqa: E402
 
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 DB = os.path.join(DATA, "tgdb-catalog.sqlite")
 
 # Measured 2026-08-16 by batched id sampling: ~90% of the space is populated to a ceiling

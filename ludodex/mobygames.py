@@ -48,7 +48,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 import config                       # noqa: E402
 
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 API = "https://api.mobygames.com/v1"
 
 # Their documented non-commercial ceiling. Legacy keys get 360; a commercial agreement
@@ -507,21 +507,6 @@ def extract_media(rec):
             out.append({"kind": "screenshot", "type": "sample_screenshot",
                         "url": s["image"], "width": s.get("width"),
                         "height": s.get("height"), "caption": s.get("caption") or ""})
-    return out
-
-
-def extract_covers(cover_groups):
-    """The FULL cover set from /games/{id}/platforms/{pid}/covers, one extra request."""
-    out = []
-    for grp in (cover_groups or []):
-        countries = grp.get("countries") or []
-        for c in (grp.get("covers") or []):
-            if not c.get("image"):
-                continue
-            kind = COVER_KIND.get((c.get("scan_of") or "").strip().lower(), "other")
-            out.append({"kind": kind, "type": c.get("scan_of") or "", "url": c["image"],
-                        "width": c.get("width"), "height": c.get("height"),
-                        "countries": countries})
     return out
 
 

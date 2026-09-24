@@ -38,7 +38,7 @@ import config                       # noqa: E402
 import mobygames as mg              # noqa: E402
 from titlenorm import norm          # noqa: E402
 
-DATA = os.environ.get("LUDODEX_DATA", os.path.dirname(DIR))
+DATA = config.DATA   # LUDODEX_DATA, else the repo root above this package
 DB = os.path.join(DATA, "moby-catalog.sqlite")
 
 
