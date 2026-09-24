@@ -1279,6 +1279,41 @@ def prune_dead(con, workers=16, only_nks=None, providers=("steam", "igdb", "stea
     return len(dead)
 
 
+# The full-refresh providers, in the order they run. Per provider: whether it is switched
+# on, the scoped DELETE that clears what its pass owns, the fetch, whether a plain full
+# refresh (no --provider) runs it, whether `--sync-art` has an incremental pass for it, and
+# an optional argv flag that also selects it.
+#
+# Steam's delete is kind-scoped: refresh only the constructed-URL art this pass owns, so
+# the incremental appdetails screenshots/movies (same provider) are NOT wiped.
+# ScreenScraper media rides on the metadata switch plus its own `screenscraper_media` flag.
+# SteamGridDB is opt-in: only `--provider steamgriddb` or `--steamgriddb` runs it.
+FULL_REFRESH = (
+    {"provider": "steam",
+     "enabled": lambda: config.media_enabled("steam"),
+     "delete": ("DELETE FROM media WHERE provider='steam' AND kind IN "
+                "('cover','hero','background','header','logo')", ()),
+     "fetch": lambda con, now, limit: fetch_steam(con, now),
+     "default": True, "incremental": False},
+    {"provider": "igdb",
+     "enabled": lambda: config.media_enabled("igdb"),
+     "delete": ("DELETE FROM media WHERE provider=?", ("igdb",)),
+     "fetch": lambda con, now, limit: fetch_igdb(con, now),
+     "default": True, "incremental": True},
+    {"provider": "screenscraper",
+     "enabled": lambda: (config.metadata_enabled("screenscraper")
+                         and config.get_bool("screenscraper_media", True)),
+     "delete": ("DELETE FROM media WHERE provider=?", ("screenscraper",)),
+     "fetch": lambda con, now, limit: fetch_screenscraper(con, now),
+     "default": True, "incremental": False},
+    {"provider": "steamgriddb",
+     "enabled": lambda: config.media_enabled("steamgriddb"),
+     "delete": ("DELETE FROM media WHERE provider=?", ("steamgriddb",)),
+     "fetch": lambda con, now, limit: fetch_steamgriddb(con, now, limit),
+     "default": False, "incremental": False, "flag": "--steamgriddb"},
+)
+
+
 def main(argv):
     only = argv[argv.index("--provider") + 1] if "--provider" in argv else None
     limit = int(argv[argv.index("--limit") + 1]) if "--limit" in argv else None
@@ -1320,11 +1355,13 @@ def main(argv):
         # scoped reconcile skips it for the same reason), and IGDB refs come from the
         # API's own image manifest, so dead ones are rare.
         prov = argv[argv.index("--sync-art") + 1]
-        if prov != "igdb":
+        incr = [p["provider"] for p in FULL_REFRESH if p["incremental"]]
+        if prov not in incr:
             # Only IGDB has a non-destructive incremental pass. Any other name used to
             # print a count and exit 0, which read as a sync that had run.
             con.close()
-            sys.exit("media_fetch: --sync-art supports igdb only, not %r" % prov)
+            sys.exit("media_fetch: --sync-art supports %s only, not %r"
+                     % (", ".join(incr), prov))
         if config.media_enabled("igdb"):
             fetch_igdb(con, now)
         tot = con.execute("SELECT COUNT(*) FROM media WHERE provider=?",
@@ -1333,24 +1370,13 @@ def main(argv):
         con.close()
         print("media_fetch: sync-art %s — %d refs indexed" % (prov, tot), file=sys.stderr)
         return
-    if only in (None, "steam") and config.media_enabled("steam"):
-        # kind-scoped delete: refresh only the constructed-URL art this pass owns, so the
-        # incremental appdetails screenshots/movies (same provider) are NOT wiped.
-        con.execute("DELETE FROM media WHERE provider='steam' AND kind IN "
-                    "('cover','hero','background','header','logo')")
-        fetch_steam(con, now)
-    if only in (None, "igdb") and config.media_enabled("igdb"):
-        con.execute("DELETE FROM media WHERE provider='igdb'")
-        fetch_igdb(con, now)
-    if only in (None, "screenscraper") and \
-            config.metadata_enabled("screenscraper") and \
-            config.get_bool("screenscraper_media", True):
-        con.execute("DELETE FROM media WHERE provider='screenscraper'")
-        fetch_screenscraper(con, now)
-    if (only == "steamgriddb" or "--steamgriddb" in argv) and \
-            config.media_enabled("steamgriddb"):
-        con.execute("DELETE FROM media WHERE provider='steamgriddb'")
-        fetch_steamgriddb(con, now, limit)
+    for p in FULL_REFRESH:
+        name = p["provider"]
+        selected = (only == name or (only is None and p["default"])
+                    or ("flag" in p and p["flag"] in argv))
+        if selected and p["enabled"]():
+            con.execute(*p["delete"])
+            p["fetch"](con, now, limit)
     # after (re)fetching speculative URL candidates, drop the dead ones so they
     # never surface as blank media cards
     prune_dead(con)

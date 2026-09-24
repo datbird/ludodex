@@ -559,15 +559,6 @@ const NON_ID_SOURCES = new Set(['emulation', 'archive', 'physical', 'rom', 'digi
 const META_PROVIDERS = new Set(['igdb', 'screenscraper', 'steamgriddb', 'thegamesdb',
   'arcadedb', 'zxinfo', 'mobygames'])
 
-// Deep link to a store's page for this game, where the id maps to a stable public URL.
-// Stores whose ids don't (GOG product ids, Epic/Xbox/PSN catalogue ids) still get a chip —
-// it just isn't clickable, which is honest rather than a guessed link that 404s.
-function storeUrl(source: string, id: string): string {
-  if (source === 'steam' && /^\d+$/.test(id)) return `https://store.steampowered.com/app/${id}`
-  if (source === 'itch' && /^https?:\/\//.test(id)) return id
-  return ''
-}
-
 // Default frame + the inline style that positions/zooms an image inside its
 // viewport. Returns undefined for an unframed (identity) frame.
 const DEFAULT_FRAME: Frame = { top: 0, right: 0, bottom: 0, left: 0, zoom: 1 }
@@ -8223,7 +8214,9 @@ function Detail({ nk, onClose, onMediaChanged, onNavigate, onBack }: {
                       .filter((sc) => !NON_ID_SOURCES.has(sc.source) && sc.source_id)
                       .map((sc) => [sc.source, {
                         provider: sc.source, id: sc.source_id,
-                        url: storeUrl(sc.source, sc.source_id) }])).values())
+                        // the server builds the store page (provider_links.store_url);
+                        // a store whose id maps to no stable URL gets an unlinked chip
+                        url: sc.url ?? '' }])).values())
                   if (!metaChips.length && !storeChips.length) return null
                   const toggle = async (provider: string, off: boolean) => {
                     setIdBusy(provider)

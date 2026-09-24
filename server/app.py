@@ -2096,9 +2096,9 @@ def media_matched_providers(norm_key: str):
             ar = lc.execute("SELECT s.source_id FROM games g JOIN sources s "
                             "ON s.game_id=g.id WHERE g.norm_key=? AND s.source='steam' "
                             "LIMIT 1", (base,)).fetchone()
-            if ar and str(ar[0] or "").isdigit():
-                links["steam"] = {"id": str(ar[0]),
-                                  "url": "https://store.steampowered.com/app/%s" % ar[0]}
+            _url = provider_links.store_url("steam", ar[0]) if ar else None
+            if _url:
+                links["steam"] = {"id": str(ar[0]), "url": _url}
     finally:
         lc.close()
     try:
@@ -9148,8 +9148,9 @@ def game_detail(norm_key: str):
             src, sid = s.get("source"), str(s.get("source_id") or "")
             if src in _pl_seen:
                 continue
-            url = ("https://store.steampowered.com/app/%s" % sid
-                   if src == "steam" and sid.isdigit() else None)
+            # the row already carries its store page (`_card_sources`); only Steam's is
+            # surfaced as a favicon shortcut
+            url = s.get("url") if src == "steam" else None
             if url:
                 provider_links.append({"provider": src, "url": url})
                 _pl_seen.add(src)
@@ -10865,12 +10866,17 @@ def _card_sources(con, card_key, gid):
     _vc = ", via_collection" if _has_col(con, "sources", "via_collection") else ""
     cols = "source, platform, source_id, title_raw, detail" + _st + _vc
     if card_key and _has_col(con, "games", "card_key"):
-        return [dict(r) for r in con.execute(
+        rows = [dict(r) for r in con.execute(
             "SELECT " + cols + " FROM sources WHERE game_id IN ("
             "  SELECT id FROM games WHERE COALESCE(card_key, entry_key)=?)"
             " ORDER BY source, platform", (card_key,))]
-    return [dict(r) for r in con.execute(
-        "SELECT " + cols + " FROM sources WHERE game_id=?", (gid,))]
+    else:
+        rows = [dict(r) for r in con.execute(
+            "SELECT " + cols + " FROM sources WHERE game_id=?", (gid,))]
+    # each copy's store page, built server-side so the UI never keeps its own templates
+    for r in rows:
+        r["url"] = provider_links.store_url(r["source"], r["source_id"])
+    return rows
 
 
 def _card_copies(con, card_key, card_title):
