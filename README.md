@@ -44,7 +44,7 @@ Ambiguous matches are **refused** rather than guessed at, because a confident wr
 answer propagates into your art, your metadata, and eventually onto your devices.
 
 Every game shows you what it matched, which provider each fact came from, and which
-of its 33 attributes are still empty.
+of its 34 attributes are still empty.
 
 <div align="center">
 <img src="docs/images/detail.png" alt="A game detail page: matched providers, scores, attributes and tags" width="820">

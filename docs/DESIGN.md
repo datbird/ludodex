@@ -412,6 +412,13 @@ same across platforms → keyed by **`base_key`** and fanned across its entries 
 time. Ownership, installs, pins, framing and **media choice** are **per-entry**
 (platform-specific).
 
+**How a route reads a key.** Three shapes reach a route: `<base_key>@<platform>`, a bare
+`base_key`, and a card key (§11.10). Only `_split_entry_key` understands all three, so no
+route splits a key itself. It declares the key as `BaseKey`, `EntryKey`, `BaseNk` or
+`CollBaseKey` (or `RawKey` to echo it back unchanged), and FastAPI resolves it before the
+handler runs. `tests/test_routes_resolve_their_keys.py` fails any route that takes a key
+another way.
+
 ### 11.4 Media siloing (fixes the wrong-cover bug)
 
 `media` already carries `system`. An entry's media = `media WHERE norm_key=base_key AND
@@ -421,8 +428,8 @@ to platform-neutral store art (`system IS NULL`) when a console has none.
 
 ### 11.5 Xbox platform setting
 
-Config **`xbox_platform`** = `xbox` (default) | `pc`, surfaced at **Settings → Stores →
-Xbox**. It only sets the **bulk-inbound** bucket for the Xbox sync. Independent of it,
+Config **`xbox_platform`** = `xbox` (default) | `pc`, surfaced at **Settings → Library →
+Preferences**. It only sets the **bulk-inbound** bucket for the Xbox sync. Independent of it,
 **manual per-platform ownership can mark a game owned on Xbox AND PC** (or either) — the
 setting is the default, manual is unconstrained.
 
@@ -459,6 +466,13 @@ for the entire rebuild (~10 min on the array) and every concurrent `/api` read t
 catalog intact. Any large SQLite writer added here follows the same pattern. Server read
 connections (`ro()`) also carry `busy_timeout` so a brief lock from another pipeline
 writer (scores / media backfill) waits rather than erroring.
+
+**Long jobs run one at a time per kind.** Sync, ROM sync, media download, provider match,
+match index, publish and backup each hold a `JobSlot` in `server/app.py`. The running
+check and the claim happen under one lock, so two requests that arrive together cannot
+both start. A second start answers `409` with the reason, and a slot can name other slots
+that block it. Every slot reports to the job monitor in the header, where a finished job
+can be dismissed.
 
 ### 11.9 Media identity binding — the durable exit from the read-time heuristic stack
 

@@ -46,6 +46,8 @@ Stored in the same table as `1` / `0`.
 | `launchbox_media_mode` | `copy` · `link` |
 | `matchindex.prefer` | `dynamic` (your own data first) · `supplement` |
 | `matchindex.path` | where the optional match index lives |
+| `spotlight_include_collections` | let a compilation (a collection's own entry, like *DOOM + DOOM II*) appear in the dashboard Spotlight |
+| `public_health_details` | show `/api/health`'s details to signed-out callers (admin switch, off by default) |
 
 ## Credential precedence
 
@@ -64,3 +66,9 @@ python3 ludodex/config.py integrations        # overview + which are configured
 python3 ludodex/config.py integrations ea     # exact steps for one
 bash scripts/auth_status.sh                   # OK / BROKEN per source
 ```
+
+The `[ok]` mark in `integrations` comes from `config.ready(<id>)`, the one readiness
+check the sync menu, the Stores & providers panel and the provider matrix also use. It
+is stricter than "a key is set": EA needs an unexpired token, Epic needs a cached
+legendary login, GOG, PSN, Xbox and Nintendo need a saved login, and TheGamesDB needs
+an API key.

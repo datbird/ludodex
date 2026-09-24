@@ -27,6 +27,11 @@ wanted(          game_id, store, store_id, title_raw )       -- which store want
 The whole thing is rebuilt on every run, so nothing durable lives here — the durable
 stores are the separate files listed further down.
 
+Besides the per-table `game_id` indexes, `games` carries an index on the expression
+`COALESCE(card_key, entry_key)`, which is exactly what the library grid groups by, and on
+`base_key` and `parent_key`. A query only uses the first one if it writes the same
+expression.
+
 ### The keys, and why there are five
 
 This is the part worth understanding.

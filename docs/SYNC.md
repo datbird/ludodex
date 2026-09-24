@@ -34,7 +34,7 @@ code change.
 ## Running it
 
 Settings → **Database** drives all of this from the UI, and is the normal way to use it.
-From a shell:
+It is shown to admins only. From a shell:
 
 ```bash
 python3 ludodex/config.py set backingstore_backend pocketbase   # or postgres|supabase|mysql|firebase

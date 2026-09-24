@@ -194,7 +194,7 @@ where SQLite is the local cache and the remote holds the durable truth.
 fileops, backups, AI settings and spend, provider mirrors, review queues). Two
 corrections to the sketch: **`/api/search` is a `POST`**, not a `GET` — a
 natural-language query with its filters does not belong in a URL — and every `/api/*`
-route sits behind the session middleware.
+route except sign-in and `/api/health` sits behind the session middleware.
 
 
 ```

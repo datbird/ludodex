@@ -4,7 +4,7 @@ The working backlog. Numbers are stable task IDs referenced in commit messages
 (`feat(match-confidence): … (#13)`). Per-task design docs live in
 `docs/superpowers/specs/`; execution plans in `docs/superpowers/plans/`.
 
-Last reviewed: 2026-09-15.
+Last reviewed: 2026-09-24.
 
 ---
 
@@ -1227,3 +1227,75 @@ Suite 188 passed / 0 failed / 6 skipped.
 flattening the block and splitting on commas, so a COMMENT containing a comma turned the
 entry below it into a junk token and the kind read as missing. The list is commented on
 purpose, so the parser now strips comments first.
+
+## Shipped 2026-09-24: whole-codebase cleanup, and a live UI suite that found real defects
+
+Commits `7dd0b53`..`bdf016a`. No task number; this was a review of the whole codebase,
+then a browser suite to prove the result against the running app.
+
+### The cleanup
+
+| Area | What changed |
+|---|---|
+| Catalog speed | Indexes on `COALESCE(card_key, entry_key)` (the grid's grouping), `base_key` and `parent_key`, and on `run_ops(run_id, status)`. Schema DDL runs once per process per file (`ludodex/schema_once.py`) instead of on every connection. Stats and detail queries batched; the backing-store SQL sync uses `executemany`. |
+| One answer per question | `config.ready(pid)` is the one readiness check behind the CLI status column, the sync picker, the Stores & providers panel and the provider matrix. EA and Epic are stricter in the CLI than before, GOG now shows connected, and TheGamesDB needs an API key to read as ready. |
+| Store links | Built server-side in `provider_links`; each source row carries its `url`. `media_fetch` is driven by one provider table (`FULL_REFRESH`). |
+| Route keys | Every route that takes a game key declares it as `BaseKey`, `EntryKey`, `BaseNk`, `CollBaseKey` or `RawKey`, and FastAPI resolves it. `test_routes_resolve_their_keys.py` checks the annotation. |
+| Jobs | One `JobSlot` guard for the seven single-flight jobs (sync, ROM sync, media, match, match index, publish, backup). Check and claim happen under one lock. Media, match, match-index and backup jobs now appear in the job monitor and can be dismissed. |
+| Shared helpers | `_resolve_area`, `_meta_cache`, `_igdb_record`, `catalog_patch.rename_if_rom_only` and `sources_summary`; `DATA` read from config; `api.ts` goes through `get` / `mutate` / `postJson`; `useEscClose`. Dead code removed. UI polls pause while the tab is hidden. |
+
+**Bugs the review found:**
+- The per-game provider on/off switch accepted 3 of the 7 metadata providers. It now
+  reads `provider_ids.PROVIDERS`.
+- Job-slot races: two requests arriving together could both start a match-index download
+  or rebuild, a backup, or a scheduled backup.
+- The media storage job and the media reconcile queue shared one lock.
+- `media_fetch --sync-art <anything but igdb>` printed a count and exited 0. It now
+  errors, because only IGDB has an incremental pass.
+- `sources_summary` mishandled a source with a blank platform.
+- `gog_wishlist` did not save a refreshed token.
+- Art adjudication now rechecks its marker before each paid call.
+- Errors that reached the UI as `[object Object]` now show their message.
+
+### The live UI suite
+
+`tests/browser/ui_full.py`, run by `scripts/run_live_ui.sh`: Playwright inside a browser
+container over CDP, in its own context, behind a write guard, with reversible toggles
+only. See `docs/TESTING.md`. Its first runs found these, all fixed:
+
+- `%` and `_` in a search, or in the query language, were SQL `LIKE` wildcards. They are
+  now escaped.
+- `/api/stats` counted entries the library hides, so a dashboard card read higher than
+  the view it opened. It now applies the library's own hidden-entry rule.
+- The dashboard counted DLC and expansions as games. It no longer does, and `/api/stats`
+  reports how many it left out as `addons`.
+- A metadata provider disabled for a game vanished from the list, so it could not be
+  turned back on. It now stays listed, marked disabled.
+- `spotlight_include_collections` was not saved.
+- A game owned twice on one store (BioShock is Steam 7670 and Steam 409710) showed one
+  store chip, because the chips were keyed by store name. They are now keyed by store
+  and id. The IGDB chip now links to IGDB.
+- `/api/devices/browse-entries` is a GET, as a read should be, not a POST.
+- "1 results" reads "1 result".
+- At tablet and phone widths the Settings section row covered the close button.
+- `/api/health` served data paths and the AI setup to anyone who could reach the port.
+  Signed out it now returns only `{"ok": true}`; the details need a login unless an
+  admin turns on Settings > Account & Users > Health endpoint (`public_health_details`).
+- A normal user could open Settings > Database, whose panels call admin-only APIs, and
+  sat on "Loading" forever. Database is now admin-only, like Account & Users.
+- Five Settings panels (AI settings, backing store, snapshots, library preferences,
+  runbook) hid a failed first load behind a spinner. They now show the error.
+
+### Live result
+
+Offline suite: 198 passed, 0 failed, 6 skipped. Live UI suite: 437 checks, 0 failed, as
+a normal user; 483 checks, 0 failed, as an admin with writes on, every toggle restored.
+
+### Considered and not done
+
+- **Browser caching of covers.** Safe only with a cover version stamp that changes every
+  time the chosen art changes. Without one, a long cache would keep showing replaced art.
+- **Server `DATA` from config.** `config.DATA` is fixed when the module is first imported,
+  so reading the server's paths from it would not follow a later change.
+
+Nothing from this session is left open.

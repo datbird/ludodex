@@ -26,13 +26,15 @@ So there are three kinds, and each catches what the others cannot.
 
 | kind | needs | catches |
 |---|---|---|
-| **unit** (~180 files) | nothing | logic, in isolation, fast |
+| **unit** (~200 files) | nothing | logic, in isolation, fast |
 | **contract** (`test_live_ui_contract.py`) | a running instance | the UI/API seam |
 | **render** (`test_live_browser_detail.py`) | a browser too | whether anything reached the screen |
 
 Plus one **lint** with no dependencies at all: `test_routes_resolve_their_keys.py` reads
-`server/app.py` and fails if a route takes a game key and queries by `norm_key` without
-resolving it first. That is the media bug, caught at the moment somebody writes it.
+`server/app.py` and fails if a route takes a game key any way other than through a key
+dependency (`BaseKey`, `EntryKey`, `BaseNk`, `CollBaseKey`) or a helper that resolves it,
+unless the route is named in the test as taking something else. That is the media bug,
+caught at the moment somebody writes it.
 
 ## The live tests
 
@@ -96,12 +98,17 @@ Two habits, both learned the hard way:
 ## The whole UI, in a real browser
 
 `tests/browser/ui_full.py` walks every screen a user can reach and checks each against the
-API: sign-in and session, the dashboard numbers and the views each card opens, library
+API: sign-in and session, the dashboard numbers (the Games card must equal the library
+total less the add-ons `/api/stats` reports) and the views each card opens, library
 searches (exact, partial, no-hit, `%`, `_`, `&`, non-ASCII, a very long query, the query
 language), filters, sort, ownership scope, paging, per-page and layout persistence, game
 pages of several kinds (store links, provider chips, media menus, related games, Back,
 Escape), every Settings panel, the job monitor, the header menus, Files and Publish. It
 runs at a desktop and a phone viewport and saves a screenshot of each main screen.
+
+It knows which screens belong to an admin. Signed in as a `user`, it expects the
+**Files** tab and the **Account & Users** and **Database** sections of Settings to be
+absent; signed in as an admin, it expects them present.
 
 The API is the oracle wherever it can be. A search is compared with the count of titles
 that literally contain the query, taken from the full owned list, so a wildcard leaking

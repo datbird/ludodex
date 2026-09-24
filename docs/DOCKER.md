@@ -63,6 +63,9 @@ docker run -d --name ludodex -p 8001:8001 \
   secret store at runtime. `.env` is gitignored.
 - **Device credentials** (SSH keys/passwords for your Steam Deck, NAS, etc.) are
   stored in `/data/connections.sqlite` — never in the image, never in git.
+- **Health checks:** point a container health check or an uptime monitor at
+  `GET /api/health`. Signed out, it answers `{"ok": true}` and nothing more. The
+  details need a login; see [AUTH.md](AUTH.md#signing-in-to-ludodex-itself).
 
 ## Using a network share (NFS / SMB)
 

@@ -20,7 +20,7 @@ environment variable   >   local config (config.sqlite)
 
 - **Env var** — highest priority; handy for one-off runs / CI.
 - **Local config** — `python3 ludodex/config.py set <key> <value>` (or enter it in the web
-  UI: **Settings › Services**); stored in `config.sqlite` (gitignored).
+  UI: **Settings › Connections › Stores & providers**); stored in `config.sqlite` (gitignored).
 
 Resolver helpers (used by the pull scripts and `scripts/auth_status.sh`):
 
@@ -145,6 +145,10 @@ from your logged-in browser:
   Where Akamai blocks it (Path B), EA is a **re-grab-on-demand** source — re-do the
   URL→JSON step when you want to refresh ownership (EA libraries change rarely). Full
   server-side automation would need a real browser engine (Playwright), as Lutris uses.
+- **What counts as connected:** EA reads as ready only while an unexpired token sits in
+  `.ea/token.json`. A `remid` alone does not count, because the refresh it depends on is
+  so often blocked. The CLI status column, the sync menu and the provider matrix all ask
+  the same check (`config.ready`).
 
 ### emulation / local archives
 No cloud auth. The emulation ROM index is built from `roms-index.sqlite`
@@ -393,6 +397,21 @@ ScreenScraper) is IP-gated. Setting `commercial_safe_only=1` is intended to run
 only the cleared providers — keep a commercial build standing on IGDB + members'
 own ownership/library data + user-owned media, with the rest as license-gated
 enrichers.
+
+## Signing in to ludodex itself
+
+Every `/api/*` route needs a signed-in session, except sign-in itself and
+`/api/health`. Accounts are local, with two roles, `admin` and `user`, and
+[Cloudflare Access](CLOUDFLARE.md) can sign people in on top of them.
+
+- **Admin only:** Settings › **Account & Users** and Settings › **Database**, the
+  **Files** tab, and the server-side operator routes (file operations, restart and
+  reset, backups, the backing store, catalog rebuild, match-index download). The
+  server refuses these to a `user` whatever the UI shows.
+- **`/api/health`:** a signed-out caller gets `{"ok": true}` and nothing else, which is
+  enough for a container health check or an uptime monitor. The details (data paths
+  and the AI setup) need a login, unless an admin turns on Settings › Account & Users ›
+  **Health endpoint** (config `public_health_details`).
 
 ## Onboarding a fresh machine
 
