@@ -11,8 +11,12 @@ silently queried for a game named "igdb:2155". All returned 200 with an empty bo
 nothing raised and 180 unit tests stayed green.
 
 A route that splits a key itself is one that will miss the next shape. So: any route with
-a key-shaped path parameter must hand it to the resolver, and a route that genuinely
-takes something else has to say so out loud, here, by name.
+a key-shaped path parameter must take it through a key DEPENDENCY (`BaseKey`, `EntryKey`,
+`BaseNk`, `CollBaseKey` in server/app.py, which FastAPI resolves through
+`_split_entry_key` before the handler runs), or hand it to a helper that resolves it,
+and a route that genuinely takes something else has to say so out loud, here, by name.
+Resolving it by hand inside the route is itself a failure: that line is the one the next
+route forgets.
 """
 import os
 import re
@@ -20,11 +24,18 @@ import sys
 
 PASS = []
 
-# Resolvers that understand every key shape. A route reaching one of these is safe.
-RESOLVERS = ("_split_entry_key", "_resolve_entry", "_card_copies", "_card_entry")
+# The key dependencies, and the path parameter each one reads. FastAPI binds a
+# dependency's parameter to the path parameter of the SAME NAME, so a route that
+# declares `BaseKey` on a `{nk}` path would silently read a query parameter instead.
+KEY_DEPS = {"BaseKey": "norm_key", "EntryKey": "norm_key", "BaseNk": "nk",
+            "CollBaseKey": "coll_key"}
+
+# Helpers that take the raw key and resolve it themselves (they return the row, or
+# store under the base title). A route handing its key to one of these is safe.
+ROW_RESOLVERS = ("_resolve_entry", "_card_copies", "_card_entry", "_store_upload")
 
 # Path parameters that carry a GAME KEY and therefore must be resolved.
-KEY_PARAMS = ("norm_key", "entry_key", "key", "nk")
+KEY_PARAMS = ("norm_key", "entry_key", "key", "nk", "coll_key")
 
 # Routes whose key-shaped parameter is NOT a game key. Each one is named on purpose:
 # an exemption that nobody has to justify is an exemption that hides the next bug.
@@ -54,6 +65,16 @@ EXEMPT = {
     # one copy while the user meant the card.
     "/api/cards/unfold/{entry_key:path}":
         "the pin is matched against games.entry_key by build_library",
+    # Verified 2026-09-23. The attribute editor calls these with d.norm_key, and the
+    # resolve modal's notes save and its merge are handed `base`, which is d.norm_key.
+    # They store and compare the title key they are given, so resolving would change
+    # nothing today; they are listed because they take the key without the dependency.
+    "/api/games/{norm_key}/attribute":
+        "api.setAttributeOverride(d.norm_key, ...) and ResolveModal's nk={base}",
+    "/api/games/{norm_key}/attribute/{kind}":
+        "api.clearAttributeOverride(d.norm_key, kind)",
+    "/api/games/{nk}/merge":
+        "api.mergeGame from FixDupModal, whose nk is ResolveModal's base = d.norm_key",
 }
 
 
@@ -73,18 +94,109 @@ def routes(src):
         m = re.match(r'@app\.(get|post|put|delete|patch)\("([^"]+)"', line.strip())
         if not m:
             continue
-        # the decorated function starts at the next `def`
+        # the decorated function starts at the next `def` (or `async def`)
         j = i + 1
-        while j < len(lines) and not lines[j].startswith("def "):
+        while j < len(lines) and not lines[j].startswith(("def ", "async def ")):
             j += 1
         if j >= len(lines):
             continue
-        name = lines[j][4:].split("(")[0]
+        name = lines[j].split("def ", 1)[1].split("(")[0]
         k = j + 1
-        while k < len(lines) and not (lines[k].startswith(("def ", "@app.", "class "))):
+        while k < len(lines) and not (lines[k].startswith(
+                ("def ", "async def ", "@app.", "class "))):
             k += 1
         out.append((m.group(2), name, "\n".join(lines[j:k])))
     return out
+
+
+def signature(body):
+    """The `def ...(...)` header of a route body, however many lines it wraps."""
+    m = re.match(r"(?:async )?def \w+\((.*?)\)\s*(?:->[^:]*)?:\s*\n", body + "\n", re.S)
+    return m.group(1) if m else body.split("\n", 1)[0]
+
+
+def offenders_in(src):
+    """(offenders, guarded count) for every key-taking route in `src`."""
+    offenders = []
+    guarded = 0
+    for path, name, body in routes(src):
+        params = re.findall(r"\{([a-z_]+)(?::[a-z]+)?\}", path)
+        if not any(p in KEY_PARAMS for p in params):
+            continue
+        if path in EXEMPT:
+            continue
+        sig = signature(body)
+        deps = [d for d in KEY_DEPS if re.search(r":\s*%s\b" % d, sig)]
+        # A dependency reads the path parameter it is named for. Declared on a path
+        # without that parameter, FastAPI quietly turns it into a QUERY parameter.
+        wrong = [d for d in deps if KEY_DEPS[d] not in params]
+        if wrong:
+            offenders.append("%s (%s) declares %s, but the path has no {%s}"
+                             % (path, name, wrong[0], KEY_DEPS[wrong[0]]))
+            continue
+        # 1. A HAND-ROLLED PARSE. Splitting the key here means this route will miss the
+        #    next shape, exactly as every route missed the card shape.
+        if re.search(r"\.split\(['\"]@['\"]\)|rsplit\(['\"]@['\"]", body):
+            offenders.append("%s (%s) parses the key itself instead of resolving it"
+                             % (path, name))
+            continue
+        # 2. RESOLVING BY HAND. The right function, called in the wrong place: every
+        #    route that has to remember this line is a route that can forget it.
+        if "_split_entry_key(" in body:
+            offenders.append("%s (%s) resolves the key inline; declare it as a "
+                             "BaseKey/EntryKey parameter instead" % (path, name))
+            continue
+        if deps or any(r + "(" in body for r in ROW_RESOLVERS):
+            guarded += 1
+            continue
+        # 3. QUERYING BY norm_key WITH AN UNRESOLVED KEY. This is the shape that broke
+        #    the media panel: the route asked the database for a game whose norm_key was
+        #    "igdb:2155", got nothing, and returned an empty 200.
+        if re.search(r"norm_key\s*=\s*\?|WHERE norm_key|norm_key\s+IN\s*\(", body):
+            offenders.append("%s (%s) queries by norm_key without resolving the key"
+                             % (path, name))
+            continue
+        # 4. Anything else that takes a key without resolving it. It may be harmless
+        #    today, but the next line added to it will not know that.
+        offenders.append("%s (%s) takes a game key without the key dependency"
+                         % (path, name))
+    return offenders, guarded
+
+
+# Routes this lint MUST reject, so a regex that stopped matching cannot pass silently.
+BAD = {
+    "raw SQL on an unresolved key": (
+        '@app.get("/api/games/{norm_key}/zzz")\n'
+        'def zzz(norm_key: str):\n'
+        '    return lib().execute("SELECT id FROM games WHERE norm_key=?", (norm_key,))\n'),
+    "an inline resolve": (
+        '@app.get("/api/games/{norm_key}/zzz")\n'
+        'def zzz(norm_key: str):\n'
+        '    norm_key = _split_entry_key(norm_key)[0]\n'
+        '    return framing.get(DATA, norm_key)\n'),
+    "a hand-rolled parse": (
+        '@app.get("/api/games/{norm_key}/zzz")\n'
+        'def zzz(norm_key: str):\n'
+        '    return norm_key.rsplit("@", 1)[0]\n'),
+    "a dependency bound to the wrong parameter": (
+        '@app.get("/api/games/{nk}/zzz")\n'
+        'def zzz(nk: BaseKey):\n'
+        '    return nk\n'),
+    "a key taken and passed on unresolved": (
+        '@app.post("/api/games/{norm_key}/zzz")\n'
+        'async def zzz(norm_key: str,\n'
+        '              body: dict = Body(...)):\n'
+        '    return framing.set(DATA, norm_key, body)\n'),
+}
+GOOD = (
+    '@app.get("/api/games/{norm_key}/zzz")\n'
+    'def zzz(norm_key: BaseKey, kind: str):\n'
+    '    return lib().execute("SELECT id FROM games WHERE norm_key=?", (norm_key,))\n'
+    '\n\n'
+    '@app.get("/api/games/{nk}/yyy/{aid}")\n'
+    'def yyy(nk: BaseNk,\n'
+    '        aid: int):\n'
+    '    return nk\n')
 
 
 def main():
@@ -93,36 +205,29 @@ def main():
     rs = routes(src)
     check("the file parses into routes", len(rs) > 100, len(rs))
 
-    offenders = []
-    guarded = 0
-    for path, name, body in rs:
-        params = re.findall(r"\{([a-z_]+)(?::[a-z]+)?\}", path)
-        if not any(p in KEY_PARAMS for p in params):
-            continue
-        if path in EXEMPT:
-            continue
-        if any(r + "(" in body for r in RESOLVERS):
-            guarded += 1
-            continue
-        # Two things are actually dangerous, and only two.
-        #
-        # 1. A HAND-ROLLED PARSE. Splitting the key here means this route will miss the
-        #    next shape, exactly as every route missed the card shape.
-        if re.search(r"\.split\(['\"]@['\"]\)|rsplit\(['\"]@['\"]", body):
-            offenders.append("%s (%s) parses the key itself instead of resolving it"
-                             % (path, name))
-            continue
-        # 2. QUERYING BY norm_key WITH AN UNRESOLVED KEY. This is the shape that broke
-        #    the media panel: the route asked the database for a game whose norm_key was
-        #    "igdb:2155", got nothing, and returned an empty 200. Handing the key to a
-        #    helper is fine; asking SQL about it directly is not.
-        if re.search(r"norm_key\s*=\s*\?|WHERE norm_key", body):
-            offenders.append("%s (%s) queries by norm_key without resolving the key"
-                             % (path, name))
+    # the lint itself: each bad shape is caught, and the resolved shape is not
+    for label, bad in BAD.items():
+        found, _ = offenders_in(bad)
+        check("the lint catches " + label, len(found) == 1, found)
+    found, good = offenders_in(GOOD)
+    check("the lint passes a route that takes its key through the dependency",
+          not found and good == 2, found)
 
+    offenders, guarded = offenders_in(src)
     check("at least some routes are guarded", guarded >= 5, guarded)
     check("no route parses or uses a game key without the resolver",
           not offenders, "\n            ".join(offenders))
+
+    # each key dependency must be what its name says: a FastAPI Depends on a helper
+    # whose one parameter is the path parameter it claims, and that calls the resolver
+    for alias, param in KEY_DEPS.items():
+        m = re.search(r"^%s = Annotated\[\w+, Depends\((\w+)\)\]" % alias, src, re.M)
+        check("%s is a FastAPI dependency" % alias, m, alias)
+        fn = src[src.index("def %s(" % m.group(1)):]
+        fn = fn[:fn.index("\ndef ", 5)]
+        check("%s reads {%s}" % (alias, param),
+              fn.startswith("def %s(%s: str)" % (m.group(1), param)), fn[:80])
+        check("%s resolves through _split_entry_key" % alias, "_split_entry_key(" in fn)
 
     # the resolver itself must still know all three shapes
     body = src[src.index("def _split_entry_key"):]
