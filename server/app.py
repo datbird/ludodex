@@ -9252,7 +9252,7 @@ def game_detail(norm_key: str):
                 provider_links.append({"provider": l["provider"], "url": url})
                 _pl_seen.add(l["provider"])
         for s in sources:
-            src, sid = s.get("source"), str(s.get("source_id") or "")
+            src = s.get("source")
             if src in _pl_seen:
                 continue
             # the row already carries its store page (`_card_sources`); only Steam's is
